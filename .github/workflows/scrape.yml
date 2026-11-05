@@ -1,0 +1,104 @@
+# Scrapes the docs with the DevDocs fork's scraper and publishes the doc pack
+# to the "pack" branch, whose address is what you paste into DevDocs.
+name: Scrape docs
+
+on:
+  # Every week, to pick up changes to the docs.
+  schedule:
+    - cron: "23 4 * * 3"
+  # The "Run workflow" button on the Actions tab.
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/scrape.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrape
+  cancel-in-progress: true
+
+env:
+  # The doc to scrape, as `thor docs:list` names it, and any extra options
+  # (--all scrapes every version of a doc).
+  DOC: "google_cloud@Cloud Run"
+  GENERATE_OPTIONS: "--all"
+  # The doc's folder name; versions add "~<version>" to it.
+  SLUG: google_cloud
+  # The scraper needs neither the docs group's image tools nor the server's production gems.
+  BUNDLE_WITHOUT: docs:production
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      # This repository, for the README that goes into the pack.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: self
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: buggypather/devdocs
+          ref: main-custom-docs
+          path: devdocs
+
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          working-directory: devdocs
+          bundler-cache: true
+
+      - name: Scrape
+        working-directory: devdocs
+        run: |
+          bundle exec thor docs:generate "$DOC" --force --verbose $GENERATE_OPTIONS
+          bundle exec thor docs:manifest
+          du -sh public/docs/$SLUG public/docs/$SLUG~* 2>/dev/null || true
+
+      # GitHub refuses files over 100 MB.
+      - name: Check the size
+        working-directory: devdocs/public/docs
+        run: |
+          status=0
+          for db in $SLUG/db.json $SLUG~*/db.json; do
+            [ -f "$db" ] || continue
+            size=$(stat -c %s "$db")
+            echo "$db: $((size / 1024 / 1024)) MB"
+            if [ "$size" -gt 95000000 ]; then
+              echo "::error::$db is too big for GitHub ($((size / 1024 / 1024)) MB). Split the doc or skip more pages."
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Publish to the pack branch
+        env:
+          REPO_URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}
+        run: |
+          if git ls-remote --exit-code --heads "$REPO_URL" pack > /dev/null; then
+            git clone --depth 1 --branch pack "$REPO_URL" pack
+          else
+            git init -b pack pack
+          fi
+          cd pack
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          for dir in ../devdocs/public/docs/$SLUG ../devdocs/public/docs/$SLUG~*; do
+            [ -d "$dir" ] && cp -r "$dir" .
+          done
+          # The manifest lists every doc in the fork's public/docs; keep only this pack's.
+          jq --arg slug "$SLUG" '[.[] | select(.slug == $slug or (.slug | startswith($slug + "~")))]' \
+            ../devdocs/public/docs/docs.json > docs.json
+          cp ../self/README.md README.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The pack hasn't changed."
+          else
+            git commit -q -m "Scrape of $(date -u +%Y-%m-%d)"
+            git push "$REPO_URL" HEAD:pack
+          fi
+          echo "### Add this pack in DevDocs" >> "$GITHUB_STEP_SUMMARY"
+          echo "Preferences → Doc packs → paste \`https://github.com/${{ github.repository }}/tree/pack\`" >> "$GITHUB_STEP_SUMMARY"

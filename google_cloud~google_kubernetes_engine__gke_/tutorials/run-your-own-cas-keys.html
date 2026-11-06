@@ -1,0 +1,421 @@
+<h1>Run your own certificate authorities and keys in GKE</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <aside class="note"><b>Note:</b> This document uses a <a href="https://cloud.google.com/products#product-launch-stages">general availability</a> feature named <i>GKE control plane authority</i> that's only available for eligible Google Cloud customers. To request access to this feature, contact your Google Cloud account team.</aside> <p>This document shows you how to configure your Google Kubernetes Engine (GKE) cluster control plane with certificate authorities (CAs) and keys that you manage. This guidance is intended for security administrators who have specific organizational compliance or policy requirements for control over credential issuance and signing.</p> <p>This page describes one part of a set of optional control plane features in GKE that lets you perform tasks like verifying your control plane security posture or configuring encryption and credential signing in the control plane using keys that you manage. For details, see <a href="../concepts/about-control-plane-authority">About GKE control plane authority</a>.</p> <p>By default, Google Cloud applies various security measures to the managed control plane. This page describes <em>optional</em> capabilities that give you more visibility or control over the GKE control plane.</p> <p>You should already be familiar with the following concepts:</p> <ul> <li><a href="https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/">Certificate Signing Requests (CSRs)</a></li> <li><a href="https://wikipedia.org/wiki/Certificate_authority">Certificate authorities (CAs)</a></li> <li><a href="https://kubernetes.io/docs/concepts/architecture/#etcd">etcd</a></li> <li><a href="../concepts/cluster-architecture">GKE cluster architecture</a></li> </ul> <h2 id="control-plane">Control plane credential components</h2> <p>GKE clusters use specific CAs and keys to issue credentials in the cluster, like X.509 certificates or ServiceAccount tokens. You can create keys in <a href="https://docs.cloud.google.com/kms/docs/key-management-service">Cloud Key Management Service</a> (Cloud KMS) and CAs in <a href="https://docs.cloud.google.com/certificate-authority-service/docs/ca-service-overview">Certificate Authority Service</a> (CA Service) and configure your clusters to use these resources instead of Google Cloud-managed CAs and keys.</p> <p>To learn more about the specific components that you create, see <a href="../concepts/about-control-plane-authority#self-managed-cas-keys">Self-managed CAs and keys</a>.</p> <h2 id="usage-with-other-features">Usage with other GKE control plane authority features</h2> <p>GKE control plane authority provides the following features related to self-managed keys:</p> <ul> <li>Run your own certificate authorities (CAs) and keys (this document)</li> <li><a href="../how-to/encrypt-etcd-control-plane-disks">Encrypt control plane components</a></li> </ul> <aside class="note"><strong>Note:</strong><span> You can only enable these features when you create a new GKE cluster. You can't update existing clusters to use these features. To use both of these features in the same cluster, perform all of the key and CA configuration procedures in <strong>both guides</strong>, and then run the cluster creation command that enables both sets of features as described in the <a href="#create-a-cluster">Create a cluster</a> section.</span></aside> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Create keys in Cloud KMS</li> <li>Create CAs in CA Service</li> <li>Grant Identity and Access Management (IAM) roles to the GKE service agent</li> <li>Create a GKE cluster that uses your CAs and keys</li> <li>Verify that the cluster uses your CAs and keys</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://docs.cloud.google.com/kubernetes-engine/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body"> GKE</a></li> <li><a href="https://docs.cloud.google.com/kms/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body"> Cloud KMS</a></li> <li><a href="https://docs.cloud.google.com/certificate-authority-service/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body"> CA Service</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body"> Cloud Logging</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine, Certificate Authority Service, and Cloud Key Management Service APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com privateca.googleapis.com cloudkms.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine, Certificate Authority Service, and Cloud Key Management Service APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com privateca.googleapis.com cloudkms.googleapis.com</pre>
+</li> </div> </cloud-free-trial> <li>Ensure that your environment is eligible to use GKE control plane authority features. To opt-in to these features, contact your Google Cloud sales team.</li> <li>To reliably track credential issuance and usage, ensure that the following Data Access audit logs are enabled: <ul> <li>Cloud Key Management Service (KMS) API: <code translate="no" dir="ltr">DATA_READ</code>
+</li> <li>Certificate Authority Service: <code translate="no" dir="ltr">ADMIN_READ</code>
+</li> </ul> <p>To enable these log types, see <a href="https://docs.cloud.google.com/logging/docs/audit/configure-data-access">Enable Data Access audit logs</a>.</p>
+</li> </ol> <h3 id="required-roles">Required roles and permissions</h3> <p> To get the permissions that you need to run your own CAs and keys, ask your administrator to grant you the following IAM roles: </p> <ul> <li> Create Cloud KMS keys: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.admin">Cloud KMS Admin </a> (<code translate="no" dir="ltr">roles/cloudkms.admin</code>) on your key project </li> <li> Create CA pools and root CAs: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/privateca#privateca.admin">CA Service Admin </a> (<code translate="no" dir="ltr">roles/privateca.admin</code>) on your key project </li> <li> Create GKE clusters: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.clusterAdmin">Kubernetes Engine Cluster Admin </a> (<code translate="no" dir="ltr">roles/container.clusterAdmin</code>) on your cluster project </li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <h3 id="requirements">Requirements</h3> <p>You must meet the following requirements:</p> <ul> <li>Your cluster must run GKE version 1.31.1-gke.1846000 or later.</li> <li>
+<p>To set up control plane disk encryption with your own keys in addition to configuring your own CAs, create your cluster in one of the following regions:</p> <ul> <li><code translate="no" dir="ltr">asia-east1</code></li> <li><code translate="no" dir="ltr">asia-northeast1</code></li> <li><code translate="no" dir="ltr">asia-southeast1</code></li> <li><code translate="no" dir="ltr">europe-west1</code></li> <li><code translate="no" dir="ltr">europe-west4</code></li> <li><code translate="no" dir="ltr">us-central1</code></li> <li><code translate="no" dir="ltr">us-central2</code></li> <li><code translate="no" dir="ltr">us-east1</code></li> <li><code translate="no" dir="ltr">us-east4</code></li> <li><code translate="no" dir="ltr">us-east5</code></li> <li><code translate="no" dir="ltr">us-south1</code></li> <li><code translate="no" dir="ltr">us-west1</code></li> <li><code translate="no" dir="ltr">us-west3</code></li> <li><code translate="no" dir="ltr">us-west4</code></li> </ul> <aside class="note"><strong>Note:</strong><span> Separately from GKE control plane authority, you can use <a href="../how-to/confidential-gke-nodes">Confidential mode for Hyperdisk Balanced for your node disks</a>. If you plan to use Confidential mode for Hyperdisk Balanced for your nodes in addition to encrypting your control plane disks with your own keys, you must create the cluster in a <a href="https://docs.cloud.google.com/compute/docs/disks/disk-encryption#conf_hdb_regions">region that supports Confidential mode for Hyperdisk Balanced</a>. If you create the cluster in a different region, you won't be able to use Confidential mode for Hyperdisk Balanced for your nodes.</span></aside>
+</li> </ul> <h3 id="limitations">Limitations</h3> <p>The following limitations apply:</p> <ul> <li>You can only use keys from Cloud KMS. You can't use another KMS provider or another encryption provider.</li> <li>Cloud External Key Manager (Cloud EKM) keys aren't supported.</li> <li>You can only use CAs from CA Service.</li> </ul> </section> <div id="tutorial-content"> <h2 id="prepare-the-environment">Prepare the environment</h2> <p>In this section, you identify Google Cloud projects that you'll use in this tutorial, and you create a key ring in Cloud KMS to hold your keys.</p> <h3 id="identify-projects">Identify projects</h3> <p>We recommend that you use separate Google Cloud projects as follows:</p> <ul> <li>
+<strong>Key project</strong>: contains all keys and CAs.</li> <li>
+<strong>Cluster project</strong>: contains your GKE clusters.</li> </ul> <p>You can optionally use the same project for your keys, CAs, and GKE clusters, but we recommend that you use separate projects so that the teams that manage cryptographic operations in your organization are separated from the teams that manage cluster operations.</p> <h3 id="create-keyring">Create a key ring</h3> <p>Create a key ring in the key project to hold all of the keys for a specific cluster. You must create the key ring in the same location as your GKE cluster.</p> <aside class="note"><strong>Note:</strong><span> You can't delete a key ring after creation. Key rings don't incur additional costs. However, having too many key rings in a project might make managing your resources in Cloud KMS more tedious.</span></aside> <p>Run the following command:</p> 
+<pre>gcloud kms keyrings create KEY_RING_NAME \
+    --location=LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_RING_NAME</var></code>: a name for your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: the project ID of your key project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Google Cloud region where you want to create the key ring. This must be the same region where your GKE cluster is located.</li> </ul> <h2 id="create-keys">Create keys</h2> <p>For each of the credential authorities like service account keys and CAs, you create a key using Cloud KMS. This section shows you how to create the keys that GKE uses to sign and verify credentials in the cluster. You can specify your own properties for these keys depending on your organization's needs. For details, see the <a href="https://docs.cloud.google.com/kms/docs/create-key">Create a key</a> page and the <a href="https://docs.cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys"><code translate="no" dir="ltr">projects.locations.keyRings.cryptoKeys</code></a> API reference.</p> <aside class="caution"><strong>Caution:</strong><span> Don't enable automatic key rotation with Cloud KMS. Rotating your encryption keys requires additional steps to ensure that your control plane resources are re-encrypted with new key versions before the original key versions are destroyed.</span></aside> <p>Consider the following when you create these resources in Cloud KMS:</p> <ul> <li>If you have a existing key ring in your key project, you can use that key ring to store all of the keys that you create for use with your cluster.</li> <li>Your key ring must be in the same Google Cloud location as your cluster to minimize latency.</li> <li>Keys must specify <code translate="no" dir="ltr">asymmetric-signing</code> as the key purpose.</li> <li>Use the following algorithms based on the type of key: <ul> <li>ServiceAccount signing keys: a strong RSA signing PKCS1 algorithm, like <code translate="no" dir="ltr">rsa-sign-pkcs1-4096-sha256</code> or <code translate="no" dir="ltr">rsa-sign-pkcs1-3072-sha256</code>.</li> <li>Certificate authority keys: a strong algorithm like <code translate="no" dir="ltr">ec-sign-p256-sha256</code>.</li> </ul>
+</li> <li>Cloud HSM hardware keys are supported, but the <code translate="no" dir="ltr">software</code> protection level is sufficient for most use cases. For details about hardware keys, see <a href="https://docs.cloud.google.com/kms/docs/hsm">Cloud HSM</a>.</li> <li>Don't modify the <a href="https://docs.cloud.google.com/kms/docs/create-key#soft_delete">default duration for key destruction</a>.</li> <li>GKE doesn't prevent you from deleting Cloud KMS keys, including CA Service keys, that are in use by the cluster. Before you delete keys or CAs, ensure that the resources are unused.</li> </ul> <p>To create your keys, run the following commands:</p> <ol> <li>
+<p>Create the Kubernetes ServiceAccount signing key, which you also specify as the service account verification key during cluster creation:</p> 
+<pre>gcloud kms keys create sa-signing-key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --purpose="asymmetric-signing" \
+    --protection-level=hsm \
+    --default-algorithm=rsa-sign-pkcs1-4096-sha256 \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code> with the project ID for your dedicated key project.</p>
+</li> <li>
+<p>Create the cluster root CA key:</p> 
+<pre>gcloud kms keys create cluster-ca-key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --purpose="asymmetric-signing" \
+    --protection-level=hsm \
+    --default-algorithm=ec-sign-p256-sha256 \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Create the etcd peer root CA key:</p> 
+<pre>gcloud kms keys create etcd-peer-ca-key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --purpose="asymmetric-signing" \
+    --protection-level=hsm \
+    --default-algorithm=ec-sign-p256-sha256 \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Create the etcd API root CA key:</p> 
+<pre>gcloud kms keys create etcd-api-ca-key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --purpose="asymmetric-signing" \
+    --protection-level=hsm \
+    --default-algorithm=ec-sign-p256-sha256 \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Create the aggregation root CA key:</p> 
+<pre>gcloud kms keys create aggregation-ca-key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --purpose="asymmetric-signing" \
+    --protection-level=hsm \
+    --default-algorithm=ec-sign-p256-sha256 \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> </ol> <h2 id="create-the-cas">Create the CAs</h2> <p>After creating the keys for each of the control plane functions, use each key to create the CA pools and corresponding root CAs using CA Service:</p> <ol> <li>
+<p>Create the cluster CA pool:</p> 
+<pre>gcloud privateca pools create cluster-ca-pool \
+    --location=LOCATION \
+    --tier=enterprise \
+    --project=KEY_PROJECT_ID \
+    --no-publish-crl --no-publish-ca-cert
+</pre> <p>The <code translate="no" dir="ltr">--no-publish-crl</code> flag and the <code translate="no" dir="ltr">--no-publish-ca-cert</code> flag are optional. Omitting these flags publishes certificates to a Cloud Storage bucket. For details, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/managed-resources#enable-crl-publication">Enable CA certificate and CRL publication for CAs in a CA pool</a>.</p>
+</li> <li>
+<p>Create the cluster root CA:</p> 
+<pre>gcloud privateca roots create cluster-root-ca \
+    --pool=cluster-ca-pool \
+    --location=LOCATION \
+    --kms-key-version=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/cluster-ca-key/cryptoKeyVersions/1 \
+    --subject="CN=cluster-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID \
+    --auto-enable
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORGANIZATION</var></code> with your organization name.</p>
+</li> <li>
+<p>Create the etcd peer CA pool:</p> 
+<pre>gcloud privateca pools create etcd-peer-ca-pool \
+    --location=LOCATION \
+    --tier=enterprise \
+    --project=KEY_PROJECT_ID \
+    --no-publish-crl --no-publish-ca-cert
+</pre>
+</li> <li>
+<p>Create the etcd peer root CA:</p> 
+<pre>gcloud privateca roots create etcd-peer-root-ca \
+    --pool=etcd-peer-ca-pool \
+    --location=LOCATION \
+    --kms-key-version=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/etcd-peer-ca-key/cryptoKeyVersions/1 \
+    --subject="CN=etcd-peer-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID \
+    --auto-enable
+</pre>
+</li> <li>
+<p>Create the etcd API CA pool:</p> 
+<pre>gcloud privateca pools create etcd-api-ca-pool \
+    --location=LOCATION \
+    --tier=enterprise \
+    --project=KEY_PROJECT_ID \
+    --no-publish-crl --no-publish-ca-cert
+</pre>
+</li> <li>
+<p>Create the etcd API root CA:</p> 
+<pre>gcloud privateca roots create etcd-api-root-ca \
+    --pool=etcd-api-ca-pool \
+    --location=LOCATION \
+    --kms-key-version=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/etcd-api-ca-key/cryptoKeyVersions/1 \
+    --subject="CN=etcd-api-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID \
+    --auto-enable
+</pre>
+</li> <li>
+<p>Create the aggregation CA pool:</p> 
+<pre>gcloud privateca pools create aggregation-ca-pool \
+    --location=LOCATION \
+    --tier=enterprise \
+    --project=KEY_PROJECT_ID \
+    --no-publish-crl --no-publish-ca-cert
+</pre>
+</li> <li>
+<p>Create the aggregation root CA:</p> 
+<pre>gcloud privateca roots create aggregation-root-ca \
+    --pool=aggregation-ca-pool \
+    --location=LOCATION \
+    --kms-key-version=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/aggregation-ca-key/cryptoKeyVersions/1 \
+    --subject="CN=aggregation-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID \
+    --auto-enable
+</pre>
+</li> </ol> <h2 id="grant-iam-roles-service-agent">Grant IAM roles to the GKE service agent</h2> <p>The <a href="../how-to/service-accounts#gke-service-agents">GKE service agent</a> requires access to the resources that you created in Cloud KMS and in CA Service. The service agent uses these resources to sign, verify, and issue credentials in the cluster. You can use the following predefined IAM roles:</p> <ul> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.cloudKmsKeyUser">Kubernetes Engine KMS Crypto Key User</a> (<code translate="no" dir="ltr">roles/container.cloudKmsKeyUser</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/privateca#privateca.certificateManager">CA Service Certificate Manager</a> (<code translate="no" dir="ltr">roles/privateca.certificateManager</code>)</li> </ul> <p>To grant these roles to the GKE service agent, do the following:</p> <ol> <li>
+<p>Find the project number of your cluster project:</p> 
+<pre>gcloud projects describe CLUSTER_PROJECT_ID \
+    --format='value(projectNumber)'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code> with the project ID of your cluster project.</p>
+</li> <li>
+<p>Grant the Kubernetes Engine KMS Crypto Key User role on the service account signing key that you created in <a href="#create-keys">Create keys</a>:</p> 
+<pre>gcloud kms keys add-iam-policy-binding sa-signing-key \
+  --location=LOCATION \
+  --keyring=KEY_RING_NAME \
+  --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+  --role=roles/container.cloudKmsKeyUser \
+  --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_NUMBER</var></code> with the project number of the cluster project.</p>
+</li> <li>
+<p>Grant the CA Service Certificate Manager role on the CA pools that you created in <a href="#create-the-cas">Create the CAs</a>:</p> 
+<pre>gcloud privateca pools add-iam-policy-binding cluster-ca-pool \
+    --location=LOCATION \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/privateca.certificateManager \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca pools add-iam-policy-binding etcd-peer-ca-pool \
+    --location=LOCATION \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/privateca.certificateManager \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca pools add-iam-policy-binding etcd-api-ca-pool \
+    --location=LOCATION \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/privateca.certificateManager \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca pools add-iam-policy-binding aggregation-ca-pool \
+    --location=LOCATION \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/privateca.certificateManager \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> </ol> <h3 id="grant-additional-roles-non-gcloud">Grant additional roles when not using the gcloud CLI</h3> <p>This section describes additional configuration steps that you must perform if you plan to configure your CAs and keys by using a client like Terraform or the Google Cloud console instead of using the gcloud CLI. If you use the gcloud CLI, skip this section and go to the <a href="#set-up-new-cluster">Set up CAs and keys on a new cluster</a> section.</p> <p>When you use the gcloud CLI to set up your CAs and keys, as described in this document, the gcloud CLI automatically creates and configures a service agent for CA Service and grants IAM roles to the service agent. However, if you use a client like Terraform or the Google Cloud console to configure your Google Cloud environment, you must perform these configuration steps manually as follows for your key project:</p> <ol> <li>
+<p>Trigger creation of the CA Service service agent.</p> <p> <aside class="beta"> <p> <strong> Preview — triggering service agent creation </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> </p> 
+<pre>gcloud beta services identity create --service=privateca.googleapis.com \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Find the project number of your key project:</p> 
+<pre>gcloud projects describe KEY_PROJECT_ID \
+    --format='value(projectNumber)'
+</pre>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/iam/docs/understanding-roles#viewer">Viewer</a> (<code translate="no" dir="ltr">roles/viewer</code>) role and the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.signerVerifier">Cloud KMS CryptoKey Signer/Verifier</a> (<code translate="no" dir="ltr">roles/cloudkms.signerVerifier</code>) role on all of the root CA keys that you created in the <a href="#create-keys">Create keys</a> section:</p> 
+<pre>for key in cluster-ca-key etcd-peer-ca-key etcd-api-ca-key aggregation-ca-key
+do
+gcloud kms keys add-iam-policy-binding $key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --role=roles/viewer \
+    --member="serviceAccount:service-KEY_PROJECT_NUMBER@gcp-sa-privateca.iam.gserviceaccount.com" \
+    --project=KEY_PROJECT_ID
+
+gcloud kms keys add-iam-policy-binding $key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --role=roles/cloudkms.signerVerifier \
+    --member="serviceAccount:service-KEY_PROJECT_NUMBER@gcp-sa-privateca.iam.gserviceaccount.com" \
+    --project=KEY_PROJECT_ID
+done
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_NUMBER</var></code> with the key project number from the output of the previous step.</p> <p>This command is a <code translate="no" dir="ltr">for</code> loop that iterates through the root CA keys, granting each role on that key to the CA Service service agent. If you used different names for the root CA keys, run these commands manually for each key.</p>
+</li> </ol> <h2 id="set-up-new-cluster">Set up CAs and keys on a new cluster</h2> <aside class="warning"><strong>Warning:</strong><span> Deleting keys or CAs that are in use by the cluster might lead to irrecoverable clusters. Before you delete keys or CAs, ensure that your cluster no longer uses the resources.</span></aside> <p>After you create keys, CA pools, root CAs, and grant IAM roles to the GKE service agent, create a new cluster that uses these resources.</p> <p>The flags that you specify in the cluster creation command require the following resource paths as values:</p> <ul> <li>Path to a key version in Cloud KMS for the service account signing key that you created in <a href="#create-keys">Create keys</a>. You specify this path for the <code translate="no" dir="ltr">service-account-signing-keys</code> flag and for the <code translate="no" dir="ltr">service-account-verification-keys</code> flag.</li> <li>Path to each of the CA pools that you created in <a href="#create-the-cas">Create the CAs</a>.</li> </ul> <aside class="note"><strong>Note:</strong><span> Before you perform these steps, decide on whether you also want to encrypt your control plane boot disks and etcd disks with keys that you manage. If you do, perform all of the key configuration steps in <a href="../how-to/encrypt-etcd-control-plane-disks">Encrypt etcd and control plane boot disks</a> and specify the optional flags described in the cluster creation command in this section.</span></aside> <p>To configure a new cluster to use your keys and CAs, do the following steps:</p> <ol> <li>
+<p>Find the path to the latest enabled service account signing key version:</p> 
+<pre>gcloud kms keys versions list \
+    --key=sa-signing-key \
+    --keyring=KEY_RING_NAME \
+    --location=LOCATION \
+    --project=KEY_PROJECT_ID \
+    --filter="STATE=ENABLED" --sort-by=~ --format="value(name)" | sed 1q
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code> with the project ID of the key project.</p> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1
+</pre>
+</li> <li>
+<p>Find the paths to each of the CA pools that you created:</p> 
+<pre>gcloud privateca pools list --format="get(name)" \
+    --project=KEY_PROJECT_ID
+</pre> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool
+projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool
+projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool
+projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool
+</pre> <p>Ensure that the output contains all of the CA pools that you created for GKE.</p>
+</li> </ol> <h3 id="create-a-cluster">Create a cluster</h3> <p>In this section, you create a cluster with different options specified depending on which GKE control plane authority features you want to configure. You can only configure these features on a cluster during cluster creation. The following commands create Standard mode clusters. To create Autopilot mode clusters instead, use the same flags with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create-auto"><code translate="no" dir="ltr">gcloud container clusters create-auto</code></a> command.</p> <ul> <li>
+<p>To only configure the CAs and keys that you created in this tutorial, run the following command:</p> 
+<pre>gcloud container clusters create example-cluster \
+    --location=LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --cluster-version=VERSION \
+    --service-account-signing-keys=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1 \
+    --service-account-verification-keys=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1 \
+    --cluster-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool \
+    --etcd-peer-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool \
+    --etcd-api-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool \
+    --aggregation-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: the project ID of the cluster project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VERSION</var></code>: the GKE version of the cluster. Must be 1.31.1-gke.1846000 or later.</li> </ul>
+</li> <li>
+<p>To configure the CAs and keys as well as control plane boot disk encryption and etcd encryption, do the following:</p> <ol> <li>Perform all of the key configuration steps in <a href="../how-to/encrypt-etcd-control-plane-disks">Encrypt etcd and control plane boot disks</a>.</li> <li>Find the paths to each of the keys by using the instructions in <a href="../how-to/encrypt-etcd-control-plane-disks#use-encryption-keys-cluster">Use encryption keys in a cluster</a>.</li> <li>
+<p>Create a cluster:</p> 
+<pre>gcloud container clusters create example-cluster \
+    --location=LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --cluster-version=VERSION \
+    --service-account-signing-keys=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1 \
+    --service-account-verification-keys=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1 \
+    --cluster-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool \
+    --etcd-peer-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool \
+    --etcd-api-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool \
+    --aggregation-ca=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool \
+    --control-plane-disk-encryption-key=PATH_TO_DISK_KEY \
+    --gkeops-etcd-backup-encryption-key=PATH_TO_ETCD_BACKUP_KEY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: the project ID of the cluster project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VERSION</var></code>: the GKE version of the cluster. Must be 1.31.1-gke.1846000 or later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_DISK_KEY</var></code>: the path to your disk encryption key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_ETCD_BACKUP_KEY</var></code>: the path to your etcd internal backup encryption key.</li> </ul>
+</li> </ol> <p>You can also use these flags when you create a new Standard mode cluster.</p>
+</li> </ul> <h2 id="verify-cluster-keys-cas">Verify that the cluster uses your specified keys and CAs</h2> <p>This section shows you how to verify the keys and CAs that were used during cluster creation. You can perform this verification using Cloud Logging or by using the Google Cloud CLI.</p> <h3 id="verify-cloud-logging">Use Logging to verify keys and CAs</h3> <p>To verify the keys and CAs using Logging, do the following:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page:</p> 
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/query" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/query">Go to Logs Explorer</a> </p>
+</li> <li>
+<p>Specify the following query:</p> 
+<pre>resource.type="gke_cluster"
+resource.labels.cluster_name="CLUSTER_NAME"
+resource.labels.location="CLUSTER_LOCATION"
+protoPayload.serviceName="container.googleapis.com"
+protoPayload.methodName=~"google.container.v(1|1alpha1|1beta1).ClusterManager.CreateCluster"
+protoPayload.request.cluster.userManagedKeysConfig:*
+</pre> <p><code translate="no" dir="ltr">protoPayload.request.cluster.userManagedKeysConfig:*</code> filters the results for cluster creation logs that include keys and CAs that you manage.</p>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> </ol> <p>In the results, expand your cluster creation log. Verify that the paths to keys and CAs are the same as those that you created for that cluster, like in the following example:</p> 
+<pre># lines omitted for clarity
+userManagedKeysConfig: {
+  aggregationCa: "projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool"
+  clusterCa: "projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool"
+  etcdApiCa: "projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool"
+  etcdPeerCa: "projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool"
+  serviceAccountSigningKeys: [
+    0: "projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1"
+  ]
+  serviceAccountVerificationKeys: [
+    0: "projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1"
+  ]
+}
+</pre> <h3 id="verify-gcloud">Use the gcloud CLI to verify keys and CAs</h3> <p>To verify that the cluster uses the CAs and keys that you created, run the following command:</p> 
+<pre>gcloud container clusters describe example-cluster \
+    --location=LOCATION \
+    --project=CLUSTER_PROJECT_ID
+</pre> <p>The output should include the <code translate="no" dir="ltr">userManagedKeysConfig</code> field like in the following example:</p> 
+<pre># lines omitted for clarity
+userManagedKeysConfig:
+  sa-signing-key: projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1
+  sa-verification-key: projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/sa-signing-key/cryptoKeyVersions/1
+  cluster-ca: projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool
+  etcd-peer-ca: projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool
+  etcd-api-ca: projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool
+  aggregation-ca: projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool
+</pre> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_projects">Delete the projects</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <h3 id="delete_individual_resources">Delete individual resources</h3> <ol> <li>
+<p>Delete the cluster:</p> 
+<pre>gcloud container clusters delete example-cluster \
+    --location=LOCATION \
+    --project=CLUSTER_PROJECT_ID
+</pre>
+</li> <li>
+<p>Disable the root CAs:</p> 
+<pre>gcloud privateca roots disable cluster-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca roots disable etcd-peer-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca roots disable etcd-api-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca roots disable aggregation-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Delete the root CAs:</p> 
+<pre>gcloud privateca roots delete cluster-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/cluster-ca-pool \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca roots delete etcd-peer-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-peer-ca-pool \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca roots delete etcd-api-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/etcd-api-ca-pool \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca roots delete aggregation-root-ca \
+    --location=LOCATION \
+    --pool=projects/KEY_PROJECT_ID/locations/LOCATION/caPools/aggregation-ca-pool \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Delete the CA pools:</p> 
+<pre>gcloud privateca pools delete cluster-ca-pool --location=LOCATION \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca pools delete etcd-peer-ca-pool --location=LOCATION \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca pools delete etcd-api-ca-pool --location=LOCATION \
+    --project=KEY_PROJECT_ID
+
+gcloud privateca pools delete aggregation-ca-pool --location=LOCATION \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Delete the keys:</p> 
+<pre>gcloud kms keys versions destroy 1 \
+    --location=LOCATION \
+    --keyring=KEY_RING_NAME \
+    --key=sa-signing-key \
+    --project=KEY_PROJECT_ID
+
+gcloud kms keys versions destroy 1 \
+    --location=LOCATION \
+    --keyring=KEY_RING_NAME \
+    --key=cluster-ca-key \
+    --project=KEY_PROJECT_ID
+
+gcloud kms keys versions destroy 1 \
+    --location=LOCATION \
+    --keyring=KEY_RING_NAME \
+    --key=etcd-peer-ca-key \
+    --project=KEY_PROJECT_ID
+
+gcloud kms keys versions destroy 1 \
+    --location=LOCATION \
+    --keyring=KEY_RING_NAME \
+    --key=etcd-api-ca-key \
+    --project=KEY_PROJECT_ID
+
+gcloud kms keys versions destroy 1 \
+    --location=LOCATION \
+    --keyring=KEY_RING_NAME \
+    --key=aggregation-ca-key \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> </ol> <p>You can't delete key rings from Cloud KMS. However, key rings don't incur additional costs.</p> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li><a href="../how-to/verify-identity-issuance-usage">Track identity usage from the moment of issuance</a></li> <li><a href="../how-to/rotate-control-plane-cas-keys">Rotate the CAs and service account signing keys</a></li> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/run-your-own-cas-keys" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/run-your-own-cas-keys</a>
+  </p>
+</div>

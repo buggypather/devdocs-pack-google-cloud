@@ -1,0 +1,406 @@
+<h1>Serve an LLM with multi-cluster Ray Serve and GKE Inference Gateway</h1>  <p>This document explains how to manage inference requests across multiple Ray Serve clusters on Google Kubernetes Engine (GKE) by configuring the Kubernetes Gateway API and GKE Inference Gateway. This configuration lets you centralize traffic management for multiple teams, distribute workloads across regions for higher capacity, and implement model-aware routing based on request body content.</p> <h2 id="benefits">Benefits of using GKE Inference Gateway and Ray Serve</h2> <p>Using GKE Inference Gateway and Ray Serve offers the following benefits:</p> <ul> <li>
+<strong>Path routing</strong>: configure each RayService with a path prefix, then serve them with one Gateway routing to multiple Ray Services. <ul> <li>For more information about setting up path prefix rules, see the <a href="https://gateway-api.sigs.k8s.io/guides/http-routing/">Gateway API documentation</a>.</li> </ul>
+</li> <li>
+<strong>Model-aware routing</strong>: choose a RayService to route to based on the request body—for example, by extracting the requested model from an OpenAI-API JSON request.</li> <li>
+<strong>Governance</strong>: require API keys to use your service, or enforce quota for users by using <a href="customize-gke-inference-gateway-configurations#config-auth-api-management">Apigee for authentication and API management</a>.</li> <li>
+<strong>Multi-region</strong>: split traffic across multiple GKE clusters with RayServices to attain higher availability or capacity with <a href="../concepts/multi-cluster-gateways">multi-cluster Gateways</a>.</li> <li>
+<strong>Separation of concerns</strong>: use separate RayServices, which can be administered by separate teams, follow separate rollouts, and run on different topologies.</li> <li>
+<strong>Security</strong>: use Gateway to act as the SSL terminator to help secure your user traffic over the internet. For more information, see <a href="../concepts/gateway-security">Gateway security</a>.</li> </ul> <p>To configure routing, you need to deploy a Gateway, HTTPRoute, and RayService. A Kubernetes Service for each target Ray cluster is typically created by KubeRay. Ray Serve spreads request load in-cluster, with no need to create an InferencePool or Endpoint Picker.</p> <h2 id="model-aware-routing">Model-aware routing for Ray Serve on GKE</h2> <p>Model-aware routing is enabled by a body-based routing extension. Body-based routing lets you direct traffic to different RayServices based solely on the model named in the user's request, which lets you have a single endpoint that can serve many models hosted in multiple Ray clusters. Your users have simplified access, and your app developers have control over configuring each Ray endpoint.</p> <p>To configure model-aware routing, you deploy the following key components:</p> <ul> <li>A body-based router extension to extract model names from JSON payloads. This router extension is deployed by using Helm.</li> <li>A GKE Gateway (L7 regional internal Application Load Balancer) to handle the incoming traffic.</li> <li>HTTPRoute rules to direct traffic to the correct Ray Service by using headers populated by the router extension.</li> <li>Multiple Ray Serve clusters to manage the lifecycle and autoscaling of siloed models.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure you have <a href="https://helm.sh/docs/intro/install/">Helm</a> installed.</li> <li>Create a <a href="https://huggingface.co/">Hugging Face</a> account, if you don't already have one.</li> <li>Ensure that you have a <a href="https://huggingface.co/docs/hub/security-tokens">Hugging Face token</a>.</li> </ul> <h2 id="prepare_your_environment">Prepare your environment</h2> <p>Set up environment variables:</p> 
+<pre>export CLUSTER=$(whoami)-ray-bbr
+export PROJECT_ID=$(gcloud config get-value project)
+export LOCATION=us-central1-b
+export REGION=us-central1
+export HUGGING_FACE_TOKEN=YOUR_HUGGING_FACE_TOKEN
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">YOUR_HUGGING_FACE_TOKEN</var></code> with your Hugging Face access token.</p> <h2 id="prepare-your-infrastructure">Prepare your infrastructure</h2> <p>In this section, you set up a Ray-enabled, Gateway-enabled GKE cluster with L4 GPUs.</p> <ol> <li>
+<p>Create a cluster with the Ray Operator and Gateway API enabled:</p> 
+<pre>gcloud container clusters create ${CLUSTER} \
+    --project ${PROJECT_ID} \
+    --location ${LOCATION} \
+    --cluster-version 1.35 \
+    --gateway-api standard \
+    --addons HttpLoadBalancing,RayOperator \
+    --enable-ray-cluster-logging \
+    --enable-ray-cluster-monitoring \
+    --machine-type e2-standard-4
+</pre>
+</li> <li>
+<p>Create a GPU node pool for your model workloads:</p> 
+<pre>gcloud container node-pools create gpu-pool \
+    --cluster=${CLUSTER} \
+    --location=${LOCATION} \
+    --accelerator="type=nvidia-l4,count=1,gpu-driver-version=latest" \
+    --machine-type=g2-standard-8 \
+    --num-nodes=4
+</pre>
+</li> <li>
+<p>Create a proxy-only subnet for the regional internal Application Load Balancer, which is required by body-based routing:</p> 
+<pre>gcloud compute networks subnets create bbr-proxy-only-subnet \
+    --purpose=REGIONAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=${REGION} \
+    --network=default \
+    --range=192.168.10.0/24
+</pre>
+</li> <li>
+<p>Deploy your Hugging Face secret:</p> 
+<pre>kubectl create secret generic hf-secret \
+    --from-literal=hf_api_token=${HUGGING_FACE_TOKEN}
+</pre>
+</li> </ol> <h2 id="deploy_router">Deploy the body-based router for model-aware routing</h2> <p>The body-based router extension intercepts requests, parses the JSON body, and extracts the model field into an <code translate="no" dir="ltr">X-Gateway-Model-Name</code> header.</p> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">helm-values.yaml</code> with the following content:</p> 
+<pre>bbr:
+  plugins:
+    - type: "body-field-to-header"
+      name: "openai-model-extractor"
+      json:
+        field_name: "model"
+        header_name: "X-Gateway-Model-Name"
+</pre>
+</li> <li>
+<p>Install the body-based router by using Helm:</p> 
+<pre>helm install body-based-router \
+    oci://registry.k8s.io/gateway-api-inference-extension/charts/body-based-routing \
+    --version v1.4.0 \
+    --set provider.name=gke \
+    --set inferenceGateway.name=ray-multi-model-gateway \
+    --values helm-values.yaml
+</pre>
+</li> </ol> <h2 id="deploy_ray_services">Deploy RayServices</h2> <p>To deploy your models, you must apply the <code translate="no" dir="ltr">RayService</code> manifests. Each manifest defines a Ray cluster that runs a specific LLM.</p> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">gemma-2b-it.yaml</code> with the following content:</p> 
+<pre>apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: gemma-2b-it
+spec:
+  serveConfigV2: |
+    applications:
+    - name: llm_app
+      route_prefix: "/"
+      import_path: ray.serve.llm:build_openai_app
+      args:
+        llm_configs:
+            - model_loading_config:
+                model_id: gemma-2b-it
+                model_source: google/gemma-2b-it
+              accelerator_type: L4
+              log_engine_metrics: true
+              deployment_config:
+                autoscaling_config:
+                    min_replicas: 2
+                    max_replicas: 2
+                health_check_period_s: 600
+                health_check_timeout_s: 300
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        num-cpus: "0"
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray-llm:2.54.0-py311-cu128
+              resources:
+                limits:
+                  memory: "8Gi"
+                  ephemeral-storage: "32Gi"
+                requests:
+                  cpu: "2"
+                  memory: "8Gi"
+                  ephemeral-storage: "32Gi"
+              ports:
+                - containerPort: 6379
+                  name: gcs-server
+                - containerPort: 8265
+                  name: dashboard
+                - containerPort: 10001
+                  name: client
+                - containerPort: 8000
+                  name: serve
+              env:
+                - name: RAY_SERVE_THROUGHPUT_OPTIMIZED
+                  value: "1"
+                - name: RAY_SERVE_ENABLE_HA_PROXY
+                  value: "1"
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_api_token
+    rayVersion: 2.54.0
+    workerGroupSpecs:
+      - replicas: 2
+        minReplicas: 2
+        maxReplicas: 2
+        groupName: gpu-group
+        rayStartParams: {}
+        template:
+          spec:
+            containers:
+              - name: llm
+                image: rayproject/ray-llm:2.54.0-py311-cu128
+                env:
+                  - name: RAY_SERVE_THROUGHPUT_OPTIMIZED
+                    value: "1"
+                  - name: RAY_SERVE_ENABLE_HA_PROXY
+                    value: "1"
+                  - name: HUGGING_FACE_HUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-secret
+                        key: hf_api_token
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                    ephemeral-storage: "24Gi"
+                  requests:
+                    cpu: "6"
+                    memory: "24Gi"
+                    nvidia.com/gpu: "1"
+                    ephemeral-storage: "24Gi"
+            nodeSelector:
+              cloud.google.com/gke-accelerator: nvidia-l4
+</pre>
+</li> <li>
+<p>Create a file named <code translate="no" dir="ltr">qwen2.5-3b.yaml</code> with the following content:</p> 
+<pre>apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: qwen-25-3b
+spec:
+  serveConfigV2: |
+    applications:
+    - name: llm_app
+      route_prefix: "/"
+      import_path: ray.serve.llm:build_openai_app
+      args:
+        llm_configs:
+            - model_loading_config:
+                model_id: qwen-2.5-3b
+                model_source: Qwen/Qwen2.5-3B
+              accelerator_type: L4
+              log_engine_metrics: true
+              deployment_config:
+                autoscaling_config:
+                    min_replicas: 2
+                    max_replicas: 2
+                health_check_period_s: 600
+                health_check_timeout_s: 300
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        num-cpus: "0"
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray-llm:2.54.0-py311-cu128
+              resources:
+                limits:
+                  memory: "8Gi"
+                  ephemeral-storage: "32Gi"
+                requests:
+                  cpu: "2"
+                  memory: "8Gi"
+                  ephemeral-storage: "32Gi"
+              ports:
+                - containerPort: 6379
+                  name: gcs-server
+                - containerPort: 8265
+                  name: dashboard
+                - containerPort: 10001
+                  name: client
+                - containerPort: 8000
+                  name: serve
+              env:
+                - name: RAY_SERVE_THROUGHPUT_OPTIMIZED
+                  value: "1"
+                - name: RAY_SERVE_ENABLE_HA_PROXY
+                  value: "1"
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_api_token
+    rayVersion: 2.54.0
+    workerGroupSpecs:
+      - replicas: 2
+        minReplicas: 2
+        maxReplicas: 2
+        groupName: gpu-group
+        rayStartParams: {}
+        template:
+          spec:
+            containers:
+              - name: llm
+                image: rayproject/ray-llm:2.54.0-py311-cu128
+                env:
+                  - name: RAY_SERVE_THROUGHPUT_OPTIMIZED
+                    value: "1"
+                  - name: RAY_SERVE_ENABLE_HA_PROXY
+                    value: "1"
+                  - name: HUGGING_FACE_HUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-secret
+                        key: hf_api_token
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                    ephemeral-storage: "24Gi"
+                  requests:
+                    cpu: "6"
+                    memory: "24Gi"
+                    nvidia.com/gpu: "1"
+                    ephemeral-storage: "24Gi"
+            nodeSelector:
+              cloud.google.com/gke-accelerator: nvidia-l4
+</pre>
+</li> <li>
+<p>Deploy the models:</p> 
+<pre>kubectl apply -f gemma-2b-it.yaml
+kubectl apply -f qwen2.5-3b.yaml
+</pre>
+</li> </ol> <h3 id="configure_health_checks">Configure health checks</h3> <p>To help ensure the load balancer accurately monitors Ray worker health, you must apply the <code translate="no" dir="ltr">HealthCheckPolicy</code> resource.</p> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">healthcheck-policy.yaml</code> with the following content:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: gemma-serve-healthcheck
+  namespace: default
+spec:
+  default:
+    checkIntervalSec: 5
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 2
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8000
+        requestPath: /-/healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: gemma-2b-it-serve-svc
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: qwen-serve-healthcheck
+  namespace: default
+spec:
+  default:
+    checkIntervalSec: 5
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 2
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8000
+        requestPath: /-/healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: qwen-25-3b-serve-svc
+</pre>
+</li> <li>
+<p>Apply the health check policy:</p> 
+<pre>kubectl apply -f healthcheck-policy.yaml
+</pre>
+</li> </ol> <h2 id="configure_routing">Configure routing</h2> <p>To configure routing, you must apply the <code translate="no" dir="ltr">Gateway</code> and <code translate="no" dir="ltr">HTTPRoute</code> manifests. The <code translate="no" dir="ltr">HTTPRoute</code> contains rules that match the <code translate="no" dir="ltr">X-Gateway-Model-Name</code> header (populated by the body-based router) to route traffic to the appropriate Ray service.</p> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">gateway.yaml</code> with the following content:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ray-multi-model-gateway
+  namespace: default
+spec:
+  gatewayClassName: gke-l7-rilb
+  listeners:
+  - allowedRoutes:
+      namespaces:
+        from: Same
+    name: http
+    port: 80
+    protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ray-multi-model-route
+spec:
+  parentRefs:
+  - name: ray-multi-model-gateway
+  rules:
+  - matches:
+    - headers:
+      - type: Exact
+        name: X-Gateway-Model-Name
+        value: gemma-2b-it  # Must match model named in JSON request!
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: gemma-2b-it-serve-svc  # Ray service name plus "-serve-svc".
+      kind: Service
+      port: 8000
+
+  - matches:
+    - headers:
+      - type: Exact
+        name: X-Gateway-Model-Name
+        value: qwen-2.5-3b  # Matches another extracted model name
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: qwen-25-3b-serve-svc  # Target Ray Service.
+      kind: Service
+      port: 8000
+</pre>
+</li> <li>
+<p>Apply the gateway and route:</p> 
+<pre>kubectl apply -f gateway.yaml
+</pre>
+</li> </ol> <h2 id="test_deployment">Test the deployment</h2> <p>After the Gateway is provisioned and both Ray clusters are ready, you can test routing by sending requests with different model names in the JSON body.</p> <ol> <li>
+<p>Get the Gateway IP address:</p> 
+<pre>kubectl get gateways ray-multi-model-gateway
+</pre>
+</li> <li>
+<p>Start a shell in a network that can reach the Gateway address. You can use curl on one of the Ray cluster Pods:</p> 
+<pre>POD_NAME=$(kubectl get pods -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -it $POD_NAME -- bash
+</pre>
+</li> <li>
+<p>Send requests by testing routing to Gemma:</p> 
+<pre>curl http://GATEWAY_IP_ADDRESS/v1/chat/completions \
+    --header 'Content-Type: application/json' \
+    --data '{
+    "model": "gemma-2b-it",
+    "messages": [{"role": "user", "content": "Tell me about GKE."}]
+    }'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code> with the IP address from the previous step.</p> <p>The output is similar to the following:</p> 
+<pre>{"id":"chatcmpl-594f7cab-f991-4522-9829-acdbb65d9f67","object":"chat.completion","created":1776379509,"model":"gemma-2b-it","choices":[{"index":0,"message":{"role":"assistant","content":"**Google Kubernetes Engine (GKE)** is a fully managed container orchestration service for Kubernetes [...]
+</pre>
+</li> <li>
+<p>Test routing to Qwen:</p> 
+<pre>curl http://GATEWAY_IP_ADDRESS/v1/chat/completions \
+    --header 'Content-Type: application/json' \
+    --data '{
+    "model": "qwen-2.5-3b",
+    "messages": [{"role": "user", "content": "How does Ray Serve work?"}]
+    }'
+</pre> <p>The output is similar to the following:</p> 
+<pre>{"id":"chatcmpl-dfe3f3b7-45fc-481c-b53e-2fc09c033cdb","object":"chat.completion","created":1776380249,"model":"qwen-2.5-3b","choices":[{"index":0,"message":{"role":"assistant","content":"Ray Serve facilitates the hosting and deployment of scalable microservices. [...]
+</pre>
+</li> </ol> <p>The body-based router automatically extracts the value of the <code translate="no" dir="ltr">model</code> field and ensures each request reaches the correct backend service configured in the <code translate="no" dir="ltr">gateway.yaml</code> file.</p> <h2 id="clean_up">Clean up</h2> <p>Delete the cluster:</p> 
+<pre>gcloud container clusters delete ${CLUSTER}
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="https://www.anyscale.com/blog/ray-serve-inference-lower-latency-higher-throughput-haproxy">performance optimizations for Ray Serve</a>.</li> <li>Read more about <a href="../concepts/gateway-api">Gateway on GKE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/serve-multi-cluster-ray-inference-gateway" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/serve-multi-cluster-ray-inference-gateway</a>
+  </p>
+</div>

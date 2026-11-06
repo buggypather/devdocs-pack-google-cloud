@@ -1,0 +1,294 @@
+<h1>Deploy a multi-cluster Gateway for weighted traffic splitting</h1>  <p>This document guides you through a blue-green deployment of a sample <code translate="no" dir="ltr">store</code> application across two GKE clusters. Blue-green deployments are an effective strategy to migrate your applications to new GKE clusters with minimal risk. By gradually shifting traffic from the current cluster (blue) to the new cluster (green), you can validate the new environment in production before committing to a full cutover.</p> Multi-cluster Gateways provide a powerful way to manage traffic for services deployed across multiple GKE clusters. By using Google's global load-balancing infrastructure, you can create a single entry point for your applications, which simplifies management and improves reliability. <p>In this tutorial, you use a sample <code translate="no" dir="ltr">store</code> application to simulate a real-world scenario where an online shopping service is owned and operated by separate teams and deployed across a <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs">fleet</a> of shared GKE clusters.</p> <h2 id="before_you_begin">Before you begin</h2> <p>Multi-cluster Gateways require some environmental preparation before they can be deployed. Before you proceed, follow the steps in <a href="prepare-environment-multi-cluster-gateways">Prepare your environment for multi-cluster Gateways</a>:</p> <ol> <li><p><a href="prepare-environment-multi-cluster-gateways#deploy-clusters">Deploy</a> GKE clusters.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke#register_your_cluster_on">Register</a> your clusters to a fleet (if they aren't already).</p></li> <li><p><a href="prepare-environment-multi-cluster-gateways#enable_multi-cluster_services_in_the_fleet">Enable</a> the multi-cluster Service and multi-cluster Gateway controllers.</p></li> </ol> <p>Finally, review the GKE Gateway controller <a href="deploying-gateways#limitations">limitations and known issues</a> before you use the controller in your environment.</p> <h2 id="blue-green">Blue-green, multi-cluster routing with Gateway</h2> <p>The <code translate="no" dir="ltr">gke-l7-global-external-managed-*</code>, <code translate="no" dir="ltr">gke-l7-regional-external-managed-*</code>, and <code translate="no" dir="ltr">gke-l7-rilb-*</code> GatewayClasses have many advanced traffic routing capabilities including traffic splitting, header matching, header manipulation, traffic mirroring, and more. In this example, you'll demonstrate how to use weight-based traffic splitting to explicitly control the traffic proportion across two GKE clusters.</p> <p>This example goes through some realistic steps that a service owner would take in moving or expanding their application to a new GKE cluster. The goal of blue-green deployments is to reduce risk through multiple validation steps which confirm that the new cluster is operating correctly. This example walks through four stages of deployment:</p> <ol> <li>
+<strong><span style="color:#3186ff">100%</span>-<span style="color:#00af57">Header-based canary</span></strong>: <a href="#header-canary">Use HTTP header routing</a> to send only test or synthetic traffic to the new cluster.</li> <li>
+<strong><span style="color:#3186ff">100%</span>-<span style="color:#00af57">Mirror traffic</span></strong>: <a href="#traffic-mirror">Mirror user traffic</a> to the canary cluster. This tests the capacity of the canary cluster by copying 100% of the user traffic to this cluster.</li> <li>
+<strong><span style="color:#3186ff">90%</span>-<span style="color:#00af57">10%</span></strong>: <a href="#traffic-split">Canary a traffic split</a> of 10% to slowly expose the new cluster to live traffic.</li> <li>
+<strong><span style="color:#3186ff">0%</span>-<span style="color:#00af57">100%</span></strong>: <a href="#cut-over">Cutover fully to the new cluster</a> with the option of switching back if any errors are observed.</li> </ol> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-gateway-ex2-v2.svg" alt="Blue-green traffic splitting across two GKE clusters"></p> <p>This example is similar to the previous one, except it deploys an internal multi-cluster Gateway instead. This deploys an internal Application Load Balancer which is only privately accessible from within the VPC. You will use the clusters and same application that you deployed in the previous steps, except deploy them through a different Gateway.</p> <aside class="note"><strong>Note:</strong><span> The same configurations could be applied to Gateways using external GatewayClasses (gke-l7-global-external-managed-<em>,gke-l7-regional-external-managed-</em>), except the gke-l7-gxlb GatewayClass that does not support advanced traffic management capabilities. To learn more about the different features supported with each GatewayClass, see <a href="gatewayclass-capabilities">GatewayClass capabilities</a>.</span></aside> <h3 id="prerequisites">Prerequisites</h3> <p>The following example builds on some of the steps in <a href="#external-gateway">Deploying an external multi-cluster Gateway</a>. Ensure that you have done the following steps before proceeding with this example:</p> <ol> <li><p><a href="prepare-environment-multi-cluster-gateways">Prepare your environment for multi-cluster Gateways</a></p></li> <li>
+<p><a href="#demo-app">Deploying a demo application</a></p> <p>This example uses the <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-west-2</code> clusters that you already set up. These clusters are in the same region because the <code translate="no" dir="ltr">gke-l7-rilb-mc</code> GatewayClass is regional and only supports cluster backends in the same region.</p>
+</li> <li>
+<p>Deploy the Service and ServiceExports needed on each cluster. If you deployed Services and ServiceExports from the previous example then you already deployed some of these.</p> 
+<pre>kubectl apply --context gke-west-1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store-west-1-service.yaml
+kubectl apply --context gke-west-2 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store-west-2-service.yaml
+</pre> <p>It deploys a similar set of resources to each cluster:</p> 
+<pre>service/store created
+serviceexport.net.gke.io/store created
+service/store-west-2 created
+serviceexport.net.gke.io/store-west-2 created
+</pre>
+</li> </ol> <h3 id="configuring_a_proxy-only_subnet">Configuring a proxy-only subnet</h3> <p>If you have not already done so, <a href="https://docs.cloud.google.com/load-balancing/docs/proxy-only-subnets#proxy_only_subnet_create">configure a proxy-only subnet</a> for each region in which you are deploying internal Gateways. This subnet is used to provide internal IP addresses to the load balancer proxies and must be configured with a <code translate="no" dir="ltr">--purpose</code> set to <code translate="no" dir="ltr">REGIONAL_MANAGED_PROXY</code> only.</p> <p>You must create a proxy-only subnet before you create Gateways that manage internal Application Load Balancers. Each region of a Virtual Private Cloud (VPC) network in which you use internal Application Load Balancers must have a proxy-only subnet.</p> <p>The <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/networks/subnets/create"><code translate="no" dir="ltr">gcloud compute networks subnets create</code></a> command creates a proxy-only a subnet.</p> 
+<pre>gcloud compute networks subnets create SUBNET_NAME \
+    --purpose=REGIONAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=REGION \
+    --network=VPC_NETWORK_NAME \
+    --range=CIDR_RANGE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: the name of the proxy-only subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region of the proxy-only subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VPC_NETWORK_NAME</var></code>: the name of the VPC network that contains the subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CIDR_RANGE</var></code>: the primary IP address range of the subnet. You must use a subnet mask no larger than <code translate="no" dir="ltr">/26</code> so that at least 64 IP addresses are available for proxies in the region. The recommended subnet mask is <code translate="no" dir="ltr">/23</code>.</li> </ul> <h3 id="deploying_the_gateway">Deploying the Gateway</h3> <p>The following Gateway is created from the <code translate="no" dir="ltr">gke-l7-rilb-mc</code> GatewayClass, which is a regional internal Gateway that can target only GKE clusters in the same region.</p> <ol> <li>
+<p>Apply the following <code translate="no" dir="ltr">Gateway</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-http
+  namespace: store
+spec:
+  gatewayClassName: gke-l7-rilb-mc
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      kinds:
+      - kind: HTTPRoute
+EOF
+</pre>
+<aside class="note"><strong>Note:</strong><span> It might take several minutes (up to 10) for the Gateway to fully deploy and serve traffic.</span></aside>
+</li> <li>
+<p>Validate that the Gateway has come up successfully. You can filter for just the events from this Gateway with the following command:</p> 
+<pre>kubectl get events --field-selector involvedObject.kind=Gateway,involvedObject.name=internal-http --context=gke-west-1 --namespace store
+</pre> <p>The Gateway deployment was successful if the output resembles the following:</p> 
+<pre>LAST SEEN   TYPE     REASON   OBJECT                  MESSAGE
+5m18s       Normal   ADD      gateway/internal-http   store/internal-http
+3m44s       Normal   UPDATE   gateway/internal-http   store/internal-http
+3m9s        Normal   SYNC     gateway/internal-http   SYNC on store/internal-http was a success
+</pre>
+</li> </ol> <h3 id="header-canary">Header-based canary</h3> <p>Header-based canarying lets the service owner match synthetic test traffic that does not come from real users. This is an easy way of validating that the basic networking of the application is functioning without exposing users directly.</p> <ol> <li>
+<p>Apply the following <code translate="no" dir="ltr">HTTPRoute</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-store-route
+  namespace: store
+  labels:
+    gateway: internal-http
+spec:
+  parentRefs:
+  - kind: Gateway
+    namespace: store
+    name: internal-http
+  hostnames:
+  - "store.example.internal"
+  rules:
+  # Matches for env=canary and sends it to store-west-2 ServiceImport
+  - matches:
+    - headers:
+      - name: env
+        value: canary
+    backendRefs:
+      - group: net.gke.io
+        kind: ServiceImport
+        name: store-west-2
+        port: 8080
+  # All other traffic goes to store-west-1 ServiceImport
+  - backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store-west-1
+      port: 8080
+EOF
+</pre> <p>Once deployed, this HTTPRoute configures the following routing behavior:</p> <ul> <li>Internal requests to <code translate="no" dir="ltr">store.example.internal</code> <strong>without</strong> the <code translate="no" dir="ltr">env: canary</code> HTTP header are routed to <code translate="no" dir="ltr">store</code> Pods on the <code translate="no" dir="ltr">gke-west-1</code> cluster</li> <li>Internal requests to <code translate="no" dir="ltr">store.example.internal</code> <strong>with</strong> the <code translate="no" dir="ltr">env: canary</code> HTTP header are routed to <code translate="no" dir="ltr">store</code> Pods on the <code translate="no" dir="ltr">gke-west-2</code> cluster</li> </ul> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-gateway-routing-internal-v2.svg" alt="The HTTPRoute enables routing to different clusters based on the HTTP
+headers"></p> <p>Validate that the HTTPRoute is functioning correctly by sending traffic to the Gateway IP address.</p>
+</li> <li>
+<p>Retrieve the internal IP address from <code translate="no" dir="ltr">internal-http</code>.</p> 
+<pre>kubectl get gateways.gateway.networking.k8s.io internal-http -o=jsonpath="{.status.addresses[0].value}" --context gke-west-1 --namespace store
+</pre> <p>Replace <var translate="no">VIP</var> in the following steps with the IP address you receive as output.</p> <aside class="note"><strong>Note:</strong><span> In the following steps send all requests to <var translate="no">VIP</var> from a client that has internal VPC connectivity and is in the same region as the GKE cluster (unless you have configured global access on your Gateway). You can create a VM in <code translate="no" dir="ltr">us-west1</code> and SSH to it for this purpose. This is necessary because the <code translate="no" dir="ltr">internal-http</code> Gateway is an internal, regional load balancer. Also set the host header with <code translate="no" dir="ltr">store.example.internal</code> so that DNS does not have to be configured for this example to work.</span></aside>
+</li> <li>
+<p>Send a request to the Gateway using the <code translate="no" dir="ltr">env: canary</code> HTTP header. This will confirm that traffic is being routed to <code translate="no" dir="ltr">gke-west-2</code>. Use a private client in the same VPC as the GKE clusters to confirm that requests are being routed correctly. The following command must be run on a machine that has private access to the Gateway IP address or else it will not function.</p> 
+<pre>curl -H "host: store.example.internal" -H "env: canary" http://VIP
+</pre> <p>The output confirms that the request was served by a Pod from the <code translate="no" dir="ltr">gke-west-2</code> cluster:</p> 
+<pre>{
+    "cluster_name": "gke-west-2", 
+    "host_header": "store.example.internal",
+    "node_name": "gke-gke-west-2-default-pool-4cde1f72-m82p.c.agmsb-k8s.internal",
+    "pod_name": "store-5f5b954888-9kdb5",
+    "pod_name_emoji": "😂",
+    "project_id": "agmsb-k8s",
+    "timestamp": "2021-05-31T01:21:55",
+    "zone": "us-west1-a"
+}
+</pre>
+</li> </ol> <h3 id="traffic-mirror">Traffic mirror</h3> <p>This stage sends traffic to the intended cluster but also mirrors that traffic to the canary cluster.</p> <p>Using mirroring is helpful to determine how traffic load will impact application performance without impacting responses to your clients in any way. It may not be necessary for all kinds of rollouts, but can be useful when rolling out large changes that could impact performance or load.</p> <ol> <li>
+<p>Apply the following <code translate="no" dir="ltr">HTTPRoute</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-store-route
+  namespace: store
+  labels:
+    gateway: internal-http
+spec:
+  parentRefs:
+  - kind: Gateway
+    namespace: store
+    name: internal-http
+  hostnames:
+  - "store.example.internal"
+  rules:
+  # Sends all traffic to store-west-1 ServiceImport
+  - backendRefs:
+    - name: store-west-1
+      group: net.gke.io
+      kind: ServiceImport
+      port: 8080
+    # Also mirrors all traffic to store-west-2 ServiceImport
+    filters:
+    - type: RequestMirror
+      requestMirror:
+        backendRef:
+          group: net.gke.io
+          kind: ServiceImport
+          name: store-west-2
+          port: 8080
+EOF
+</pre>
+</li> <li>
+<p>Using your private client, send a request to the <code translate="no" dir="ltr">internal-http</code> Gateway. Use the <code translate="no" dir="ltr">/mirror</code> path so you can uniquely identify this request in the application logs in a later step.</p> 
+<pre>curl -H "host: store.example.internal" http://VIP/mirror
+</pre>
+</li> <li>
+<p>The output confirms that the client received a response from a Pod in the <code translate="no" dir="ltr">gke-west-1</code> cluster:</p> 
+<pre>{
+    "cluster_name": "gke-west-1", 
+    "host_header": "store.example.internal",
+    "node_name": "gke-gke-west-1-default-pool-65059399-ssfq.c.agmsb-k8s.internal",
+    "pod_name": "store-5f5b954888-brg5w",
+    "pod_name_emoji": "🎖",
+    "project_id": "agmsb-k8s",
+    "timestamp": "2021-05-31T01:24:51",
+    "zone": "us-west1-a"
+}
+</pre> <p>This confirms that the primary cluster is responding to traffic. You still need to confirm that the cluster you are migrating to is receiving mirrored traffic.</p>
+</li> <li>
+<p>Check the application logs of a <code translate="no" dir="ltr">store</code> Pod on the <code translate="no" dir="ltr">gke-west-2</code> cluster. The logs should confirm that the Pod received mirrored traffic from the load balancer.</p> 
+<pre>kubectl logs deployment/store --context gke-west-2 -n store | grep /mirror
+</pre>
+</li> <li>
+<p>This output confirms that Pods on the <code translate="no" dir="ltr">gke-west-2</code> cluster are also receiving the same requests, however their responses to these requests are not sent back to the client. The IP addresses seen in the logs are that of the load balancer's internal IP addresses which are communicating with your Pods.</p> 
+<pre>Found 2 pods, using pod/store-5c65bdf74f-vpqbs
+[2023-10-12 21:05:20,805] INFO in _internal: 192.168.21.3 - - [12/Oct/2023 21:05:20] "GET /mirror HTTP/1.1" 200 -
+[2023-10-12 21:05:27,158] INFO in _internal: 192.168.21.3 - - [12/Oct/2023 21:05:27] "GET /mirror HTTP/1.1" 200 -
+[2023-10-12 21:05:27,805] INFO in _internal: 192.168.21.3 - - [12/Oct/2023 21:05:27] "GET /mirror HTTP/1.1" 200 -
+</pre>
+</li> </ol> <h3 id="traffic-split">Traffic split</h3> <p>Traffic splitting is one of the most common methods of rolling out new code or deploying to new environments safely. The service owner sets an explicit percentage of traffic that is sent to the canary backends that is typically a very small amount of the overall traffic so that the success of the rollout can be determined with an acceptable amount of risk to real user requests.</p> <p>Doing a traffic split with a minority of the traffic enables the service owner to inspect the health of the application and the responses. If all the signals look healthy, then they may proceed to the full cutover.</p> <ol> <li>
+<p>Apply the following <code translate="no" dir="ltr">HTTPRoute</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-store-route
+  namespace: store
+  labels:
+    gateway: internal-http
+spec:
+  parentRefs:
+  - kind: Gateway
+    namespace: store
+    name: internal-http
+  hostnames:
+  - "store.example.internal"
+  rules:
+  - backendRefs:
+    # 90% of traffic to store-west-1 ServiceImport
+    - name: store-west-1
+      group: net.gke.io
+      kind: ServiceImport
+      port: 8080
+      weight: 90
+    # 10% of traffic to store-west-2 ServiceImport
+    - name: store-west-2
+      group: net.gke.io
+      kind: ServiceImport
+      port: 8080
+      weight: 10
+EOF
+</pre>
+</li> <li>
+<p>Using your private client, send a continuous curl request to the <code translate="no" dir="ltr">internal-
+http</code> Gateway.</p> 
+<pre>while true; do curl -H "host: store.example.internal" -s VIP | grep "cluster_name"; sleep 1; done
+</pre> <p>The output will be similar to this, indicating that a 90/10 traffic split is occurring.</p> 
+<pre>"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-2",
+"cluster_name": "gke-west-1",
+"cluster_name": "gke-west-1",
+...
+</pre>
+</li> </ol> <h3 id="cut-over">Traffic cut over</h3> <p>The last stage of the blue-green migration is to fully cut over to the new cluster and remove the old cluster. If the service owner was actually onboarding a second cluster to an existing cluster then this last step would be different as the final step would have traffic going to both clusters. In that scenario a single <code translate="no" dir="ltr">store</code> ServiceImport is recommended that has Pods from both <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-west-2</code> clusters. This allows the load balancer to make the decision of where traffic should go for an active-active application, based on proximity, health, and capacity.</p> <ol> <li>
+<p>Apply the following <code translate="no" dir="ltr">HTTPRoute</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-store-route
+  namespace: store
+  labels:
+    gateway: internal-http
+spec:
+  parentRefs:
+  - kind: Gateway
+    namespace: store
+    name: internal-http
+  hostnames:
+  - "store.example.internal"
+  rules:
+    - backendRefs:
+      # No traffic to the store-west-1 ServiceImport
+      - name: store-west-1
+        group: net.gke.io
+        kind: ServiceImport
+        port: 8080
+        weight: 0
+      # All traffic to the store-west-2 ServiceImport
+      - name: store-west-2
+        group: net.gke.io
+        kind: ServiceImport
+        port: 8080
+        weight: 100
+EOF
+</pre>
+</li> <li>
+<p>Using your private client, send a continuous curl request to the <code translate="no" dir="ltr">internal-
+http</code> Gateway.</p> 
+<pre>while true; do curl -H "host: store.example.internal" -s VIP | grep "cluster_name"; sleep 1; done
+</pre> <p>The output will be similar to this, indicating that all traffic is now going to <code translate="no" dir="ltr">gke-west-2</code>.</p> 
+<pre>"cluster_name": "gke-west-2",
+"cluster_name": "gke-west-2",
+"cluster_name": "gke-west-2",
+"cluster_name": "gke-west-2",
+...
+</pre>
+</li> </ol> <p>This final step completes a full blue-green application migration from one GKE cluster to another GKE cluster.</p> <h2 id="clean_up">Clean up</h2> <p>After completing the exercises on this document, follow these steps to remove resources and prevent unwanted charges incurring on your account:</p> <ol> <li><p><a href="deleting-a-cluster">Delete the clusters</a>.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/unregister">Unregister the clusters</a> from the fleet if they don't need to be registered for another purpose.</p></li> <li>
+<p>Disable the <code translate="no" dir="ltr">multiclusterservicediscovery</code> feature:</p> 
+<pre>gcloud container fleet multi-cluster-services disable
+</pre>
+</li> <li>
+<p>Disable Multi Cluster Ingress:</p> 
+<pre>gcloud container fleet ingress disable
+</pre>
+</li> <li>
+<p>Disable the APIs:</p> 
+<pre>gcloud services disable \
+    multiclusterservicediscovery.googleapis.com \
+    multiclusteringress.googleapis.com \
+    trafficdirector.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+</li> </ol> <h2 id="troubleshooting">Troubleshooting</h2> <h3 id="no-healthy-upstream">No healthy upstream</h3> <p><strong>Symptom:</strong></p> <p>The following issue might occur when you create a Gateway but cannot access the backend services (503 response code):</p> 
+<pre>no healthy upstream
+</pre> <p><strong>Reason:</strong></p> <p>This error message indicates that the health check prober cannot find healthy backend services. It is possible that your backend services are healthy but you might need to customize the health checks.</p> <p><strong>Workaround:</strong></p> <p>To resolve this issue, <a href="configure-gateway-resources#configure_health_check">customize your health check</a> based on your application's requirements (for example, <code translate="no" dir="ltr">/health</code>) using a <code translate="no" dir="ltr">HealthCheckPolicy</code>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about the <a href="../concepts/gateway-api">Gateway controller</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-gateway-traffic-splitting" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-gateway-traffic-splitting</a>
+  </p>
+</div>

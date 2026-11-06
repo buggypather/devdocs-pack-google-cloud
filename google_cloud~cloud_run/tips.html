@@ -1,0 +1,261 @@
+<h1>General development tips</h1> <p>Designing Cloud Run services with recommended practices lets you optimize runtime efficiency, minimize container startup latency, and scale predictably across workloads. These design, concurrency, and security strategies help you build resilient and cost-effective services. If you are moving an existing web service to Cloud Run, see <a href="migrating">Migrating an existing service</a>.</p> <h2 id="write_effective_services">Write effective services</h2> <p>This section describes general best practices for designing and implementing a Cloud Run service.</p> <h3 id="background-activity">Background activity</h3> <p>Background activity is anything that happens after your HTTP response has been delivered. To determine whether there is background activity in your service that is not readily apparent, check your logs for anything that is logged after the entry for the HTTP request.</p> <h4 id="configure_instance-based_billing_to_use_background_activities">Configure instance-based billing to use background activities</h4> <p>If you want to support background activities in your Cloud Run service, set your Cloud Run service to <a href="configuring/billing-settings">instance-based billing</a> so you can run background activities outside of requests and still have CPU access.</p> <h4 id="avoid_background_activities_if_using_request-based_billing">Avoid background activities if using request-based billing</h4> <p>If you need to set your service to <a href="configuring/billing-settings">request-based billing</a>, when the Cloud Run service finishes handling a request, the instance's access to CPU will be disabled or severely limited. You shouldn't start background threads or routines that run outside the scope of the request handlers if you use this type of billing.</p> <p>Review your code to make sure all asynchronous operations finish before you deliver your response.</p> <p>Running background threads with request-based billing enabled can result in unexpected behavior because any subsequent request to the same container instance resumes any suspended background activity.</p> <h3 id="delete_temporary_files">Delete temporary files</h3> <p>In the Cloud Run environment, disk storage is an in-memory filesystem. Files written to disk consume memory otherwise available to your service, and can persist between invocations. Failing to delete these files can eventually lead to an out-of-memory error and a subsequent slow container startup times.</p> <h3 id="report_errors">Report errors</h3> <p>Handle all exceptions and do not let your service crash on errors. A crash leads to a slow container startup while traffic is queued for a replacement instance.</p> <p>See the <a href="error-reporting">Error reporting guide</a> for information on how to properly report errors.</p> <h2 id="optimize_performance">Optimize performance</h2> <p>This section describes best practices for optimizing performance.</p> <h3 id="start_containers_quickly">Start containers quickly</h3> <p>Because instances are <a href="about-instance-autoscaling">scaled as needed</a>, their startup time has impact on the latency of your service. Cloud Run de-couples instance startup and request processing, so in some cases a request must wait for a new instance to start before the request is processed. This commonly happens when a service scales from zero.</p> <p>The startup routine consists of:</p> <ul> <li>Downloading the container image (using Cloud Run's container image streaming technology)</li> <li>Starting the container by running the <a href="configuring/services/containers#configure-entrypoint-services">entrypoint</a> command.</li> <li>Waiting for the container to start listening on the <a href="configuring/services/containers#configure-port">configured port</a>.</li> </ul> <p>Optimizing for container startup speed minimizes the request processing latency.</p> <h3 id="startup-cpu-boost">Use startup CPU boost to reduce startup latency</h3> <p>You can <a href="configuring/services/cpu#startup-boost">enable startup CPU boost</a> to temporarily increase CPU allocation during instance startup in order to reduce startup latency.</p> <h3 id="use_minimum_instances_to_reduce_cold_starts">Use minimum instances to reduce container startup times</h3> <p>You can configure <a href="configuring/min-instances">minimum instances</a> and <a href="configuring/concurrency">concurrency</a> to minimize container startup times. For example, using a minimum instances of 1 means that your service is ready to receive up to the number of concurrent requests configured for your service without needing to start a new instance. When using minimum instances, avoid using system exits that will shut down an instance and potentially increase cold starts.</p> <p>Note that a request waiting for an instance to start will be kept pending in a queue as follows:</p> <p>Requests will pend for up to 3.5 times average startup time of container instances of this service, or 10 seconds, whichever is greater.</p> <h3 id="use_dependencies_wisely">Use dependencies wisely</h3> <p>If you use a dynamic language with dependent libraries, such as importing modules in Node.js, the load time for those modules adds to the startup latency.</p> <p>Reduce startup latency in these ways:</p> <ul> <li>Minimize the number and size of dependencies to build a lean service.</li> <li>Lazily load code that is infrequently used, if your language supports it.</li> <li>Use code-loading optimizations such as PHP's <a href="https://getcomposer.org/doc/articles/autoloader-optimization.md" target="_blank" class="external">composer autoloader optimization</a>.</li> </ul> <h3 id="use_global_variables">Use global variables</h3> <p>In Cloud Run, you cannot assume that service state is preserved between requests. However, Cloud Run does reuse individual instances to serve ongoing traffic, so you can declare a variable in global scope to allow its value to be reused in subsequent invocations. Whether any individual request receives the benefit of this reuse cannot be known ahead of time.</p> <p>You can also cache objects in memory if they are expensive to recreate on each service request. Moving this from the request logic to global scope results in better performance.</p> <div id="run_tips_global_scope-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Node.js</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">const functions = require('@google-cloud/functions-framework');
+
+// TODO(developer): Define your own computations
+const {lightComputation, heavyComputation} = require('./computations');
+
+// Global (instance-wide) scope
+// This computation runs once (at instance cold-start)
+const instanceVar = heavyComputation();
+
+/**
+ * HTTP function that declares a variable.
+ *
+ * @param {Object} req request context.
+ * @param {Object} res response context.
+ */
+functions.http('scopeDemo', (req, res) =&gt; {
+  // Per-function scope
+  // This computation runs every time this function is called
+  const functionVar = lightComputation();
+
+  res.send(`Per instance: ${instanceVar}, per function: ${functionVar}`);
+});</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">import time
+
+import functions_framework
+
+
+# Placeholder
+def heavy_computation():
+    return time.time()
+
+
+# Placeholder
+def light_computation():
+    return time.time()
+
+
+# Global (instance-wide) scope
+# This computation runs at instance cold-start
+instance_var = heavy_computation()
+
+
+@functions_framework.http
+def scope_demo(request):
+    """
+    HTTP Cloud Function that declares a variable.
+    Args:
+        request (flask.Request): The request object.
+        &lt;http://flask.pocoo.org/docs/1.0/api/#flask.Request&gt;
+    Returns:
+        The response text, or any set of values that can be turned into a
+        Response object using `make_response`
+        &lt;http://flask.pocoo.org/docs/1.0/api/#flask.Flask.make_response&gt;.
+    """
+
+    # Per-function scope
+    # This computation runs every time this function is called
+    function_var = light_computation()
+    return f"Instance: {instance_var}; function: {function_var}"
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+// h is in the global (instance-wide) scope.
+var h string
+
+// init runs during package initialization. So, this will only run during an
+// an instance's cold start.
+func init() {
+	h = heavyComputation()
+	functions.HTTP("ScopeDemo", ScopeDemo)
+}
+
+// ScopeDemo is an example of using globally and locally
+// scoped variables in a function.
+func ScopeDemo(w http.ResponseWriter, r *http.Request) {
+	l := lightComputation()
+	fmt.Fprintf(w, "Global: %q, Local: %q", h, l)
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.cloud.functions.HttpFunction;
+import com.google.cloud.functions.HttpRequest;
+import com.google.cloud.functions.HttpResponse;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.Arrays;
+
+public class Scopes implements HttpFunction {
+  // Global (instance-wide) scope
+  // This computation runs at instance cold-start.
+  // Warning: Class variables used in functions code must be thread-safe.
+  private static final int INSTANCE_VAR = heavyComputation();
+
+  @Override
+  public void service(HttpRequest request, HttpResponse response)
+      throws IOException {
+    // Per-function scope
+    // This computation runs every time this function is called
+    int functionVar = lightComputation();
+
+    var writer = new PrintWriter(response.getWriter());
+    writer.printf("Instance: %s; function: %s", INSTANCE_VAR, functionVar);
+  }
+
+  private static int lightComputation() {
+    int[] numbers = new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    return Arrays.stream(numbers).sum();
+  }
+
+  private static int heavyComputation() {
+    int[] numbers = new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    return Arrays.stream(numbers).reduce((t, x) -&gt; t * x).getAsInt();
+  }
+}</pre> </div> </section> </div> <h3 id="perform_lazy_initialization_of_global_variables">Perform lazy initialization of global variables</h3> <p>The initialization of global variables always occurs during startup, which increases container startup time. Use lazy initialization for infrequently used objects to defer the time cost and decrease container startup times.</p> <p>One drawback of lazy initialization is an increased latency for first requests to new instances. This can cause overscaling and dropped requests when you deploy a new revision of a service that is actively handling many requests.</p> <div id="run_tips_global_lazy-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Node.js</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">const functions = require('@google-cloud/functions-framework');
+
+// Always initialized (at cold-start)
+const nonLazyGlobal = fileWideComputation();
+
+// Declared at cold-start, but only initialized if/when the function executes
+let lazyGlobal;
+
+/**
+ * HTTP function that uses lazy-initialized globals
+ *
+ * @param {Object} req request context.
+ * @param {Object} res response context.
+ */
+functions.http('lazyGlobals', (req, res) =&gt; {
+  // This value is initialized only if (and when) the function is called
+  lazyGlobal = lazyGlobal || functionSpecificComputation();
+
+  res.send(`Lazy global: ${lazyGlobal}, non-lazy global: ${nonLazyGlobal}`);
+});</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">import functions_framework
+
+# Always initialized (at cold-start)
+non_lazy_global = file_wide_computation()
+
+# Declared at cold-start, but only initialized if/when the function executes
+lazy_global = None
+
+
+@functions_framework.http
+def lazy_globals(request):
+    """
+    HTTP Cloud Function that uses lazily-initialized globals.
+    Args:
+        request (flask.Request): The request object.
+        &lt;http://flask.pocoo.org/docs/1.0/api/#flask.Request&gt;
+    Returns:
+        The response text, or any set of values that can be turned into a
+        Response object using `make_response`
+        &lt;http://flask.pocoo.org/docs/1.0/api/#flask.Flask.make_response&gt;.
+    """
+    global lazy_global, non_lazy_global  # noqa: F824
+
+    # This value is initialized only if (and when) the function is called
+    if not lazy_global:
+        lazy_global = function_specific_computation()
+
+    return f"Lazy: {lazy_global}, non-lazy: {non_lazy_global}."
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+// Package tips contains tips for writing Cloud Functions in Go.
+package tips
+
+import (
+	"context"
+	"log"
+	"net/http"
+	"sync"
+
+	"cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
+)
+
+// client is lazily initialized by LazyGlobal.
+var client *storage.Client
+var clientOnce sync.Once
+
+func init() {
+	functions.HTTP("LazyGlobal", LazyGlobal)
+}
+
+// LazyGlobal is an example of lazily initializing a Google Cloud Storage client.
+func LazyGlobal(w http.ResponseWriter, r *http.Request) {
+	// You may wish to add different checks to see if the client is needed for
+	// this request.
+	clientOnce.Do(func() {
+		// Pre-declare an err variable to avoid shadowing client.
+		var err error
+		client, err = storage.NewClient(context.Background())
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			log.Printf("storage.NewClient: %v", err)
+			return
+		}
+	})
+	// Use client.
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.cloud.functions.HttpFunction;
+import com.google.cloud.functions.HttpRequest;
+import com.google.cloud.functions.HttpResponse;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.Arrays;
+
+public class LazyFields implements HttpFunction {
+  // Always initialized (at cold-start)
+  // Warning: Class variables used in Servlet classes must be thread-safe,
+  // or else might introduce race conditions in your code.
+  private static final int NON_LAZY_GLOBAL = fileWideComputation();
+
+  // Declared at cold-start, but only initialized if/when the function executes
+  // Uses the "initialization-on-demand holder" idiom
+  // More information: https://en.wikipedia.org/wiki/Initialization-on-demand_holder_idiom
+  private static class LazyGlobalHolder {
+    // Making the default constructor private prohibits instantiation of this class
+    private LazyGlobalHolder() {}
+
+    // This value is initialized only if (and when) the getLazyGlobal() function below is called
+    private static final Integer INSTANCE = functionSpecificComputation();
+
+    private static Integer getInstance() {
+      return LazyGlobalHolder.INSTANCE;
+    }
+  }
+
+  @Override
+  public void service(HttpRequest request, HttpResponse response)
+      throws IOException {
+    Integer lazyGlobal = LazyGlobalHolder.getInstance();
+
+    var writer = new PrintWriter(response.getWriter());
+    writer.printf("Lazy global: %s; non-lazy global: %s%n", lazyGlobal, NON_LAZY_GLOBAL);
+  }
+
+  private static int functionSpecificComputation() {
+    int[] numbers = new int[] {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    return Arrays.stream(numbers).sum();
+  }
+
+  private static int fileWideComputation() {
+    int[] numbers = new int[] {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    return Arrays.stream(numbers).reduce((t, x) -&gt; t * x).getAsInt();
+  }
+}</pre> </div> </section> </div> <h3 id="use_a_different_execution_environment">Use a different execution environment</h3> <p>You may experience faster startup times by using a <a href="about-execution-environments">different execution environment</a>.</p> <h2 id="optimize_concurrency">Optimize concurrency</h2> <p>Cloud Run instances can serve multiple requests simultaneously, "concurrently", up to a <a href="about-concurrency">configurable maximum concurrency</a>.</p> <p>Cloud Run automatically adjusts the concurrency up to the configured maximum.</p> <p>The default maximum concurrency of 80 is a good fit for many container images. However, you should:</p> <ul> <li>Lower it if your container is not able to process many concurrent requests.</li> <li>Increase it if your container is able to handle a large volume of requests.</li> </ul> <h3 id="tuning-concurrency">Tune concurrency for your service</h3> <p>The number of concurrent requests that each instance can serve can be limited by the technology stack and the use of shared resources such as variables and database connections.</p> <p>To optimize your service for maximum stable concurrency:</p> <ol> <li>Optimize your service performance.</li> <li>Set your expected level of concurrency support in any code-level concurrency configuration. Not all technology stacks require such a setting.</li> <li>Deploy your service.</li> <li>Set Cloud Run concurrency for your service equal or less than any code-level configuration. If there is no code-level configuration, use your expected concurrency.</li> <li>Use <a href="https://en.wikipedia.org/wiki/Load_testing" target="_blank" class="external">load testing</a> tools that support a configurable concurrency. You need to confirm that your service remains stable under expected load and concurrency.</li> <li>If the service does poorly, go to step 1 to improve the service or step 2 to reduce the concurrency. If the service does well, go back to step 2 and increase the concurrency.</li> </ol> <p>Continue iterating until you find the maximum stable concurrency.</p> <h3 id="match_memory_to_concurrency">Match memory to concurrency</h3> <p>Each request your service handles requires some amount of additional memory. So, when you adjust concurrency up or down, make sure you adjust your memory limit as well.</p> <h3 id="avoid_mutable_global_state">Avoid mutable global state</h3> <p>If you want to leverage mutable global state in a concurrent context, take extra steps in your code to ensure this is done safely. Minimize contention by limiting global variables to one-time initialization and reuse as described above under <a href="#optimize_performance">Optimize performance</a>.</p> <p>If you use mutable global variables in a service that serves multiple requests at the same time, make sure to use locks or mutexes to prevent race conditions.</p> <h3 id="throughput-latency-cost-tradeoff">Throughput versus latency versus cost tradeoffs</h3> <p>Tuning the maximum concurrent requests setting can help balance the tradeoff between throughput, latency, and cost for your service.</p> <p>In general, a lower maximum concurrent requests setting results in lower latency and lower throughput per instance. With lower maximimum concurrent requests, fewer requests compete for resources inside each instance and each request achieves better performance. But because each instance can serve fewer requests at once, the per instance throughput is lower and the service needs more instances to serve the same traffic.</p> <p>In the opposite direction, a higher maximum concurrent requests setting generally results in higher latency and higher throughput per instance. Requests might need to wait for access to resources like CPU, GPU, and memory bandwidth inside the instance, which leads to increased latency. But each instance can process more requests at once such that the service needs less instances overall to process the same traffic.</p> <h3 id="cost_considerations">Cost considerations</h3> <p><a href="https://cloud.google.com/run/pricing">Cloud Run pricing</a> is per instance time. If you set <a href="configuring/billing-settings#choosing-instance-based-billing">instance-based billing</a>, the instance time is the total lifetime of each instance. If you set request-based billing, the instance time is the time each instance spends processing at least one request.</p> <p>The impact of maximum concurrent requests on billing depends on your traffic pattern. Lowering maximum concurrent requests <em>can</em> result in a lower bill <em>if</em> the lower setting leads to</p> <ul> <li>Decreased latency</li> <li>Instances completing their work faster</li> <li>Instances shutting down faster even if more total instances are required</li> </ul> <p>But the opposite is also possible: lowering maximum concurrent requests can <em>increase</em> billing if the increase in number of instances is not outweighed by the reduction in time that each instance is running, due to the improved latency.</p> <p>The best way to optimize billing is through <a href="about-load-testing">load testing</a> using different maximum concurrent requests settings to identify the setting that results in the lowest billable instance time, as seen in the <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z#gcp-run"><code translate="no" dir="ltr">container/billable_instance_time</code> monitoring metric</a>.</p> <h2 id="container-security">Container security</h2> <p>Many general purpose software security practices apply to containerized services. There are some practices that are either specific to containers or that align with the philosophy and architecture of containers.</p> <p>To improve container security:</p> <ul> <li>
+<p>Use actively maintained and secure base images such as Google <a href="https://docs.cloud.google.com/software-supply-chain-security/docs/base-images" target="_blank">base images</a> or Docker Hub's <a href="https://hub.docker.com/search" target="_blank" class="external">official images</a>.</p> <aside class="note"> <p><strong>Note:</strong> As of November 1, 2020, Docker Hub <a href="https://www.docker.com/blog/scaling-docker-to-serve-millions-more-developers-network-egress/" class="external"> rate limits</a> apply to unauthenticated or authenticated pull requests on the Docker Free plan. To avoid disruptions and have greater control over your software supply chain, you can migrate your dependencies to <a href="https://docs.cloud.google.com/artifact-registry/docs/docker/migrate-external-containers">Artifact Registry</a>.</p> </aside>
+</li> <li><p>Apply security updates to your services by regularly rebuilding container images and redeploying your services.</p></li> <li><p>Include in the container only what is necessary to run your service. Extra code, packages, and tools are potential security vulnerabilities. See <a href="#minimize-container">Build minimal container images</a> for the related performance impact.</p></li> <li><p>Implement a <a href="https://en.wikipedia.org/wiki/Reproducible_builds" target="_blank" class="external">deterministic build process</a> that includes specific software and library versions. This prevents unverified code from being included in your container.</p></li> <li><p>Set your container to run as a user other than <code translate="no" dir="ltr">root</code> with the <a href="https://docs.docker.com/engine/reference/builder/#user" target="_blank" class="external">Dockerfile <code translate="no" dir="ltr">USER</code> statement</a>. Some container images may already have a specific user configured.</p></li> <li><p>Prevent the use of Preview features by using <a href="securing/custom-constraints#example_constraints">custom organization policies</a>.</p></li> </ul> <h3 id="automate_security_scanning">Automate security scanning</h3> <p>Enable <a href="https://docs.cloud.google.com/artifact-analysis/docs/scanning-types#automated">vulnerability scanning</a> for security scanning of container images stored in <a href="https://docs.cloud.google.com/artifact-registry">Artifact Registry</a>.</p> <h3 id="minimize-container">Build minimal container images</h3> <p>Large container images likely increase security vulnerabilities because they contain more than what the code needs.</p> <p>Because of Cloud Run's container image streaming technology, the size of your container image <em>does not affect</em> container startup times or request processing time. The container image size also does not count towards the <a href="configuring/services/memory-limits">available memory</a> of your container.</p> <p>To build a minimal container, consider working from a lean base image such as:</p> <ul> <li><a href="https://hub.docker.com/_/alpine">alpine</a></li> <li><a href="https://hub.docker.com/_/scratch">scratch</a></li> </ul> <p><a href="https://hub.docker.com/_/ubuntu">Ubuntu</a> is larger in size, but is a commonly used base image with a more complete out-of-box server environment.</p> <p>If your service has a tool-heavy build process consider using <a href="https://docs.docker.com/develop/develop-images/multistage-build/#use-multi-stage-builds" target="_blank" class="external">multi-stage builds</a> to keep your container light at run time.</p> <p>These resources provide further information on creating lean container images:</p> <ul> <li>
+<a href="https://cloud.google.com/blog/products/containers-kubernetes/kubernetes-best-practices-how-and-why-to-build-small-container-images" target="_blank">Kubernetes best practices: How and why to build small container images</a> </li> <li>
+<a href="https://cloud.google.com/blog/products/containers-kubernetes/7-best-practices-for-building-containers" target="_blank">7 best practices for building containers</a> </li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/tips" class="_attribution-link">https://docs.cloud.google.com/run/docs/tips</a>
+  </p>
+</div>

@@ -1,0 +1,377 @@
+<h1>Handle transient spikes with flow control</h1> <p>Data pipelines sometimes get spikes in published traffic. The traffic spikes can overwhelm subscribers unless you're prepared for it. A simple solution to avoiding traffic spikes is to dynamically increase Pub/Sub subscriber resources to process more messages. However, this solution might drive up costs or not work instantaneously. For example, you might require many VMs.</p> <p>Flow control on the subscriber side lets the subscriber regulate the rate at which messages are ingested. Flow control thus handles traffic spikes without driving up costs or until the subscriber is scaled up.</p> <p>Flow control is an available feature in the Pub/Sub <a href="pull#high_client_library">high-level client library</a>. You can also implement your own flow control programming when you're using a <a href="pull#low_client_library">low-level client library</a>.</p> <p>Key point: If you get sudden spikes of traffic for published messages, use flow control in your pull subscriber client to address the transient spikes.</p> <p>The need for flow control indicates that messages are being published at a higher rate than they are being consumed. If this scenario is a persistent state, rather than a transient spike in message volume, consider increasing the number of subscriber client instances.</p> <h2 id="flow_control_configuration">Flow control configuration</h2> <p>Flow control lets you configure the maximum number of bytes allocated for outstanding requests, and the maximum number of outstanding messages permitted. Set these limits according to the throughput capacity of your client machines.</p> <p>The default values for the flow control variables and the names of the variables might differ across client libraries. For example, in the Java client library, the following variables configure flow control:</p> <ul> <li><p><strong>setMaxOutstandingElementCount().</strong> Defines the maximum number of messages for which Pub/Sub has not received acknowledgments or negative acknowledgments.</p></li> <li><p><strong>setMaxOutstandingRequestBytes().</strong> Defines the maximum size of messages for which Pub/Sub has not received acknowledgments or negative acknowledgments.</p></li> </ul> <p>If the limit for <code translate="no" dir="ltr">setMaxOutstandingElementCount()</code> or <code translate="no" dir="ltr">setMaxOutstandingRequestBytes()</code> is crossed, the subscriber client does not pull more messages. This behavior continues until the messages that are already pulled get acknowledged or negatively acknowledged. We can thus align throughput with the cost associated with running more subscribers.</p> <h2 id="code_samples_for_flow_control">Code samples for flow control</h2> <p>To control the rate at which the subscriber client receives messages, use the flow control features of the subscriber. These flow control features are illustrated in the following samples:</p> <div> <section><p class="_code-tab"><strong>C++</strong></p>
+
+<p>Before trying this sample, follow the C++ setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/cpp/google-cloud-pubsub/latest/" class="external">Pub/Sub C++ API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace pubsub = ::google::cloud::pubsub;
+using ::google::cloud::future;
+using ::google::cloud::Options;
+using ::google::cloud::StatusOr;
+auto sample = [](std::string project_id, std::string subscription_id) {
+  // Change the flow control watermarks, by default the client library uses
+  // 0 and 1,000 for the message count watermarks, and 0 and 10MiB for the
+  // size watermarks. Recall that the library stops requesting messages if
+  // any of the high watermarks are reached, and the library resumes
+  // requesting messages when *both* low watermarks are reached.
+  auto constexpr kMiB = 1024 * 1024L;
+  auto subscriber = pubsub::Subscriber(pubsub::MakeSubscriberConnection(
+      pubsub::Subscription(std::move(project_id), std::move(subscription_id)),
+      Options{}
+          .set&lt;pubsub::MaxOutstandingMessagesOption&gt;(1000)
+          .set&lt;pubsub::MaxOutstandingBytesOption&gt;(8 * kMiB)));
+
+  auto session = subscriber.Subscribe(
+      [](pubsub::Message const&amp; m, pubsub::AckHandler h) {
+        std::move(h).ack();
+        std::cout &lt;&lt; "Received message " &lt;&lt; m &lt;&lt; "\n";
+        PleaseIgnoreThisSimplifiesTestingTheSamples();
+      });
+  return std::make_pair(subscriber, std::move(session));
+};</pre> </div> </section> <section><p class="_code-tab"><strong>C#</strong></p>
+
+<p>Before trying this sample, follow the C# setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://cloud.google.com/dotnet/docs/reference/Google.Cloud.PubSub.V1/latest" class="external">Pub/Sub C# API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="csharp">
+using Google.Api.Gax;
+using Google.Cloud.PubSub.V1;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+public class PullMessagesWithFlowControlAsyncSample
+{
+    public async Task&lt;int&gt; PullMessagesWithFlowControlAsync(string projectId, string subscriptionId, bool acknowledge)
+    {
+        SubscriptionName subscriptionName = SubscriptionName.FromProjectSubscription(projectId, subscriptionId);
+        int messageCount = 0;
+        SubscriberClient subscriber = await new SubscriberClientBuilder
+        {
+            SubscriptionName = subscriptionName,
+            Settings = new SubscriberClient.Settings
+            {
+                AckExtensionWindow = TimeSpan.FromSeconds(4),
+                AckDeadline = TimeSpan.FromSeconds(10),
+                FlowControlSettings = new FlowControlSettings(maxOutstandingElementCount: 100, maxOutstandingByteCount: 10240)
+            }
+        }.BuildAsync();
+        // SubscriberClient runs your message handle function on multiple
+        // threads to maximize throughput.
+        Task startTask = subscriber.StartAsync((PubsubMessage message, CancellationToken cancel) =&gt;
+        {
+            string text = message.Data.ToStringUtf8();
+            Console.WriteLine($"Message {message.MessageId}: {text}");
+            Interlocked.Increment(ref messageCount);
+            return Task.FromResult(acknowledge ? SubscriberClient.Reply.Ack : SubscriberClient.Reply.Nack);
+        });
+        // Run for 5 seconds.
+        await Task.Delay(5000);
+        await subscriber.StopAsync(CancellationToken.None);
+        // Lets make sure that the start task finished successfully after the call to stop.
+        await startTask;
+        return messageCount;
+    }
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Go</strong></p>
+
+<p>The following sample uses the major version of the Go Pub/Sub client library (v2). If you are still using the v1 library, see <a href="https://github.com/googleapis/google-cloud-go/blob/main/pubsub/MIGRATING.md">the migration guide to v2</a>. To see a list of v1 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Go setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/pubsub/v2" class="external">Pub/Sub Go API reference documentation</a>.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+
+	"cloud.google.com/go/pubsub/v2"
+)
+
+func pullMsgsFlowControlSettings(w io.Writer, projectID, subID string) error {
+	// projectID := "my-project-id"
+	// subID := "my-sub"
+	ctx := context.Background()
+	client, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("pubsub.NewClient: %w", err)
+	}
+	defer client.Close()
+
+	// client.Subscriber can be passed a subscription ID (e.g. "my-sub") or
+	// a fully qualified name (e.g. "projects/my-project/subscriptions/my-sub").
+	// If a subscription ID is provided, the project ID from the client is used.
+	sub := client.Subscriber(subID)
+	// MaxOutstandingMessages is the maximum number of unprocessed messages the
+	// subscriber client will pull from the server before pausing. This also configures
+	// the maximum number of concurrent handlers for received messages.
+	//
+	// For more information, see https://cloud.google.com/pubsub/docs/pull#streamingpull_dealing_with_large_backlogs_of_small_messages.
+	sub.ReceiveSettings.MaxOutstandingMessages = 100
+	// MaxOutstandingBytes is the maximum size of unprocessed messages,
+	// that the subscriber client will pull from the server before pausing.
+	sub.ReceiveSettings.MaxOutstandingBytes = 1e8
+	err = sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		fmt.Fprintf(w, "Got message: %q\n", string(msg.Data))
+		msg.Ack()
+	})
+	if err != nil {
+		return fmt.Errorf("sub.Receive: %w", err)
+	}
+	return nil
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Java</strong></p>
+
+<p>Before trying this sample, follow the Java setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-pubsub/latest/overview" class="external">Pub/Sub Java API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.gax.batching.FlowControlSettings;
+import com.google.cloud.pubsub.v1.AckReplyConsumer;
+import com.google.cloud.pubsub.v1.MessageReceiver;
+import com.google.cloud.pubsub.v1.Subscriber;
+import com.google.pubsub.v1.ProjectSubscriptionName;
+import com.google.pubsub.v1.PubsubMessage;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+public class SubscribeWithFlowControlSettingsExample {
+  public static void main(String... args) throws Exception {
+    // TODO(developer): Replace these variables before running the sample.
+    String projectId = "your-project-id";
+    String subscriptionId = "your-subscription-id";
+
+    subscribeWithFlowControlSettingsExample(projectId, subscriptionId);
+  }
+
+  public static void subscribeWithFlowControlSettingsExample(
+      String projectId, String subscriptionId) {
+    ProjectSubscriptionName subscriptionName =
+        ProjectSubscriptionName.of(projectId, subscriptionId);
+
+    // Instantiate an asynchronous message receiver.
+    MessageReceiver receiver =
+        (PubsubMessage message, AckReplyConsumer consumer) -&gt; {
+          // Handle incoming message, then ack the received message.
+          System.out.println("Id: " + message.getMessageId());
+          System.out.println("Data: " + message.getData().toStringUtf8());
+          consumer.ack();
+        };
+
+    Subscriber subscriber = null;
+
+    // The subscriber will pause the message stream and stop receiving more messsages from the
+    // server if any one of the conditions is met.
+    FlowControlSettings flowControlSettings =
+        FlowControlSettings.newBuilder()
+            // 1,000 outstanding messages. Must be &gt;0. It controls the maximum number of messages
+            // the subscriber receives before pausing the message stream.
+            .setMaxOutstandingElementCount(1000L)
+            // 100 MiB. Must be &gt;0. It controls the maximum size of messages the subscriber
+            // receives before pausing the message stream.
+            .setMaxOutstandingRequestBytes(100L * 1024L * 1024L)
+            .build();
+
+    try {
+      subscriber =
+          Subscriber.newBuilder(subscriptionName, receiver)
+              .setFlowControlSettings(flowControlSettings)
+              .build();
+
+      // Start the subscriber.
+      subscriber.startAsync().awaitRunning();
+      System.out.printf("Listening for messages on %s:\n", subscriptionName.toString());
+      // Allow the subscriber to run for 30s unless an unrecoverable error occurs.
+      subscriber.awaitTerminated(30, TimeUnit.SECONDS);
+    } catch (TimeoutException timeoutException) {
+      // Shut down the subscriber after 30s. Stop receiving messages.
+      subscriber.stopAsync();
+    }
+  }
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Node.js (JavaScript)</strong></p>
+
+<p>Before trying this sample, follow the Node.js setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/nodejs/pubsub/latest" class="external">Pub/Sub Node.js API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">/**
+ * TODO(developer): Uncomment these variables before running the sample.
+ */
+// const subscriptionNameOrId = 'YOUR_SUBSCRIPTION_NAME_OR_ID';
+// const maxInProgress = 5;
+// const timeout = 10;
+
+// Imports the Google Cloud client library
+const {PubSub} = require('@google-cloud/pubsub');
+
+// Creates a client; cache this for further use
+const pubSubClient = new PubSub();
+
+async function subscribeWithFlowControlSettings(
+  subscriptionNameOrId,
+  maxInProgress,
+  timeout,
+) {
+  const subscriberOptions = {
+    flowControl: {
+      maxMessages: maxInProgress,
+    },
+  };
+
+  // References an existing subscription.
+  // Note that flow control settings are not persistent across subscribers.
+  const subscription = pubSubClient.subscription(
+    subscriptionNameOrId,
+    subscriberOptions,
+  );
+
+  console.log(
+    `Subscriber to subscription ${subscription.name} is ready to receive messages at a controlled volume of ${maxInProgress} messages.`,
+  );
+
+  const messageHandler = message =&gt; {
+    console.log(`Received message: ${message.id}`);
+    console.log(`\tData: ${message.data}`);
+    console.log(`\tAttributes: ${message.attributes}`);
+
+    // "Ack" (acknowledge receipt of) the message
+    message.ack();
+  };
+
+  subscription.on('message', messageHandler);
+
+  // Wait a while for the subscription to run. (Part of the sample only.)
+  setTimeout(async () =&gt; {
+    await subscription.close();
+  }, timeout * 1000);
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Node.js (TypeScript)</strong></p>
+
+<p>Before trying this sample, follow the Node.js setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/nodejs/pubsub/latest" class="external">Pub/Sub Node.js API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">/**
+ * TODO(developer): Uncomment these variables before running the sample.
+ */
+// const subscriptionNameOrId = 'YOUR_SUBSCRIPTION_NAME_OR_ID';
+// const maxInProgress = 5;
+// const timeout = 10;
+
+// Imports the Google Cloud client library
+import {Message, PubSub, SubscriberOptions} from '@google-cloud/pubsub';
+
+// Creates a client; cache this for further use
+const pubSubClient = new PubSub();
+
+async function subscribeWithFlowControlSettings(
+  subscriptionNameOrId: string,
+  maxInProgress: number,
+  timeout: number,
+) {
+  const subscriberOptions: SubscriberOptions = {
+    flowControl: {
+      maxMessages: maxInProgress,
+    },
+  };
+
+  // References an existing subscription.
+  // Note that flow control settings are not persistent across subscribers.
+  const subscription = pubSubClient.subscription(
+    subscriptionNameOrId,
+    subscriberOptions,
+  );
+
+  console.log(
+    `Subscriber to subscription ${subscription.name} is ready to receive messages at a controlled volume of ${maxInProgress} messages.`,
+  );
+
+  const messageHandler = (message: Message) =&gt; {
+    console.log(`Received message: ${message.id}`);
+    console.log(`\tData: ${message.data}`);
+    console.log(`\tAttributes: ${message.attributes}`);
+
+    // "Ack" (acknowledge receipt of) the message
+    message.ack();
+  };
+
+  subscription.on('message', messageHandler);
+
+  // Wait a while for the subscription to run. (Part of the sample only.)
+  setTimeout(async () =&gt; {
+    await subscription.close();
+  }, timeout * 1000);
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<p>Before trying this sample, follow the Python setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://docs.cloud.google.com/python/docs/reference/pubsub/latest">Pub/Sub Python API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">from concurrent.futures import TimeoutError
+from google.cloud import pubsub_v1
+
+# TODO(developer)
+# project_id = "your-project-id"
+# subscription_id = "your-subscription-id"
+# Number of seconds the subscriber should listen for messages
+# timeout = 5.0
+
+subscriber = pubsub_v1.SubscriberClient()
+subscription_path = subscriber.subscription_path(project_id, subscription_id)
+
+def callback(message: pubsub_v1.subscriber.message.Message) -&gt; None:
+    print(f"Received {message.data!r}.")
+    message.ack()
+
+# Limit the subscriber to only have ten outstanding messages at a time.
+flow_control = pubsub_v1.types.FlowControl(max_messages=10)
+
+streaming_pull_future = subscriber.subscribe(
+    subscription_path, callback=callback, flow_control=flow_control
+)
+print(f"Listening for messages on {subscription_path}..\n")
+
+# Wrap subscriber in a 'with' block to automatically call close() when done.
+with subscriber:
+    try:
+        # When `timeout` is not set, result() will block indefinitely,
+        # unless an exception is encountered first.
+        streaming_pull_future.result(timeout=timeout)
+    except TimeoutError:
+        streaming_pull_future.cancel()  # Trigger the shutdown.
+        streaming_pull_future.result()  # Block until the shutdown is complete.</pre> </div> </section> <section><p class="_code-tab"><strong>Ruby</strong></p>
+
+<p>The following sample uses Ruby Pub/Sub client library v3. If you are still using the v2 library, see <a href="https://github.com/googleapis/google-cloud-ruby/blob/main/google-cloud-pubsub/MIGRATION_GUIDE.md"> the migration guide to v3</a>. To see a list of Ruby v2 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Ruby setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/ruby/google-cloud-pubsub/latest/Google/Cloud/PubSub.html" class="external">Pub/Sub Ruby API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="ruby"># subscription_id = "your-subscription-id"
+
+pubsub = Google::Cloud::PubSub.new
+subscriber = pubsub.subscriber subscription_id
+
+listener = subscriber.listen inventory: 10 do |received_message|
+  puts "Received message: #{received_message.data}"
+  received_message.acknowledge!
+end
+
+listener.start
+# Let the main thread sleep for 60 seconds so the thread for listening
+# messages does not quit
+sleep 60
+listener.stop.wait!</pre> </div> </section> <section><p class="_code-tab"><strong>Rust</strong></p>
+
+<p>Before trying this sample, follow the Rust setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://docs.rs/google-cloud-pubsub" class="external">Pub/Sub Rust API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">use google_cloud_pubsub::client::Subscriber;
+use std::time::Duration;
+
+pub async fn sample(project_id: &amp;str, subscription_id: &amp;str) -&gt; anyhow::Result&lt;()&gt; {
+    let subscription_name = format!("projects/{project_id}/subscriptions/{subscription_id}");
+    let client = Subscriber::builder().build().await?;
+    let mut stream = client
+        .subscribe(subscription_name)
+        // The server pauses message delivery to the application when either
+        // this many messages, or this many bytes are outstanding. A message is
+        // outstanding until it has been acked or nacked.
+        .set_max_outstanding_messages(1000)
+        .set_max_outstanding_bytes(10 * 1024 * 1024) // 10 MB
+        .build();
+
+    // Terminate the example after 10 seconds.
+    let shutdown_token = stream.shutdown_token();
+    let shutdown = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        shutdown_token.shutdown().await;
+    });
+
+    println!("listening for messages...");
+
+    while let Some((message, handler)) = stream.next().await.transpose()? {
+        println!("received message: {message:?}");
+        handler.ack();
+    }
+    shutdown.await?;
+
+    println!("done listening for messages");
+    Ok(())
+}</pre> </div> </section> </div> <h2 id="whats_next">What's next</h2> <p>Read about the other delivery options you can configure for a subscription:</p> <ul> <li><p><a href="handling-failures#subscription_retry_policy">Handle message failures with subscription retry policy</a></p></li> <li><p><a href="handling-failures#dead-letter_topic">Forward undelivered messages to a dead letter topic</a></p></li> <li><p><a href="replay-overview">Replay previously-acked messages or purge messages</a></p></li> <li><p><a href="lease-management">Extend ack time with lease management</a></p></li> <li><p><a href="ordering">Receive messages in order</a></p></li> <li><p><a href="subscription-message-filter">Filter messages by their attributes</a></p></li> <li><p><a href="exactly-once-delivery">Receive and acknowledge messages exactly-once</a></p></li> <li><p><a href="concurrency-control">Process more messages with concurrency control</a></p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/pubsub/docs/flow-control" class="_attribution-link">https://docs.cloud.google.com/pubsub/docs/flow-control</a>
+  </p>
+</div>

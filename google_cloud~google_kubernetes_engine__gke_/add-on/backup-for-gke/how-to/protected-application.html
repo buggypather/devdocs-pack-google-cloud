@@ -1,0 +1,241 @@
+<h1>Define custom backup and restore logic</h1>  <p>When you enable the Backup for GKE agent in your Google Kubernetes Engine cluster, Backup for GKE provides a <code translate="no" dir="ltr">CustomResourceDefinition</code> that introduces a new kind of Kubernetes resource: the <code translate="no" dir="ltr">ProtectedApplication</code>.</p> <p>Composing a <code translate="no" dir="ltr">ProtectedApplication</code> involves three activities:</p> <ul> <li><p><a href="#selecting-resources">Selecting the set of resources</a> that you want to backup and restore as part of the application.</p></li> <li><p><a href="#defining-components">Defining detailed orchestration rules</a> for a subset of those resources.</p></li> <li><p><a href="#validation">Validating the <code translate="no" dir="ltr">ProtectedApplication</code></a> to check if it is ready for backup.</p></li> </ul> <p><code translate="no" dir="ltr">ProtectedApplication</code> resources provide you with these capabilities when customizing backup and restore logic at the application level:</p> <ul> <li><p>More fine-grained backup and restore operations. Without <code translate="no" dir="ltr">ProtectedApplications</code>, the scope of your backups must be defined at the <code translate="no" dir="ltr">Namespace</code> level (either by selecting <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/reference/rest/v1/projects.locations.backupPlans#BackupConfig.FIELDS.all_namespaces">allNamespaces</a> or <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/reference/rest/v1/projects.locations.backupPlans#BackupConfig.FIELDS.selected_namespaces">selectedNamespaces</a>). Similar logic applies to namespaced resource restoration. Creating <code translate="no" dir="ltr">ProtectedApplication</code> resources allows you to supply a name to a subset of the resources in a <code translate="no" dir="ltr">Namespace</code>. You can then backup and restore that subset by listing <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/reference/rest/v1/projects.locations.backupPlans#BackupConfig.FIELDS.selected_applications">selectedApplications</a> in your backup scope (and similarly, for <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/reference/rest/v1/RestoreConfig#FIELDS.selected_applications">restore</a>).</p></li> <li>
+<p>Orchestrating fine-grained details of the backup or restore process, including:</p> <ul> <li><p>Skipping selected volumes during backup.</p></li> <li><p>Incorporating application topology into backup and restore (for example, only backing up one instance of a replicated database and using it to restore multiple instances).</p></li> <li><p>Executing user-defined <em>hooks</em> before and after volumes are snapshotted. These can be used, for example, to flush and quiesce a workload before snapshotting and unquiesce it afterwards.</p></li> </ul>
+</li> </ul> <p>You create <code translate="no" dir="ltr">ProtectedApplication</code> by using <code translate="no" dir="ltr">kubectl</code> like other Kubernetes resources. They are completely optional. If <code translate="no" dir="ltr">ProtectedApplication</code> resources are not present, Backup for GKE creates volume backups for all volumes within the scope of a backup and the resulting volume backups will be <em>crash consistent</em> - all writes flushed to the disk at a particular point in time will be captured (i.e., no partial writes). However, some applications may keep data in memory that isn't flushed to disk, so whether or not an application can recover successfully from a crash consistent backup depends upon the application logic.</p> <h2 id="selecting-resources">Selecting resources</h2> <p>The first step in building your <code translate="no" dir="ltr">ProtectedApplication</code> resource is to identify the other resources in the same <code translate="no" dir="ltr">Namespace</code> that you want to include as part of the application. This is the set of resources that will be backed up or restored if you supply the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/reference/rest/v1/projects.locations.backupPlans#BackupConfig.FIELDS.selected_applications">selectedApplications</a> scope option in your <code translate="no" dir="ltr">BackupPlan</code> configuration.</p> <p>Resources are identified using a <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/">label selector</a>. This requires that you label all your resources (using the <code translate="no" dir="ltr">metadata.label</code> field in each resource) with the same label. Note that this also applies to resources that are automatically created by controllers. These auto-created resources are labeled using their corresponding template. Note that it is common to re-use the same label you are already using to associate generated <code translate="no" dir="ltr">Pods</code> and <code translate="no" dir="ltr">PersistentVolumeClaims</code> with their parent resource.</p> <p>Usage considerations include the following:</p> <ul> <li>If you want to protect resources that create child resources, then both parent resources (like <code translate="no" dir="ltr">StatefulSet</code>, <code translate="no" dir="ltr">Deployment</code>, or <code translate="no" dir="ltr">DaemonSet</code>) and child resources (like <code translate="no" dir="ltr">Pod</code> or <code translate="no" dir="ltr">PersistentVolumeClaim</code>) must both have the label that is used in the <code translate="no" dir="ltr">Selector</code> field of the <code translate="no" dir="ltr">ProtectedApplication</code>.</li> <li>If some of the resources referenced by your <code translate="no" dir="ltr">ProtectedApplication</code> are created automatically by an operator, you should also include the operator's custom resources in your <code translate="no" dir="ltr">ProtectedApplication</code> selector. This will help avoid a restore-time race condition that can occur when the operator attempts to create a resource while it is simultaneously being restored from backup.</li> </ul> <p>The following example shows how you can apply the <code translate="no" dir="ltr">app: nginx</code> label to the other resources in addition to the <code translate="no" dir="ltr">Deployment</code>.</p> 
+<pre>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-vars
+  namespace: webserver
+  labels:
+    app: nginx
+  data:
+    ...
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nginx-logs
+  namespace: webserver
+  labels:
+    app: nginx
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Mi
+  storageClassName: standard-rwo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  namespace: webserver
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      volumes:
+        - name: nginx-logs
+          persistentVolumeClaim:
+           claimName: nginx-logs
+      containers:
+      ...
+</pre> <p>Once you have your selected label applied to all your target resources (and the templates from which additional resources are generated), then you can reference those resources from a <code translate="no" dir="ltr">ProtectedApplication</code>. For example:</p> 
+<pre>kind: ProtectedApplication
+apiVersion: gkebackup.gke.io/v1
+metadata:
+  name: nginx
+  namespace: webserver
+spec:
+  resourceSelection:
+    type: Selector
+    selector:
+      matchLabels:
+        app: nginx
+  ...
+</pre> <h2 id="defining-components">Define orchestration rules</h2> <p>Once you have all the resources in your <code translate="no" dir="ltr">ProtectedApplication</code> identified, you can choose to define detailed orchestration rules for a subset of these resources. These rules may only apply to two kinds of resources: <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/">Deployments</a> and <a href="../../../concepts/statefulset">StatefulSets</a> and are referenced in the <code translate="no" dir="ltr">components</code> section of the <code translate="no" dir="ltr">ProtectedApplication</code>.</p> <h3 id="component_overview">Component overview</h3> <p>Configuring a component involves the following:</p> <ul> <li>
+<p>Selecting a fundamental <em>strategy</em> for how backup and restore will work for this component. There are three strategies available:</p> <ul> <li><p><a href="#backup-all-restore-all"><code translate="no" dir="ltr">BackupAllRestoreAll</code></a> - backup the volumes associated with all instances of the component and restore them all from the backups.</p></li> <li><p><a href="#backup-one-restore-all"><code translate="no" dir="ltr">BackupOneRestoreAll</code></a> - backup the volumes from only one instance of the component and use those backups to restore all instances.</p></li> <li><p><a href="#dump-load"><code translate="no" dir="ltr">DumpAndLoad</code></a> - export data from the application to a single volume at backup time and import that data into the application at restore time.</p></li> </ul>
+</li> <li><p>Defining execution <a href="#execution-hooks">hooks</a> to run during backup (and possibly restore, depending on the strategy). A hook is a command that is executed in specific containers.</p></li> <li><p><a href="#volume-selection">Selecting a subset of volumes to backup</a>.</p></li> </ul> <h3 id="execution-hooks">Execution hooks</h3> <p>A hook is a shell command that Backup for GKE executes in a container at particular phase of the backup or restore process.</p> <p>There are four different types of hooks:</p> <ul> <li><p><code translate="no" dir="ltr">pre hooks</code> - these commands are executed right before volumes are backed up and are generally expected to flush any data in memory to disk and then quiesce the application so that no new disk writes are occurring. These hooks are used in the <a href="#backup-all-restore-all"><code translate="no" dir="ltr">BackupAllRestoreAll</code></a> and <a href="#backup-one-restore-all"><code translate="no" dir="ltr">BackupOneRestoreAll</code></a> strategies.</p></li> <li><p><code translate="no" dir="ltr">post hooks</code> - these commands are executed during the volume backup process right after the SNAPSHOTTING step of the volume backup process (before the UPLOADING step). Generally, the SNAPSHOTTING step takes just a few seconds. They are generally expected to unquiesce the application (i.e. allow normal processing and disk writes to proceed). These hooks are used in the <a href="#backup-all-restore-all"><code translate="no" dir="ltr">BackupAllRestoreAll</code></a>, <a href="#backup-one-restore-all"><code translate="no" dir="ltr">BackupOneRestoreAll</code></a>, and <a href="#dump-load"><code translate="no" dir="ltr">DumpAndLoad</code></a> strategies.</p></li> <li><p><code translate="no" dir="ltr">dump hooks</code> - these commands are executed before the volume is backed up in the <a href="#dump-load"><code translate="no" dir="ltr">DumpAndLoad</code></a> strategy and are generally expected to export data from the application into the designated backup volume.</p></li> <li><p><code translate="no" dir="ltr">load hooks</code> - these commands are executed at restore time after the backup volume is restored in <a href="#dump-load"><code translate="no" dir="ltr">DumpAndLoad</code></a> strategy cases. They are generally expected to import the data from the backup volume into the application.</p></li> </ul> <p>You may provide more than one hook for each type and Backup for GKE will execute them in the order you define them.</p> <p>You define hooks as part of the component section of the <code translate="no" dir="ltr">ProtectedApplication</code> specification. All hook definitions have the same available fields:</p> <ul> <li><p><code translate="no" dir="ltr">name</code> - a name you assign to the hook.</p></li> <li><p><code translate="no" dir="ltr">container</code> - (optional) name of container to run command in. If you don't supply the container, Backup for GKE will run the hook in the first container defined for the target <code translate="no" dir="ltr">Pod</code>(s).</p></li> <li><p><code translate="no" dir="ltr">command</code> - this is the actual command sent into the container, constructed as an array of words. The first word in the array is the path to the command and subsequent words are the arguments to be passed to the command.</p></li> <li><p><code translate="no" dir="ltr">timeoutSeconds</code> - (optional) time before hook execution is aborted. If you don't supply this, then it defaults to 30 seconds.</p></li> <li><p><code translate="no" dir="ltr">onError</code> - (optional) behavior taken when the hook fails. May be set to <code translate="no" dir="ltr">Ignore</code> or <code translate="no" dir="ltr">Fail</code> (default). If you set this to <code translate="no" dir="ltr">Fail</code>, then when a hook fails, the volume backup will fail. If you set this to <code translate="no" dir="ltr">Ignore</code>, failures of this hook are ignored.</p></li> </ul> <p>Before applying <code translate="no" dir="ltr">ProtectedApplication</code> hooks to your application, you should test the command by using <a href="https://kubernetes.io/docs/tasks/debug/debug-application/get-shell-running-container/#running-individual-commands-in-a-container"><code translate="no" dir="ltr">kubectl exec</code></a> to ensure that the hooks behave as expected:</p> 
+<pre>kubectl exec POD_NAME -- COMMAND
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: the name of the Pod that contains the <code translate="no" dir="ltr">ProtectedApplication</code> resource.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMMAND</var></code>: the array containing the command that you want to run in the container.</li> </ul> <h3 id="volume-selection">Selecting a subset of volumes to backup</h3> <p>Sometimes, applications write to volumes that are not interesting to restore (for example, certain log or scratch volumes). You can suppress the backup of these volumes by using a <em>volume selector</em>.</p> <p>To use this feature, you must first apply a common label to the <code translate="no" dir="ltr">PersistentVolumeClaim</code> resources of volumes you want to backup. You must also leave this label <strong>off</strong> of the <code translate="no" dir="ltr">PersistentVolumeClaim</code> resources of volumes you do <strong>not</strong> want backed up. Then, you include a <code translate="no" dir="ltr">volumeSelector</code> clause in your component definition as follows:</p> 
+<pre>spec:
+  ...
+  components:
+  ...
+    strategy:
+      ...
+      volumeSelector:
+        matchLabels:
+          label_name: label_value
+</pre> <p>If you supply a <code translate="no" dir="ltr">volumeSelector</code> for a component, then only the volumes whose <code translate="no" dir="ltr">PersistentVolumeClaim</code> resources have the given label are backed up and restored. At restore time, any other volumes are provisioned as empty instead of restored from a volume backup.</p> <h3 id="backup-all-restore-all">Strategy: BackupAllRestoreAll</h3> <p>This is the simplest strategy and backs up all the component's volumes at backup time and restores them all from their volume backups at restore time. It is your best choice when your application has no replication between <code translate="no" dir="ltr">Pods</code>.</p> <p>This strategy supports the following parameters:</p> <ul> <li><p><code translate="no" dir="ltr">backupPreHooks</code> - (optional) an ordered list of <a href="#execution-hooks">hooks</a> that are executed right before volumes are backed up. These commands are executed on all <code translate="no" dir="ltr">Pods</code> in the component.</p></li> <li><p><code translate="no" dir="ltr">backupPostHooks</code> - (optional) an ordered list of <a href="#execution-hooks">hooks</a> that are executed after volume backups have reached the UPLOADING phase. These commands are executed on all <code translate="no" dir="ltr">Pods</code> in the component.</p></li> <li><p><code translate="no" dir="ltr">volumeSelector</code> - (optional) logic for matching a <a href="#volume-selection">subset of volumes to backup</a>.</p></li> </ul> <p>This example creates a <code translate="no" dir="ltr">ProtectedApplication</code> resource that quiesces the file system before backing up the logs volume and unquiesces after the backup:</p> 
+<pre>kind: ProtectedApplication
+apiVersion: gkebackup.gke.io/v1
+metadata:
+  name: nginx
+  namespace: sales
+spec:
+  resourceSelection:
+    type: Selector
+    selector:
+      matchLabels:
+        app: nginx
+  components:
+  - name: nginx-app
+    resourceKind: Deployment
+    resourceNames: ["nginx-deployment"]
+    strategy:
+      type: BackupAllRestoreAll
+      backupAllRestoreAll:
+        backupPreHooks:
+        - name: freeze
+          container: nginx
+          command:
+          - bash
+          - "-c"
+          - |
+            # Add application logic to flush data to disk before snapshot
+            # and freeze the application from further changes.
+            echo "Freezing the application"
+
+            # Return 0 on successful freeze of application, and non-zero
+            # for errors
+            exit 0
+        backupPostHooks:
+        - name: unfreeze
+          container: nginx
+          command:
+          - bash
+          - "-c"
+          - |
+            # Add application logic to unfreeze the application.
+            echo "Unfreezing the application"
+
+            # Return 0 on successful freeze of application, and non-zero
+            # for errors
+            exit 0
+</pre> <h3 id="backup-one-restore-all">Strategy: BackupOneAndRestoreAll</h3> <p>This strategy backs up one copy of a selected Pod. This single copy is the source for restoring all Pods during a restore. This method can help reduce storage cost and backup time. This strategy works in a <a href="https://docs.cloud.google.com/sql/docs/mysql/high-availability">high availability configuration</a> when a component is deployed with one primary <code translate="no" dir="ltr">PersistentVolumeClaim</code> and multiple secondary <code translate="no" dir="ltr">PersistentVolumeClaims</code>.</p> <p>This strategy supports the following parameters:</p> <ul> <li><p><code translate="no" dir="ltr">backupTargetName</code> - (required) specifies which Deployment or StatefulSet that you want to use to back up the data. The best Pod to back up is automatically selected. In a high availability configuration, we recommend that you set this to one of your application replicas.</p></li> <li><p><code translate="no" dir="ltr">backupPreHooks</code> - (optional) an ordered list of <a href="#execution-hooks">hooks</a> that are executed right before volumes are backed up. These commands are executed only on the selected backup <code translate="no" dir="ltr">Pod</code>.</p></li> <li><p><code translate="no" dir="ltr">backupPostHooks</code> - (optional) an ordered list of <a href="#execution-hooks">hooks</a> that are executed after volume backups have reached the UPLOADING phase. These commands are executed only on the selected backup <code translate="no" dir="ltr">Pod</code>.</p></li> <li><p><code translate="no" dir="ltr">volumeSelector</code> - (optional) logic for matching a <a href="#volume-selection">subset of volumes to backup</a>.</p></li> </ul> <p>If a component is configured with multiple Deployments or StatefulSets, all resources must have the same PersistentVolume structure, meaning they must follow these rules:</p> <ul> <li>The number of <code translate="no" dir="ltr">PersistentVolumeClaims</code> used by all Deployments or StatefulSets must be the same.</li> <li>The purpose of <code translate="no" dir="ltr">PersistentVolumeClaims</code> in the same index must be the same. For StatefulSets, the index is defined in the <code translate="no" dir="ltr">volumeClaimTemplate</code>. For Deployments, the index is defined in <code translate="no" dir="ltr">Volumes</code> and any non-persistent volumes are skipped.</li> <li>If the application component consists of Deployments, each Deployment must have exactly one replica.</li> </ul> <p>Given these considerations, multiple volume sets can be selected for backup, but only one volume from each volume set will be selected.</p> <p>This example, assuming an architecture of one primary StatefulSet and a secondary StatefulSet, shows a backup of volumes of one Pod in secondary StatefulSet, and then a restore to all other volumes:</p> 
+<pre>kind: ProtectedApplication
+apiVersion: gkebackup.gke.io/v1
+metadata:
+  name: mariadb
+  namespace: mariadb
+spec:
+  resourceSelection:
+    type: Selector
+    selector:
+      matchLabels:
+        app: mariadb
+  components:
+  - name: mariadb
+    resourceKind: StatefulSet
+    resourceNames: ["mariadb-primary", "mariadb-secondary"]
+    strategy:
+      type: BackupOneRestoreAll
+      backupOneRestoreAll:
+        backupTargetName: mariadb-secondary
+        backupPreHooks:
+        - name: quiesce
+          container: mariadb
+          command: [...]
+        backupPostHooks:
+        - name: unquiesce
+          container: mariadb
+          command: [...]
+</pre> <h3 id="dump-load">Strategy: DumpAndLoad</h3> <p>This strategy uses a dedicated volume for backup and restore processes and requires a dedicated <code translate="no" dir="ltr">PersistentVolumeClaim</code> attached to a component that stores dump data.</p> <p>This strategy supports the following parameters:</p> <ul> <li><p><code translate="no" dir="ltr">dumpTarget</code> - (required) specifies which Deployment or StatefulSet that you want to use to back up the data. The best Pod to back up is automatically selected. In a high availability configuration, we recommend that you set this to one of your application replicas.</p></li> <li><p><code translate="no" dir="ltr">loadTarget</code> - (required) specifies which Deployment or StatefulSet should be used to load the data. The best Pod to back up is automatically selected. The load target does not have to be the same as the dump target.</p></li> <li><p><code translate="no" dir="ltr">dumpHooks</code> - (required) an ordered list of <a href="#execution-hooks">hooks</a> that are executed to populate the dedicated backup volume. These commands are only executed on the selected dump <code translate="no" dir="ltr">Pod</code>.</p></li> <li><p><code translate="no" dir="ltr">backupPostHooks</code> - (optional) an ordered list of <a href="#execution-hooks">hooks</a> that are executed after volume backups have reached the UPLOADING phase. These commands are executed only on the selected dump <code translate="no" dir="ltr">Pod</code>.</p></li> <li><p><code translate="no" dir="ltr">loadHooks</code> - (required) an ordered list of <a href="#execution-hooks">hooks</a> that are executed to load the data from the restored volume after the application starts. These commands are executed only on the selected load <code translate="no" dir="ltr">Pod</code>.</p></li> <li><p><code translate="no" dir="ltr">volumeSelector</code> - (required) logic for matching a single volume to backup and restore (the "dump" volume). Though it must only match a single volume, you configure this the same way you do the <a href="#volume-selection">subset of volumes to backup</a> used by other strategies.</p></li> </ul> <p>If the application consists of Deployments, each Deployment must have exactly one replica.</p> <p>This example, assuming an architecture of one primary StatefulSet and a secondary StatefulSet with dedicated <code translate="no" dir="ltr">PersistentVolumeClaims</code> for both primary and secondary StatefulSets, shows a <code translate="no" dir="ltr">DumpAndLoad</code> strategy:</p> 
+<pre>kind: ProtectedApplication
+apiVersion: gkebackup.gke.io/v1
+metadata:
+  name: mariadb
+  namespace: mariadb
+spec:
+  resourceSelection:
+    type: Selector
+    selector:
+      matchLabels:
+        app: mariadb
+  components:
+  - name: mariadb-dump
+    resourceKind: StatefulSet
+    resourceNames: ["mariadb-primary", "mariadb-secondary"]
+    strategy:
+      type: DumpAndLoad
+      dumpAndLoad:
+        loadTarget: mariadb-primary
+        dumpTarget: mariadb-secondary
+        dumpHooks:
+        - name: db_dump
+          container: mariadb
+          command:
+          - bash
+          - "-c"
+          - |
+            mysqldump -u root --all-databases &gt; /backup/mysql_backup.dump
+        loadHooks:
+        - name: db_load
+          container: mariadb
+          command:
+          - bash
+          - "-c"
+          - |
+            mysql -u root &lt; /backup/mysql_backup.sql
+        volumeSelector:
+          matchLabels:
+            gkebackup.gke.io/backup: dedicated-volume
+</pre> <h2 id="validation">Check if a <code translate="no" dir="ltr">ProtectedApplication</code> is ready for backup</h2> <p>You can check whether a <code translate="no" dir="ltr">ProtectedApplication</code> is ready for a backup by running the following command:</p> 
+<pre>kubectl describe protectedapplication APPLICATION_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">APPLICATION_NAME</var></code> with the name of your application.</p> <p>If ready, the application description will show <code translate="no" dir="ltr">Ready to backup</code> status as <code translate="no" dir="ltr">true</code>, such as in this example:</p> 
+<pre>% kubectl describe protectedapplication nginx
+Name:         nginx
+Namespace:    default
+API Version:  gkebackup.gke.io/v1
+Kind:         ProtectedApplication
+Metadata:
+  UID:               90c04a86-9dcd-48f2-abbf-5d84f979b2c2
+Spec:
+  Components:
+    Name:           nginx
+    Resource Kind:  Deployment
+    Resource Names:
+      nginx
+    Strategy:
+      Backup All Restore All:
+        Backup Pre Hooks:
+          Command:
+             /sbin/fsfreeze
+             -f
+             /var/log/nginx
+          Container:         nginx
+          Name:              freeze
+        Backup Post Hooks:
+          Command:
+             /sbin/fsfreeze
+             -u
+             /var/log/nginx
+          Container:         nginx
+          Name:              unfreeze
+      Type:                  BackupAllRestoreAll
+  Resource Selection:
+    Selector:
+      Match Labels:
+        app:        nginx
+    Type:           Selector
+ Status:
+  Ready To Backup:  true 
+Events:             &lt;none&gt;
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="backup-plan">planning a set of backups</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/how-to/protected-application" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/how-to/protected-application</a>
+  </p>
+</div>

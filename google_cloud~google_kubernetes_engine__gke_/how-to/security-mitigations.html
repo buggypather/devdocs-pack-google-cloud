@@ -1,0 +1,121 @@
+<h1>Mitigate security incidents</h1>  <p>This document describes common mitigations and responses to potential security incidents on your Google Kubernetes Engine (GKE) clusters and containers.</p> <p>This document is for Security specialists looking for guidance when responding to GKE security incidents. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>The suggestions in <a href="hardening-your-cluster">Hardening your cluster's security</a> can improve the security of your GKE workloads. Security incidents, however, can occur even when measures to protect your workloads are in place.</p> <h2 id="detecting_incidents">Detect incidents</h2> <p>To detect potential incidents, we recommend you set up a process that collects and monitors your workload's logs. Then, set up alerts based on abnormal events detected from logs. Alerts notify your security team when something unusual is detected. Your security team can then review the potential incident.</p> <p>You can customize alerts based on specific metrics or actions. For example, alerting on high CPU usage on your GKE nodes may indicate they are compromised for cryptomining.</p> <p>Alerts should be generated where you aggregate your logs and metrics. For example, you can use GKE <a href="audit-logging">Audit Logging</a> in combination with <a href="https://docs.cloud.google.com/logging/docs/logs-based-metrics">logs-based alerting</a> in Cloud Logging.</p> <p>To learn more about security-relevant queries, see the <a href="audit-logging#example_filters_for_your_admin_activity_log">Audit Logging</a> documentation.</p> <h2 id="responding_to_a_security_incident">Respond to a security incident</h2> <p>After you have been alerted to an incident, take action. Fix the vulnerability if you can. If you do not know the root cause of the vulnerability or do not have a fix ready, apply mitigations.</p> <p>The mitigations you might take depend on the severity of the incident and your certainty that you have identified the issue.</p> <p>This guide covers actions you can take after you detect an incident on a workload running on GKE. You could, in increasing order of severity:</p> <ul> <li>
+<a href="#snapshot_the_vms_disk"><strong>Snapshot the host VM's disk</strong></a>. A snapshot lets you perform some forensics on the VM state at the time of the anomaly after the workload has been redeployed or deleted.</li> <li><p><strong><a href="#inspect_the_vm_while_the_workload_continues_to_run">Inspect the VM while the workload continues to run</a></strong>. Connecting to the host VM or workload container can provide information about the attacker's actions. We recommend you reduce access before inspecting the live VM<strong>.</strong></p></li> <li><p><strong><a href="#redeploy_a_container">Redeploy a container</a></strong>. Redeploying ends currently running processes in the affected container and restarts them.</p></li> <li><p><strong><a href="#delete_a_workload">Delete a workload</a></strong>. Deleting the workload ends currently running processes in the affected container without a restart.</p></li> </ul> <p>These mitigations are described in the following sections.</p> <h2 id="before_you_begin">Before you begin</h2> <p>The methods used in this topic use the following information:</p> <ul> <li>The name of the Pods you think have been compromised, or <code translate="no" dir="ltr">POD_NAME</code>.</li> <li>The name of the host VM running the container or Pods, or <code translate="no" dir="ltr">NODE_NAME</code>.</li> </ul> <p>Also, before taking any of the actions, consider if there will be a negative reaction from the attacker if they are discovered. The attacker may decide to delete data or destroy workloads. If the risk is too high, consider more drastic mitigations such as deleting a workload before performing further investigation.</p> <h2 id="snapshot_the_vms_disk">Snapshot the VM's disk</h2> <p>Creating a snapshot of the VM's disk allows forensic investigation after the workload has been redeployed or deleted. Snapshots can be created while disks are attached to running instances.</p> <aside class="note"><strong>Note:</strong><span> Snapshots only capture state written to disk. Snapshots do not capture contents of the VM's memory.</span></aside> <ol> <li>
+<p>To snapshot your persistent disk, first find the disks attached to your VM. Run the following command and look at the <code translate="no" dir="ltr">source</code> field:</p> 
+<pre>gcloud compute instances describe NODE_NAME --zone COMPUTE_ZONE \
+    --format="flattened([disks])"
+</pre>
+</li> <li>
+<p>Look for the lines that contain <code translate="no" dir="ltr">disks[NUMBER].source</code>. The output is similar to the following:</p> 
+<pre>disks[0].source: https://www.googleapis.com/compute/v1/projects/PROJECT_NAME/zones/COMPUTE_ZONE/disks/DISK_NAME
+</pre> <p>The disk name is the portion of the source name after the final slash. For example disk name is <code translate="no" dir="ltr">gke-cluster-pool-1-abcdeffff-zgt8</code>.</p>
+</li> <li>
+<p>To complete the snapshot, run the following command:</p> 
+<pre>gcloud compute disks snapshot DISK_NAME
+</pre>
+</li> </ol> <p>For more information, see <a href="https://docs.cloud.google.com/compute/docs/disks/create-snapshots">Creating persistent disk snapshots</a> in the Compute Engine documentation.</p> <h2 id="inspect_the_vm_while_the_workload_continues_to_run">Inspect the VM</h2> <aside class="caution"><strong>Caution:</strong><span> In severe incidents, workloads on the same node or the same cluster may also be compromised. This is known as a container escape. Monitor all of your workloads for abnormal behavior and take appropriate actions.</span></aside> <p>Consider what access an attacker may have before taking action. If you suspect a container has been compromised and are concerned about informing the attacker, you can <a href="https://kubernetes.io/docs/tasks/debug/debug-application/get-shell-running-container/">connect to</a> the container and inspect it without disrupting your workloads. Inspecting is useful for quick investigation before taking more disruptive actions. Inspecting is also the least disruptive approach to the workload, but it doesn't stop the incident.</p> <p>Alternatively, to avoid logging into a machine with a privileged credential, you can analyze your workloads by setting up live forensics (such as <a href="https://grr-doc.readthedocs.io/en/latest/" class="external">GRR Rapid Response</a>), on-node agents, or network filtering.</p> <h3 id="reduce_access_before_inspecting_the_live_vm">Reduce access before inspecting the live VM</h3> <p>By <a href="https://kubernetes.io/docs/concepts/architecture/nodes/#manual-node-administration" class="external">cordoning</a>, <a href="https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/" class="external">draining</a>, and limiting network access to the VM hosting a compromised container, you can <em>partially</em> isolate the compromised container from the rest of your cluster. Limiting access to the VM reduces risk but does not prevent an attacker from moving laterally in your environment if they take advantage of a critical vulnerability.</p> <h4 id="cordon">Cordon the node and drain the other workloads from it</h4> <p>Cordoning and draining a node moves workloads colocated with the compromised container to other VMs in your cluster. Cordoning and draining reduces an attacker's ability to impact other workloads on the same node. It does not necessarily prevent them from inspecting a workload's persistent state (for example, by inspecting container image contents).</p> <aside class="caution"><strong>Caution:</strong><span> <code translate="no" dir="ltr">kubectl cordon</code> marks a node as 'unschedulable', which has the side effect of the service controller removing the node from any LoadBalancer node target lists it was previously eligible for, effectively removing incoming load balancer traffic from the cordoned node(s). This issue applies to GKE versions 1.18 and earlier.</span></aside> <ol> <li>
+<p>Use <code translate="no" dir="ltr">kubectl</code> to cordon the node and ensure that no other Pods are scheduled on it:</p> 
+<pre>kubectl cordon NODE_NAME
+</pre>
+<aside class="caution"><strong>Caution:</strong><span> Draining evicts other workloads from the same node, which might cause downtime. Using <code translate="no" dir="ltr">kubectl drain</code> will respect PodDisruptionBudgets, but it assumes Pods are configured to be automatically re-created on other nodes after eviction.</span></aside> <p>After cordoning the node, drain the node of other Pods.</p>
+</li> <li>
+<p>Label the Pod that you are quarantining:</p> 
+<pre>kubectl label pods POD_NAME quarantine=true
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of the Pod that you want to quarantine.</p>
+</li> <li>
+<p>Drain the node of Pods that are not labeled with <code translate="no" dir="ltr">quarantine</code>:</p> 
+<pre>kubectl drain NODE_NAME --pod-selector='!quarantine'
+</pre>
+</li> </ol> <h4 id="restrict_network_access_to_the_node">Restrict network access to the node</h4> <p>We recommended blocking both internal and external traffic from accessing the host VM. Next, allow inbound connections from a specific VM on your network or VPC to connect to the quarantined VM.</p> <p>The first step is to abandon the VM from the <a href="https://docs.cloud.google.com/compute/docs/instance-groups">Managed Instance Group</a> that owns it. Abandoning the VM prevents the node from being marked unhealthy and auto-repaired (re-created) before your investigation is complete.</p> <p>To abandon the VM, run the following command:</p> 
+<pre>gcloud compute instance-groups managed abandon-instances INSTANCE_GROUP_NAME \
+    --instances=NODE_NAME
+</pre> <h3 id="firewall_the_vm">Firewall the VM</h3> <p><a href="https://docs.cloud.google.com/vpc/docs/using-firewalls">Creating a firewall</a> between the affected container and other workloads in the same network helps prevent an attacker from moving into other parts of your environment while you conduct further analysis. Since you already <a href="#reduce_access_before_inspecting_the_live_vm">drained the VM</a> of other containers, this only affects the quarantined container.</p> <p>The following instructions on firewalling the VM prevents:</p> <ul> <li>
+<strong>New</strong> outbound connections to other VMs in your cluster using an egress rule.</li> <li>Inbound connections to the compromised VM using an ingress rule.</li> </ul> <aside class="note"><b>Note:</b> Firewalls have several limitations. <ol> <li>Adding firewall rules doesn't close existing connections. Removing the VM's external IP address (described in the following section) breaks existing connections from the external internet, although not from inside your network.</li> <li>An attacker who compromises a privileged container or breaks out of an unprivileged container can access the VM's <a href="https://docs.cloud.google.com/compute/docs/storing-retrieving-metadata">metadata</a>. We recommend using <a href="shielded-gke-nodes">Shielded GKE nodes</a> to remove the privileged bootstrap keys from the metadata server.</li> </ol> </aside> <p>To firewall the VM off from your other instances, follow these steps for the node that hosts the Pod you want to quarantine:</p> <ol> <li>
+<p>Tag the instance so you can apply a new firewall rule.</p> <aside class="note"><strong>Note:</strong><span> Check that the tag does not conflict with other VMs before applying it.</span></aside>
+<pre>gcloud compute instances add-tags NODE_NAME \
+    --zone COMPUTE_ZONE \
+    --tags quarantine
+</pre>
+</li> <li>
+<p>Create a firewall rule to deny all egress TCP traffic from instances with the <code translate="no" dir="ltr">quarantine</code> tag:</p> 
+<pre>gcloud compute firewall-rules create quarantine-egress-deny \
+    --network NETWORK_NAME \
+    --action deny \
+    --direction egress \
+    --rules tcp \
+    --destination-ranges 0.0.0.0/0 \
+    --priority 0 \
+    --target-tags quarantine
+</pre>
+</li> <li>
+<p>Create a firewall rule to deny all ingress TCP traffic to instances with the <code translate="no" dir="ltr">quarantine</code> tag. Give this ingress rule a <code translate="no" dir="ltr">priority</code> of <code translate="no" dir="ltr">1</code>, which lets you override it with another rule that allows SSH from a specified VM.</p> 
+<pre>gcloud compute firewall-rules create quarantine-ingress-deny \
+    --network NETWORK_NAME \
+    --action deny \
+    --direction ingress \
+    --rules tcp \
+    --source-ranges 0.0.0.0/0 \
+    --priority 1 \
+    --target-tags quarantine
+</pre>
+</li> </ol> <h4 id="remove_the_vms_external_ip_address">Remove the VM's external IP address</h4> <p>Removing the VM's external IP address breaks any existing network connections outside your VPC.</p> <p>To remove the external address of a VM, perform the following steps:</p> <ol> <li>
+<p>Find and delete the access config that associates the external IP with the VM. First find the access config by describing the VM:</p> 
+<pre>gcloud compute instances describe NODE_NAME \
+    --zone COMPUTE_ZONE --format="flattened([networkInterfaces])"
+</pre> <p>Look for the lines that contain <code translate="no" dir="ltr">name</code> and <code translate="no" dir="ltr">natIP</code>. They look like the following:</p> 
+<pre>networkInterfaces[0].accessConfigs[0].name:              ACCESS_CONFIG_NAME
+networkInterfaces[0].accessConfigs[0].natIP:             EXTERNAL_IP_ADDRESS
+</pre>
+</li> <li><p>Find the value of <code translate="no" dir="ltr">natIP</code> that matches the external IP you want to remove. Note the name of the access config.</p></li> <li>
+<p>To remove the external IP, run the following command:</p> 
+<pre>gcloud compute instances delete-access-config NODE_NAME \
+    --access-config-name "ACCESS_CONFIG_NAME"
+</pre>
+</li> </ol> <h3 id="ssh_to_the_host_vm_via_an_intermediate_vm">SSH to the host VM via an intermediate VM</h3> <p>After you remove the host VM's external IP, you cannot ssh from outside your VPC. You access it from another VM in the same network. For the rest of this section, we refer to this as the <strong>intermediate VM</strong>.</p> <h4 id="prerequisites">Prerequisites</h4> <ul> <li>An intermediate VM with access to the subnetwork of the host VM. If you do not already have one, <a href="https://docs.cloud.google.com/compute/docs/instances/create-start-instance">create a VM</a> for this purpose.</li> <li>The internal IP address of the intermediate VM.</li> <li>An SSH public key from the intermediate VM. To learn more, see <a href="https://docs.cloud.google.com/compute/docs/instances/adding-removing-ssh-keys#locatesshkeys">Managing SSH Keys</a>
+</li> </ul> <h4 id="connecting_to_the_host_vm">Connecting to the host VM</h4> <ol> <li>Add the intermediate VM's public key to the host VM. For more information, see <a href="https://docs.cloud.google.com/compute/docs/instances/adding-removing-ssh-keys">Adding and Removing SSH keys</a> in the Compute Engine documentation.</li> <li>
+<p>Add a tag to the intermediate VM.</p> <aside class="note"><strong>Note:</strong><span> Check that the tag does not conflict with other VMs in your network before applying it.</span></aside>
+<pre>gcloud compute instances add-tags INTERMEDIATE_NODE_NAME \
+  --zone COMPUTE_ZONE \
+  --tags intermediate
+</pre>
+</li> <li>
+<p>Add an ingress allow rule to override the deny rule you added earlier. To add the rule, run the following command.</p> 
+<pre>gcloud compute firewall-rules create quarantine-ingress-allow \
+    --network NETWORK_NAME \
+    --action allow \
+    --direction ingress \
+    --rules tcp:22 \
+    --source-tags intermediate \
+    --priority 0 \
+    --target-tags quarantine
+</pre> <p>This rule allows incoming traffic on port 22 (SSH) from VMs in your network with the <code translate="no" dir="ltr">intermediate</code> tag. It overrides the deny rule with a <code translate="no" dir="ltr">priority</code> of <code translate="no" dir="ltr">0</code>.</p>
+</li> <li>
+<p>Connect to the quarantined VM with using its internal IP:</p> 
+<pre>ssh -i KEY_PATH USER@QUARANTINED_VM_INTERNAL_IP
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PATH</var></code>: the path to your SSH private key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USER</var></code>: your Google Cloud account's email address.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">QUARANTINED_VM_INTERNAL_IP</var></code>: the internal IP address.</li> </ul>
+</li> </ol> <h2 id="redeploy_a_container">Redeploy a container</h2> <p>By redeploying your container, you start a fresh copy of the container and delete the compromised container.</p> <p>You redeploy a container by deleting the Pod that hosts it. If the Pod is managed by a higher-level Kubernetes construct (for example, a Deployment or DaemonSet), deleting the Pod schedules a new Pod. This Pod runs new containers.</p> <p>Redeploying makes sense when:</p> <ul> <li>You already know the cause of the vulnerability.</li> <li>You think it takes an attacker significant effort or time to compromise your container again.</li> <li>You think that the container might quickly get compromised again and you don't want to take it offline, so you plan to place it in a <a href="sandbox-pods">sandbox</a> to limit the impact.</li> </ul> <aside class="note"><strong>Note:</strong><span> <strong>If you have a fix for the vulnerability, roll out the fix first, then migrate traffic to the replacement workload.</strong> Redeploying a Pod does not fix security issues. An attacker might repeat the same exploit chain again. Attacks can continue until a fix has been deployed.</span></aside> <p>When redeploying the workload, if the possibility of another compromise is high, consider placing the workload in a sandbox environment such as <a href="../concepts/sandbox-pods">GKE Sandbox</a>. Sandboxing limits access to the host node kernel if the attacker compromises the container again.</p> <p>To redeploy a container in Kubernetes, delete the Pod that contains it:</p> 
+<pre>kubectl delete pods POD_NAME --grace-period=10
+</pre> <p>If the containers in the deleted Pod continue to run, you can <a href="#delete_a_workload">delete the workload</a>.</p> <p>To redeploy the container within a sandbox, follow the instructions in <a href="sandbox-pods">Harden workload isolation with GKE Sandbox</a>.</p> <h2 id="delete_a_workload">Delete a workload</h2> <p>Deleting a workload, such as a Deployment or DaemonSet, causes all of its member Pods to be deleted. All containers inside those Pods stop running. Deleting a workload can make sense when:</p> <ul> <li>You want to stop an attack in progress.</li> <li>You are willing to take the workload offline.</li> <li>Stopping the attack immediately is more important than application uptime or forensic analysis.</li> </ul> <aside class="caution"><strong>Caution:</strong><span> Deleting a workload takes the entire application offline.</span></aside> <p>To delete a workload, use <code translate="no" dir="ltr">kubectl delete <var translate="no">CONTROLLER_TYPE</var></code>. For example, to delete a Deployment, run the following command:</p> 
+<pre>kubectl delete deployments DEPLOYMENT
+</pre> <p>If deleting the workload doesn't delete all associated Pods or containers, you can manually delete the containers using <code translate="no" dir="ltr">crictl</code>, the container runtime's CLI tool.</p> <aside class="note"><strong>Note:</strong><span> If you manually delete a container before deleting the workload, Kubernetes redeploys the container.</span></aside> <p>Stop or remove containers with <code translate="no" dir="ltr">crictl</code>.</p> <p>To stop a container in <code translate="no" dir="ltr">containerd</code>, run the following command:</p> 
+<pre>crictl stop CONTAINER
+</pre> <p>To remove a container in <code translate="no" dir="ltr">containerd</code>, run the following command:</p> 
+<pre>crictl rm -f CONTAINER
+</pre> <h2 id="deleting_the_host_vm">Delete the host VM</h2> <aside class="warning"><strong>Warning:</strong><span> Deleting a VM stops any workloads co-located on the node. <a href="#cordon">Cordon and drain</a> the node first to limit disruption.</span></aside> <p>If you are unable to delete or remove the container, you can delete the virtual machine that hosts the affected container.</p> <p>If the Pod is still visible, you can find the name of the host VM with the following command:</p> 
+<pre>kubectl get pods --all-namespaces \
+  -o=custom-columns=POD_NAME:.metadata.name,INSTANCE_NAME:.spec.nodeName \
+  --field-selector=metadata.name=POD_NAME
+</pre> <p>To delete the host VM, run the following <code translate="no" dir="ltr">gcloud</code> command:</p> 
+<pre>gcloud compute instance-groups managed delete-instances INSTANCE_GROUP_NAME \
+    --instances=NODE_NAME
+</pre> <p>Abandoning the instance from the Managed Instance Group reduces the size of the group by one VM. You can manually add one instance back to the group with the following command:</p> 
+<pre>gcloud compute instance-groups managed resize INSTANCE_GROUP_NAME \
+    --size=SIZE
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li><a href="https://cloud.google.com/blog/products/containers-kubernetes/best-practices-for-performing-forensics-on-containers">Performing forensics on containers</a></li> <li><a href="hardening-your-cluster">Hardening your cluster's security</a></li> <li><a href="https://docs.cloud.google.com/solutions/security-controls-and-forensic-analysis-for-GKE-apps">Forensic analysis for GKE applications</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/security-mitigations" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/security-mitigations</a>
+  </p>
+</div>

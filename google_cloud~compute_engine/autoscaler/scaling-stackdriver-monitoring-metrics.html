@@ -1,0 +1,477 @@
+<h1>Scale based on Monitoring metrics</h1> <p>Autoscaling based on <a href="https://docs.cloud.google.com/monitoring/docs/monitoring-overview">Cloud Monitoring</a> metrics lets you adjust the capacity needed according to measurements from your app. When you autoscale a MIG based on a metric, the autoscaler creates VMs when the metric value increases and deletes VMs when the value decreases.</p> <p>For example, you can define how many VMs you need per user count, latency, or the number of messages in a Pub/Sub subscription. You can use either the <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp">built-in metrics</a> provided by the Monitoring service, or the <a href="https://docs.cloud.google.com/monitoring/custom-metrics">custom metrics</a> that you export from your application.</p> <p>This document describes how to autoscale a <a href="../instance-groups#managed_instance_groups">managed instance group (MIG)</a> based on Monitoring metrics.</p> <p>You can also autoscale a MIG based on <a href="scaling-cpu">CPU utilization</a>, <a href="scaling-load-balancing">load balancing serving capacity</a>, or <a href="scaling-schedules">schedules</a>.</p> <h2 id="byb">Before you begin</h2> <ul> <li>Read about autoscaler <a href="../autoscaler#fundamentals">fundamentals</a>.</li> <li>Read about <a href="#metrics_concept">Monitoring metrics concepts</a> used in an autoscaling configuration.</li> <li>If you want to autoscale based on an <a href="https://docs.cloud.google.com/monitoring/api/metrics_opsagent">Ops Agent metric</a>, install the <a href="https://docs.cloud.google.com/monitoring/agent/ops-agent">Ops Agent</a>.</li> <li> If you haven't already, set up <a href="../authentication">authentication</a>. Authentication verifies your identity for access to Google Cloud services and APIs. To run code or samples from a local development environment, you can authenticate to Compute Engine by selecting one of the following options: <p>Select the tab for how you plan to use the samples on this page:</p> <div class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Console</strong></p> <p> When you use the Google Cloud console to access Google Cloud services and APIs, you don't need to set up authentication. </p> </section> <section> <p class="_code-tab"><strong>gcloud</strong></p> <ol>
+<li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. After installation, <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the Google Cloud CLI by running the following command: </p> 
+<pre data-language="bash">gcloud init</pre> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li>
+<li>
+<a href="../gcloud-compute#set_default_zone_and_region_in_your_local_client"> Set a default region and zone</a>.</li>
+</ol> </section> <section> <p class="_code-tab"><strong>REST</strong></p> <p> To use the REST API samples on this page in a local development environment, you use the credentials you provide to the gcloud CLI. </p> <ol> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </ol> <p> For more information, see <a href="https://docs.cloud.google.com/docs/authentication/rest">Authenticate for using REST</a> in the Google Cloud authentication documentation. </p> </section> </div> </li> </ul> <h2 id="limitations">Limitations</h2> <p>Scaling based on Monitoring metrics is restricted by the <a href="../autoscaler#specifications">limitations for all autoscalers</a> as well as by the following limitations:</p> <ul> <li>You can configure autoscaling based on up to 5 Monitoring metrics per MIG.</li> <li>You can autoscale based on metrics that have <code translate="no" dir="ltr">INT64</code> or <code translate="no" dir="ltr">DOUBLE</code> value types only. Other <a href="https://docs.cloud.google.com/monitoring/api/v3/kinds-and-types#value-types">value types</a> are not supported.</li> <li>You cannot configure the same metric more than once in an autoscaling policy.</li> </ul> <h2 id="configure_autoscaling_based_on_metrics">Configure autoscaling based on Monitoring metrics</h2> <p>You can use a Monitoring metric value for autoscaling in two different ways:</p> <ul> <li>
+<p><strong>Utilization target</strong>: If you want the autoscaler to maintain a metric at a specific value, <a href="#configure_utilization_target">configure a <em>utilization target</em></a>. The autoscaler creates VMs when the metric value is above the target and deletes VMs when the metric value is below the target. This is useful for metrics like network traffic, memory or disk usage, or average latency of your application. The following diagram shows how an autoscaler adds and removes VMs in response to a metric value to maintain a utilization target.</p> <p><img src="https://docs.cloud.google.com/static/compute/images/autoscaler/global-metrics-utilization-target.svg" alt="Autoscaler adding and removing VMs to maintain a utilization target."></p>
+</li> <li>
+<p><strong>Single instance assignment</strong>: If you want to autoscale based on how much work is available to assign to each VM, <a href="#configure_single_instance_assignment">configure a <em>single instance assignment</em></a>. The single instance assignment that you specify represents how much work you expect each VM to handle. The autoscaler divides the metric value by the single instance assignment value to calculate how many VMs are needed. For example, if the metric is equal to 100 and the single instance assignment is 5, then the autoscaler creates 20 VMs in the MIG. This is useful for metrics that reflect the amount of work like Pub/Sub queue length or batch jobs count. Single instance assignment does not apply to metrics that come from each VM. The following diagram shows the proportional relationship between the metric value and the number of VMs when scaling with single instance assignment.</p> <p><img src="https://docs.cloud.google.com/static/compute/images/autoscaler/global-metrics-instance-assignment.svg" alt="The proportional relationship between metric value and number of instances."></p>
+</li> </ul> <h3 id="configure_utilization_target">Autoscale to maintain a metric at a target value</h3> <p>When you want to maintain a metric at a target value, specify a utilization target. The autoscaler creates VMs when the metric value is above the target and deletes VMs when the metric value is below the target.</p> <ul> <li><p>If the metric comes from each VM in your MIG, then the autoscaler takes the average metric value across all VMs in the MIG and compares it with the utilization target. For example, if you want to autoscale using the <a href="https://docs.cloud.google.com/monitoring/api/metrics_agent#agent-network"><code translate="no" dir="ltr">tcp_connections</code> metric</a> that gives the number of TCP connections on a VM, then the autoscaler takes an average number of TCP connections across all VMs in the MIG to compare with the target. When you use such metrics that originate from a VM, the MIG cannot scale in to zero because the autoscaler requires at least one VM to publish a metric value.</p></li> <li><p>If the metric applies to the whole MIG and does not come from the VMs in your MIG, then the autoscaler compares the metric value with the utilization target. For example, you can use a <a href="https://docs.cloud.google.com/monitoring/custom-metrics">custom metric</a> that measures the latency of your application. When you use such metrics that apply to the whole MIG, the MIG can scale in to zero instances , provided that you set the minimum number of instances to <code translate="no" dir="ltr">0</code> and the <a href="understanding-autoscaler-decisions#scale-in-to-zero">necessary conditions</a> are met.</p></li> </ul> <p>When your metric has multiple values, apply a filter to autoscale using an individual value from the metric. For more details about metric filters and other fields that you can use in your configuration, see <a href="#metrics_concept">Monitoring metrics concepts</a>.</p> <section class="expandable">  <h4 class="showalways" id="permissions-required-for-this-task">Permissions required for this task</h4> <p>To perform this task, you must have the following <a href="https://docs.cloud.google.com/iam/docs/overview#permissions">permissions</a>: </p>
+<ul> <li>
+<code translate="no" dir="ltr">compute.autoscalers.create</code> on the project</li> <li>
+<code translate="no" dir="ltr">compute.instanceGroupManagers.use</code> on the project</li> </ul> </section> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>If you don't have a managed instance group, <a href="../instance-groups/creating-groups-of-managed-instances">create one</a>. Otherwise, click the name of a MIG from the list to open that instance group page.</p></li> <li><p>Click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. In the <strong>Resource and metric</strong> pane that opens, do the following:</p> <ol> <li>Click <strong>Select a metric</strong>. <ol> <li>Select the metric that you want to use for autoscaling. You can filter the metrics based on any keywords—for example, memory, bytes, disk.</li> <li>Click <strong>Apply</strong>. The pane displays a chart that shows the data from the selected metric.</li> </ol>
+</li> <li>
+<p>If you want to use specific data from the metric, add a filter based on labels as follows:</p> <ol> <li>In the <strong>Filters</strong> section, click <strong>Add a filter</strong>.</li> <li>Select a <strong>Label</strong> and enter a <strong>Value</strong>.</li> <li>Click <strong>Done</strong>. The chart refreshes to show you the filtered value of the metric.</li> </ol> <aside class="note"><strong>Note:</strong><span> The filter <code translate="no" dir="ltr">project_id=<var translate="no">PROJECT_ID</var></code> is added by default because you can use the metric values from the resources in the current project only. If you selected a metric that comes from each VM (<code translate="no" dir="ltr">gce_instance</code>), then an additional filter <code translate="no" dir="ltr">instance_group=<var translate="no">MIG_NAME</var></code> is also added because you can autoscale based on the metric values from the VMs in the current MIG only.</span></aside>
+</li> <li><p>To view the aggregated value of metric that will be used to autoscale your MIG, toggle the <strong>Show aggregation in chart</strong> button. The chart refreshes to show the aggregated value.</p></li> <li><p>In the <strong>Metric target options for autoscaling</strong> section, select <strong>Utilization target</strong>.</p></li> <li>
+<p>Provide the following:</p> <ol> <li>
+<strong>Utilization target</strong>: Specify the value that the autoscaler must maintain. This must be a positive number. For example, both 24.5 and 100 are acceptable values.</li> <li>
+<strong>Utilization target type</strong>: Select a target type that corresponds to the metric's kind of measurement. For accurate comparisons, if the utilization target is measured per seconds, then use <strong>Delta / second</strong> as the target type. Likewise, use <strong>Delta / min</strong> for a utilization target measured per minutes. <ul> <li>
+<strong>Gauge</strong>: The autoscaler calculates the average value of the data collected in the last couple of minutes and compares that to the utilization target.</li> <li>
+<strong>Delta / min</strong>: The autoscaler calculates the average rate of growth per minute and compares that to the utilization target.</li> <li>
+<strong>Delta / second</strong>: The autoscaler calculates the average rate of growth per second and compares that to the utilization target.</li> </ul>
+</li> </ol>
+</li> <li><p>When you've finished configuring the metric, click <strong>Select</strong>.</p></li> </ol>
+</li> <li><p>Review the metric details and click <strong>Done</strong>.</p></li> <li><p>To complete the configuration, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To configure autoscaling based on Monitoring metrics, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instance-groups/managed/set-autoscaling"><code translate="no" dir="ltr">set-autoscaling</code> command</a>.</p> <aside class="note"><strong>Note:</strong><span> If autoscaling is already enabled for a MIG, the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instance-groups/managed/set-autoscaling"><code translate="no" dir="ltr">set-autoscaling</code> command</a> overwrites the existing autoscaler to the new specifications.</span></aside> <p>Use the following command to autoscale based on a Monitoring metric with a utilization target.</p> 
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=METRIC_URL \
+  --stackdriver-metric-utilization-target=TARGET_VALUE \
+  --stackdriver-metric-utilization-target-type=TARGET_TYPE
+</pre> <p>If your metric has multiple values and you want to use an individual value for autoscaling, then use the <code translate="no" dir="ltr">--stackdriver-metric-filter</code> flag as given in the following command.</p> 
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=METRIC_URL \
+  --stackdriver-metric-utilization-target=TARGET_VALUE \
+  --stackdriver-metric-utilization-target-type=TARGET_TYPE \
+  --stackdriver-metric-filter="METRIC_FILTER"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_NAME</var></code>: the MIG in which you want to add an autoscaler.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_INSTANCES</var></code>: the maximum number of VMs that the MIG can have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_INSTANCES</var></code>: the minimum number of VMs that the MIG needs to have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_URL</var></code>: a protocol-free URL of a Monitoring metric. For example, <code translate="no" dir="ltr">compute.googleapis.com/instance/uptime</code>. If you use a custom metric, it must meet the <a href="#custom_metrics">custom metric requirements</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_VALUE</var></code>: the metric value that the autoscaler attempts to maintain.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_TYPE</var></code>: the value type for the metric. <ul> <li>
+<code translate="no" dir="ltr">gauge</code> the autoscaler computes the average value of the data collected in the last couple of minutes and compares that to the utilization target.</li> <li>
+<code translate="no" dir="ltr">delta-per-minute</code> the autoscaler calculates the average rate of growth per minute and compares that to the utilization target.</li> <li>
+<code translate="no" dir="ltr">delta-per-second</code> the autoscaler calculates the average rate of growth per second and compares that to the utilization target. For accurate comparisons, if you set the utilization target in seconds, use <code translate="no" dir="ltr">delta-per-second</code> as the target type. Likewise, use <code translate="no" dir="ltr">delta-per-minute</code> for a utilization target in minutes.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_FILTER</var></code>: apply a filter to use an individual value from a metric having multiple values and to specify the monitored resource type. If you use a metric that comes from each VM, you don't have to specify the monitored resource type because <a href="https://docs.cloud.google.com/monitoring/api/resources#tag_gce_instance"><code translate="no" dir="ltr">gce_instance</code></a> is used as default. For other metrics, use <code translate="no" dir="ltr">resource.type</code> in the filter expression to specify the monitored resource. To learn more about metric filter, see <a href="#metrics_concept">Monitoring metrics concepts</a>.</li> </ul> <p>To see a full list of available commands and flags for the gcloud CLI, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instance-groups/managed"><code translate="no" dir="ltr">gcloud</code> reference</a>.</p></section> <section><p class="_code-tab"><strong>REST</strong></p>
+<aside class="note"><strong>Note:</strong><span> Although autoscaling is a feature of managed instance groups, it is a separate API resource. Keep that in mind when you construct API requests for autoscaling.</span></aside> <p>To configure autoscaling based on Monitoring metrics for a zonal MIG, use the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/autoscalers"><code translate="no" dir="ltr">autoscalers</code></a> resource or, for a regional MIG, use the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionAutoscalers"><code translate="no" dir="ltr">regionAutoscalers</code></a> resource.</p> <p>Make the following call to autoscale a zonal MIG based on a Monitoring metric with a utilization target.</p> 
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+ "name": "AUTOSCALER_NAME",
+ "target": "zones/ZONE/instanceGroupManagers/MIG_NAME",
+ "autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+    {
+      "metric": "METRIC_URL",
+      "utilizationTarget": TARGET_VALUE,
+      "utilizationTargetType": TARGET_TYPE
+    }
+  ],
+ }
+}
+</pre> <p>If your metric has multiple values and you want to use an individual value for autoscaling, then use the <code translate="no" dir="ltr">filter</code> parameter as given in the following API call.</p> 
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+ "name": "AUTOSCALER_NAME",
+ "target": "zones/ZONE/instanceGroupManagers/MIG_NAME",
+ "autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+    {
+      "metric": "METRIC_URL",
+      "utilizationTarget": TARGET_VALUE,
+      "utilizationTargetType": TARGET_TYPE,
+      "filter": "METRIC_FILTER"
+    }
+  ],
+ }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the MIG is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AUTOSCALER_NAME</var></code>: the name of the autoscaler.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_NAME</var></code>: the MIG in which you want to add an autoscaler.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_INSTANCES</var></code>: the maximum number of VMs that the MIG can have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_INSTANCES</var></code>: the minimum number of VMs that the MIG needs to have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_URL</var></code>: a protocol-free URL of a Monitoring metric. For example, <code translate="no" dir="ltr">compute.googleapis.com/instance/uptime</code>. If you use a custom metric, it must meet the <a href="#custom_metrics">custom metric requirements</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_VALUE</var></code>: the metric value that the autoscaler attempts to maintain.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_TYPE</var></code>: the value type for the metric. <ul> <li>
+<code translate="no" dir="ltr">GAUGE</code>: The autoscaler computes the average value of the data collected in the last couple of minutes and compares that to the utilization target.</li> <li>
+<code translate="no" dir="ltr">DELTA_PER_MINUTE</code> The autoscaler calculates the average rate of growth per minute and compares that to the utilization target.</li> <li>
+<code translate="no" dir="ltr">DELTA_PER_SECOND</code> The autoscaler calculates the average rate of growth per second and compares that to the utilization target. For accurate comparisons, if you set the utilization target in seconds, use <code translate="no" dir="ltr">DELTA_PER_SECOND</code> as the target type. Likewise, use <code translate="no" dir="ltr">DELTA_PER_MINUTE</code> for a utilization target in minutes.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_FILTER</var></code>: apply a filter to use an individual value from a metric with multiple values and to specify the monitored resource type. If you use a metric that comes from each VM, you don't have to specify the monitored resource type because <a href="https://docs.cloud.google.com/monitoring/api/resources#tag_gce_instance"><code translate="no" dir="ltr">gce_instance</code></a> is used as default. For other metrics, you must specify the monitored resource using <code translate="no" dir="ltr">resource.type</code> selector. To learn more about metric filter, see <a href="#metrics_concept">Monitoring metrics concepts</a>.</li> </ul></section> </div> <h3 id="configure_single_instance_assignment">Autoscale based on work available for each VM in a MIG</h3> <p>When you want to autoscale based on the quantity of work that is available for each VM in a MIG, specify a single instance assignment. The value of the single instance assignment that you set indicates how much work you expect each VM to handle. The autoscaler divides the metric value by the single instance assignment value to calculate how many VMs are needed.</p> <p>A metric value of <code translate="no" dir="ltr">0</code> indicates that there is no work for your MIG to complete. If your MIG's minimum number of instances is set to <code translate="no" dir="ltr">0</code> and your metric value drops to <code translate="no" dir="ltr">0</code>, then the MIG scales in to <code translate="no" dir="ltr">0</code> until the metric value increases.</p> <p>When your metric has multiple values, apply a filter to autoscale using an individual value from the metric. For more details about metric filters and other fields that you can use in your configuration, see <a href="#metrics_concept">Monitoring metrics concepts</a>.</p> <section class="expandable">  <h4 class="showalways" id="permissions-required-for-this-task_1">Permissions required for this task</h4> <p>To perform this task, you must have the following <a href="https://docs.cloud.google.com/iam/docs/overview#permissions">permissions</a>: </p>
+<ul> <li>
+<code translate="no" dir="ltr">compute.autoscalers.create</code> on the project</li> <li>
+<code translate="no" dir="ltr">compute.instanceGroupManagers.use</code> on the project</li> </ul> </section> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>If you don't have a managed instance group, <a href="../instance-groups/creating-groups-of-managed-instances">create one</a>. Otherwise, click the name of a MIG from the list to open that instance group page.</p></li> <li><p>Click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. In the <strong>Resource and metric</strong> pane that opens, do the following:</p> <ol> <li>Click <strong>Select a metric</strong>. <ol> <li>Select the metric that you want to use for autoscaling. You can filter the metrics based on any keywords—for example, memory, bytes, disk.</li> <li>Click <strong>Apply</strong>. The pane displays a chart that shows the data from the selected metric.</li> </ol>
+</li> <li>
+<p>If you want to use specific data from the metric, add a filter based on labels as follows:</p> <ol> <li>In the <strong>Filters</strong> section, click <strong>Add a filter</strong>.</li> <li>Select a <strong>Label</strong> and enter a <strong>Value</strong>.</li> <li>Click <strong>Done</strong>. The chart refreshes to show you the filtered metric value.</li> </ol> <aside class="note"><strong>Note:</strong><span> The filter <code translate="no" dir="ltr">project_id=<var translate="no">PROJECT_ID</var></code> is added by default because you can use the metric values from the resources in the current project only.</span></aside>
+</li> <li><p>To view the aggregated value of metric that will be used to autoscale your MIG, toggle the <strong>Show aggregation in chart</strong> button. The chart refreshes to show the aggregated value.</p></li> <li><p>In the <strong>Metric target options for autoscaling</strong> section, select <strong>Single VM instance assignment</strong>.</p></li> <li><p>Provide a <strong>Single instance assignment</strong> value that represents the amount of work to assign to each VM in the MIG.</p></li> <li><p>When you've finished configuring the metric, click <strong>Select</strong>.</p></li> </ol>
+</li> <li><p>Review the metric details and click <strong>Done</strong>.</p></li> <li><p>To complete the configuration, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To configure autoscaling based on Monitoring metrics, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instance-groups/managed/set-autoscaling"><code translate="no" dir="ltr">set-autoscaling</code> command</a>.</p> <aside class="note"><strong>Note:</strong><span> If autoscaling is already enabled for a MIG, the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instance-groups/managed/set-autoscaling"><code translate="no" dir="ltr">set-autoscaling</code></a> command overwrites the existing autoscaler to the new specifications.</span></aside> <p>In the command, specify the <code translate="no" dir="ltr">--stackdriver-metric-single-instance-assignment</code> flag to indicate the amount of work that you expect each VM in the group to handle.</p> <p>The following command creates an autoscaler based on work assignment for each VM.</p> 
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+    --max-num-replicas=MAX_INSTANCES \
+    --min-num-replicas=MIN_INSTANCES \
+    --update-stackdriver-metric=METRIC_URL \
+    --stackdriver-metric-filter="METRIC_FILTER" \
+    --stackdriver-metric-single-instance-assignment=INSTANCE_ASSIGNMENT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_NAME</var></code>: the name of the MIG to autoscale.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_INSTANCES</var></code>: the maximum number of VMs that the MIG can have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_INSTANCES</var></code>: the minimum number of VMs that the MIG needs to have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_URL</var></code>: a protocol-free URL of a Monitoring metric. For example, <code translate="no" dir="ltr">compute.googleapis.com/instance_group/size</code>. If you use a custom metric, it must meet the <a href="#custom_metrics">custom metric requirements</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_FILTER</var></code>: apply a filter to use an individual value from a metric with multiple values and to specify the monitored resource type. To learn more about metric filter, see <a href="#metrics_concept">Monitoring metrics concepts</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_ASSIGNMENT</var></code>: the amount of work to assign to each VM instance in the MIG.</li> </ul></section> <section><p class="_code-tab"><strong>REST</strong></p>
+<aside class="note"><strong>Note:</strong><span> Although autoscaling is a feature of managed instance groups, <a href="https://docs.cloud.google.com/compute/docs/reference/v1/autoscalers">autoscalers</a> are a separate API resource. Keep that in mind when you construct API requests for autoscaling.</span></aside> <p>To configure autoscaling based on Monitoring metrics for a zonal MIG, use the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/autoscalers"><code translate="no" dir="ltr">autoscalers</code></a> resource or, for a regional MIG, use the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionAutoscalers"><code translate="no" dir="ltr">regionAutoscalers</code></a> resource.</p> <p>Use the <code translate="no" dir="ltr">singleInstanceAssignment</code> parameter to specify the amount of work that you expect each VM to handle.</p> <p>For example, make the following call to create an autoscaler that scales a zonal MIG based on the instance assignment.</p> 
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+
+{
+ "name": "AUTOSCALER_NAME",
+ "target": "zones/ZONE/instanceGroupManagers/MIG_NAME",
+ "autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+    {
+      "metric": "METRIC_URL",
+      "filter": "METRIC_FILTER",
+      "singleInstanceAssignment": INSTANCE_ASSIGNMENT
+    }
+  ],
+ }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the MIG is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AUTOSCALER_NAME</var></code>: the name of the autoscaler.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_NAME</var></code>: the name of the MIG to autoscale.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_INSTANCES</var></code>: the maximum number of VMs that the MIG can have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_INSTANCES</var></code>: the minimum number of VMs that the MIG needs to have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_URL</var></code>: a protocol-free URL of a Monitoring metric. For example, <code translate="no" dir="ltr">compute.googleapis.com/instance_group/size</code>. If you use a custom metric, it must meet the <a href="#custom_metrics">custom metric requirements</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">METRIC_FILTER</var></code>: apply a filter to use an individual value from a metric with multiple values and to specify the monitored resource type. To learn more about metric filter, see <a href="#metrics_concept">Monitoring metrics concepts</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_ASSIGNMENT</var></code>: the amount of work to assign to each VM instance in the MIG.</li> </ul></section> </div> <h2 id="examples_for_autoscaling_based_on_metrics">Examples for autoscaling based on metrics</h2> <p>This section provides some examples of metrics used for autoscaling. For a complete list of metrics, see <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp">Google Cloud metrics</a>.</p> <h3 id="autoscale_based_on_a_custom_metric">Autoscale based on a custom metric</h3> <p>There might be a situation when the metric providing a relevant signal does not represent a total amount of available work or another resource applicable to the group, but instead an average, a percentile, or some other statistical property. For this example, assume that you scale based on the group's average processing latency.</p> <p>Assume the following setup:</p> <ul> <li>A zonal MIG named <code translate="no" dir="ltr">our-instance-group</code> is assigned to perform a particular task. The group is located in zone <code translate="no" dir="ltr">us-central1-a</code>.</li> <li>You have a <a href="https://docs.cloud.google.com/monitoring/custom-metrics">Monitoring custom metric</a> that exports a value that you would like to maintain at a particular level. For this example, assume the metric represents the average latency of processing queries assigned to the group. <ul> <li>The custom metric is named: <code translate="no" dir="ltr">custom.googleapis.com/example_average_latency</code>.</li> <li>The custom metric has a label with a key named <code translate="no" dir="ltr">group_name</code> and value equal to the MIG's name, <code translate="no" dir="ltr">our-instance-group</code>.</li> <li>The custom metric exports data for the <a href="https://docs.cloud.google.com/monitoring/api/resources#tag_global">global monitored resource</a>, that is, it is not associated with any specific VM.</li> </ul>
+</li> </ul> <p>You have determined that when the metric value is above some specific value, you need to add more VMs to the group to handle the load, while when it is below that value, you can free up some resources. You want the autoscaler to gradually add or remove VMs at a rate that is proportional to how much the metric is above or below the target. For this example, assume that you have determined your target value to be <code translate="no" dir="ltr">250 delta/sec</code>.</p> <p>You can configure autoscaling for the group using a utilization target of <code translate="no" dir="ltr">250</code>, which represents the rate of change of the metric value that the autoscaler will attempt to maintain:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>Click the name of your MIG from the list to open the instance group overview page.</p></li> <li><p>Click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. The <strong>Resource and metric</strong> pane opens.</p> <ol> <li>Click <strong>Select a metric</strong>. <ol> <li>Choose your metric from <strong>Global &gt; Custom metrics</strong>.</li> <li>Click <strong>Apply</strong>.</li> </ol>
+</li> <li>In the <strong>Filters</strong> section, do the following: <ol> <li>Click <strong>Add a filter</strong>.</li> <li>In the <strong>Label</strong> drop-down, select <code translate="no" dir="ltr">group_name</code>.</li> <li>In the <strong>Value</strong> field, provide <code translate="no" dir="ltr">our-instance-group</code>.</li> <li>Click <strong>Done</strong>. The chart refreshes to show the filtered value from the metric.</li> </ol>
+</li> <li>In the <strong>Metric target options for autoscaling</strong> section, do the following: <ol> <li>Select <strong>Utilization target</strong>.</li> <li>Enter the utilization target value as 250.</li> <li>Set the utilization target type to <strong>Delta / sec</strong>.</li> </ol>
+</li> <li>After you've configured the metric, click <strong>Select</strong>.</li> </ol>
+</li> <li><p>Review the metric details and then click <strong>Done</strong>.</p></li> <li><p>When you've finished, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud compute instance-groups managed set-autoscaling our-instance-group \
+  --zone=us-central1-a \
+  --max-num-replicas=50 \
+  --min-num-replicas=0 \
+  --update-stackdriver-metric=custom.googleapis.com/example_average_latency \
+  --stackdriver-metric-filter="metric.labels.group_name = \"our-instance-group\" AND resource.type = \"global\"" \
+  --stackdriver-metric-utilization-target=250 \
+  --stackdriver-metric-utilization-target-type=delta-per-second</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/autoscalers
+{
+"name": "our-instance-group-autoscaler",
+"target": "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instanceGroupManagers/our-instance-group",
+"autoscalingPolicy": {
+  "maxNumReplicas": 50,
+  "minNumReplicas": 0,
+  "customMetricUtilizations": [
+    {
+      "filter": "metric.labels.group_name=\"our-instance-group\" AND resource.type = \"global\"",
+      "utilizationTargetType": "delta-per-second",
+      "utilizationTarget": 250.0,
+      "metric": "custom.googleapis.com/example_average_latency"
+    }
+  ]
+}
+}
+</pre></section> </div> <h3 id="scale_based_on_pubsub">Autoscale based on unacknowledged messages in Pub/Sub</h3> <p>To configure autoscaling based on unacknowledged messages in a <a href="https://docs.cloud.google.com/pubsub/docs">Pub/Sub</a> subscription, use the <code translate="no" dir="ltr">subscription/num_undelivered_messages</code> metric provided by <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z#gcp-pubsub"><code translate="no" dir="ltr">pubsub</code></a> and filter by the <code translate="no" dir="ltr">subscription ID</code>.</p> <p>The <code translate="no" dir="ltr">subscription/num_undelivered_messages</code> metric exports the total number of messages in the subscription, including messages that are being processed but that are not yet acknowledged. Using a metric that does not include the messages being processed is not recommended because such a metric can drop-down to 0 when there is still work being done, which prompts autoscaling to scale in and possibly interrupt the actual work.</p> <p>If you don't have a subscription, you can create a <a href="https://docs.cloud.google.com/pubsub/docs/create-subscription">pull</a>, <a href="https://docs.cloud.google.com/pubsub/docs/create-push-subscription">push</a>, or <a href="https://docs.cloud.google.com/pubsub/docs/create-bigquery-subscription">BigQuery</a> subscription before you configure autoscaling.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>Click the name of your MIG from the list to open the instance group overview page.</p></li> <li><p>Click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Pub/Sub queue</strong>.</p></li> <li><p>Select a <strong>Topic</strong>. If you want a new topic, click <strong>Create a topic</strong> to <a href="https://docs.cloud.google.com/pubsub/docs/admin">create one</a>.</p></li> <li><p>Select the <strong>Subscription</strong> based on which you want to autoscale your MIG. If you want a new subscription, click <strong>Create a subscription</strong> to <a href="https://docs.cloud.google.com/pubsub/docs/create-subscription">create one</a>.</p></li> <li><p>In the <strong>Number of messages to assign to each VM</strong> field, specify the number of unacknowledged messages that you expect each VM to handle.</p></li> <li><p>Click <strong>Done</strong>.</p></li> <li><p>When you've finished, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages \
+  --stackdriver-metric-filter="resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"SUBSCRIPTION_ID\"" \
+  --stackdriver-metric-single-instance-assignment=NUMBER_OF_MESSAGES_TO_ASSIGN_TO_EACH_VM</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+<p>To configure autoscaling for a zonal MIG, use the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/autoscalers"><code translate="no" dir="ltr">autoscalers</code></a> resource or, for a regional MIG, use the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionAutoscalers"><code translate="no" dir="ltr">regionAutoscalers</code></a> resource.</p> <p>For example, make the following call to create an autoscaler for a zonal MIG.</p> 
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+"name": "AUTOSCALER_NAME",
+"target": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/instanceGroupManagers/MIG_NAME",
+"autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+    {
+      "singleInstanceAssignment": NUMBER_OF_MESSAGES_TO_ASSIGN_TO_EACH_VM,
+      "filter": "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id=\"SUBSCRIPTION_ID\"",
+      "metric": "pubsub.googleapis.com/subscription/num_undelivered_messages"
+    }
+  ]
+}
+}
+</pre></section> </div> <h3 id="autoscale_based_on_incoming_network_traffic">Autoscale based on incoming network traffic</h3> <p>To configure autoscaling based on the incoming network traffic to VMs in your MIG, use the <code translate="no" dir="ltr">instance/network/received_bytes_count</code> metric provided by <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_c#gcp-compute"><code translate="no" dir="ltr">compute</code></a>.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>Click the name of your MIG from the list to open the instance group overview page.</p></li> <li><p>Click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. The <strong>Resource and metric</strong> pane opens.</p> <ol> <li>Click <strong>Select a metric</strong>. <ol> <li>Select <strong>VM Instance &gt; Instance &gt; Received bytes</strong> (<code translate="no" dir="ltr">compute.googleapis.com/instance/network/received_bytes_count</code>).</li> <li>Click <strong>Apply</strong>.</li> </ol>
+</li> <li>In the <strong>Metric target options for autoscaling</strong> section, do the following: <ol> <li>Make sure that <strong>Utilization target</strong> is selected.</li> <li>Enter a utilization target value.</li> <li>Set a utilization target type.</li> </ol>
+</li> <li>After you've configured the metric, click <strong>Select</strong>.</li> </ol>
+</li> <li><p>Review the metric details and then click <strong>Done</strong>.</p></li> <li><p>When you've finished, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=compute.googleapis.com/instance/network/received_bytes_count \
+  --stackdriver-metric-utilization-target=TARGET_VALUE \
+  --stackdriver-metric-utilization-target-type=TARGET_TYPE
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+"name": "AUTOSCALER_NAME",
+"target": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/instanceGroupManagers/MIG_NAME",
+"autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+    {
+      "utilizationTargetType": "TARGET_TYPE",
+      "utilizationTarget": TARGET_VALUE,
+      "metric": "compute.googleapis.com/instance/network/received_bytes_count"
+    }
+  ]
+}
+}
+</pre></section> </div> <h3 id="autoscale_based_on_memory_usage">Autoscale based on memory usage</h3> <p>To configure autoscaling based on the percent of used memory, specify the <code translate="no" dir="ltr">percent_used</code> metric provided by the <a href="https://docs.cloud.google.com/monitoring/api/metrics_opsagent#agent-memory">memory</a> Ops Agent metrics. You should filter the metric by <code translate="no" dir="ltr">state</code> to use only the <code translate="no" dir="ltr">used</code> memory state. If you don't specify the filter, then the autoscaler takes the sum of memory usage by all memory states labeled as <code translate="no" dir="ltr">buffered</code>, <code translate="no" dir="ltr">cached</code>, <code translate="no" dir="ltr">free</code>, <code translate="no" dir="ltr">slab</code>, and <code translate="no" dir="ltr">used</code>.</p> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">memory/percent_used</code> metric is an <a href="https://docs.cloud.google.com/monitoring/api/metrics_opsagent">Ops Agent metric</a>. You must install the <a href="https://docs.cloud.google.com/monitoring/agent/ops-agent">Ops Agent</a> before you configure autoscaling based on this metric.</span></aside><div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>Click the name of your MIG from the list to open the instance group overview page.</p></li> <li><p>On the instance group overview page, click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. The <strong>Resource and metric</strong> pane opens.</p> <ol> <li>Click <strong>Select a metric</strong>. <ol> <li>Select <strong>VM Instance &gt; Memory &gt; Memory utilization</strong> (<code translate="no" dir="ltr">agent.googleapis.com/memory/percent_used</code>).</li> <li>Click <strong>Apply</strong>.</li> </ol>
+</li> <li>In the <strong>Filters</strong> section, do the following: <ol> <li>Click <strong>Add a filter</strong>.</li> <li>In the <strong>Label</strong> drop-down, choose the <strong>state</strong> metric label.</li> <li>In the <strong>Value</strong> field, type <strong>used</strong>.</li> <li>Click <strong>Done</strong>.</li> </ol>
+</li> <li>In the <strong>Metric target options for autoscaling</strong> section, do the following: <ol> <li>Make sure that <strong>Utilization target</strong> is selected.</li> <li>Enter a utilization target value.</li> <li>Set the utilization target type to <strong>Gauge</strong>.</li> </ol>
+</li> <li>After you've configured the metric, click <strong>Select</strong>.</li> </ol>
+</li> <li><p>Review the metric details and then click <strong>Done</strong>.</p></li> <li><p>When you've finished, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=agent.googleapis.com/memory/percent_used \
+  --stackdriver-metric-filter="metric.labels.state = \"used\"" \
+  --stackdriver-metric-utilization-target-type=gauge \
+  --stackdriver-metric-utilization-target=TARGET_VALUE  \
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+"name": "AUTOSCALER_NAME",
+"target": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/instanceGroupManagers/MIG_NAME",
+"autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+  {
+    "filter": "metric.labels.state=\"used\"",
+    "utilizationTargetType": "GAUGE",
+    "utilizationTarget": TARGET_VALUE,
+    "metric": "agent.googleapis.com/memory/percent_used"
+  }
+  ]
+}
+}
+</pre></section> </div> <h3 id="autoscale_based_on_disk_io">Autoscale based on disk I/O</h3> <p>To configure autoscaling based on the total count of disk I/O operations, use the <code translate="no" dir="ltr">operation_count</code> metric provided by the <a href="https://docs.cloud.google.com/monitoring/api/metrics_opsagent#agent-disk">disk</a> Ops Agent metrics. If you want to scale based on read or write operations, filter the metric using the <code translate="no" dir="ltr">direction</code> label. Similarly, to scale based on disk operations in a particular device, use the <code translate="no" dir="ltr">device</code> label in the metric filter.</p> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">disk/operation_count</code> metric is an <a href="https://docs.cloud.google.com/monitoring/api/metrics_opsagent">Ops Agent metric</a>. You must install the <a href="https://docs.cloud.google.com/monitoring/agent/ops-agent">Ops Agent</a> before you configure autoscaling based on this metric.</span></aside><div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>Click the name of your MIG from the list to open the instance group overview page.</p></li> <li><p>On the instance group overview page, click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. The <strong>Resource and metric</strong> pane opens.</p> <ol> <li>Click <strong>Select a metric</strong>. <ol> <li>Select <strong>VM instance &gt; Disk &gt; Disk operations</strong> (<code translate="no" dir="ltr">agent.googleapis.com/disk/operation_count</code>).</li> <li>Click <strong>Apply</strong>.</li> </ol>
+</li> <li>In the <strong>Metric target options for autoscaling</strong> section, do the following: <ol> <li>Make sure that <strong>Utilization target</strong> is selected.</li> <li>Enter a utilization target value.</li> <li>Set a utilization target type.</li> </ol>
+</li> <li>After you've configured the metric, click <strong>Select</strong>.</li> </ol>
+</li> <li><p>Review the metric details and then click <strong>Done</strong>.</p></li> <li><p>When you've finished, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_NAME \
+  --max-num-replicas=MAX_INSTANCES  \
+  --min-num-replicas=MIN_INSTANCES  \
+  --update-stackdriver-metric=agent.googleapis.com/disk/operation_count \
+  --stackdriver-metric-utilization-target=TARGET_VALUE  \
+  --stackdriver-metric-utilization-target-type=TARGET_TYPE
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+"name": "AUTOSCALER_NAME",
+"target": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/instanceGroupManagers/MIG_NAME",
+"autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+  {
+    "utilizationTargetType": "TARGET_TYPE",
+    "utilizationTarget": TARGET_VALUE,
+    "metric": "agent.googleapis.com/disk/operation_count"
+  }
+  ]
+}
+}
+</pre></section> </div> <h3 id="autoscale_based_on_size_of_another_mig">Autoscale based on size of another MIG</h3> <p>You can autoscale a MIG based on the size of another MIG within the same project. For example, you can have multi-tier application with a frontend MIG that <a href="scaling-load-balancing">autoscales based on a load balancer</a> and a backend MIG that autoscales proportionally to the frontend. Use a single instance assignment to define how many backend VMs are needed for every frontend VM. If you need 1 backend VM for every 4 frontend VMs, then set the single instance assignment to 4 in the backend MIG.</p> <p>To autoscale a MIG (<var translate="no">MIG_1</var>) based on the size of another MIG (<var translate="no">MIG_2</var>), use the <code translate="no" dir="ltr">instance_group/size</code> metric provided by <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_c#gcp-compute"><code translate="no" dir="ltr">compute</code></a>.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Instance groups</strong> page.</p> <p><a href="https://console.cloud.google.com/compute/instanceGroups" target="console" track-type="tasks" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewInstanceGroup" class="button button-primary">Go to Instance groups</a> </p>
+</li> <li><p>Click the name of your MIG from the list to open the instance group overview page.</p></li> <li><p>On the instance group overview page, click <strong>Edit</strong>. </p></li>
+<li>Click <b>Group size &amp; autoscaling</b> to expand the section.</li> 
+<li>If autoscaling configuration doesn't exist, click <b>Configure autoscaling</b>. 
+<p>By default, the autoscaling configuration adds a signal based on <b>CPU utilization</b>. If you don't require this signal, you can edit it to change the signal type.</p>
+</li> 
+<li>In the <b>Autoscaling signals</b> section, if a signal for a Monitoring metric exists, you can click to edit it, or click <b>Add a signal</b> to add one.</li> <li><p>Set the <strong>Signal type</strong> to <strong>Cloud Monitoring metric</strong>.</p></li> <li>
+<p>Click <strong>Configure</strong>. The <strong>Resource and metric</strong> pane opens.</p> <ol> <li>Click <strong>Select a metric</strong> <ol> <li>Select <strong>Instance Group &gt; Instance_group &gt; Instance group size</strong> (<code translate="no" dir="ltr">compute.googleapis.com/instance_group/size</code>).</li> <li>Click <strong>Apply</strong>.</li> </ol>
+</li> <li>In the <strong>Filters</strong> section, do the following: <ol> <li>Click <strong>Add a filter</strong>.</li> <li>In the <strong>Label</strong> drop-down, choose the <strong>instance_group_name</strong> resource label.</li> <li>In the <strong>Value</strong> field, type the name of the MIG (<var translate="no">MIG_2</var>) based on which you want to autoscale your MIG.</li> <li>Click <strong>Done</strong>.</li> </ol>
+</li> <li>In the <strong>Metric target options for autoscaling</strong> section, do the following: <ol> <li>Select <strong>Single VM instance assignment</strong>.</li> <li>In the Single VM instance assignment field, enter <code translate="no" dir="ltr">4</code>, if you want to keep 1 VM in your current MIG (<var translate="no">MIG_1</var>) for every 4 VMs in <var translate="no">MIG_2</var>.</li> </ol>
+</li> <li>After you've configured the metric, click <strong>Select</strong>.</li> </ol>
+</li> <li><p>Review the metric details and then click <strong>Done</strong>.</p></li> <li><p>When you've finished, click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_1 \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=compute.googleapis.com/instance_group/size \
+  --stackdriver-metric-filter="resource.type = \"instance_group\" AND resource.labels.location = \"ZONE|REGION\" AND resource.labels.instance_group_name = \"MIG_2\"" \
+  --stackdriver-metric-single-instance-assignment=4
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/autoscalers
+{
+"name": "AUTOSCALER_NAME",
+"target": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID/zones/ZONE/instanceGroupManagers/MIG_1",
+"autoscalingPolicy": {
+  "maxNumReplicas": MAX_INSTANCES,
+  "minNumReplicas": MIN_INSTANCES,
+  "customMetricUtilizations": [
+    {
+      "singleInstanceAssignment": 4,
+      "filter": "resource.type = \"instance_group\" AND resource.labels.location = \"ZONE|REGION\" AND resource.labels.instance_group_name = \"MIG_2\"",
+      "metric": "compute.googleapis.com/instance_group/size"
+    }
+  ]
+}
+}
+</pre></section> </div> <h3 id="autoscale_based_on_a_metric_from_a_different_project">Autoscale based on a metric from a different project</h3> <p>You can autoscale a MIG based on metrics from a different project. To allow your project to access metrics from another project, you must <a href="https://docs.cloud.google.com/monitoring/settings/multiple-projects">add the other project to the metric scope</a> of your current project.</p> <p>After you configure the metric scope, you can use metrics from the other project by specifying the metric's project ID in your filter using the <code translate="no" dir="ltr">resource.labels.project_id</code> label.</p> <p>When using metrics from a different project, the following limitations also apply:</p> <ul> <li><p>You can only configure the metric using the gcloud CLI or REST. The Google Cloud console isn't supported.</p></li> <li><p>You can only use those metrics that apply to the whole MIG. Metrics that come from each VM in your MIG are not supported.</p></li> </ul> <p>The following example shows how to autoscale a zonal MIG (<code translate="no" dir="ltr"><var translate="no">MIG_1</var></code>) based on the size of another MIG (<code translate="no" dir="ltr"><var translate="no">MIG_2</var></code>) located in a different project.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">
+gcloud compute instance-groups managed set-autoscaling MIG_1 \
+  --max-num-replicas=MAX_INSTANCES \
+  --min-num-replicas=MIN_INSTANCES \
+  --update-stackdriver-metric=compute.googleapis.com/instance_group/size \
+  --stackdriver-metric-filter="resource.type = \"instance_group\" AND resource.labels.project_id = \"PROJECT_ID_OF_MIG_2\" AND resource.labels.instance_group_name = \"MIG_2\"" \
+  --stackdriver-metric-single-instance-assignment=1 \
+  --zone=ZONE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_1</var></code>: the name of the MIG to autoscale.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_INSTANCES</var></code>: the maximum number of VMs that the MIG can have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_INSTANCES</var></code>: the minimum number of VMs that the MIG needs to have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID_OF_MIG_2</var></code>: the ID of the project containing the metric.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_2</var></code>: the name of the MIG providing the metric.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone containing the MIG to autoscale.</li> </ul></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">
+POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID_OF_MIG_1/zones/ZONE/autoscalers
+{
+  "name": "AUTOSCALER_NAME",
+  "target": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID_OF_MIG_1/zones/ZONE/instanceGroupManagers/MIG_1",
+  "autoscalingPolicy": {
+    "maxNumReplicas": MAX_INSTANCES,
+    "minNumReplicas": MIN_INSTANCES,
+    "customMetricUtilizations": [
+      {
+        "singleInstanceAssignment": 1,
+        "filter": "resource.type = \"instance_group\" AND resource.labels.project_id = \"PROJECT_ID_OF_MIG_2\" AND resource.labels.instance_group_name = \"MIG_2\"",
+        "metric": "compute.googleapis.com/instance_group/size"
+      }
+    ]
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID_OF_MIG_1</var></code>: the ID of the project containing the MIG to autoscale.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone containing the MIG to autoscale.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AUTOSCALER_NAME</var></code>: the name of the autoscaler that you're configuring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_1</var></code>: the name of the MIG to autoscale.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_INSTANCES</var></code>: the maximum number of VMs that the MIG can have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_INSTANCES</var></code>: the minimum number of VMs that the MIG needs to have.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID_OF_MIG_2</var></code>: the ID of the project containing the metric.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_2</var></code>: the name of the MIG providing the metric.</li> </ul></section> </div> <h2 id="metrics_concept">Monitoring metrics concepts</h2> <p>This section provides a brief description of the Monitoring metrics concepts that you need to know while configuring autoscaling based on Monitoring metrics.</p> <ul> <li>
+<p><strong>Metric identifier</strong> or <strong>Metric URL</strong>: The metric name in the form of a protocol-free URL. You can find URLs for built-in metrics URL from the <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp">metric list</a>.</p> <p>For example, the URL of a Pub/Sub metric that gives the number of unacknowledged messages is <code translate="no" dir="ltr">pubsub.googleapis.com/subscription/num_undelivered_messages</code>.</p>
+</li> <li>
+<p><strong>Monitored resource type</strong>: The source of metric value. You can find the monitored resource type of a metric from the <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp">metric list</a>.</p> <p>For example, the monitored resource type of the <code translate="no" dir="ltr">pubsub.googleapis.com/subscription/num_undelivered_messages</code> metric is <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z#gcp-pubsub"><code translate="no" dir="ltr">pubsub_subscription</code></a>. For more details about each monitored resource type, see <a href="https://docs.cloud.google.com/monitoring/api/resources">Monitored resource types</a>.</p>
+</li> <li>
+<p><strong>Metric filter</strong>: When your metric has multiple values, a filter enables the autoscaler to identify a specific metric value from the set of possible metric values. Use the labels defined on a <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp">metric</a> and a <a href="https://docs.cloud.google.com/monitoring/api/resources">monitored resource type</a> to filter the values. If you want to explore your metric values with different filters, you can try them in the <a href="https://docs.cloud.google.com/monitoring/charts/metrics-explorer">metrics explorer</a>.</p> <p>For example, the following screenshot shows <code translate="no" dir="ltr">pubsub.googleapis.com/subscription/num_undelivered_messages</code> metric that gives the number of unacknowledged messages in all available subscriptions. Each line on the chart indicates a subscription.</p> <p><img src="https://docs.cloud.google.com/static/compute/images/autoscaler/metric-without-filter.svg" alt="Metric explorer showing metric values without filter." class="screenshot"> </p> <p>Without a filter, the autoscaler takes the sum of metric values from all subscriptions. To autoscale based on a single subscription, apply a filter on the<code translate="no" dir="ltr">subscription_id</code> label defined for the <code translate="no" dir="ltr">pubsub_subscription</code>. The following screenshot shows a single subscription after applying the filter.</p> <p><img src="https://docs.cloud.google.com/static/compute/images/autoscaler/metric-with-filter.svg" alt="Metric explorer showing filtered metric value." class="screenshot"> </p> </li> </ul> <h3 id="filter_metrics">Metric filtering requirements</h3> <p>When you use a metric that has multiple values (categorized using <a href="https://docs.cloud.google.com/monitoring/api/v3/metric-model#generic-label-info">labels</a>), you can apply a filter to autoscale based on specific values from the metric. If the filter returns multiple values, then the values are added together. For best results, create a filter that is specific enough to return a single value.</p> <p>Autoscaler filtering for metrics is compatible with the <a href="https://docs.cloud.google.com/monitoring/api/v3/filters">Monitoring filter syntax</a>. The filter must meet the following requirements:</p> <ul> <li>You must wrap the value of a filter in double quotes.</li> <li>You must use the direct equality comparison operator (<code translate="no" dir="ltr">=</code>).</li> <li>
+<p>You must use the <code translate="no" dir="ltr">AND</code> operator to join different filter criteria.</p> <p>For example: <code translate="no" dir="ltr">--stackdriver-metric-filter="resource.type=\"pubsub_subscription\" AND
+resource.labels.subscription_id=\"our-subscription\""</code>.</p>
+</li> <li>
+<p>You must use direct values. You cannot use wildcards or functions in the filter.</p> <p>For example, you cannot use <code translate="no" dir="ltr">resource.labels.zone = starts_with("us-")</code>.</p>
+</li> <li><p>You cannot use <a href="https://docs.cloud.google.com/stackdriver/docs/deprecations/metadata-labels">resource metadata labels</a> that store metadata about a monitored resource.</p></li> </ul> <p>For a full reference of metric labels and monitored resource labels that you can filter on, see <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp">metrics list</a> and <a href="https://docs.cloud.google.com/monitoring/api/resources">monitored resources list</a>.</p> <h3 id="custom_metrics">Custom metric requirements</h3> <p>To use custom metrics, you must first create a custom metric that is associated with one of the <a href="https://docs.cloud.google.com/monitoring/custom-metrics#which-resource">monitored-resource types</a>.</p> <p>A custom metric used for autoscaling must have the following properties:</p> <ul> <li>If the autoscaling configuration uses data from each VM in the group, set up instances in your MIG so that each VM exports the custom metric. The exported values from each VM must be associated with a <a href="https://docs.cloud.google.com/monitoring/api/resources#tag_gce_instance"><code translate="no" dir="ltr">gce_instance</code></a> monitored resource, which contains the following labels: <ul> <li>
+<code translate="no" dir="ltr">zone</code> with the name of the zone the instance is in.</li> <li>
+<code translate="no" dir="ltr">instance_id</code> with the value of unique numerical ID assigned to the VM.</li> </ul>
+</li> <li>The metric must export data at least every 60 seconds. If you export data more often than every 60 seconds, the autoscaler can respond to load changes more quickly. If you export your data less frequent than every 60 seconds, the autoscaler might not respond to load changes quickly enough.</li> <li>The metric must export data that is of <code translate="no" dir="ltr">INT64</code> or <code translate="no" dir="ltr">DOUBLE</code> value type.</li> </ul> <p>For information about creating a custom metric, see <a href="https://docs.cloud.google.com/monitoring/custom-metrics/labeled">Using custom metrics</a>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="managing-autoscalers">managing autoscalers</a>.</li> <li>Learn <a href="understanding-autoscaler-decisions">how autoscalers make decisions</a>.</li> <li>Learn how to use <a href="multiple-policies">multiple autoscaling signals</a> to scale your group.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/autoscaler/scaling-stackdriver-monitoring-metrics" class="_attribution-link">https://docs.cloud.google.com/compute/docs/autoscaler/scaling-stackdriver-monitoring-metrics</a>
+  </p>
+</div>

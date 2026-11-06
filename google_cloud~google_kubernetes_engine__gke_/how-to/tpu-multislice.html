@@ -1,0 +1,448 @@
+<h1>Deploy TPU Multislices in GKE</h1>  <p>This page shows you how to deploy workloads in Google Kubernetes Engine (GKE) by using the Cloud TPU Multislice configuration for cost-effective, large-scale training.</p> <p>This tutorial is for Machine learning (ML) engineers and Platform admins and operators who want to use Kubernetes container orchestration to manage large-scale model training, tuning, and inference workloads by using TPUs. To learn more about common roles and example tasks referenced in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before you configure Multislice in GKE, ensure that you're familiar with the following concepts:</p> <ol> <li><a href="https://docs.cloud.google.com/tpu/docs/intro-to-tpu">Introduction to Cloud TPU</a></li> <li><a href="https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm#slices">Cloud TPU system architecture</a></li> <li><a href="../concepts/tpus">About TPUs in GKE</a></li> </ol> <aside class="key-term"><strong>Key Term:</strong><span> This page introduces the following terms: <ul> <li>
+<b>Data Center Networking (DCN)</b>: A higher capacity, low latency, and lower-throughput network that connects Cloud TPU slices in a Multislice configuration.</li> <li>
+<b>TPU slice node</b>: A Kubernetes node that contains a set of VMs with interconnected TPU chips. Each VM in a TPU slice may contain one, four, or eight TPU chips. To learn more, see <a href="https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm#tpu_slices">System Architecture</a>.</li> <li>
+<b>Multislice workload</b>: A workload requiring multiple TPU slices.</li> <li>
+<b>TPU Topology</b>: It defines the number and physical arrangement of TPU chips within a TPU slice. To learn more, see <a href="../concepts/tpus#topology">About TPUs in GKE</a>.</li> </ul></span></aside> <h2 id="whats_tpu_multislice">What's TPU Multislice</h2> <p>TPU <em>Multislice</em> is the architectural organization of VMs in a TPU slice where two or more Cloud TPU slices communicate over the Data Center Network (DCN). Multislice enables full-stack, cost effective, large scale training with near-linear scaling up to tens of thousands of TPU chips. In a Multislice configuration, GKE deploys a Multislice workload on multiple TPU slices. The communication between TPU chips within a slice happens over inter chip interconnects (ICI). The communication between slices happens over the DCN.</p> <p>We recommend that you use the Multislice if your Job is too big to fit on a single TPU slice.</p> <h2 id="availability">Multislice availability in GKE</h2> <ul> <li>Standard supports Multislice in version 1.27.4-gke.900 and later.</li> <li>Autopilot supports Multislice in version 1.29.2-gke.1521000 and later.</li> <li>Multislice supports JAX and PyTorch frameworks. The minimum supported JAX version is 2.1.</li> <li>Multislice only supports <a href="../concepts/tpus#multi-host">multi-host TPU slice node pools</a>. For example, you cannot use Multislice with a <code translate="no" dir="ltr">ct4p-hightpu-4t</code> with a <code translate="no" dir="ltr">2x2x1</code> topology or a <code translate="no" dir="ltr">ct5lp-hightpu-4t</code> with a <code translate="no" dir="ltr">2x2</code> topology, because these are single-host TPU slice node pools.</li> <li>Multislice only supports synchronous multicontroller training.</li> <li>Multislice workloads can only run across TPU slices that share the same TPU type, size, and topology.</li> <li>Multislice don't support TPU v3.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Create a <a href="creating-a-regional-cluster">Standard</a> cluster or an <a href="creating-an-autopilot-cluster">Autopilot</a> cluster that runs a version that supports Multislice. For supported versions, see <a href="#availability">Multislice availability in GKE</a>.</li> <li>
+<a href="tpus#ensure-quota">Ensure your project has sufficient quota</a> for Cloud TPU in GKE.</li> <li>
+<a href="https://jobset.sigs.k8s.io/docs/installation/">Install JobSet</a> v0.2.3 or later.</li> </ul> <h2 id="gke-implementation-methods">Choose a GKE implementation method</h2> <p>You can choose to prepare your GKE TPU node pools manually or deploy them automatically using Cluster Toolkit blueprints.</p> <h3 id="prepare-standard-node-pool">Manually create your GKE node pool</h3> <p>This section shows you how prepare a Standard mode node pool to run a workload on a Multislice. If you use GKE Autopilot mode, skip to the <a href="#run_workload">Run a Multislice workload</a> section. Autopilot clusters that run version 1.29.2-gke.1521000 or later enable TPUs by default.</p> <p>This section covers the following steps:</p> <ol> <li>Create <em>three</em> multi-host TPU slice node pools</li> <li>Verify the node pool status</li> <li>Run a Multislice workload</li> </ol> <h4 id="create_node_pool">Create the TPU slice node pool</h4> <p>You can create more than one multi-host TPU slice node pool. For the purpose of this guide, create <em>three</em> multi-host TPU slice node pools to run a Multislice workload. The steps to create a multi-host TPU slice node pool differ depending on whether you use Ironwood (TPU7x) or an earlier TPU version.</p> <div> <section><p class="_code-tab"><strong>Ironwood (TPU7x)</strong></p>
+<p>You can create a <a href="../concepts/tpus#multi-host">multi-host TPU slice</a> node pool in version Ironwood (TPU7x) by using the Google Cloud CLI or Terraform:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To create a multi-host TPU slice node pool with Ironwood (TPU7x), you must first create a workload policy.</p> <aside class="note"><strong>Note:</strong><span> You don't need to create a new workload policy for every node pool. A workload policy is unique per project, per region, and per topology. You can reuse the same workload policy for multiple node pools that share these characteristics. To see the list of workload policies, use the <code translate="no" dir="ltr">gcloud compute resource-policies list --filter="region:<var translate="no">REGION</var>"</code> command.</span></aside> <ol> <li>
+<p>Create a workload policy:</p> 
+<pre data-language="bash">gcloud compute resource-policies create workload-policy WORKLOAD_POLICY_NAME \
+    --type=HIGH_THROUGHPUT \
+    --accelerator-topology=TPU_TOPOLOGY \
+    --project=PROJECT_ID \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POLICY_NAME</var></code>: a name for your workload policy.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: the TPU Ironwood (TPU7x) topology. For example, <code translate="no" dir="ltr">2x2x2</code>. To see all supported Ironwood (TPU7x) topologies, see the <a href="../concepts/plan-tpus#topology">topology section</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the workload policy. A workload policy is a regional resource and can be re-used across node pools that share the same topology.</li> </ul>
+</li> <li>
+<p>Create the node pool with the workload policy:</p> 
+<pre data-language="bash">gcloud container node-pools create NODE_POOL_NAME \
+  --cluster=CLUSTER_NAME \
+  --machine-type=tpu7x-standard-4t \
+  --placement-policy=WORKLOAD_POLICY_NAME \
+  --location=CONTROL_PLANE_LOCATION \
+  --node-locations=NODE_ZONE \
+  --project=PROJECT_ID \
+  --reservation=RESERVATION_NAME \
+  --reservation-affinity=specific
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name for your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your GKE cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POLICY_NAME</var></code>: the name of the workload policy you created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster. Provide a region for regional clusters, or a zone for zonal clusters.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_ZONE</var></code>: the name of the zone based on the TPU version you want to use. <p>Optional: use an <a href="https://docs.cloud.google.com/compute/docs/regions-zones/ai-zones">AI zone</a>, like <code translate="no" dir="ltr">us-central1-ai1a</code>. AI zones are specialized locations that are optimized for AI/ML workloads within Google Cloud regions.</p> To identify an available location, see <a href="../concepts/plan-tpus#availability">TPU availability in GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation to use.</li> </ul> <p>In this command, the <code translate="no" dir="ltr">--tpu-topology</code> flag has been replaced by the <code translate="no" dir="ltr">--placement-policy</code> flag. </p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<ol> <li>Ensure that you use the version 4.84.0 or later of the <a href="https://registry.terraform.io/providers/hashicorp/google/latest"><code translate="no" dir="ltr">google</code></a> provider.</li> <li>
+<p>Create a workload policy:</p> 
+<pre data-language="">resource "google_compute_resource_policy" {
+  name   = "WORKLOAD_POLICY_NAME"
+  region = CLUSTER_LOCATION
+  workload_policy {
+    type = "HIGH_THROUGHPUT"
+    accelerator_topology = "TPU_TOPOLOGY"
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POLICY_NAME</var></code>: a name for your workload policy.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_LOCATION</var></code>: Compute location for the cluster. We recommend having a regional cluster for higher reliability of the Kubernetes control plane. You can also use a zonal cluster. For more information, see <a href="../concepts/plan-tpus#choose-tpu-version">Select a TPU version and topology</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: the TPU Ironwood (TPU7x) topology. For example, <code translate="no" dir="ltr">2x2x2</code>. To see all supported Ironwood (TPU7x) topologies, see <a href="../concepts/plan-tpus#topology">Plan TPUs</a>.</li> </ul> <p>For more information about the <code translate="no" dir="ltr">google_compute_resource_policy</code> reference, see <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_resource_policy#argument-reference">Terraform Provider</a>.</p>
+</li> <li>
+<p>In your Terraform configuration, add the following block:</p> 
+<pre data-language="">resource "google_container_node_pool" "NODE_POOL_RESOURCE_NAME" {
+  provider           = google
+  project            = PROJECT_ID
+  cluster            = CLUSTER_NAME
+  name               = POOL_NAME
+  location           = CLUSTER_LOCATION
+  node_locations     = [NODE_ZONES]
+  initial_node_count = NUM_NODES
+
+  autoscaling {
+    max_node_count = MAX_NODES
+    location_policy      = "ANY"
+  }
+  node_config {
+    machine_type = MACHINE_TYPE
+    reservation_affinity {
+      consume_reservation_type = "SPECIFIC_RESERVATION"
+      key = "compute.googleapis.com/reservation-name"
+      values = [RESERVATION_LABEL_VALUES]
+    }
+    flex_start = false
+    spot = true
+  }
+
+  placement_policy {
+    policy_name = WORKLOAD_POLICY_NAME
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_RESOURCE_NAME</var></code>: the name of the node pool resource in the Terraform template.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the existing cluster to add the node pool to.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of the node pool to create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_ZONES</var></code>: the comma-separated list of one or more zones where GKE creates the node pool. <p>Optional: use an <a href="https://docs.cloud.google.com/compute/docs/regions-zones/ai-zones">AI zone</a>, like <code translate="no" dir="ltr">us-central1-ai1a</code>. AI zones are specialized locations that are optimized for AI/ML workloads within Google Cloud regions.</p>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: the number of nodes in the node pool. It must be zero or the product of the number of the TPU chips divided by four, because in multi-host TPU slices each TPU slice node has four chips. For example, if <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> is <code translate="no" dir="ltr">4x8</code>, then there are 32 chips, which means <code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code> must be 8. To learn more about TPU topologies, use the table in <a href="../concepts/plan-tpus#choose-tpu-version">Choose the TPU version</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: this indicates the selected physical topology for the TPU slice. The format of the topology depends on the TPU version you are using. To learn more about TPU topologies, use the table in <a href="../concepts/plan-tpus#topology">Choose a topology</a>.</li> </ul> <p>Optionally, you can also use the following variables:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: if you use a <a href="tpus#ensure-reservation-availability">TPU reservation</a>, provide a list of reservation-resource labels to use when creating the node pool. To learn more about how to populate the<code translate="no" dir="ltr"><var translate="no">RESERVATION_LABEL_VALUES</var></code> in the <code translate="no" dir="ltr">reservation_affinity</code> field, see <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/container_cluster#reservation_affinity">Terraform Provider</a>.</li> <li>
+<code translate="no" dir="ltr">autoscaling</code>: create a node pool with autoscaling enabled. When GKE scales a multi-host TPU slice node pool, it <a href="../concepts/tpus#terminology">atomically</a> scales up the node pool from zero to the maximum size. <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_NODES</var></code>: the maximum size of the node pool. The value must be equal to the product of the values defined in <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> (<code translate="no" dir="ltr">{A}x{B}x{C}</code>) divided by the number of chips in each VM. For example, if <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> is <code translate="no" dir="ltr">2x2x2</code>, the product is 8. Since each VM in <code translate="no" dir="ltr">tpu7x-standard-4t</code> has 4 chips, the number of nodes is 2.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">spot</code>: the node pool that will use Spot VMs for the TPU slice nodes. This setting cannot be changed after the node pool is created. For more information, see <a href="../concepts/spot-vms">Spot VMs</a>.</li> <li>
+<code translate="no" dir="ltr">flex_start</code>: the node pool that will use <a href="../concepts/dws">flex-start</a> consumption option. This setting can't be set to <code translate="no" dir="ltr">true</code> if <code translate="no" dir="ltr">spot</code> is enabled.</li> </ul>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>Other TPU versions</strong></p>
+<p>You can create a <a href="../concepts/tpus#multi-host">multi-host TPU slice</a> node pool in version v3, v4, v5p, v5e, and Trillium (v6e) by using the Google Cloud CLI, Terraform, or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p> 
+<pre data-language="bash">  gcloud container node-pools create POOL_NAME \
+      --location=CONTROL_PLANE_LOCATION \
+      --cluster=CLUSTER_NAME \
+      --node-locations=NODE_ZONE \
+      --machine-type=MACHINE_TYPE \
+      --tpu-topology=TPU_TOPOLOGY \
+      [--num-nodes=NUM_NODES] \
+      [--spot \]
+      [--flex-start \]
+      [--enable-autoscaling \
+        --max-nodes MAX_NODES]
+      [--reservation-affinity=specific \
+      --reservation=RESERVATION_NAME] \
+      [--node-labels cloud.google.com/gke-nodepool-group-name=COLLECTION_NAME,cloud.google.com/gke-workload-type=HIGH_AVAILABILITY]
+      [--placement-type=COMPACT]
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of the new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the name of the zone based on the TPU version you want to use. To identify an available location, see <a href="../concepts/plan-tpus#availability">TPU availability in GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_ZONES</var></code>: the comma-separated list of one or more zones where GKE creates the node pool.<p>Optional: use an <a href="https://docs.cloud.google.com/compute/docs/regions-zones/ai-zones">AI zone</a>, like <code translate="no" dir="ltr">us-central1-ai1a</code>. AI zones are specialized locations that are optimized for AI/ML workloads within Google Cloud regions.</p>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the type of machine to use for nodes. To learn more about the available machine types, see <a href="../concepts/plan-tpus#choose-tpu-version">Choose the TPU version</a>.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: the physical topology for the TPU slice. The format of the topology depends on the TPU version. To learn more about TPU topologies, use the table in <a href="../concepts/plan-tpus#topology">Choose a topology</a>.</p> <p>For more information, see <a href="../concepts/tpus#topology">Topology</a>.</p> <p>Optionally, you can also use the following flags:</p>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: the number of nodes in the node pool. It must be zero or the product of the values defined in <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> (<code translate="no" dir="ltr">{A}x{B}x{C}</code>) divided by the number of chips in each VM. For multi-host TPU v4 and TPU v5e, the number of chips in each VM is four. Therefore, if your <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> is <code translate="no" dir="ltr">2x4x4</code> (TPU v4 with four chips in each VM), then the <code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code> is 32/4 which equals to 8. If you omit this flag, the number of nodes is calculated and defaulted based on the topology and machine type.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation GKE uses when creating the node pool. If you omit this flag, GKE uses available TPU slice node pools. For more information about TPU reservations, see <a href="tpus#ensure-reservation-availability">TPU reservation</a>.</p></li> <li><p><code translate="no" dir="ltr">--spot</code>: sets the node pool to use Spot VMs for the TPU slice nodes. This cannot be changed after node pool creation. For more information, see <a href="../concepts/spot-vms">Spot VMs</a>.</p></li> <li><p><code translate="no" dir="ltr">--flex-start</code>: sets the node pool to use Flex-start VMs. Flex-start VMs are created by using the <a href="../concepts/dws">flex-start</a> consumption option, which is supported in GKE version 1.33.0-gke.1712000 or later.</p></li> <li>
+<p><code translate="no" dir="ltr">--enable-autoscaling</code>: Create a node pool with autoscaling enabled. When GKE scales a multi-host TPU slice node pool, it <a href="../concepts/tpus#terminology">atomically</a> scales up the node pool from zero to the maximum size.</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_NODES</var></code>: the maximum size of the node pool. The <code translate="no" dir="ltr">--max-nodes</code> flag is required if <code translate="no" dir="ltr">--enable-autoscaling</code> is supplied and must be equal to the product of the values defined in <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> (<code translate="no" dir="ltr">{A}x{B}x{C}</code>) divided by the number of chips in each VM.</li> </ul>
+</li> <li>
+<p><code translate="no" dir="ltr">--node-label=cloud.google.com/gke-nodepool-group-name=<var translate="no">COLLECTION_NAME</var>,
+cloud.google.com/gke-workload-type=HIGH_AVAILABILITY</code>: Tells GKE that the multi-host TPU slice node pool is a collection. Use this flag if the following conditions apply:</p> <ul> <li>The node pool runs inference workloads.</li> <li>The node pool uses TPU Trillium.</li> <li>Spot VMs don't support collection scheduling.</li> </ul> <p>For more information about collection scheduling management, see <a href="tpus#manage-collection">Manage collection scheduling in multi-host TPU slices</a>.</p>
+</li> <li><p><code translate="no" dir="ltr">--placement-type=COMPACT</code>: Create a node pool with compact placement enabled. This option must be used with the flag <code translate="no" dir="ltr">--tpu-topology</code>. For more information, see <a href="compact-placement#create_a_compact_placement_policy">Create a compact placement policy</a> and <a href="../concepts/tpus#topology">TPU Topology</a>. </p></li> </ul></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<ol> <li>Ensure that you use the version 4.84.0 or later of the <a href="https://registry.terraform.io/providers/hashicorp/google/latest"><code translate="no" dir="ltr">google</code></a> provider.</li> <li>
+<p>Add the following block to your Terraform configuration:</p> 
+<pre data-language="">resource "google_container_node_pool" "NODE_POOL_RESOURCE_NAME" {
+  provider           = google
+  project            = PROJECT_ID
+  cluster            = CLUSTER_NAME
+  name               = POOL_NAME
+  location           = CLUSTER_LOCATION
+  node_locations     = [NODE_ZONES]
+  initial_node_count = NUM_NODES
+
+  autoscaling {
+    max_node_count = MAX_NODES
+    location_policy      = "ANY"
+  }
+  node_config {
+    machine_type = MACHINE_TYPE
+    reservation_affinity {
+      consume_reservation_type = "SPECIFIC_RESERVATION"
+      key = "compute.googleapis.com/reservation-name"
+      values = [RESERVATION_LABEL_VALUES]
+    }
+    flex_start = false
+    spot = true
+  }
+
+  placement_policy {
+    type = "COMPACT"
+    tpu_topology = TPU_TOPOLOGY
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_RESOURCE_NAME</var></code>: the name of the node pool resource in the Terraform template.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the existing cluster to add the node pool to.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of the node pool to create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_LOCATION</var></code>: compute location for the cluster. We recommend having a regional cluster for higher reliability of the Kubernetes control plane. You can also use a zonal cluster. To learn more, see <a href="tpus#version_and_topology">Select a TPU version and topology</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_ZONES</var></code>: the comma-separated list of one or more zones where GKE creates the node pool.<p>Optional: use an <a href="https://docs.cloud.google.com/compute/docs/regions-zones/ai-zones">AI zone</a>, like <code translate="no" dir="ltr">us-central1-ai1a</code>. AI zones are specialized locations that are optimized for AI/ML workloads within Google Cloud regions.</p>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: the number of nodes in the node pool. It must be zero or the product of the number of the TPU chips divided by four, because in multi-host TPU slices each TPU slice node has 4 chips. For example, if <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> is <code translate="no" dir="ltr">4x8</code>, then there are 32 chips which means <code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code> must be 8. To learn more about TPU topologies, use the table in <a href="../concepts/plan-tpus#choose-tpu-version">Choose the TPU version</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: this indicates the physical topology for the TPU slice. The format of the topology depends on the TPU version you are using. To learn more about TPU topologies, use the table in <a href="../concepts/plan-tpus#topology">Choose a topology</a>.</li> </ul> <p>Optionally, you can also use the following variables:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: if you use <a href="tpus#ensure-reservation-availability">TPU reservation</a>, this is the list of labels of the reservation resources to use when creating the node pool. To learn more about how to populate the<code translate="no" dir="ltr"><var translate="no">RESERVATION_LABEL_VALUES</var></code> in the <code translate="no" dir="ltr">reservation_affinity</code> field, see <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/container_cluster#reservation_affinity">Terraform Provider</a>.</li> <li>
+<code translate="no" dir="ltr">autoscaling</code>: Create a node pool with autoscaling enabled. When GKE scales a multi-host TPU slice node pool, it <a href="../concepts/tpus#terminology">atomically</a> scales up the node pool from zero to the maximum size. <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_NODES</var></code>: it is the maximum size of the node pool. It must be equal to the product of the values defined in <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> (<code translate="no" dir="ltr">{A}x{B}x{C}</code>) divided by the number of chips in each VM).</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">spot</code>: lets the node pool to use Spot VMs for the TPU slice nodes. This cannot be changed after node pool creation. For more information, see <a href="../concepts/spot-vms">Spot VMs</a>.</li> <li>
+<code translate="no" dir="ltr">flex_start</code>: Sets the node pool to use <a href="../concepts/dws">flex-start</a> consumption option. Can't be set to <code translate="no" dir="ltr">true</code> if <code translate="no" dir="ltr">spot</code> is enabled.</li> </ul>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To create a node pool with TPUs:</p> <ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>In the cluster list, click the name of the cluster you want to modify.</p></li> <li><p>Click the <strong>Nodes</strong> tab.</p></li> <li><p>Click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Create user-managed node pool</strong>.</p></li> <li><p>In the <strong>Node pool details</strong> section, check the <strong>Specify node locations</strong> box.</p></li> <li><p>Select the name of the zone based on the TPU version you want to use. To identify an available location, see <a href="../concepts/tpus#availability">TPU availability in GKE</a>.</p></li> <li><p>From the navigation pane, click <strong>Nodes</strong>.</p></li> <li><p>In the <strong>Machine Configuration</strong> section, select <strong>TPUs</strong>.</p></li> <li>
+<p>In the <strong>Series</strong> drop-down menu, select one of the following:</p> <ul> <li>
+<strong>CT3</strong>: TPU v3, single-host device</li> <li>
+<strong>CT3P</strong>: TPU v3, multi-host pod slice</li> <li>
+<strong>CT4P</strong>: TPU v4</li> <li>
+<strong>CT5LP</strong>: TPU v5e</li> <li>
+<strong>CT5P</strong>: TPU v5p</li> <li>
+<strong>CT6E</strong>: TPU Trillium (v6e)</li> </ul>
+</li> <li><p>In the <strong>Machine type</strong> drop-down menu, select the name of the machine to use for nodes. Use the <a href="../concepts/plan-tpus#choose-tpu-version">Choose the TPU version</a> table to learn how to define the machine type and TPU topology that create a <em>multi-host</em> TPU slice node pool.</p></li> <li><p>In the <strong>TPU Topology</strong> drop-down menu, select the physical topology for the TPU slice.</p></li> <li><p>In the <strong>Changes needed</strong> dialog, click <strong>Make changes</strong>.</p></li> <li><p>Ensure that <strong>Boot disk type</strong> is either <strong>Standard persistent disk</strong> or <strong>SSD persistent disk</strong>.</p></li> <li><p>Optionally, select the <strong>Enable nodes on spot VMs</strong> checkbox to use Spot VMs for the nodes in the node pool.</p></li> <li><p>Click <strong>Create</strong>.</p></li> </ol></section> </div></section> </div>
+<aside class="special"><strong>Important:</strong><span> Repeat the preceding steps <em>twice</em> to create two additional TPU slice node pools in the cluster. Change the name of the node pool in every iteration.</span></aside> <h4 id="verify_node_pool">Verify the node pool status</h4> <ol> <li>
+<p>Get credentials, so that you can use <code translate="no" dir="ltr">kubectl</code> to access the cluster:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME \
+    --project=PROJECT_ID \
+    --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster. Provide a region for regional clusters, or a zone for zonal clusters.</li> </ul>
+</li> <li>
+<p>Use <code translate="no" dir="ltr">kubectl</code>, in Cloud Shell, to see your TPU slice nodes:</p> 
+<pre>kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=ACCELERATOR_TYPE \
+   -l cloud.google.com/gke-tpu-topology=TPU_TOPOLOGY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCELERATOR_TYPE</var></code>: the accelerator type of the TPU slice node pool. This value must map to the machine type you used during node pool creation. For example, if you created a node pool with the <code translate="no" dir="ltr">ct5lp-hightpu-4t</code> machine type, use <code translate="no" dir="ltr">tpu-v5-lite-podslice</code>. To learn which accelerator type to use, see the table in <a href="../concepts/plan-tpus">Plan your TPU on GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: the <a href="../concepts/plan-tpus#topology">physical topology</a> for the TPU slice.</li> </ul> <p>The output is similar to the following:</p> 
+<pre> NAME                                    STATUS   ROLES    AGE    VERSION
+ gke-tpu-20ee2cce-5tv6                   Ready    &lt;none&gt;   34h     v1.28.1-gke.1066000
+</pre>
+</li> </ol> <h4 id="run_workload">Run a Multislice workload</h4> <p>In this section you run a JAX workload which shows the global number of TPU chips in the TPU slice and then exits.</p> <p>To run a JAX workload do the following:</p> <ol> <li>
+<p>Create the following <code translate="no" dir="ltr">tpu-multislice.yaml</code> manifest:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-job
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 2 # This value defines a "Multislice" setup, by creating 2 independent TPU slices.
+      template:
+        spec:
+          parallelism: 4
+          completions: 4
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 4x4
+              containers:
+              - name: jax-tpu
+                image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                - containerPort: 8431
+                command:
+                - bash
+                - -c
+                - |
+                  python -c 'import jax; print("Global device count:", jax.device_count())'
+                  sleep 60
+                resources:
+                 limits:
+                    google.com/tpu: 4 # This container requires 4 TPU chips
+</pre> <p>In this manifest, you select <code translate="no" dir="ltr">tpu-v5-lite-podslice</code> with a <code translate="no" dir="ltr">4x4</code> topology. This configuration means the following:</p> <ul> <li>The topology has 16 chips in total (<code translate="no" dir="ltr">4*4=16</code>).</li> <li>The <code translate="no" dir="ltr">tpu-v5-lite-podslice</code> is deployed in <code translate="no" dir="ltr">ct5lp-hightpu-4t</code> machines that have four chips per VM. This means that to have a <code translate="no" dir="ltr">4x4</code> topology, you need four VMs (<code translate="no" dir="ltr">16/4=4</code>). So, the <code translate="no" dir="ltr">parallelism</code> and <code translate="no" dir="ltr">completions</code> fields must be set to <code translate="no" dir="ltr">4</code>.</li> <li>Each container in the Pod requests four TPU chips, which corresponds to the <a href="../concepts/plan-tpus#standard">number of chips per VM</a>. This is specified in the manifest with the line <code translate="no" dir="ltr">google.com/tpu: 4</code>.</li> <li>The <code translate="no" dir="ltr">replicas</code> field is set to <code translate="no" dir="ltr">2</code> to create two slices.</li> </ul> <p>For more information about the possible values for these variables, see the table in <a href="../concepts/plan-tpus">Plan your TPU on GKE</a>.</p></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-job
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: NUM_SLICES
+      template:
+        spec:
+          parallelism: NUM_NODES
+          completions: NUM_NODES
+          backoffLimit: 0
+          template:
+            spec:
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: ACCELERATOR_TYPE
+                cloud.google.com/gke-tpu-topology: TPU_TOPOLOGY
+              containers:
+              - name: jax-tpu
+                image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                - containerPort: 8431
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  python -c 'import jax; print("Global device count:", jax.device_count())'
+                  sleep 60
+                resources:
+                  limits:
+                   google.com/tpu: NUM_CHIPS
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_SLICES</var></code>: the number of TPU slice node pools. In this case, the <code translate="no" dir="ltr"><var translate="no">NUM_SLICES</var></code> equals <code translate="no" dir="ltr">3</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCELERATOR_TYPE</var></code>: the accelerator type of the TPU slice node pool. This value must map to the machine type you used during node pool creation. For example, if you created a node pool with the <code translate="no" dir="ltr">ct5lp-hightpu-4t</code> machine type, use <code translate="no" dir="ltr">tpu-v5-lite-podslice</code>. To learn which accelerator type to use, see the table in <a href="../concepts/plan-tpus">Plan your TPU on GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: the <a href="../concepts/plan-tpus#topology">physical topology</a> for the TPU slice. For example <code translate="no" dir="ltr">4x4x4</code> or <code translate="no" dir="ltr">2x2</code> depending on the TPU version.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: the number of nodes in the node pool. It must be zero or the product of the values defined in <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> (<code translate="no" dir="ltr">{A}x{B}x{C}</code>) divided by the number of TPU chips in each VM. For multi-host TPU v4, the number of TPU chips in each VM is four. For multi-host TPU v5e, the number of TPU chips in each VM is one, four, or eight. Therefore, if your <code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code> is <code translate="no" dir="ltr">2x4x4</code> (TPU v4 with four TPU chips in each VM), then the <code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code> is 32/4 which equals to 8.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_CHIPS</var></code>: the <a href="../concepts/plan-tpus#standard">number of chips per VM</a>.</li> </ul></section> </div> <section class="expandable"> <h4 class="showalways" id="expand-the-following-section-to-see-the-description-of-other-flags-in-this-manifest:">Expand the following section to see the description of other flags in this manifest:</h4> <ul> <li>The JobSet is a Headless Service with the same name as the JobSet name, in this case it is <code translate="no" dir="ltr">multislice-job</code>.</li> <li>The <code translate="no" dir="ltr">alpha.jobset.sigs.k8s.io/exclusive-topology:
+cloud.google.com/gke-nodepool</code> annotation configures Pod affinity to ensure all Pods are scheduled on the same slice.</li> <li>The <code translate="no" dir="ltr">image</code> field is set to the latest <a href="https://jaxstack.ai/">JAX AI</a> image. To set a different version, see the list of <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/images#current_jax_ai_images">current JAX AI images</a>.</li> <li>The <code translate="no" dir="ltr">maxRestarts: 4</code> indicates the maximum number of times that GKE restarts the JobSet when a child Job fails. If the JobSet restarts reaches the maximum defined, then the JobSet is marked as failed.</li> <li>The <code translate="no" dir="ltr">backoff</code> is 0 because Multislice only supports synchronous multi-controller training. Must be set to 0. Fail the job when any pod fails.</li> <li>The values in the affinity section ensure that there is only one TPU Multislice workload running in a group of Multislices.</li> <li>The <code translate="no" dir="ltr">containerPort: 8080</code> is the port for MXLA coordinator.</li> <li>The <code translate="no" dir="ltr">containerPort: 8431</code> is the port to export the TPU usage metrics.</li> <li>The <code translate="no" dir="ltr">securityContext: privileged: true</code> indicates that nodes have privileged mode enabled to access TPUs. Nodes in GKE version 1.28 or later don't need to have privileged mode enabled to access TPUs. To learn more, see <a href="tpus#privileged-mode">Run containers without privileged mode</a>.</li> </ul> </section>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f tpu-multislice.yaml
+</pre>
+</li> <li>
+<p>Confirm that the workload is admitted:</p> 
+<pre>kubectl get jobsets
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME            RESTARTS   COMPLETED   AGE
+multislice-job                         3s
+</pre>
+</li> <li>
+<p>Monitor the status of the provisioned Pods:</p> 
+<pre>kubectl get pods
+</pre> <p>The output is similar to the following:</p> 
+<pre> NAME                                READY   STATUS      RESTARTS   AGE
+ multislice-job-slice-0-0-wzq9t      0/1     Completed   0          2m31s
+ multislice-job-slice-0-1-zf4dp      0/1     Completed   0          2m30s
+ multislice-job-slice-1-0-hbfn5      0/1     Completed   0          2m31s
+ multislice-job-slice-1-1-45fgl      0/1     Completed   0          2m30s
+ multislice-job-slice-2-0-wjbp4      0/1     Completed   0          2m30s
+ multislice-job-slice-2-1-lwnvs      0/1     Completed   0          2m30s
+</pre> <p>The <code translate="no" dir="ltr">multislice-job</code> JobSet schedules, creates, then runs the Pods to completion. The Pod names are in the format <code translate="no" dir="ltr">&lt;jobsetName&gt;-&lt;jobName&gt;-&lt;jobReplicaIndex&gt;-&lt;randomSuffix&gt;</code>. The <code translate="no" dir="ltr">jobsetName</code> prefix determines the JobSet the Pod belongs to.</p>
+</li> <li>
+<p>Optional: Remove the JAX workload:</p> 
+<pre>kubectl delete -f tpu-multislice.yaml
+</pre>
+</li> </ol> <h3 id="cluster-toolkit-create">Use Cluster Toolkit to create resources and submit multislice workloads</h3> <ol> <li>
+<a href="https://docs.cloud.google.com/cluster-toolkit/docs/setup/configure-environment">Set up Cluster Toolkit</a>.</li> <li>
+<p>Deploy a GKE multislice TPU cluster by following the instructions in <a href="https://docs.cloud.google.com/cluster-toolkit/docs/deploy/gke/gke-tpu-7x">Deploy a GKE TPU 7x cluster</a> or <a href="https://docs.cloud.google.com/cluster-toolkit/docs/deploy/gke/gke-tpu-v6e">Deploy a GKE TPU v6e cluster</a> (for TPU v4, v5e, and v5p blueprints, see the <a href="https://github.com/GoogleCloudPlatform/cluster-toolkit/tree/main/examples">Cluster Toolkit GitHub repository</a>).</p> <p>When configuring your deployment blueprint, do the following:</p> <ul> <li>Set <code translate="no" dir="ltr">num_slices</code> to the number of TPU slices to provision (for Multislice, specify a value greater than 1, such as <code translate="no" dir="ltr">2</code> or <code translate="no" dir="ltr">4</code>).</li> <li>Set <code translate="no" dir="ltr">reservation</code> to the name of your <a href="https://docs.cloud.google.com/tpu/docs/about-tpu-reservations">TPU reservation</a>.</li> </ul>
+</li> <li>
+<p>Submit a multislice workload by using the <code translate="no" dir="ltr">gcluster job submit</code> command. For more information about job submission options, see the <a href="https://github.com/GoogleCloudPlatform/cluster-toolkit/blob/main/docs/gcluster_job_guide.md">Cluster Toolkit Job Submission Guide</a>:</p> 
+<pre>gcluster job submit \
+    --name=WORKLOAD_NAME \
+    --cluster=DEPLOYMENT_NAME \
+    --project=PROJECT_ID \
+    --location=ZONE \
+    --compute-type=COMPUTE_TYPE \
+    --topology=TOPOLOGY \
+    --num-slices=NUM_SLICES \
+    --image=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest \
+    --command="python -c 'import jax; print(\"TPU cores:\", jax.device_count())'"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_NAME</var></code>: the name of your workload.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DEPLOYMENT_NAME</var></code>: the name of your Cluster Toolkit deployment (which is also the name of the GKE cluster).</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the cluster is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_TYPE</var></code>: the compute type matching your node pool accelerator type, for example, <code translate="no" dir="ltr">v6e-16</code> or <code translate="no" dir="ltr">tpu7x-standard-4t</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TOPOLOGY</var></code>: the physical topology matching your node pool, for example, <code translate="no" dir="ltr">2x4</code> or <code translate="no" dir="ltr">2x2x2</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_SLICES</var></code>: the number of TPU slices to allocate for the workload (matching cluster slice configuration), for example, <code translate="no" dir="ltr">2</code> or <code translate="no" dir="ltr">4</code>.</li> </ul>
+</li> </ol> <h2 id="additional_configurations">Configure additional settings</h2> <p>The following sections describe the additional configurations you can apply to your Multislice.</p> <h3 id="enable_hostNetwork">Improve network performance with hostNetwork</h3> <p>To improve network performance between TPU slices, we recommend you turn on <code translate="no" dir="ltr">hostNetworking</code>. Use <code translate="no" dir="ltr">hostNetwork: true</code> in your Pod spec to skip all the Kubernetes networking stack and let your Kubernetes Pods use the host network directly for VM-to-VM communication.</p> <p>To turn on <code translate="no" dir="ltr">hostNetworking</code>, add the following two lines to your Pod spec:</p> 
+<pre>hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+</pre> <p>To keep using the <code translate="no" dir="ltr">podHostnames</code> for worker node discovery with <code translate="no" dir="ltr">hostNetwork</code>, set <code translate="no" dir="ltr">dnsPolicy: ClusterFirstWithHostNet</code>. This is important when you are running auto-resuming training Jobs and you need to have the same names for reloading the same checkpoints.</p> <aside class="note"><strong>Note:</strong><span> If you don't turn on <code translate="no" dir="ltr">hostNetworking</code>, the Multislice workload might have slower networking between slices.</span></aside> <p>If you use TPU Trillium (v6e) or Ironwood (TPU7x) (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>) and your Pods use <code translate="no" dir="ltr">hostNetworking</code>, install the following DaemonSet for tuning <code translate="no" dir="ltr">/proc/sys/net/ipv4/tcp_rmem</code> on the node.</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/ai-on-gke/51bf3dcab6ff658cf62cc32867f96860bf58dfdc/scripts/network-setup/v6e-increase-rmem.yaml
+</pre> <h3 id="enable_multi-nic">Improve network performance without hostNetwork on TPU Trillium or Ironwood (TPU7x)</h3> <p>If you use TPU Trillium or Ironwood (TPU7x) (<a href="https://docs.cloud.google.com/products#product-launch-stages">Preview</a>) and your Pods can't use <code translate="no" dir="ltr">hostNetworking</code>, implement <a href="allocate-network-resources-dra">GKE DRANET</a> to allocate network devices for best network performance. The GKE DRANET feature lets you request high-performance networking resources for your Pods, bypassing Kubernetes and GKE Dataplane V2.</p> <p>The <code translate="no" dir="ltr">ct6e-standard-4t</code> machine type is backed by two physical NICs. Kubernetes requires one vNIC that can't be passed to Pods. Therefore, each node must have three vNICs to allow Pods to have direct access to two vNICs to achieve best performance of both physical NICs.</p> <aside class="note"><strong>Note:</strong><span> If you provision your cluster using Cluster Toolkit blueprints (such as <code translate="no" dir="ltr">gke-tpu-7x</code> or <code translate="no" dir="ltr">gke-tpu-v6e</code>), DRANET resources and multi-vNIC networking are configured automatically. You can skip the following steps for creating a manual network and node pool.</span></aside> <p>To enable the DRANET feature and allocate network devices for <code translate="no" dir="ltr">ct6e-standard-4t</code>, complete the following steps:</p> <ol> <li>
+<p>Create two additional VPCs by using the following commands:</p> 
+<pre>gcloud compute networks subnets create ADDITIONAL_SUBNET_1 \
+    --project=PROJECT_ID \
+    --network=ADDITIONAL_VPC_1 \
+    --location=CONTROL_PLANE_LOCATION
+</pre>
+
+<pre>gcloud compute networks subnets create ADDITIONAL_SUBNET_2 \
+    --project=PROJECT_ID \
+    --network=ADDITIONAL_VPC_2 \
+    --location=CONTROL_PLANE_LOCATION
+</pre>
+</li> <li><p><a href="allocate-network-resources-dra#create-cluster">Create a GKE cluster that uses GKE Dataplane V2</a>.</p></li> <li>
+<p>Create a node pool with the created networks and GKE DRANET enabled by adding the <code translate="no" dir="ltr">cloud.google.com/gke-networking-dra-driver=true</code> label:</p> 
+<pre>gcloud container node-pools create NODE_POOL_NAME \
+  --location=CONTROL_PLANE_LOCATION \
+  --cluster=CLUSTER_NAME \
+  --machine-type=MACHINE_TYPE \
+  --num-nodes=NUM_NODES \
+  --additional-node-network network=ADDITIONAL_VPC_1,subnetwork=ADDITIONAL_SUBNET_1 \
+  --additional-node-network network=ADDITIONAL_VPC_2,subnetwork=ADDITIONAL_SUBNET_2 \
+  --node-labels=cloud.google.com/gke-networking-dra-driver=true
+</pre>
+</li> <li>
+<p>After <a href="#verify_node_pool">verifying the node pool status</a>, create a workload with the additional network devices by applying a <code translate="no" dir="ltr">ResourceClaimTemplate</code>:</p> 
+<pre>apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: two-netdev
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-netdev
+        exactly:
+          deviceClassName: netdev.google.com
+          allocationMode: ExactCount
+          count: 2
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sample-netdevice-pod-1
+spec:
+  containers:
+  - name: sample-netdevice-pod
+    image: busybox
+    command: ["sleep", "infinity"]
+    resources:
+      claims:
+      - name: netdev
+      limits:
+        google.com/tpu: 4
+  restartPolicy: Always
+  resourceClaims:
+  - name: netdev
+    resourceClaimTemplateName: two-netdev
+</pre>
+</li> <li>
+<p>Verify that the interfaces are available in the Pod:</p> 
+<pre>kubectl exec -it pods/sample-netdevice-pod-1 -- ip a
+</pre>
+</li> </ol> <section class="key-point"> <b>Best practice</b>: <p>Use <code translate="no" dir="ltr">eth1</code> and <code translate="no" dir="ltr">eth2</code> interfaces for better networking performance, instead of the <code translate="no" dir="ltr">eth0</code> interface. This can be done by adding <code translate="no" dir="ltr">export LIBTPU_INIT_ARGS="$LIBTPU_INIT_ARGS --megascale_grpc_interface_prefixes=eth1,eth2,lo"</code> to the workload specification.</p> </section> <h3 id="logging">Enable logging</h3> <p>Logs emitted by containers running on GKE nodes, including TPU slice nodes, are visible in the <a href="https://docs.cloud.google.com/logging/docs/view/logs-explorer-interface">Logs Explorer</a>, if you have <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/installing#available-logs">GKE system logging enabled</a> in your cluster.</p> <p>You can <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/using-logs">view your logs from GKE</a> by using the Logs Explorer with the following filter to view the container logs for your workload:</p> 
+<pre>resource.type="k8s_container"
+resource.labels.cluster_name=CLUSTER_NAME
+labels."k8s-pod/jobset_sigs_k8s_io/jobset-name"=JOBSET_NAME
+</pre> <p>Use the following filter for TPU slice and workers:</p> 
+<pre>resource.type="k8s_container"
+resource.labels.cluster_name=CLUSTER_NAME
+labels."k8s-pod/jobset_sigs_k8s_io/jobset-name"=JOBSET_NAME
+resource.labels.pod_name:&lt;jobSetName&gt;-&lt;replicateJobName&gt;-&lt;job-index&gt;-&lt;worker-index&gt;
+</pre> <p>To learn more, see <a href="../troubleshooting/tpus#view-tpu-logs">View GKE TPU logs</a>.</p> <h3 id="metrics">Enable additional metrics</h3> <p>In addition to the general <a href="tpus#metrics">TPU metrics</a>, there are 4 additional multislice specific TPU runtime metrics. These metrics are available in GKE version 1.29.1-gke.1016000 or later. TPU workload must use JAX version <a href="https://github.com/google/jax/releases/tag/jaxlib-v0.4.24">0.4.24</a></p> <p>The following are the available multislice metrics:</p> <ul> <li>
+<strong>DCN (Data Center Network) transfer latencies</strong>: Distribution of network transfer latencies for multislice traffic.</li> <li>
+<strong>Collective latencies</strong>: Distribution of end to end collective latency for multislice traffic.</li> <li>
+<strong>Host-to-Device transfer latencies</strong>: Distribution of host to device transfer latency for each chunk of data for multislice traffic.</li> <li>
+<strong>Device-to-Host transfer latencies</strong>: Distribution of device to host transfer latency for each chunk of data for multislice traffic.</li> </ul> <p>These metrics are located in the Kubernetes container (<code translate="no" dir="ltr">k8s_container</code>) schema:</p> <ul> <li><code translate="no" dir="ltr">kubernetes.io/container/multislice/network/dcn_transfer_latencies</code></li> <li><code translate="no" dir="ltr">kubernetes.io/container/multislice/network/collective_end_to_end_latencies</code></li> <li><code translate="no" dir="ltr">kubernetes.io/container/multislice/accelerator/host_to_device_transfer_latencies</code></li> <li><code translate="no" dir="ltr">kubernetes.io/container/multislice/accelerator/device_to_host_transfer_latencies</code></li> </ul> <h2 id="comparison">TPU slice versus Multislice</h2> <p>The following table differentiates the architectural organization of a TPU slice and a Multislice:</p> <table> <tr> <th></th> <th>TPU slice</th> <th>Multislice</th> </tr> <tr> <th>Interconnectivity</th> <td>The workload runs on a single TPU slice. All TPU chips in a slice are connected with ICI.</td> <td>The workload runs on multiple TPU slices. Communication within a slice happens over ICI. Communication between slices occurs over DCN.</td> </tr> <tr> <th>Supported node pools</th> <td>Single-host TPU slice and multi-host TPU slice</td> <td>Groups of multi-host TPU slices</td> </tr> <tr> <th>Recommended workload type</th> <td>IndexedJob or JobSet</td> <td>JobSet</td> </tr> </table> <h2 id="clean_up_resources">Clean up resources</h2> <p>The easiest way to eliminate billing is to delete the Google Cloud project that you created for the tutorial. Alternatively, you can delete the individual resources.</p> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <h3 id="delete_individual_resources">Delete individual resources</h3> <p>Delete the GKE cluster:</p> 
+<pre>```sh
+gcloud container clusters delete  CLUSTER_NAME \
+   --project=PROJECT_ID  \
+   --location=CONTROL_PLANE_LOCATION
+```
+</pre> <h3 id="delete-cluster-toolkit-resources">Delete Cluster Toolkit resources</h3> <p>If you used Cluster Toolkit to create your cluster, delete the deployment to avoid incurring further charges:</p> 
+<pre>gcluster destroy DEPLOYMENT_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DEPLOYMENT_NAME</var></code> with the name of the deployment directory created when you deployed your blueprint.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="../tutorials/tpu-multislice-kueue">Orchestrate Multislice workloads with TPU slices</a>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/tpu-multislice" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/tpu-multislice</a>
+  </p>
+</div>

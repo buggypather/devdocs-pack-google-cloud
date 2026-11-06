@@ -1,0 +1,132 @@
+<h1>Ensuring compatibility of webhook certificates before upgrading to v1.23</h1> <p>Starting from <strong>version 1.23</strong>, Kubernetes no longer supports server identity validation using the X.509 Common Name (CN) field in certificates. Instead, Kubernetes will only rely on information in the X.509 Subject Alternative Name (SAN) fields.</p> <p>To prevent impact to your clusters, you must replace incompatible certificates without SANs for backends of webhooks and aggregated API servers before upgrading your clusters to Kubernetes <strong>version 1.23</strong>.</p> <aside class="note"><strong>Note:</strong><span> GKE only upgrades clusters on <strong>version 1.22.6-gke.1000</strong> or later if the clusters are not using webhook backends with incompatible certificates. Affected clusters will only be upgraded once the certificate(s) are replaced or when Kubernetes <strong>version 1.22</strong> reaches its <a href="../release-schedule">end of standard support</a> date. If your cluster has an earlier version than <strong>1.22.6-gke.1000</strong>, you can temporarily prevent automatic minor upgrades by configuring a <a href="../concepts/maintenance-windows-and-exclusions#exclusions">maintenance exclusion</a>.</span></aside><aside class="warning"><strong>Warning:</strong><span> If you do not ensure compatibility of your certificates for Kubernetes <strong>version 1.23</strong>, cluster functionality might be impaired. GKE webhook and aggregated API server backends reliant on the CN field for server identity validation will fail due to authentication failure. The Kubernetes control plane will be unable to communicate with your webhooks. Depending on your configuration—especially if you use Admission webhooks—failure to contact a webhook might block resource (i.e. Pod) creation.</span></aside> <h2 id="why_kubernetes_no_longer_supports_backend_certificates_without_sans">Why Kubernetes no longer supports backend certificates without SANs</h2> <p>GKE operates open-source Kubernetes, which uses the <a href="https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/" class="external">kube-apiserver component</a> to contact your webhook and aggregated API server backends using Transport Layer Security (TLS). The kube-apiserver component is written in the Go programming language.</p> <p>Before Go 1.15, TLS clients validated the identity of the servers they connected to using a two-step process:</p> <ol> <li>Check if the DNS name (or IP address) of the server is present as one of the SANs on the server's certificate.</li> <li>As a fallback, check if the DNS name (or IP address) of the server is equal to the CN on the server's certificate.</li> </ol> <p><a href="https://datatracker.ietf.org/doc/html/rfc6125" class="external">RFC 6125</a> fully deprecated server identity validation based on the CN field in 2011. Browsers and other security-critical applications no longer use the field.</p> <p>To align with the wider TLS ecosystem, <a href="https://golang.org/doc/go1.15#commonname" class="external">Go 1.15 removed Step 2</a> from its validation process, but left a debug switch (<code translate="no" dir="ltr">x509ignoreCN=0</code>) to enable the old behavior to ease the migration process. Kubernetes <strong>version 1.19</strong> was the first version built using Go 1.15. GKE clusters on versions from 1.19 to 1.22 enabled the debug switch by default to provide customers with more time to replace the certificates for the affected webhook and aggregated API server backends.</p> <p>Kubernetes <strong>version 1.23</strong> is built with Go 1.17, which <a href="https://tip.golang.org/doc/go1.17#crypto/x509" class="external">removes the debug switch</a>. Once GKE upgrades your clusters to <strong>version 1.23</strong>, calls will fail to connect from your cluster's control plane to webhooks or aggregated API services that do not provide a valid X.509 certificate with appropriate SAN.</p> <h2 id="identifying-affected-clusters">Identifying affected clusters</h2> <h3 id="identifying-certificates-with-logs">For clusters running patch versions at least 1.21.9 or 1.22.3</h3> <p>For clusters on patch versions 1.21.9 and 1.22.3 or later with Cloud Logging <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/installing#installing">enabled</a>, GKE provides a <a href="../how-to/audit-logging#viewing_your_projects_admin_activity_log">Cloud Audit Logs log</a> to identify calls to affected backends from your cluster. You can use the following filter to search for the logs:</p> 
+<pre>logName =~ "projects/.*/logs/cloudaudit.googleapis.com%2Factivity"
+resource.type = "k8s_cluster"
+operation.producer = "k8s.io"
+"invalid-cert.webhook.gke.io"
+</pre> <p>If your clusters have not called backends with affected certificates, you won't see any logs. If you do see such an audit log, it will include the hostname of the affected backend.</p> <p>The following is an example of the log entry, for a webhook backend hosted by a service named <strong>example-webhook</strong> in the <strong>default</strong> namespace:</p> 
+<pre>{
+  ...
+  resource {
+    type: "k8s_cluster",
+    "labels": {
+      "location": "us-central1-c",
+      "cluster_name": "example-cluster",
+      "project_id": "example-project"
+    }
+  },
+  labels: {
+    invalid-cert.webhook.gke.io/example-webhook.default.svc: "No subjectAltNames returned from example-webhook.default.svc:8443",
+    ...
+  },
+  logName: "projects/example-project/logs/cloudaudit.googleapis.com%2Factivity",
+  operation: {
+    ...
+    producer: "k8s.io",
+    ...
+  },
+  ...
+}
+</pre> <p>The hostnames of the affected services (e.g. <code translate="no" dir="ltr">example-webhook.default.svc</code>) are included as suffixes in the label names that start with <code translate="no" dir="ltr">invalid-cert.webhook.gke.io/</code>. You can also get the name of the cluster that made the call from the <code translate="no" dir="ltr">resource.labels.cluster_name</code> label, which has <code translate="no" dir="ltr">example-cluster</code> value in this example.</p> <p><strong>Deprecation insights</strong></p> <p>You can learn which clusters use incompatible certificates from <a href="viewing-deprecation-insights-and-recommendations">deprecation insights</a>. Insights are available for clusters running version 1.22.6-gke.1000 or later.</p> <h3 id="identifying-clusters-other-versions">Other cluster versions</h3> <p>If you have a cluster on a patch version earlier than 1.22.3 on the 1.22 minor version, or any patch version earlier than 1.21.9, you have two options for determining whether your cluster is affected by this deprecation:</p> <p><strong>Option 1</strong> <em>(recommended)</em>: <a href="../how-to/upgrading-a-cluster">Upgrade</a> your cluster to a patch version that supports <a href="#identifying-certificates-with-logs">identifying affected certificates with logs</a>. Make sure that Cloud Logging is <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/installing#installing">enabled</a> for your cluster. After your cluster has been upgraded, the identifying Cloud Audit Logs logs will be produced each time the cluster attempts to call a Service that does not provide a certificate with an appropriate SAN. As the logs will only be produced on a call attempt, we recommend waiting for 30 days after an upgrade to make enough time for all call paths to be invoked.</p> <p>Using logs to identify impacted services is recommended because this approach minimizes manual effort by automatically producing logs to show the affected services.</p> <p><strong>Option 2</strong>: Inspect the certificates used by Webhooks or Aggregated API Servers in your clusters to determine whether they are affected because of not having SANs:</p> <ol> <li>
+<a href="#identifying-services-to-inspect">Get the list</a> of Webhooks and Aggregated API Servers in your cluster and identify their backends (Services or URLs).</li> <li>
+<a href="#inspecting-certificate-of-service">Inspect the certificates</a> used by the backend services.</li> </ol> <p>Given the manual effort required to inspect all certificates in this way, this method should only be followed if you need to assess the impact of the deprecations in Kubernetes <strong>version 1.23</strong> before upgrading your cluster to <strong>version 1.21</strong>. If you can upgrade your cluster to 1.21, you should upgrade it first and then follow the instructions in Option 1 to avoid the manual effort.</p> <h2 id="identifying-services-to-inspect">Identifying backend services to inspect</h2> <p>To identify backends that might be affected by the deprecation, get the list of Webhooks and Aggregated API Services and their associated backends in the cluster.</p> <p>To list all relevant webhooks in the cluster, use the following <code translate="no" dir="ltr">kubectl</code> commands:</p> 
+<pre>kubectl get mutatingwebhookconfigurations -A   # mutating admission webhooks
+
+kubectl get validatingwebhookconfigurations -A # validating admission webhooks
+</pre> <p>You can get an associated backend Service or URL for a given Webhook by examining <code translate="no" dir="ltr">clientConfig.service</code> <a href="https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#service-reference" class="external">field</a> or <code translate="no" dir="ltr">webhooks.clientConfig.url</code> <a href="https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#url" class="external">field</a> in the Webhook's configuration:</p> 
+<pre>kubectl get mutatingwebhookconfigurations example-webhook -o yaml
+</pre> <p>The output of this command is similar to the following:</p> 
+<pre>apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+webhooks:
+- admissionReviewVersions:
+  clientConfig:
+    service:
+        name: example-service
+        namespace: default
+        port: 443
+</pre> <p>Note that clientConfig can specify its backend as a Kubernetes Service (<code translate="no" dir="ltr">clientConfig.service</code>), or as a URL (<code translate="no" dir="ltr">clientConfig.url</code>).</p> <p>To list all relevant Aggregated API Services in the cluster, use the following <code translate="no" dir="ltr">kubectl</code> command:</p> 
+<pre>kubectl get apiservices -A |grep -v Local      # aggregated API services
+</pre> <p>The output of this command is similar to the following:</p> 
+<pre>NAME                     SERVICE                      AVAILABLE   AGE
+v1beta1.metrics.k8s.io   kube-system/metrics-server   True        237d
+</pre> <p>This example returns <code translate="no" dir="ltr">metric-server</code> Service from the <code translate="no" dir="ltr">kube-system</code> namespace.</p> <p>You can get an associated Service for a given Aggregated API by examining <code translate="no" dir="ltr">spec.service</code> field:</p> 
+<pre>kubectl get apiservices v1beta1.metrics.k8s.io -o yaml
+</pre> <p>The output of this command is similar to the following:</p> 
+<pre>...
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+spec:
+  service:
+    name: metrics-server
+    namespace: kube-system
+    port: 443
+</pre> <h3 id="inspecting-certificate-of-service">Inspecting the certificate of a Service</h3> <p>Once you have <a href="#identifying-services-to-inspect">identified</a> relevant backend Services to inspect, you can inspect the certificate of each specific Service, such as <code translate="no" dir="ltr">example-service</code>:</p> <ol> <li>
+<p>Find the selector and target port of the service:</p> 
+<pre>kubectl describe service example-service
+</pre> <p>The output of this command is similar to the following:</p> 
+<pre>Name: example-service
+Namespace: default
+Labels: run=nginx
+Selector: run=nginx
+Type: ClusterIP
+IP: 172.21.xxx.xxx
+Port: 443
+TargetPort: 444
+</pre> <p>In this example, <code translate="no" dir="ltr">example-service</code> has the selector <code translate="no" dir="ltr">run=nginx</code> and the target port <code translate="no" dir="ltr">444</code>.</p> <aside class="note"><strong>Note:</strong><span> When absent, <code translate="no" dir="ltr">TargetPort</code> is the same value as the <code translate="no" dir="ltr">Port</code> field.</span></aside>
+</li> <li>
+<p>Find a pod matching the selector:</p> 
+<pre>kubectl get pods --selector=run=nginx
+</pre> <p>The output of the command is similar to the following:</p> 
+<pre>NAME          READY   STATUS    RESTARTS   AGE
+example-pod   1/1     Running   0          21m
+</pre>
+</li> <li>
+<p class="external">Set up a <a href="https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands#port-forward">port forward</a> </p> <p>from your <code translate="no" dir="ltr">kubectl</code> localhost to the pod.</p> 
+<pre>kubectl port-forward pods/example-pod LOCALHOST_PORT:TARGET_PORT # port forwarding in background
+</pre> <p>Replace the following in the command:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCALHOST_PORT</var></code>: the address to listen on.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_PORT</var></code> the <code translate="no" dir="ltr">TargetPort</code> from Step 1.</li> </ul>
+</li> <li>
+<p>Use <code translate="no" dir="ltr">openssl</code> to print the certificate used by the Service:</p> 
+<pre>openssl s_client -connect localhost:LOCALHOST_PORT &lt;/dev/null | openssl x509 -noout -text
+</pre> <p>This example output shows a valid certificate (with SAN entries):</p> 
+<pre>Subject: CN = example-service.default.svc
+X509v3 extensions:
+  X509v3 Subject Alternative Name:
+    DNS:example-service.default.svc
+</pre> <p>This example output shows a certificate with a missing SAN:</p> 
+<pre>Subject: CN = example-service.default.svc
+  X509v3 extensions:
+      X509v3 Key Usage: critical
+          Digital Signature, Key Encipherment
+      X509v3 Extended Key Usage:
+          TLS Web Server Authentication
+      X509v3 Authority Key Identifier:
+          keyid:1A:5F:29:D8:E9:3C:54:3C:35:CC:D8:AB:D1:21:FD:C3:56:25:C0:74
+</pre>
+</li> <li>
+<p>Remove the port forward from running in the background with the following commands:</p> 
+<pre>$ jobs
+[1]+  Running                 kubectl port-forward pods/example-pod 8888:444 &amp;
+$ kill %1
+[1]+  Terminated              kubectl port-forward pods/example 8888:444
+</pre>
+</li> </ol> <h3 id="inspecting_the_certificate_of_a_url_backend">Inspecting the certificate of a URL backend</h3> <p>If the webhook uses a <code translate="no" dir="ltr">url</code> <a href="https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#url" class="external">backend</a>, directly connect to the hostname specified in the URL. For example, if the URL is <code translate="no" dir="ltr">https://example.com:123/foo/bar</code>, use the following <code translate="no" dir="ltr">openssl</code> command to print the certificate used by the backend:</p> 
+<pre>  openssl s_client -connect example.com:123 &lt;/dev/null | openssl x509 -noout -text
+</pre> <h2 id="mitigating_the_risk_of_123_upgrade">Mitigating the risk of 1.23 upgrade</h2> <p>Once you have <a href="#identifying-affected-clusters">identified</a> affected clusters and their backend services using certificates without SANs, you must update the webhooks and aggregated API server backends to use certificates with appropriate SANs prior to upgrading the clusters to <strong>version 1.23</strong>.</p> <p>GKE will not automatically upgrade clusters on versions 1.22.6-gke.1000 or later with backends using incompatible certificates until you replace the certificates or until <strong>version 1.22</strong> reaches <a href="../release-schedule">end of standard support</a>.</p> <p>If your cluster is on a GKE version earlier than <strong>1.22.6-gke.1000</strong>, you can temporarily prevent automatic upgrades by configuring a <a href="../concepts/maintenance-windows-and-exclusions#x27;">maintenance exclusion</a> to prevent minor upgrades.</p> <h2 id="resources">Resources</h2> <p>See the following resources for additional information on this change:</p> <ul> <li>
+<a href="https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.23.md#urgent-upgrade-notes" class="external">Kubernetes 1.23 release notes</a> <ul> <li>Kubernetes is built using Go 1.17. This version of Go removes the ability to use a <code translate="no" dir="ltr">GODEBUG=x509ignoreCN=0</code> environment setting to re-enable deprecated legacy behavior of treating the CN of X.509 serving certificates as a host name.</li> </ul>
+</li> <li>
+<a href="https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.19.md#api-change-5" class="external">Kubernetes 1.19</a> and <a href="https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.20.md#api-change-10" class="external">Kubernetes 1.20</a> release notes <ul> <li>The deprecated, legacy behavior of treating the CN field on X.509 serving certificates as a host name when no SANs are present is now disabled by default.</li> </ul>
+</li> <li>
+<a href="https://go.dev/doc/go1.17#crypto/x509" class="external">Go 1.17 release notes</a> <ul> <li>The temporary <code translate="no" dir="ltr">GODEBUG=x509ignoreCN=0</code> flag has been removed.</li> </ul>
+</li> <li>
+<a href="https://go.dev/doc/go1.15#commonname" class="external">Go 1.15 release notes</a> <ul> <li>The deprecated, legacy behavior of treating the CN field on X.509 certificates as a host when no SANs are present is now disabled by default.</li> </ul>
+</li> <li>
+<a href="https://datatracker.ietf.org/doc/html/rfc6125#page-46" class="external">RFC 6125</a> (page 46) <ul> <li>Although the use of the CN value is existing practice, it is deprecated, and Certificate Authorities are encouraged to provide <code translate="no" dir="ltr">subjectAltName</code> values instead.</li> </ul>
+</li> <li>
+<a href="https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#contacting-the-webhook" class="external">Admission webhooks</a> </li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/webhookcompatibility" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/webhookcompatibility</a>
+  </p>
+</div>

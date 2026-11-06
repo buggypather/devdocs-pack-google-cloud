@@ -1,0 +1,238 @@
+<h1>Configure Cloud CDN for Gateway</h1>  <p>This document describes how to use the Google Kubernetes Engine (GKE) Gateway controller to configure Cloud CDN. You can find detailed information on Cloud CDN concepts, best practices, and troubleshooting in the <a href="https://docs.cloud.google.com/cdn/docs/overview">Cloud CDN documentation</a>.</p> <p>Cloud CDN helps improve end-user latency and reduces origin load by caching content close to your users. You can enable Cloud CDN caching capabilities by using the GCPHTTPFilter CustomResourceDefinition.</p> <p>This document is for Application developers, Cloud architects, and Networking specialists who design and architect their organization's network. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="overview">Overview</h2> <p>GKE Gateway integration with Cloud CDN lets you use Kubernetes-native resources to manage edge caching. By using the GCPHTTPFilter resource, you can fine-tune configurations such as cache modes and time to live (TTL) for different slices of your traffic.</p> <p>You enable Cloud CDN by creating a GCPHTTPFilter object and referencing the object in an HTTPRoute rule. You can create multiple GCPHTTPFilter objects to define different caching behaviors for different types of traffic. For example, you might create one filter for static images and another for a default policy that uses Cloud CDN recommended default values.</p> <p>The GCPHTTPFilter resource lets you configure the following:</p> <ul> <li>
+<strong>Cache modes</strong>: control how Cloud CDN caches responses from your origin.</li> <li>
+<strong>Time to live (TTL) configuration</strong>: configure how long objects stay in the cache.</li> <li>
+<strong>Cache keys</strong>: define which elements of a request (headers, cookies, query strings) are used to generate cache keys.</li> <li>
+<strong>Negative caching</strong>: cache common error responses or redirects to reduce origin load during failures.</li> <li>
+<strong>Cache policies</strong>: control how Cloud CDN handles your cacheable requests. For example, you can enable Cloud CDN to do the following: <ul> <li>Maintain high availability by continuing to serve cached content even if backend services become unavailable.</li> <li>Define specific request headers that bypass the cache to fetch data directly from your backend.</li> <li>Merge multiple concurrent requests for the same resource into a single request to reduce backend load.</li> </ul>
+</li> </ul> <p>The GCPHTTPFilter resource must be in the same namespace as that of the HTTPRoute resource to which it is attached. After you configure GCPHTTPFilter, the filter is merged into the filter chain for your route.</p> <p>The following diagram illustrates how you can use GCPHTTPFilter to apply different caching configurations to specific slices of traffic within an HTTPRoute:</p> <figure style="text-align: center"> <img class="add-background" src="https://docs.cloud.google.com/static/kubernetes-engine/images/caching-configurations.svg" alt="Figure 1. Different caching configurations made with GCPHTTPFilter within an HTTPRoute."> <figcaption><b>Figure 1.</b> Caching configurations within an HTTPRoute.</figcaption> </figure> <p>This architecture let you configure granular, automated edge-caching management. An HTTPRoute configures how incoming requests are handled by matching the incoming traffic based on the attributes such as request path. To enable caching for specific routes, GCPHTTPFilters are attached to the rules within the HTTPRoute. Each GCPHTTPFilter can specify a different caching logic for images, web assets, and the other content. This caching logic is then enforced by Cloud CDN, which serves the cached content to the client.</p> <h2 id="limitations">Requirements and limitations</h2> <ul> <li>Your cluster must be on GKE version 1.35.2-gke.1751000 or later.</li> <li>You must have configured a <a href="deploying-gateways#deploy_a_global_external_gateway">global external Gateway</a> by using the <code translate="no" dir="ltr">gke-l7-global-external-managed</code> or <code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code> GatewayClass.</li> <li>You must have configured an <a href="deploying-gateways#configure_http-to-https_redirects">HTTPRoute resource</a>.</li> <li>You can't enable both Identity-Aware Proxy (IAP) and Cloud CDN on the same Gateway. If IAP is required, you must remove the GCPHTTPFilter object before you enable GCPBackendPolicy.</li> <li>You can attach only one GCPHTTPFilter object to a specific path rule within an HTTPRoute.</li> </ul> <h2 id="pricing">Pricing</h2> <p>Cloud CDN pricing applies when caching is enabled. For more information, see <a href="https://docs.cloud.google.com/cdn/pricing">Cloud CDN pricing</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h3 id="roles_and_permissions">Roles and permissions</h3> <ol> <li><p>To view configured Google Cloud resources, ensure that you have the <code translate="no" dir="ltr">roles/compute.networkViewer</code> <a href="https://docs.cloud.google.com/iam/docs/understanding-roles#kubernetes-engine-roles">IAM role</a>.</p></li> <li>
+<p>Ensure that you have access to the GKE cluster and are authorized to perform the necessary actions. The following snippet shows the minimal RBAC permissions required:</p> 
+<pre>apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-caching-admin
+rules:
+# 1. Full access to manage HTTPRoutes
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["httproutes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# 2. Read-only access to view the Gateway
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways"]
+  verbs: ["get", "list", "watch"]
+# 3. Full access to manage caching filters
+- apiGroups: ["networking.gke.io"]
+  resources: ["gcphttpfilters"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+</pre>
+</li> </ol> <p>For more information about using RBAC and IAM, see <a href="role-based-access-control#iam-interaction">Interaction with Identity and Access Management</a>.</p> <h2 id="configure-caching">Configure caching with GCPHTTPFilter</h2> <p>To enable and configure Cloud CDN, you create one or more GCPHTTPFilter resources and then reference them in your HTTPRoute object.</p> <aside class="note"><strong>Note:</strong><span> When you configure Cloud CDN by using the GKE Gateway API, caching is managed at the URL map level, not at the backend service level. If your backend service configuration in Google Cloud CLI or the Google Cloud console shows Cloud CDN as <code translate="no" dir="ltr">Disabled</code>, this behavior is expected and doesn't indicate a configuration issue.</span></aside> <h3 id="create-gcphttpfilter">Create a GCPHTTPFilter</h3> <p>The GCPHTTPFilter resource defines your caching policy. In the following example, you create three <code translate="no" dir="ltr">GCPHTTPFilters</code>:</p> <ul> <li>The first filter caches static images for faster delivery to end users.</li> <li>The second filter caches web assets such as CSS files.</li> <li>The third filter serves as a "catch-all" for remaining traffic.</li> </ul> <ol> <li>
+<p>Create the first filter by saving the following manifest as <code translate="no" dir="ltr">store-caching-images-filter.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPHTTPFilter
+metadata:
+  name: store-caching-images-filter
+spec:
+  cachePolicy:
+    cacheKeyPolicy:
+      includeQueryString: false
+    cacheMode: CACHE_ALL_STATIC
+    defaultTTL: 12h
+</pre> <p>In this manifest, the following apply:</p> <ul> <li>
+<code translate="no" dir="ltr">includeQueryString</code>: instructs Cloud CDN to ignore query parameters in the cache key. This helps ensure that different user requests for the same image receive identical cached copies.</li> <li>
+<code translate="no" dir="ltr">cacheMode</code>: is set to <code translate="no" dir="ltr">CACHE_ALL_STATIC</code>, which automatically caches static content such as images.</li> <li>
+<code translate="no" dir="ltr">defaultTTL</code>: instructs Cloud CDN to cache images for 12 hours. You can specify the time in hours (h), minutes (m), or seconds (s).</li> </ul>
+</li> <li>
+<p>Create the second filter. Save the following manifest as <code translate="no" dir="ltr">store-caching-webassets-filter.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPHTTPFilter
+metadata:
+  name: store-caching-webassets-filter
+spec:
+  cachePolicy:
+    cacheKeyPolicy:
+      includeQueryString: false
+    serveWhileStale: 24h
+    cacheMode: CACHE_ALL_STATIC
+    defaultTTL: 24h
+</pre> <p>This manifest has some of the same settings as the first filter except for the following differences:</p> <ul> <li>
+<code translate="no" dir="ltr">serveWhileStale</code>: is set to 24 hours. If a web asset (such as a CSS file) expires after its <code translate="no" dir="ltr">defaultTTL</code>, Cloud CDN continues to serve that stale asset from the cache for up to an additional 24 hours and revalidates the content in the background.</li> <li>
+<code translate="no" dir="ltr">defaultTTL</code>: is set to a longer duration of 24 hours.</li> </ul>
+</li> <li>
+<p>Create a third filter to define a default caching policy without any parameters. Save the following manifest as <code translate="no" dir="ltr">store-caching-default-filter.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPHTTPFilter
+metadata:
+  name: store-caching-default-filter
+spec:
+  cachePolicy: {}
+</pre> <p>When you don't specify any parameters in your GCPHTTPFilter resource, GKE uses the <a href="https://docs.cloud.google.com/cdn/docs/caching#default-values">default values for caching</a>.</p>
+</li> <li>
+<p>Apply the filters to your cluster:</p> 
+<pre>kubectl apply -f store-caching-images-filter.yaml
+kubectl apply -f store-caching-webassets-filter.yaml
+kubectl apply -f store-caching-default-filter.yaml
+</pre>
+</li> </ol> <h3 id="attach-filter-to-httproute">Attach the filter to an HTTPRoute</h3> <p>To apply the caching policies, update your existing HTTPRoute manifest to reference the filters.</p> <p>You can reference different filters within the same HTTPRoute object to apply consistent caching rules. You can also reuse the same filter across different rules, for example, when you split traffic between different backend versions during a progressive rollout.</p> <ol> <li>
+<p>Modify your existing HTTPRoute manifest (for example, <code translate="no" dir="ltr">store-route-external.yaml</code>) to include the <code translate="no" dir="ltr">filters</code> section in your routing rules:</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-external
+spec:
+  parentRefs:
+  - kind: Gateway
+    name: external-http
+  hostnames:
+  - "store.example.com"
+  rules:
+  # RULE 1: Default /img/ traffic to store-v1
+  - matches:
+    - path:
+        value: /img/
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: networking.gke.io
+        kind: GCPHTTPFilter
+        name: store-caching-images-filter
+    backendRefs:
+    - name: store-v1
+      port: 8080
+  # RULE 2: Default /web/ traffic to store-v1
+  - matches:
+    - path:
+        value: /web/
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: networking.gke.io
+        kind: GCPHTTPFilter
+        name: store-caching-webassets-filter
+    backendRefs:
+    - name: store-v1
+      port: 8080
+  # RULE 3: Canary /img/ traffic (header + path match) to store-v2
+  - matches:
+    - headers:
+      - name: env
+        value: canary
+      path:
+        value: /img/
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: networking.gke.io
+        kind: GCPHTTPFilter
+        name: store-caching-images-filter
+    backendRefs:
+    - name: store-v2
+      port: 8080
+  # RULE 4: Canary /web/ traffic (header + path match) to store-v2
+  - matches:
+    - headers:
+      - name: env
+        value: canary
+      path:
+        value: /web/
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: networking.gke.io
+        kind: GCPHTTPFilter
+        name: store-caching-webassets-filter
+    backendRefs:
+    - name: store-v2
+      port: 8080
+  # RULE 5: Default (catch-all) traffic to store-v1
+  - backendRefs:
+    - name: store-v1
+      port: 8080
+    # If you need caching for default traffic, it can be enabled by placing
+    # filters directly under backendRefs
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: networking.gke.io
+        kind: GCPHTTPFilter
+        name: store-caching-default-filter
+</pre>
+</li> <li>
+<p>Apply the updated HTTPRoute configuration to your cluster:</p> 
+<pre>kubectl apply -f store-route-external.yaml
+</pre>
+</li> <li>
+<p>Verify that the HTTPRoute and Gateway are deployed:</p> 
+<pre>kubectl describe httproute store-external
+kubectl describe gateway external-http
+</pre> <p>The output shows that Cloud CDN is enabled for the HTTPRoute resource. Cloud CDN applies the configured caching policies to your traffic and accelerates the delivery of static images, web assets, and other traffic.</p>
+</li> </ol> <h2 id="invalidate-content">Invalidate cached content</h2> <p>To purge outdated content from the cache, you must submit an invalidation request. For detailed information about how invalidation works, see <a href="https://docs.cloud.google.com/cdn/docs/invalidating-cached-content">Invalidate cached content</a> in the Cloud CDN documentation.</p> <ol> <li>
+<p>Find the URL map associated with your Gateway:</p> 
+<pre>kubectl describe gateway external-http
+</pre> <p>Look for the <code translate="no" dir="ltr">networking.gke.io/url-maps</code> annotation. For example:</p> 
+<pre>Name: external-http
+Namespace: foo
+API Version: gateway.networking.k8s.io
+Kind: Gateway
+Annotations: networking.gke.io/backend-services: gkegw-service1
+             networking.gke.io/firewalls: gkegw-l7-fw
+             networking.gke.io/forwarding-rules: gkegw-fr1
+             networking.gke.io/health-checks: gkegw-hc1
+             networking.gke.io/ssl-certificates:
+             networking.gke.io/target-proxies: gkegw-tp1
+             networking.gke.io/url-maps: gkegw-url-map1
+</pre>
+</li> <li>
+<p>You can invalidate content by using several invalidation matchers, including host, path, cache tags, response status code, <a href="https://developer.mozilla.org/en-US/docs/Glossary/MIME_type">MIME type</a>, and backend. For example, to submit the invalidation request by using the host and status code matchers, run the following command:</p> 
+<pre>gcloud compute url-maps invalidate-cdn-cache URL_MAP_NAME
+    --host="store.example.com" 
+    --status=404
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">URL_MAP_NAME</var></code> with the name identified in the preceding step, for example, <code translate="no" dir="ltr">gkegw-url-map1</code>.</p>
+</li> </ol> <h2 id="monitor-performance">Monitor Cloud CDN performance</h2> <p>You can use Cloud Logging and Cloud Monitoring to track cache hit rates and performance.</p> <p>Cloud CDN logs are associated with the load balancer provisioned by your GKE Gateway Controller. The logs are indexed by the load balancer's forwarding rule and URL map. To retrieve recent logs, run the following command:</p> 
+<pre>gcloud logging read 'resource.type="http_load_balancer" AND 
+    resource.labels.url_map_name="URL_MAP_NAME" AND 
+    logName="projects/PROJECT_ID/logs/cloudcdn_googleapis_com%2Frequests"' 
+    --project PROJECT_ID --limit 100 --format json
+</pre> <p>Cloud CDN exports metrics to Cloud Monitoring. You can use the <code translate="no" dir="ltr">matched_url_path_rule</code> filter in your monitoring queries to narrow down metrics to a specific HTTPRoute.</p> <p>For more information about viewing logs and monitoring for Cloud CDN, see <a href="https://docs.cloud.google.com/cdn/docs/logging">Logs and metrics for caching</a>.</p> <h2 id="disable">Disable Cloud CDN</h2> <p>To disable caching, remove the GCPHTTPFilter references from your HTTPRoute.</p> <ol> <li>
+<p>Edit your HTTPRoute manifest and remove the <code translate="no" dir="ltr">filters</code> block that references the GCPHTTPFilter. The following example shows an HTTPRoute manifest with the filters removed:</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-external
+spec:
+  parentRefs:
+  - kind: Gateway
+    name: external-http
+  hostnames:
+  - "store.example.com"
+  rules:
+  # RULE 1: Default /img/ traffic to store-v1
+  - matches:
+    - path:
+        value: /img/
+    backendRefs:
+    - name: store-v1
+      port: 8080
+  # RULE 2: Canary /img/ traffic (header match) to store-v2
+  - matches:
+    - headers:
+      - name: env
+        value: canary
+      path:
+        value: /img/
+    backendRefs:
+    - name: store-v2
+      port: 8080
+  # RULE 3: Default (catch-all) traffic to store-v1
+  - backendRefs:
+    - name: store-v1
+      port: 8080
+</pre>
+</li> <li>
+<p>Apply the updated HTTPRoute manifest to your cluster:</p> 
+<pre>kubectl apply -f store-route-external.yaml
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> Disabling Cloud CDN does not purge existing caches. To prevent stale content from being served if you re-enable the feature, you must manually invalidate the content.</span></aside> <h2 id="whats_next">What's next</h2> <ul> <li>Read an <a href="https://docs.cloud.google.com/cdn/docs/overview">overview of Cloud CDN</a>.</li> <li>Read the <a href="https://docs.cloud.google.com/cdn/docs/best-practices">best practices for content delivery</a>.</li> <li>Learn how to <a href="https://docs.cloud.google.com/cdn/docs/troubleshooting-steps">troubleshoot issues with Cloud CDN</a>.</li> <li>Learn about <a href="gatewayclass-capabilities">GatewayClass capabilities</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-cdn-for-gateway" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-cdn-for-gateway</a>
+  </p>
+</div>

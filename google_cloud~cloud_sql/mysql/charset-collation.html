@@ -1,0 +1,273 @@
+<h1>Update the character set and collation for a database</h1>  <p>This page describes how to update the character set and collation of Cloud SQL databases.</p> <h2 id="overview">Overview</h2> <p>When you create a database in Cloud SQL for MySQL, you can specify the <a href="https://dev.mysql.com/doc/refman/8.0/en/charset-general.html">character set and collation</a> configuration for a database. If you don't specify custom values for these settings, then the database uses the default value. In MySQL, you can specify custom values for the character set and collation at different object levels, including databases, tables, and columns. For more information about using character set and collation configurations in MySQL, see <a href="https://dev.mysql.com/doc/refman/8.0/en/charset.html">Character Sets, Collations, Unicode</a>.</p> <p>If you want to change the character set or collation of your database after you've already created the database and some objects in the database, then you can do so by following the procedure in this document.</p> <p>This procedure consists of the following steps:</p> <ol> <li>
+<a href="#check-current-charset">Check current character set and collation values</a>.</li> <li>
+<a href="#determine-level">Determine what level of update to perform</a>.</li> <li>
+<a href="#first-backup">Take a backup of the instance</a>.</li> <li>
+<a href="#mysqldump-generate">Generate rebuild commands for stored database objects</a>.</li> <li>
+<a href="#update-databases">Perform updates to your databases, and if necessary, tables and columns</a>.</li> <li>
+<a href="#validate-updates">Validate the updates and look for errors</a>.</li> <li>
+<a href="#recreate-objects">Recreate your stored database objects</a>.</li> <li>
+<a href="#post-backup">Take another backup of the instance</a>.</li> </ol> <h2 id="check-current-charset">Check the current character set and collation values</h2> <p>Check the existing values that are configured for character set and collation for your database and database objects. When you check your database, you also need to check the configuration of its tables, columns, and stored objects. You can use the following statements to check your databases and its database objects.</p> <h3 id="check-instance">Check your instance configuration</h3> <p>To check the default global values on the instance (server) level, start a MySQL shell and enter the following command:</p> 
+<pre>mysql&gt; SELECT @@character_set_server,@@collation_server;</pre> <p>Example output:</p> 
+<pre>+------------------------+--------------------+
+| @@character_set_server | @@collation_server |
++------------------------+--------------------+
+| utf8mb4                | utf8mb4_0900_ai_ci |
++------------------------+--------------------+
+1 row in set (0.00 sec)
+</pre> <p>You can check that the default global values are different from the custom values that you'll provide for your database later.</p> <h3 id="check-database">Check your database configuration</h3> <p>To check the existing character set and collation values on the database level, use the following statement. After you run each statement, make a list of all the databases and database objects that you need to update with new character sets or collation values. The list depends on which databases you want to change and how many tables, columns, and database objects require configuration updates.</p> 
+<pre>SELECT * FROM INFORMATION_SCHEMA.SCHEMATA
+WHERE schema_name
+NOT IN ('performance_schema', 'mysql', 'sys', 'information_schema');</pre> <p>For example, you receive the following output:</p> 
+<pre>+--------------+-------------+----------------------------+------------------------+----------+--------------------+
+| CATALOG_NAME | SCHEMA_NAME | DEFAULT_CHARACTER_SET_NAME | DEFAULT_COLLATION_NAME | SQL_PATH | DEFAULT_ENCRYPTION |
++--------------+-------------+----------------------------+------------------------+----------+--------------------+
+| def          | test1       | utf8mb4                    | utf8mb4_0900_ai_ci     |     NULL | NO                 |
+| def          | test2       | utf8mb4                    | utf8mb4_0900_ai_ci     |     NULL | NO                 |
+| def          | test3       | utf8mb4                    | utf8mb4_0900_ai_ci     |     NULL | NO                 |
+| def          | test4       | utf8mb4                    | utf8mb4_0900_ai_ci     |     NULL | NO                 |
++--------------+-------------+----------------------------+------------------------+----------+--------------------+
+</pre> <p>However, you want to change the databases to the following custom character set values:</p> 
+<pre>+--------------+-------------+----------------------------+------------------------+----------+--------------------+
+| CATALOG_NAME | SCHEMA_NAME | DEFAULT_CHARACTER_SET_NAME | DEFAULT_COLLATION_NAME | SQL_PATH | DEFAULT_ENCRYPTION |
++--------------+-------------+----------------------------+------------------------+----------+--------------------+
+| def          | test1       | ascii                      | ascii_general_ci       |     NULL | NO                 |
+| def          | test2       | latin1                     | latin1_swedish_ci      |     NULL | NO                 |
+| def          | test3       | utf16                      | utf16_general_ci       |     NULL | NO                 |
+| def          | test4       | ucs2                       | ucs2_general_ci        |     NULL | NO                 |
++--------------+-------------+----------------------------+------------------------+----------+--------------------+
+</pre> <p>Then, in this case, for each database that has a value that you want to change, you need to update each object that resides in the database.</p> <h3 id="check-table-configuration">Check the configuration of your tables</h3> <p>To check the existing values for the tables, use the following statement:</p> 
+<pre>SELECT T.table_name, T.table_schema, CCSA.character_set_name, CCSA.collation_name
+FROM information_schema.`tables` T,
+  information_schema.`collation_character_set_applicability` CCSA
+WHERE CCSA.collation_name = T.table_collation
+AND T.table_schema
+NOT IN ('performance_schema', 'mysql', 'sys','information_schema');</pre> <p>Example output:</p> 
+<pre>+------------+--------------+--------------------+-------------------+
+| TABLE_NAME | TABLE_SCHEMA | CHARACTER_SET_NAME | COLLATION_NAME    |
++------------+--------------+--------------------+-------------------+
+| t1         | test1        | ascii              | ascii_general_ci  |
+| t2         | test2        | latin1             | latin1_swedish_ci |
+| t3         | test3        | utf16              | utf16_general_ci  |
+| t4         | test4        | ucs2               | ucs2_general_ci   |
++------------+--------------+--------------------+-------------------+
+</pre> <h3 id="check-table-columns">Check the configuration of your table columns</h3> <p>To check the values for columns, use the following statement:</p> 
+<pre>SELECT table_schema, table_name, column_name, character_set_name, collation_name
+FROM information_schema.columns
+WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'sys', 'mysql');</pre> <p>Example output:</p> 
+<pre>+--------------+------------+-------------+--------------------+------------------+
+| TABLE_SCHEMA | TABLE_NAME | COLUMN_NAME | CHARACTER_SET_NAME | COLLATION_NAME   |
++--------------+------------+-------------+--------------------+------------------+
+| test1        | t1         | c           | ascii              | ascii_general_ci |
+| test1        | t1         | i           | NULL               | NULL             |
+| test2        | t2         | j           | NULL               | NULL             |
+| test2        | t2         | v           | ascii              | ascii_general_ci |
+| test3        | t3         | k           | NULL               | NULL             |
+| test3        | t3         | summary     | utf16              | utf16_general_ci |
+| test4        | t4         | col         | ucs2               | ucs2_general_ci  |
+| test4        | t4         | p           | NULL               | NULL             |
++--------------+------------+-------------+--------------------+------------------+
+</pre>
+<aside class="note"><strong>Note:</strong><span> Character set and collation configuration applies only to string-based columns (for example, <code translate="no" dir="ltr">char</code>, <code translate="no" dir="ltr">varchar</code>, <code translate="no" dir="ltr">enum</code>, <code translate="no" dir="ltr">text</code>, <code translate="no" dir="ltr">mediumtext</code>, <code translate="no" dir="ltr">longtext</code>, and <code translate="no" dir="ltr">set</code>). For all other column types, character set and collation configuration appears as <code translate="no" dir="ltr">NULL</code>.</span></aside> <h3 id="check-active-schema">Check the active schema or database</h3> <p>To check the details for the active schema or database, use the following statement.</p> 
+<pre>SELECT TABLE_SCHEMA, TABLE_NAME, CCSA.CHARACTER_SET_NAME AS DEFAULT_CHAR_SET,
+       COLUMN_NAME, COLUMN_TYPE, C.CHARACTER_SET_NAME
+FROM information_schema.TABLES AS T
+JOIN information_schema.COLUMNS AS C USING (TABLE_SCHEMA, TABLE_NAME)
+JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY AS CCSA
+ON (T.TABLE_COLLATION = CCSA.COLLATION_NAME)
+WHERE TABLE_SCHEMA=SCHEMA()
+AND C.DATA_TYPE IN ('enum', 'varchar', 'char', 'text', 'mediumtext', 'longtext', 'set' )
+ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME;</pre> <p>Example output:</p> 
+<pre>+------------+
+| DATABASE() |
++------------+
+| test3      |
++------------+
++--------------+------------+------------------+-------------+-------------+--------------------+
+| TABLE_SCHEMA | TABLE_NAME | DEFAULT_CHAR_SET | COLUMN_NAME | COLUMN_TYPE | CHARACTER_SET_NAME |
++--------------+------------+------------------+-------------+-------------+--------------------+
+| test3        | t3         | utf16            | summary     | text        | utf16              |
++--------------+------------+------------------+-------------+-------------+--------------------+
+</pre>
+<aside class="note"><strong>Note:</strong><span> The output includes only the character set and collation configuration for applicable string-based columns for the current active database.</span></aside> <h3 id="check-sps">Check the configuration of your stored procedures</h3> <p>To check the values for stored procedures, use the following statement:</p> 
+<pre>SHOW PROCEDURE STATUS WHERE db = 'DB_NAME';</pre> <p>Replace <var translate="no">DB_NAME</var> with the name of the database.</p> <p>Example output:</p> 
+<pre>+-------+------+-----------+---------+---------------------+---------------------+---------------+---------+----------------------+----------------------+--------------------+
+| Db    | Name | Type      | Definer | Modified            | Created             | Security_type | Comment | character_set_client | collation_connection | Database Collation |
++-------+------+-----------+---------+---------------------+---------------------+---------------+---------+----------------------+----------------------+--------------------+
+| test2 | p1   | PROCEDURE | root@%  | 2024-08-09 11:47:05 | 2024-08-09 11:47:05 | DEFINER       |         | utf8mb4              | utf8mb4_0900_ai_ci   | latin1_swedish_ci  |
+| test2 | p2   | PROCEDURE | root@%  | 2024-08-09 11:48:36 | 2024-08-09 11:48:36 | DEFINER       |         | utf8mb4              | utf8mb4_0900_ai_ci   | latin1_swedish_ci  |
++-------+------+-----------+---------+---------------------+---------------------+---------------+---------+----------------------+----------------------+--------------------+
+</pre> <p>To get the definition of a stored procedure, use the following statement:</p> 
+<pre>SHOW CREATE PROCEDURE DB_NAME.SP_NAME;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the MySQL database</li> <li>
+<var translate="no">SP_NAME</var>: the name of the stored procedure</li> </ul> <p>If a stored procedure isn't using your intended character set or collation value, then you might need to <a href="#mysqldump-generate">drop and recreate</a> it with the new character set or collation.</p> <h4 id="collation-mapping">Check database collation mapping</h4> <p>In the previous example output, the stored procedure is created with <code translate="no" dir="ltr">latin1_swedish_ci</code> as the default collation and the corresponding character set is <code translate="no" dir="ltr">latin1</code>. This means all processing happens using the <code translate="no" dir="ltr">latin1</code> character set (unless specific parameters of the procedure are tagged with a custom character set.) If you change only the database-level character set and collation, then the database-level update doesn't update the stored procedure automatically. The procedure continues to operate with the <code translate="no" dir="ltr">latin1</code> character set and the respective collation. Dropping and recreating the stored procedure ensures that the procedure starts to use the new character set and new collation of the database that you just updated.</p> <p>You can find out the mapping between database collation and character set by querying the <code translate="no" dir="ltr">information_schema.COLLATION_CHARACTER_SET_APPLICABILITY</code> table.</p> <p>Use the following statement as an example:</p> 
+<pre>SELECT CHARACTER_SET_NAME
+FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY
+WHERE COLLATION_NAME = (SELECT database_collation FROM information_schema.ROUTINES
+                        WHERE ROUTINE_SCHEMA = "test2" and ROUTINE_NAME = "p1");
+</pre> <p>Example output:</p> 
+<pre>+--------------------+
+| CHARACTER_SET_NAME |
++--------------------+
+| latin1             |
++--------------------+
+</pre> <h3 id="check-triggers">Check the configuration of your triggers</h3> <p>To check the values for triggers, use the following statement as an example.</p> 
+<pre>SHOW TRIGGERS FROM DB_NAME;</pre> <p>Replace <var translate="no">DB_NAME</var> with the name of the MySQL database.</p> <p>To get the definition of a trigger, use the following example statement.</p> 
+<pre>SHOW CREATE trigger DB_NAME.TRIGGER_NAME;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the MySQL database</li> <li>
+<var translate="no">TRIGGER_NAME</var>: the name of the trigger</li> </ul> <p>If the trigger isn't using your intended character set or collation value, then you might need to <a href="#mysqldump-generate">drop and recreate</a> it with the new character set or collation. Check that the trigger is using the correct database collation mapping. For more information about checking database collation, see <a href="#collation-mapping">Check database collation mapping</a>.</p> <h3 id="check-events">Check the configuration of your events</h3> <p>To check the values for events, use the following statement as an example.</p> 
+<pre>SHOW EVENTS FROM DB_NAME;</pre> <p>Replace <var translate="no">DB_NAME</var> with the name of the database.</p> <p>To get the definition of an event, use the following example statement.</p> 
+<pre>SHOW CREATE EVENT DB_NAME.EVENT_NAME;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database</li> <li>
+<var translate="no">EVENT_NAME</var>: the name of the event</li> </ul> <p>If the event isn't using your intended character set or collation value, then you might need to <a href="#mysqldump-generate">drop and recreate</a> it with the new character set or collation. Check that the event is using the correct database collation mapping. For more information about checking database collation, see <a href="#collation-mapping">Check database collation mapping</a>.</p> <aside class="caution"><strong>Caution:</strong><span> Recreating events can cause events to miss their scheduled turn.</span></aside> <h3 id="check-functions">Check the configuration of your functions</h3> <p>To check the values for functions, use the following statement as an example.</p> 
+<pre>SHOW FUNCTION STATUS WHERE db = 'DB_NAME';</pre> <p>Replace <var translate="no">DB_NAME</var> with the name of the database.</p> <p>To get the definition of a function, use the following example statement.</p> 
+<pre>SHOW CREATE FUNCTION DB_NAME.FUNCTION_NAME;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the MySQL database</li> <li>
+<var translate="no">FUNCTION_NAME</var>: the name of the function</li> </ul> <p>If the function isn't using your intended character set or collation value, then you might need to <a href="#mysqldump-generate">drop and recreate</a> it with the new character set or collation. Check that the function is using the correct database collation mapping. For more information about checking database collation, see <a href="#collation-mapping">Check database collation mapping</a>.</p> <p>I character set or collation. Check that the function is using the correct database collation mapping. For more information about checking database collation, see <a href="#collation-mapping">Check database collation mapping</a>.</p> <h2 id="determine-level">Determine what level of updates to perform</h2> <p>After you have checked the character set and collation configuration of your database, you have a list of databases and possibly a list of database objects that you need to update.</p> <p>The number of tasks you'll need to perform depend on the type of the database objects that require configuration changes.</p> <ul> <li>
+<a href="#level1-db-only">Perform database-level updates</a>. You need to update MySQL metadata only.</li> <li>
+<a href="#level2-db-and-table">Perform database and table-level updates</a>. You need to update MySQL metadata only.</li> <li>
+<a href="#level3-db-table-columns">Perform database, table, and column-level updates</a>. You must update the metadata and rebuild tables and database objects. These updates can take the most amount of time; however, you can use one of the provided <a href="#example-scripts">example scripts</a> to update all of the tables and columns in a given database.</li> </ul> <h2 id="first-backup">Take a backup of the instance</h2> <aside class="special"><strong>Important:</strong><span> Do NOT skip this step.</span></aside> <p>Before you do any of these updates, take a backup of your instance. For more information, see <a href="backup-recovery/backing-up">Create an on-demand backup</a>. We recommend that you take the backup without any DDL operations running on the instance.</p> <h2 id="mysqldump-generate">Generate rebuild commands for the stored database objects in your database</h2> <p>If you need to drop and recreate any stored database objects in your databases with the new character set and collation, then use the <code translate="no" dir="ltr">mysqldump</code> tool to generate the commands now. After you update your database and table columns, you'll use the generated <code translate="no" dir="ltr">mysqldump</code> file to rebuild the stored database objects in your database. This command generates statements for all stored procedures, functions, triggers, and events.</p> <p>Run the following command so you can use the output to recreate all the stored procedures, functions, and events of a particular database later (when you <a href="#recreate-objects">recreate stored database objects</a>).</p> 
+<pre>$ mysqldump -uDBAuser -p -h IP_ADDRESS \
+   -P 3306 DB_NAME --no-data --no-create-db \
+   --no-create-info --routines --triggers --events \
+   --set-gtid-purged=OFF --events &gt; dump_objects.sql</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">IP_ADDRESS</var>: IP address of the Cloud SQL for MySQL instance</li> <li>
+<var translate="no">DB_NAME</var>: the name of the MySQL database</li> </ul> <h2 id="update-databases">Perform updates to your databases, and if necessary, tables and columns.</h2> <p>In this step, you update the character set and collation values of your databases. Also, you might need to rebuild your tables and columns.</p> <h3 id="level1-db-only">Perform database-level updates</h3> <p>If you are performing database-level updates only, then run the following statement to update your database:</p> 
+<pre>ALTER DATABASE DB_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the database</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the database</li> </ul> <h3 id="level2-db-and-table">Perform database and table-level updates</h3> <p>If you are performing database and table-level updates, then do the following:</p> <ol> <li>
+<p>Run the following statement to update your database:</p> 
+<pre>ALTER DATABASE DB_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the database</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the database</li> </ul>
+</li> <li>
+<p>For each table that you want to update, run the following statement:</p> 
+<pre>ALTER TABLE TABLE_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">TABLE_NAME</var>: the name of the table to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table</li> </ul>
+</li> </ol> <h3 id="level3-db-table-columns">Perform database, table, and column-level updates</h3> <p>At this level, you need to re-encode existing data to comply with the new character set and collation settings. If you are performing a database, table, and column-level updates, then do the following:</p> <ol> <li>
+<p>Before proceeding with updates to the table columns, review the following considerations:</p> <ul> <li>The <code translate="no" dir="ltr">ALTER TABLE</code> character set and collation conversion causes the table to rebuild and locks the table. As a result, any active query that tries to access the table is blocked.</li> <li>The <code translate="no" dir="ltr">ALTER TABLE</code> character set and collation conversion takes time because it fetches the complete table in memory. This operation might increase the latency of any workload running in parallel because the buffer pool pages are being used for the updated table.</li> <li>If there are queries accessing multiple tables and some of the tables are being updated while others are not yet updated, then the queries might produce inconsistent results during this transaction time.</li> <li>The process of running an <code translate="no" dir="ltr">ALTER TABLE</code> character set and collation conversion creates a shadow table, so plan disk usage accordingly.</li> <li>The <code translate="no" dir="ltr">ALTER TABLE</code> character set and collation conversion also causes any indexes on the table to rebuild.</li> <li>You don't need to update replica instances separately. <code translate="no" dir="ltr">ALTER</code>, <code translate="no" dir="ltr">DROP</code>, and <code translate="no" dir="ltr">CREATE</code> commands are replicated automatically. However, running DDL commands can cause replica lag time to increase during the operation.</li> <li>If you restore any of the databases from a backup taken from before you applied these updates, then you'll need to re-apply the updates.</li> </ul>
+</li> <li>
+<p>Check your table for any data tuples that might be incompatible with the new character set. If there are any incompatibilities, then you need to fix them before you update the character set. Otherwise, you'll encounter errors during the conversion process. You can use the following <code translate="no" dir="ltr">SELECT CONVERT</code> statement to validate your data with new character set.</p> 
+<pre>SELECT COLUMN_NAME,CONVERT(COLUMN_NAME USING NEW_CHARSET)
+FROM TABLE_NAME
+WHERE COLUMN_NAME != CONVERT(COLUMN_NAME USING NEW_CHARSET);</pre> <aside class="note"><strong>Note:</strong><span> If you have a very large dataset, then the <code translate="no" dir="ltr">SELECT CONVERT</code> query might take a longer time to run. For example, if you have a table <code translate="no" dir="ltr">t</code> with a char column <code translate="no" dir="ltr">c</code>, then you can run the following <code translate="no" dir="ltr">SELECT CONVERT</code> statement to check the data tuples before converting to the ASCII character set.</span></aside>
+<pre>SELECT c,CONVERT(c USING 'ascii')
+FROM t WHERE c != CONVERT(c USING ascii);
+</pre> <p>Example output:</p> 
+<pre>+------+--------------------------+
+| c    | convert(c using 'ascii') |
++------+--------------------------+
+| é    | ?                        |
+| é    | ?                        |
+| £    | ?                        |
++------+--------------------------+
+</pre> <p>In this example, since the output returns these three tuples, there are three inconsistent values that need to be fixed. Before moving to the next step, examine the output of your query, and fix the data until your query returns zero tuples for all the columns that need conversion. You can also combine multiple columns in the same <code translate="no" dir="ltr">SELECT</code> query.</p>
+</li> <li><p>Choose an option for updating the character set and collation for your tables at the column level.</p></li> <li>
+<p>If you want to update the character set for a very specific table column, then follow the steps in the Column-level tab where you only have to re-encode selected columns. Otherwise, follow the steps in the Table-level tab which re-encode the full table.</p> 
+<div id="table-column-updates" class="ds-selector-tabs" data-ds-scope="examples"> <section> <p class="_code-tab"><strong>Table-level</strong></p> <aside class="tip"><strong>Tip:</strong><span> If you have many tables, then you can also use the <a href="#option1-table-script">script to update multiple tables</a>.</span></aside> <ol> <li>
+<p>Run the following statement to update your database:</p> 
+<pre data-language="">ALTER DATABASE DB_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the database</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the database</li> </ul>
+</li> <li>
+<p>For each affected table, run the following statement to update your table:</p> 
+<pre data-language="">ALTER TABLE TABLE_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">TABLE_NAME</var>: the name of the table to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table</li> </ul>
+</li> <li>
+<p>Update at table level so that all columns that are part of the table are updated with the new character set and collation. This option rebuilds the table completely. To use this option, run the following statement:</p> 
+<pre data-language="">ALTER TABLE DB_NAME.TABLE_NAME
+CONVERT TO CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">TABLE_NAME</var>: the name of the table to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table</li> </ul> <aside class="note"><strong>Note:</strong><span> With this option, if MySQL can't fit the data in the new character set, then MySQL might change its data type. This change is unlikely, but we recommend that you check your tables after the conversion update.</span></aside>
+</li> </ol> </section> <section> <p class="_code-tab"><strong>Column-level</strong></p> <p>Update at the column level. This option also rebuilds the table completely. If multiple columns are updated, then this option can cause multiple rebuilds.</p> <aside class="note"><b>Tip</b>: If you have many columns, then you can also use the <a href="#option2-column-script">Script to update multiple columns in a table</a>.</aside> <p>To use this option, run the following statement:</p> <ol> <li> Run the following statement to update your database:</li> 
+<pre data-language="">ALTER DATABASE DB_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the database</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the database</li> </ul> <li> For each affected table, run the following statement to update your table:</li> 
+<pre data-language="">ALTER TABLE TABLE_NAME CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;
+ </pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">TABLE_NAME</var>: the name of the table to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table</li> </ul> <li>Run the following statement to update at the column level:</li> 
+<pre data-language="">ALTER TABLE DB_NAME.TABLE_NAME
+MODIFY COLUMN_DEFINITION CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;</pre> <aside class="note"><b>Note</b>: You must obtain the exact column definition. To obtain the exact column definition, use <code translate="no" dir="ltr">SHOW CREATE TABLE <var translate="no">TABLE_NAME</var></code>. </aside> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">TABLE_NAME</var>: the name of the table to update</li> <li>
+<var translate="no">COLUMN_DEFINITION</var>: specify an <i>exact column definition</i> that includes constraints. The column definition might carry the old character set and collation values. You must update the column definition with the new values.</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table column</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table column</li> </ul> <p>Repeat this statement for all string columns present in the table that need a character set or collation update.</p> </ol> </section> 
+</div>
+</li> </ol> <h2 id="validate-updates">Validate the updates and look for errors</h2> <p>During the <code translate="no" dir="ltr">ALTER TABLE</code> operation, look for any errors that indicate that existing data in the table isn't compatible with the new character set. For example:</p> 
+<pre>ERROR 1366 (HY000): Incorrect string value: '\xC3\xA9' for column 'c' at row 1
+</pre> <p>If you encounter any data compatibility errors, then we recommend that you check your tables again for any data compatibility errors and fix them before re-running the <code translate="no" dir="ltr">ALTER TABLE</code> statements to re-encode the data.</p> <p>In addition, during the <code translate="no" dir="ltr">ALTER TABLE</code> operation, the tables (the foreign key table and the referenced table), a foreign key check might fail while the column undergoes re-encoding. If this happens, then you can disable the foreign key check (<code translate="no" dir="ltr">SET FOREIGN_KEY_CHECKS=0;</code>) and run the update again.</p> <h2 id="recreate-objects">Recreate your stored database objects</h2> <p>After you have updated your database successfully, you can use the generated <code translate="no" dir="ltr">mysqldump</code> file to recreate the stored database objects with the character set and collation values.</p> <p>To recreate your stored database objects, do the following:</p> <ol> <li>Verify that the stored database objects are present on the database.</li> <li>Make sure that there's no parallel load that expects the stored database objects to be present during this drop and recreate time.</li> <li>
+<p>The <code translate="no" dir="ltr">mysqldump</code> file that you <a href="#mysqldump-generate">generated with the <code translate="no" dir="ltr">mysqldump</code> tool</a> doesn't include the statement for dropping triggers. If you need to drop triggers, then open a MySQL terminal to generate the <code translate="no" dir="ltr">DROP</code> statement for triggers.</p> 
+<pre>mysql&gt; SELECT CONCAT('DROP TRIGGER ', TRIGGER_NAME, ';') AS
+drop_trigger_statements FROM information_schema.TRIGGERS
+WHERE TRIGGER_SCHEMA = DB_NAME;</pre>
+</li> <li><p>Copy the output.</p></li> <li><p>Run the statement to drop the triggers for your database, either in a MySQL shell or in a script.</p></li> <li>
+<p>After you drop the triggers, apply the dump file that you <a href="#mysqldump-generate">generated with the <code translate="no" dir="ltr">mysqldump</code> tool</a>. To apply the dump file and recreate the objects, enter the following:</p> 
+<pre>$ mysql -uDBAuser -p -h IP_ADDRESS \
+  -P 3306 DB_NAME &lt; dump_objects.sql</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">IP_ADDRESS</var>: IP address of the Cloud SQL for MySQL instance</li> <li>
+<var translate="no">DB_NAME</var>: the name of the database</li> </ul>
+</li> </ol> <h2 id="post-backup">Take another backup of the instance</h2> <p>After you complete your updates, take another backup of your instance. For more information, see <a href="backup-recovery/backing-up">Create an on-demand backup</a>.</p> <h2 id="example-scripts">Example scripts</h2> <p>If you need to update <a href="#level3-db-table-columns">databases, tables, and columns</a>, then this section provides example scripts to help re-encode your data.</p> <aside class="tip"><strong>Tip:</strong><span> You can try testing the data conversion on a clone instance before re-encoding data in production.</span></aside> <h3 id="option1-table-script">Script to update multiple tables</h3> <p>The following script generates a statement for all the tables in the given database. The statement lets you re-encode existing data to comply with the new character set and collation settings.</p> 
+<pre>SELECT CONCAT("ALTER TABLE ",TABLE_SCHEMA,".",TABLE_NAME," CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;  ",
+"ALTER TABLE ",TABLE_SCHEMA,".",TABLE_NAME," CONVERT TO CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION; ")
+AS alter_sql FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'DB_NAME' AND TABLE_TYPE='BASE TABLE';</pre> 
+<p>Replace the following:</p> 
+<ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table</li> </ul> <p>Example output:</p> 
+<pre>+--------------------------------------------------------------------------------------------+
+|alter_sql
++--------------------------------------------------------------------------------------------+
+| ALTER TABLE test1.t1 CHARACTER SET &lt;new-charset&gt; COLLATE &lt;new-collation&gt;;
+  ALTER TABLE test1.t1 CONVERT TO CHARACTER SET &lt;new-charset&gt; COLLATE &lt;new-collation&gt;;       |
++--------------------------------------------------------------------------------------------+
+</pre> <h3 id="option2-column-script">Script to update multiple columns in a table</h3> <p>The following script generates a statement for all the columns in a given table. The statement lets you re-encode existing data to comply with the new character set and collation settings.</p> <ol> <li>
+<p>Generate <code translate="no" dir="ltr">ALTER TABLE</code> statements for all tables in the database</p> 
+<pre>SELECT CONCAT("ALTER TABLE ",TABLE_SCHEMA,".",TABLE_NAME," CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION;  ")
+AS alter_table_statements
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'DB_NAME' AND TABLE_TYPE='BASE TABLE';</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table</li> </ul> <p>Example output:</p> 
+<pre>+------------------------------------------------------------------------------+
+| alter_table_statements                                                       |
++------------------------------------------------------------------------------+
+| ALTER TABLE test1.t1 CHARACTER SET &lt;new-charset&gt; COLLATE &lt;new-collation&gt;;    |
++------------------------------------------------------------------------------+
+</pre>
+</li> <li>
+<p>For every table, generate <code translate="no" dir="ltr">ALTER TABLE MODIFY</code> commands.</p> 
+<pre>SELECT CONCAT( "ALTER TABLE ", table_name, " MODIFY ", column_name, 'COLUMN_DEFINITION' , " CHARACTER SET NEW_CHARSET COLLATE NEW_COLLATION ")
+AS alter_table_column_statements FROM information_schema.columns
+WHERE table_schema = 'DB_NAME' AND table_name = 'TABLE_NAME'
+AND data_type IN ('char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext','set','enum');</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DB_NAME</var>: the name of the database to update</li> <li>
+<var translate="no">TABLE_NAME</var>: the name of the table to update</li> <li>
+<var translate="no">COLUMN_DEFINITION</var>: after obtaining results from each query, replace with the column definition for each column (column definitions can differ across columns)</li> <li>
+<var translate="no">NEW_CHARSET</var>: the new character set to apply to the table column</li> <li>
+<var translate="no">NEW_COLLATION</var>: the new collation to apply to the table column</li> </ul> <p>Example output:</p> 
+<pre>+-------------------------------------------------------------------------------------------------------------------------------------+
+|alter_table_column_statements                                                                                                        |
++-------------------------------------------------------------------------------------------------------------------------------------+
+| ALTER TABLE t1 MODIFY c &lt;column-definition-replaced-after-obtaining-result-set&gt; CHARACTER SET &lt;new-charset&gt; COLLATE &lt;new-collation&gt;  |
++-------------------------------------------------------------------------------------------------------------------------------------+
+</pre>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li><a href="monitor-instance">Monitor Cloud SQL instances</a></li> <li><a href="logging">View instance logs</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/mysql/charset-collation" class="_attribution-link">https://docs.cloud.google.com/sql/docs/mysql/charset-collation</a>
+  </p>
+</div>

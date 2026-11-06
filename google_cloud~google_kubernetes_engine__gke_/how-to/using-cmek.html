@@ -1,0 +1,213 @@
+<h1>Use customer-managed encryption keys (CMEK)</h1>  <p>This page describes how to use Customer Managed Encryption Keys (CMEK) on Google Kubernetes Engine (GKE). If you need to control management of your keys, you can use <a href="https://docs.cloud.google.com/kms">Cloud Key Management Service</a> and CMEK to protect attached Persistent Disks and <a href="custom-boot-disks">custom boot disks</a> in your GKE cluster.</p> <h2 id="overview">Overview</h2> <p>By default, Google Cloud <a href="https://docs.cloud.google.com/docs/security/encryption/default-encryption" track-type="article" track-name="internalLink" track-metadata-position="body">encrypts customer content at rest</a>, and GKE manages encryption for you without any action on your part.</p> <p>If you want to control and manage encryption key rotation yourself, you can use CMEK. These keys encrypt the data encryption keys that encrypt your data. For more information, see <a href="https://docs.cloud.google.com/docs/security/encryption/default-encryption#key_management">Key management</a>.</p> <p>You can also encrypt secrets in your cluster using keys that you manage. For details, see <a href="encrypting-secrets">Application-layer secrets encryption</a>.</p> <p>In GKE, CMEK can protect data of two types of storage disks: node boot disks and attached disks.</p> <dl> <dt>Node boot disks</dt> <dd>Node boot disks are part of your cluster's node pools. You can create a CMEK-encrypted node boot disk when you create clusters and node pools.</dd> <dt>Attached disks</dt> <dd>Attached disks are PersistentVolumes used by Pods for durable storage. CMEK-encrypted attached persistent disks are available in GKE as a <a href="../concepts/persistent-volumes#dynamic_provisioning">dynamically provisioned PersistentVolume</a>.</dd> </dl> <p>To learn more about storage disks, see <a href="https://docs.cloud.google.com/compute/docs/disks">Storage options</a>. Control plane disks, used for GKE control planes, cannot be protected with CMEK.</p> <h2 id="before_you_begin">Before you begin</h2> <ol> <li>
+<p>To do the exercises in this topic, you need two Google Cloud projects:</p> <ul> <li><p><strong>Key project:</strong> This is where you create an encryption key.</p></li> <li><p><strong>Cluster project:</strong> This is where you create a cluster that enables CMEK.</p></li> </ul> <aside class="note"><strong>Note:</strong><span> You can use the same project for your key project and cluster project. But the recommended practice is to use <a href="https://docs.cloud.google.com/kms/docs/separation-of-duties">separate projects</a>.</span></aside>
+</li> <li>
+<p>In your key project, ensure that you have enabled the Cloud KMS API.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/apis/library/cloudkms.googleapis.com" target="console" track-name="consoleLink" track-type="tasks">Enable Cloud KMS API</a></p>
+</li> <li>
+<p>In your <strong>key project</strong>, the user who creates the key ring and key needs the following IAM permissions:</p> <ul> <li><code translate="no" dir="ltr">cloudkms.keyRings.getIamPolicy</code></li> <li><code translate="no" dir="ltr">cloudkms.keyRings.setIamPolicy</code></li> </ul> <p>These permissions are granted to the predefined <code translate="no" dir="ltr">roles/cloudkms.admin</code> <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.admin">Identity and Access Management role</a>. You can learn more about <a href="https://docs.cloud.google.com/kms/docs/iam">granting permissions to manage keys</a> in the Cloud KMS documentation.</p>
+</li> <li>
+<p>In your <strong>cluster project</strong>, ensure that you have enabled the Cloud KMS API.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/apis/library/cloudkms.googleapis.com" target="console" track-name="consoleLink" track-type="tasks">Enable Cloud KMS API</a></p>
+</li> <li><p>Ensure that you have installed the <a href="https://docs.cloud.google.com/sdk/downloads">gcloud CLI</a>.</p></li> <li>
+<p>Update <code translate="no" dir="ltr">gcloud</code> to the latest version:</p> 
+<pre>gcloud components update
+</pre>
+</li> </ol> <h2 id="create-key">Create a Cloud KMS key</h2> <p>Before you can protect your node boot disk or attached disk with a CMEK, you need a Cloud KMS <a href="https://docs.cloud.google.com/kms/docs/object-hierarchy">key ring and key</a>.</p> <p>Your key ring and key have the following requirements:</p> <ul> <li><p>Your key should use symmetric encryption.</p></li> <li><p>You need to <a href="#grant_permission">grant the GKE service account permissions</a> to use the key.</p></li> <li>
+<p>Your key ring must have a location that matches the location of your GKE cluster:</p> <ul> <li><p>A <a href="../concepts/types-of-clusters#zonal_clusters">zonal cluster</a> should use a key ring from a superset location. For example, a cluster in the <code translate="no" dir="ltr">us-central1-a</code> zone can only use a key in the <code translate="no" dir="ltr">us-central1</code> region.</p></li> <li><p>A <a href="../concepts/regional-clusters">regional cluster</a> should use a key ring from the same location. For example, a cluster in the <code translate="no" dir="ltr">asia-northeast1</code> region should be protected with a key ring from the <code translate="no" dir="ltr">asia-northeast1</code> region.</p></li> <li><p>The Cloud KMS <code translate="no" dir="ltr">global</code> region is not supported for use with GKE.</p></li> </ul>
+</li> </ul> <p>For instructions on how to create a key ring and key, see <a href="https://docs.cloud.google.com/kms/docs/creating-keys">Creating symmetric keys</a>.</p> <h3 id="grant_permission">Grant permission to use the key</h3> <p>You must grant the <a href="https://docs.cloud.google.com/kms/docs/reference/permissions-and-roles#cloudkms.cryptoKeyEncrypterDecrypter">Cloud KMS CryptoKey Encrypter/Decrypter</a> (<code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypter</code>) IAM role on the Cloud KMS key to the <a href="https://docs.cloud.google.com/iam/docs/service-agents#compute-engine-service-agent">Compute Engine service agent</a> in your cluster project. Granting this role allows GKE Persistent Disks to access and use your encryption key.</p> <aside class="note"><strong>Note:</strong><span> For <a href="#update_a_cluster_with_cmek-protected_node_boot_disks">CMEK-protected node boot disks</a> and <a href="#create_a_cmek_protected_attached_disk">CMEK-protected attached disks</a>, this Compute Engine service agent requires the <code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypter</code> role even if you use a custom IAM service account on your nodes.</span></aside> <p>To grant the <code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypter</code> role to the Compute Engine service agent, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Run the following command:</p> 
+<pre data-language="bash">gcloud kms keys add-iam-policy-binding KEY_NAME \
+    --location LOCATION \
+    --keyring RING_NAME \
+    --member serviceAccount:service-PROJECT_NUMBER@compute-system.iam.gserviceaccount.com \
+    --role roles/cloudkms.cryptoKeyEncrypterDecrypter \
+    --project KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_NAME</var></code>: the name of your key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region where you created your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RING_NAME</var></code>: the name of your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your cluster's project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: your key project ID.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>In the Google Cloud console, go to the <b>Key management</b> page. <p><a class="button button-primary" href="https://console.cloud.google.com/security/kms" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="security/kms">Go to Key management</a> </p>
+</li> <li><p>Click the name of the key ring that contains the key.</p></li> <li><p>Click the name of the key that you want to modify.</p></li> <li><p>Click the <strong>Permissions</strong> tab.</p></li> <li><p>Click <span class="material-icons" aria-hidden="true" translate="no">person_add</span> <strong>Grant access</strong>. The <strong>Grant access to key</strong> pane opens.</p></li> <li>
+<p>In the <strong>New principals</strong> field, enter the name of the Compute Engine service agent:</p> 
+<pre data-language="bash">service-PROJECT_NUMBER@compute-system.iam.gserviceaccount.com
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> with your cluster's project number.</p>
+</li> <li><p>In the <strong>Select a role</strong> menu, select <strong>Cloud KMS CryptoKey Encrypter/Decrypter</strong>.</p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol></section> </div> <h2 id="boot-disks">Use CMEK-protected node boot disks</h2> <p>In this section, you create a new cluster or node pool with a CMEK protected boot disk.</p> <p>You cannot enable customer-managed encryption for node boot disks on an existing cluster, as you cannot change the boot disk type of an existing cluster or node pool. However, you can create a new node pool for your cluster with customer- managed encryption enabled, and delete the previous node pool.</p> <p>You also cannot disable customer-managed encryption for node boot disks on an existing cluster or an existing node pool. However, you can create a new node pool for your cluster with customer-managed encryption disabled, and delete the previous node pool.</p> <h3 id="create_a_cluster_with_a_cmek-protected_node_boot_disk">Create a cluster with a CMEK-protected node boot disk</h3> <p>You can create a cluster with a CMEK-protected node boot disk using the gcloud CLI or the Google Cloud console.</p> <p>For Standard clusters, only a standard persistent disk (<code translate="no" dir="ltr">pd-standard</code>) or an SSD persistent disk (<code translate="no" dir="ltr">pd-ssd</code>) can be encrypted with a CMEK key.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To create a cluster whose boot disk is encrypted with a CMEK key, specify a value for the <code translate="no" dir="ltr">--boot-disk-kms-key</code> parameter in your cluster creation command.</p> <p><strong>Create a Standard cluster</strong></p> <p>To create a Standard cluster whose boot disk is encrypted with a CMEK key, use the following command:</p> 
+<pre data-language="bash">gcloud container clusters create CLUSTER_NAME \
+    --cluster-version=latest \
+    --location CONTROL_PLANE_LOCATION \
+    --boot-disk-kms-key projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME \
+    --project CLUSTER_PROJECT_ID \
+    --disk-type DISK_TYPE
+</pre> <p><strong>Create an Autopilot cluster</strong></p> <p>To create an Autopilot cluster whose boot disk is encrypted with a CMEK key, use the following command:</p> 
+<pre data-language="bash">gcloud container clusters create-auto CLUSTER_NAME \
+    --cluster-version=latest \
+    --location CONTROL_PLANE_LOCATION \
+    --boot-disk-kms-key projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME \
+    --project CLUSTER_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name for your new cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster. Provide a region for regional Standard and Autopilotclusters, or a zone for zonal Standard clusters.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: your key project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RING_NAME</var></code>: the name of your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_NAME</var></code>: the name of your key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code> is your cluster project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISK_TYPE</var></code>: <code translate="no" dir="ltr">pd-standard</code> (default) or <code translate="no" dir="ltr">pd-ssd</code>.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<p><strong>Create a Standard cluster</strong></p> <p>To create a Standard cluster whose boot disk is encrypted with a CMEK key, perform the following steps:</p> <ol> <li> In the Google Cloud console, go to the <b>Create a Kubernetes cluster</b> page. <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/add" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="kubernetes/add">Go to Create a Kubernetes cluster</a> </p> </li> <li>Configure your cluster as desired.</li> <li>From the navigation pane, under <strong>Node Pools</strong>, click <strong>Nodes</strong>.</li> <li>In the <strong>Boot disk type</strong> drop-down list, select <strong>Standard persistent disk</strong> or <strong>SSD Persistent Disk</strong>.</li> <li>Select the <strong>Enable customer-managed encryption for Boot Disk</strong> checkbox and choose the Cloud KMS encryption key you created earlier.</li> <li>Click <strong>Create</strong>.</li> </ol> <p><strong>Create an Autopilot cluster</strong></p> <p>To create an Autopilot cluster whose boot disk is encrypted with a CMEK key, perform the following steps:</p> <ol> <li> In the Google Cloud console, go to the <b>Create an Autopilot cluster</b> page. <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/auto/add" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="kubernetes/auto/add">Go to Create an Autopilot cluster</a> </p> </li> <li>Configure your cluster as desired.</li> <li>Expand the <strong>Advanced Options</strong> section and locate the <strong>Security</strong> options.</li> <li>Select the <strong>Enable customer-managed encryption for Boot Disk</strong> checkbox and choose the Cloud KMS encryption key you created earlier.</li> <li>Click <strong>Create</strong>.</li> </ol></section> </div> <h3 id="update_a_cluster_with_cmek-protected_node_boot_disks">Create a new node pool with CMEK-protected node boot disks</h3> <aside class="note"><strong>Note:</strong><span> This section applies only to Standard clusters. Nodes and node pools in Autopilot clusters are fully-managed by Google.</span></aside> <p>To create a new node pool with CMEK enabled on an existing standard cluster, you can use the gcloud CLI or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To create a node pool with customer-managed encryption for node boot disks, specify a value for the <code translate="no" dir="ltr">--boot-disk-kms-key</code> parameter in your creation command.</p> 
+<pre data-language="bash">gcloud container node-pools create NODE_POOL_NAME \
+    --location CONTROL_PLANE_LOCATION \
+    --disk-type DISK_TYPE \
+    --boot-disk-kms-key projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME \
+    --project CLUSTER_PROJECT_ID \
+    --cluster CLUSTER_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name you choose for your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster. Provide a region for regional clusters, or a zone for zonal clusters.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISK_TYPE</var></code>: <code translate="no" dir="ltr">pd-standard</code> (default) or <code translate="no" dir="ltr">pd-ssd</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>:your key project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RING_NAME</var></code>: the name of your key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_NAME</var></code>: the name of your key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: your cluster project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the Standard cluster you created in the previous step.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>In the cluster list, click the name of the cluster you want to modify.</p></li> <li><p>Click the <strong>Nodes</strong> tab.</p></li> <li><p>Click <strong>Create user-managed node pool</strong>.</p></li> <li><p>From the navigation pane, click <strong>Nodes</strong>.</p></li> <li><p>In the <strong>Machine Configuration</strong> section, ensure <strong>Boot disk type</strong> is either <strong>Standard persistent disk</strong> or <strong>SSD persistent disk</strong>.</p></li> <li><p>Select the <strong>Enable customer-managed encryption for boot disk</strong> checkbox and select the Cloud KMS encryption key you created.</p></li> <li><p>Click <strong>Create</strong>.</p></li> </ol></section> </div> <h2 id="create_a_cmek_protected_attached_disk">Use CMEK-protected Filestore instances or Persistent Disks</h2> <p>The following information covers how to encrypt newly created Filestore instances or Persistent Disks. You can enable CMEK on a new or existing cluster, using a new or existing Cloud KMS key.</p> <p>These instructions need to be completed once per GKE cluster:</p> <ul> <li>Create a GKE cluster, if you don't already have one available.</li> <li>Deploy the <a href="persistent-volumes/filestore-csi-driver">Filestore CSI Driver</a> or <a href="gce-pd-csi-driver">Compute Engine Persistent Disk CSI Driver</a> to your cluster.</li> <li>Create a Cloud KMS <a href="https://docs.cloud.google.com/kms/docs/object-hierarchy">key ring and key version</a>, if you don't already have one available.</li> <li>
+<a href="https://docs.cloud.google.com/filestore/docs/cmek#grant_key_access_permission_to_the_service_account">Grant key access permissions to the Filestore service account</a>.</li> <li>Create a <a href="../concepts/persistent-volumes#storageclasses">StorageClass</a> that enables disks provisioned by Kubernetes to automatically be encrypted with that Cloud KMS key. For details on how to do this, see the following section.</li> </ul> <aside class="note"><strong>Note:</strong><span> For CMEK encryption of Filestore instances, your cluster must run GKE 1.21 or higher. CMEK encryption of Filestore instances is only supported for the <a href="https://docs.cloud.google.com/filestore/docs/cmek#supported_tiers">Enterprise and High Scale SSD (preview) tiers</a>.</span></aside><aside class="caution"><strong>Caution:</strong><span> CMEK encryption on Filestore instances cannot be removed.</span></aside> <h3 id="storage-key">Create a StorageClass referencing the Cloud KMS key</h3> <ol> <li>
+<p>Copy the content below into a YAML file named <code translate="no" dir="ltr">cmek-sc.yaml</code>. This configuration enables dynamic provisioning of encrypted volumes.</p> <div> <section><p class="_code-tab"><strong>Filestore instances</strong></p>
+
+<pre data-language="">apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-filestore-cmek
+provisioner: filestore.csi.storage.gke.io
+allowVolumeExpansion: true
+parameters:
+  tier: enterprise
+  instance-encryption-kms-key: projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME
+</pre> <ul> <li>The <code translate="no" dir="ltr">instance-encryption-kms-key</code> field must be the <a href="https://docs.cloud.google.com/kms/docs/object-hierarchy#key">fully qualified resource identifier</a> for the key that will be used to encrypt new Filestore instances.</li> <li>The values in <code translate="no" dir="ltr">instance-encryption-kms-key</code> are case sensitive (for example: <code translate="no" dir="ltr">keyRings</code> and <code translate="no" dir="ltr">cryptoKeys</code>). Provisioning a new volume with incorrect values results in an <code translate="no" dir="ltr">invalidResourceUsage</code> error.</li> <li>You cannot add the <code translate="no" dir="ltr">instance-encryption-kms-key</code> parameter to an existing <code translate="no" dir="ltr">StorageClass</code> object. However, you can delete the <code translate="no" dir="ltr">StorageClass</code> object and recreate it with the same name, but a different set of parameters.</li> </ul></section> <section><p class="_code-tab"><strong>Persistent Disks</strong></p>
+
+<pre data-language="">apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-gce-pd-cmek
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: "WaitForFirstConsumer"
+allowVolumeExpansion: true
+parameters:
+  type: pd-standard
+  disk-encryption-kms-key: projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME
+</pre> <ul> <li>The <code translate="no" dir="ltr">disk-encryption-kms-key</code> field must be the <a href="https://docs.cloud.google.com/kms/docs/object-hierarchy#key">fully qualified resource identifier</a> for the key that will be used to encrypt new disks.</li> <li>The values in <code translate="no" dir="ltr">disk-encryption-kms-key</code> are case sensitive (for example: <code translate="no" dir="ltr">keyRings</code> and <code translate="no" dir="ltr">cryptoKeys</code>). Provisioning a new volume with incorrect values results in an <code translate="no" dir="ltr">invalidResourceUsage</code> error.</li> <li>You cannot add the <code translate="no" dir="ltr">disk-encryption-kms-key</code> parameter to an existing <code translate="no" dir="ltr">StorageClass</code> object. However, you can delete the <code translate="no" dir="ltr">StorageClass</code> object and recreate it with the same name, but a different set of parameters. Make sure the provisioner of the existing class is <code translate="no" dir="ltr">pd.csi.storage.gke.io</code>.</li> </ul></section> </div> <p>You can set the <a href="https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/" target="external" track-type="article" track-name="externalLink" track-metadata-position="body">StorageClass as the default</a>.</p>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">StorageClass</code> on your GKE cluster using <a href="../deploy-app-cluster#choosing_a_shell"><code translate="no" dir="ltr">kubectl</code></a>:</p> 
+<pre>kubectl apply -f cmek-sc.yaml
+</pre>
+</li> <li>
+<p>Verify that your <code translate="no" dir="ltr">StorageClass</code> used the Compute Engine Filestore or Persistent Disk CSI driver and includes the ID of your key:</p> <div> <section><p class="_code-tab"><strong>Filestore instances</strong></p>
+
+<pre data-language="">kubectl describe storageclass csi-filestore-cmek
+</pre> <p>In the output of the command, verify the following:</p> <ul> <li>The provisioner is set as filestore.csi.storage.gke.io.</li> <li>The ID of your key follows instance-encryption-kms-key.</li> </ul> 
+<pre data-language="">Name:                  csi-filestore-cmek
+IsDefaultClass:        No
+Annotations:           None
+Provisioner:           filestore.csi.storage.gke.io
+Parameters:            instance-encryption-kms-key=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME,type=pd-standard
+AllowVolumeExpansion:  true
+MountOptions:          none
+ReclaimPolicy:         Delete
+VolumeBindingMode:     WaitForFirstConsumer
+Events:                none
+</pre></section> <section><p class="_code-tab"><strong>Persistent Disks</strong></p>
+
+<pre data-language="">kubectl describe storageclass csi-gce-pd-cmek
+</pre> <p>In the output of the command, verify the following:</p> <ul> <li>The provisioner is set as <code translate="no" dir="ltr">pd.csi.storage.gke.io</code>.</li> <li>The ID of your key follows <code translate="no" dir="ltr">disk-encryption-kms-key</code>.</li> </ul> 
+<pre data-language="">Name:                  csi-gce-pd-cmek
+IsDefaultClass:        No
+Annotations:           None
+Provisioner:           pd.csi.storage.gke.io
+Parameters:            disk-encryption-kms-key=projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/RING_NAME/cryptoKeys/KEY_NAME,type=pd-standard
+AllowVolumeExpansion:  unset
+MountOptions:          none
+ReclaimPolicy:         Delete
+VolumeBindingMode:     WaitForFirstConsumer
+Events:                none
+</pre></section> </div>
+</li> </ol> <h3 id="create_an_encrypted_in">Create an encrypted storage volume in GKE</h3> <p>In this section, you dynamically provision encrypted Kubernetes storage volumes with your new <code translate="no" dir="ltr">StorageClass</code> and Cloud KMS key.</p> <ol> <li>
+<p>Copy the following contents into a new file named <code translate="no" dir="ltr">pvc.yaml</code>, and make sure the value for <code translate="no" dir="ltr">storageClassName</code> matches the name of your <code translate="no" dir="ltr">StorageClass</code> object:</p> <div> <section><p class="_code-tab"><strong>Filestore instances</strong></p>
+
+<pre data-language="">kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: podpvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: csi-filestore-cmek
+  resources:
+    requests:
+      storage: 1Ti
+</pre></section> <section><p class="_code-tab"><strong>Persistent Disks</strong></p>
+
+<pre data-language="">kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: podpvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: csi-gce-pd-cmek
+  resources:
+    requests:
+      storage: 6Gi
+</pre></section> </div>
+<aside class="note"><strong>Note:</strong><span> If you marked the new <code translate="no" dir="ltr">StorageClass</code> as default, then you can omit the <code translate="no" dir="ltr">storageClassName</code> field.</span></aside>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">PersistentVolumeClaim</code> (PVC) on your GKE cluster:</p> 
+<pre>kubectl apply -f pvc.yaml
+</pre>
+</li> <li>
+<p>If your <code translate="no" dir="ltr">StorageClass</code> has the <code translate="no" dir="ltr">volumeBindingMode</code> field set to <code translate="no" dir="ltr">WaitForFirstConsumer</code>, you must create a Pod to use the PVC before you can verify it. Copy the following contents into a new file named <code translate="no" dir="ltr">pod.yaml</code>, and make sure the value for <code translate="no" dir="ltr">claimName</code> matches the name of your <code translate="no" dir="ltr">PersistentVolumeClaim</code> object:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: web-server
+spec:
+  containers:
+   - name: web-server
+     image: nginx
+     volumeMounts:
+       - mountPath: /var/lib/www/html
+         name: mypvc
+  volumes:
+   - name: mypvc
+     persistentVolumeClaim:
+       claimName: podpvc
+       readOnly: false
+</pre>
+</li> <li>
+<p>Apply the Pod on your GKE cluster:</p> 
+<pre>kubectl apply -f pod.yaml
+</pre>
+</li> <li>
+<p>Get the status of your cluster's <code translate="no" dir="ltr">PersistentVolumeClaim</code> and verify that the PVC is created and bound to a newly provisioned <code translate="no" dir="ltr">PersistentVolume</code>.</p> <div> <section><p class="_code-tab"><strong>Filestore instances</strong></p>
+
+<pre data-language="">kubectl get pvc
+</pre> <p>The output is similar to the following:</p> 
+<pre data-language="">NAME      STATUS    VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS     AGE
+podpvc    Bound     pvc-e36abf50-84f3-11e8-8538-42010a800002   1Ti        RWO            csi-filestore-cmek  9s
+</pre>
+<aside class="note"><strong>Note:</strong><span> The provisioning of PVCs using <a href="https://docs.cloud.google.com/filestore/docs/service-tiers#enterprise_tier">Enterprise tier</a> Filestore instances might take 20 to 30 minutes to complete.</span></aside></section> <section><p class="_code-tab"><strong>Persistent Disks</strong></p>
+
+<pre data-language="">kubectl get pvc
+</pre> <p>The output is similar to the following:</p> 
+<pre data-language="">NAME      STATUS    VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS     AGE
+podpvc    Bound     pvc-e36abf50-84f3-11e8-8538-42010a800002   6Gi       RWO            csi-gce-pd-cmek  9s
+</pre></section> </div>
+</li> </ol> <p>You can now use your CMEK-protected Persistent Disk with your GKE cluster.</p> <h3 id="removing_cmek_protection_from_a">Remove CMEK protection</h3> <p>When you encrypt a Persistent Disk by using a Cloud KMS key, the encryption is permanent. You can't remove the encryption key from that specific disk, even if you delete or disable the Cloud KMS key. The only way to change the encryption key or to remove CMEK protection from a Persistent Disk is to create a new Persistent Disk based on a snapshot of the existing disk. For more information, see <a href="https://docs.cloud.google.com/compute/docs/disks/customer-managed-encryption#remove_encryption">Remove your Cloud KMS encryption key from a Persistent Disk</a>.</p> <p>CMEK encryption cannot be removed from Filestore instances.</p> <h2 id="cmek-org-policy">GKE and CMEK organization policies</h2> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>GKE supports <a href="https://docs.cloud.google.com/kms/docs/cmek-org-policy">CMEK organization policies</a> (Preview) that can require CMEK protection and can limit which Cloud KMS keys you can use for CMEK protection.</p> <p>When <code translate="no" dir="ltr">container.googleapis.com</code> is in the <code translate="no" dir="ltr">Deny</code> policy list of services for the <code translate="no" dir="ltr">constraints/gcp.restrictNonCmekServices</code> constraint, GKE refuses to create the following resources if you don't enable CMEK protection:</p> <ul> <li>New clusters and node pools</li> <li>New Filestore instances and Persistent Disks</li> </ul> <p>When the <code translate="no" dir="ltr">constraints/gcp.restrictNonCmekCryptoKeyProjects</code> constraint is configured in an organization policy, GKE only creates CMEK-protected resources that use an encryption key from an allowed project, folder, or organization.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="https://docs.cloud.google.com/compute/docs/disks/customer-managed-encryption">protecting resources with Cloud KMS Keys</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/using-cmek" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/using-cmek</a>
+  </p>
+</div>

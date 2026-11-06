@@ -1,0 +1,439 @@
+<h1>Deploying Microsoft SharePoint Server on Compute Engine</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <p>This tutorial describes how you can deploy Microsoft SharePoint Server on Compute Engine. The guide applies to Microsoft SharePoint Server 2016 and Microsoft SharePoint Server 2019.</p> <p>The SharePoint deployment will use six servers across two zones. This setup corresponds to the <a href="https://docs.microsoft.com/en-us/sharepoint/install/planning-for-a-minrole-server-deployment-in-sharepoint-server" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Medium High Availability (Search optimized)</a> MinRole farm topology.</p> <p>The following diagram illustrates the deployment:</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/sharepoint-architecture.svg" alt="Deployment of Microsoft Exchange"></p> <p>The article assumes that you have already deployed Active Directory and SQL Server on <a href="https://docs.cloud.google.com/">Google Cloud</a> and that you have basic knowledge of SharePoint Server, Active Directory, and Compute Engine.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Prepare a project for the deployment of SharePoint Server.</li> <li>
+<p>Deploy a <a href="https://docs.microsoft.com/en-us/sharepoint/install/overview-of-minrole-server-roles-in-sharepoint-server" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">MinRole SharePoint farm</a> that uses six servers:</p> <ul> <li>Two frontend with servers with distributed cache</li> <li>Two application servers</li> <li>Two search servers</li> </ul>
+</li> <li><p>Configure load balancing and firewall rules</p></li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p>This tutorial uses billable components of Google Cloud, including:</p> <ul> <li>
+<a href="https://cloud.google.com/compute/vm-instance-pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Compute Engine</a> </li> <li>
+<a href="https://docs.cloud.google.com/vpc/network-pricing#lb" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Load Balancing</a> </li> </ul> <p>Use the <a href="https://cloud.google.com/products/calculator/" track-type="tutorial" track-name="pricingCalculator" track-metadata-position="body">Pricing Calculator</a> to generate a cost estimate based on your projected usage.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>To complete this guide, you need the following:</p> <ul> <li>An existing Active Directory domain with at least one domain controller. You can use either <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/overview">Managed Service for Microsoft Active Directory</a> or a self-managed Active Directory domain.</li> <li>An administrative Active Directory that has permission to join computers, create user accounts, and add DNS records.</li> <li>A Google Cloud project and VPC with connectivity to your Active Directory domain controllers.</li> <li>A SQL Server instance that is joined to the Active Directory domain and can be used for SharePoint. For further details on how to set up a highly available SQL Server deployment on Google Cloud, see <a href="https://docs.cloud.google.com/solutions/deploy-multi-subnet-sql-server">Deploying a Multi-Subnet SQL Server Always-On Availability Group</a>.</li> <li>A subnet for the SharePoint VM instances. The subnet must span at least two zones.</li> </ul> <aside class="note"><strong>Note:</strong><span> If you use a self-managed Active Directory domain, make sure you have a private DNS forwarding zone set up that <a href="best-practices#use_cloud_dns_private_forwarding_zones">forwards DNS queries to your domain controllers</a>.</span></aside> <p>Before you begin the deployment, review the <a href="https://docs.microsoft.com/en-us/sharepoint/install/system-requirements-for-sharepoint-server-2016" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">system requirements for SharePoint Server 2016 and 2019.</a>.</p> <ol> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </ol> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <div id="tutorial-content"> <h2 id="preparing_the_project_and_network">Preparing the project and network</h2> <p>To prepare your Google Cloud project and VPC for the deployment of SharePoint Server, do the following:</p> <ol> <li>
+<p>Switch to your project in the Google Cloud console and open Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Open Cloud Shell</a> </p>
+</li> <li>
+<p>Initialize the following variables:</p> 
+<pre>
+VPC_NAME=VPC_NAME
+SUBNET_NAME=SUBNET_NAME
+SUBNET_REGION=SUBNET_REGION
+SUBNET_ZONE_1=$SUBNET_REGION-a
+SUBNET_ZONE_2=$SUBNET_REGION-b
+</pre> <p>Where:</p> <ul> <li>
+<var translate="no">VPC_NAME</var> is the name of your VPC.</li> <li>
+<var translate="no">SUBNET_NAME</var> is the name of your subnet.</li> <li>
+<var translate="no">SUBNET_REGION</var> is the region of your subnet.</li> </ul>
+</li> <li>
+<p>Set your default <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project ID</a>:</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of your Google Cloud project.</p>
+</li> </ol> <h3 id="creating_firewall_rules">Creating firewall rules</h3> <p>To enable communication between the servers of your SharePoint farm, you need to create several firewall rules. To simplify the creation of these firewall rules, you use <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">network tags</a>:</p> <ul> <li>Frontend servers are annotated with the <code translate="no" dir="ltr">sharepoint-frontend</code> tag.</li> <li>Application servers are annotated with the <code translate="no" dir="ltr">sharepoint-application</code> tag.</li> <li>Search servers are annotated with the <code translate="no" dir="ltr">sharepoint-search</code> tag.</li> <li>All servers are also annotated with the <code translate="no" dir="ltr">sharepoint</code>tag.</li> </ul> <p>Create firewall rules that use these network tags and permit communication over the <a href="https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/security-hardening" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">ports that SharePoint requires</a>:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create firewall rules for the SharePoint servers:</p> 
+<pre>
+gcloud compute firewall-rules create allow-http-between-sharepoint-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:80,tcp:443,tcp:32843,tcp:32844 \
+  --enable-logging \
+  --source-tags=sharepoint \
+  --target-tags=sharepoint \
+  --network=$VPC_NAME \
+  --priority=10000
+
+gcloud compute firewall-rules create allow-search-between-sharepoint-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:16500-16519 \
+  --enable-logging \
+  --source-tags=sharepoint \
+  --target-tags=sharepoint \
+  --network=$VPC_NAME \
+  --priority=10000
+
+gcloud compute firewall-rules create allow-rpc-between-sharepoint-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:135,tcp:49152-65535 \
+  --enable-logging \
+  --source-tags=sharepoint \
+  --target-tags=sharepoint \
+  --network=$VPC_NAME \
+  --priority=10000
+
+gcloud compute firewall-rules create allow-wcf-between-sharepoint-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:808 \
+  --enable-logging \
+  --source-tags=sharepoint \
+  --target-tags=sharepoint \
+  --network=$VPC_NAME \
+  --priority=10000
+
+gcloud compute firewall-rules create allow-appfabric-from-sharepoint-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:22233-22236 \
+  --enable-logging \
+  --source-tags=sharepoint \
+  --target-tags=sharepoint-frontend \
+  --network=$VPC_NAME \
+  --priority=10000
+</pre>
+</li> <li>
+<p>Create a firewall rule that permits all servers to connect to the SQL Server instances. If your SQL Server instances use a network tag <code translate="no" dir="ltr">sql-server</code>, you can use the following command to create a firewall rule:</p> 
+<pre>
+gcloud compute firewall-rules create allow-sql-from-sharepoint-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:1433 \
+  --enable-logging \
+  --source-tags=sharepoint \
+  --target-tags=sql-server \
+  --network=$VPC_NAME \
+  --priority=10000
+</pre> <p>See <a href="https://docs.cloud.google.com/vpc/docs/using-firewalls#creating_firewall_rules">Creating firewall rules</a> for alternative ways to create a firewall rule if your SQL Server instance does not use a network tag.</p>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> Depending on how you've deployed Active Directory, you might need to create additional firewall rules to allow SharePoint servers to join the domain. See <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/firewalls#accessing_from_within_your_vpc">Accessing Managed Microsoft AD from within your VPC</a> for further details.</span></aside> <p>Your project and VPC are now ready for the deployment of SharePoint.</p> <h3 id="creating_an_installation_disk">Creating an installation disk</h3> <p>Your next step is to create a disk that contains the SharePoint Server installation media. By creating a disk that you can attach to multiple VM instances, you avoid having to download the installation media to each VM instance individually.</p> <ol> <li>
+<p>Follow the instructions in <a href="../../images/creating-an-image-from-an-iso-file">Creating an image from an ISO file</a>. Use the following URL as the download URL:</p> <div> <section><p class="_code-tab"><strong>SharePoint Server 2016</strong></p>
+
+<pre data-language="">
+https://download.microsoft.com/download/0/0/4/004EE264-7043-45BF-99E3-3F74ECAE13E5/officeserver.img
+</pre></section> <section><p class="_code-tab"><strong>SharePoint Server 2019</strong></p>
+
+<pre data-language="">
+https://download.microsoft.com/download/C/B/A/CBA01793-1C8A-4671-BE0D-38C9E5BBD0E9/officeserver.img
+</pre></section> </div>
+</li> <li>
+<p>Use the new image to create a disk in the first zone:</p> 
+<pre>
+gcloud compute disks create sharepoint-media-1 \
+  --zone=$SUBNET_ZONE_1 \
+  --image-project=$GOOGLE_CLOUD_PROJECT \
+  --image=IMAGE
+</pre> <p>Replace <var translate="no">IMAGE</var> with the name of the image that you created in the previous step.</p>
+</li> <li>
+<p>Create a disk in the second zone:</p> 
+<pre>
+gcloud compute disks create sharepoint-media-2 \
+  --zone=$SUBNET_ZONE_2 \
+  --image-project=$GOOGLE_CLOUD_PROJECT \
+  --image=IMAGE
+</pre> <p>Replace <var translate="no">IMAGE</var> with the name of the image that you created in the first step.</p>
+</li> </ol> <h3 id="creating_a_sharepoint_image">Creating a SharePoint image</h3> <p>To avoid the repetitive task of installing SharePoint components on all servers individually, you now create a custom <a href="../../images">VM image</a>. You later use this VM image as a <a href="https://docs.microsoft.com/en-us/sharepoint/install/deploy-sharepoint-virtual-machines#virtual-machine-templates" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">virtual machine template</a> to deploy the SharePoint servers.</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a <a href="../../startupscript#providing_a_startup_script_for_windows_instances">specialize script</a> for the VM instance. The script will run during VM initialization and install the <a href="https://docs.microsoft.com/en-us/sharepoint/install/prerequisites-2019" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">SharePoint prerequisites</a>:</p> 
+<pre>
+cat &lt;&lt; "EOF" &gt; specialize.ps1
+$ErrorActionPreference = "stop"
+
+# Allow HTTP/HTTPS redirects so that the prerequisite installer can run
+Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name WarnonZoneCrossing -Value 0 -Type DWord
+
+# Install prerequisites
+&amp; d:\prerequisiteinstaller.exe /unattended | Out-Default
+
+# Install logging agent
+(New-Object Net.WebClient).DownloadFile(
+    "https://dl.google.com/cloudagents/windows/StackdriverLogging-v1-10.exe",
+    "$env:Temp\StackdriverLogging-v1-10.exe")
+&amp; $env:Temp\StackdriverLogging-v1-10.exe /S | Out-Default
+
+# Disable Windows firewall (because VPC firewall rules are used instead)
+&amp; netsh advfirewall set allprofiles state off | Out-Default
+EOF
+</pre>
+</li> <li>
+<p>Create the VM instance and assign <code translate="no" dir="ltr">specialize.ps1</code> for the specialize script value. Attach the SharePoint installation disk in read-only mode so that you can launch the SharePoint installer from this disk:</p> 
+<pre>
+gcloud compute instances create sp-template \
+  --image-family=windows-2019 \
+  --image-project=windows-cloud \
+  --machine-type=n1-standard-2 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --zone=$SUBNET_ZONE_1 \
+  --tags=sharepoint \
+  --disk=name=sharepoint-media-1,auto-delete=no,mode=ro \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize.ps1
+ </pre>
+</li> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output sp-template --zone=$SUBNET_ZONE_1
+</pre> <p>Wait about 10 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the installation of prerequisites is complete and the VM instance is ready to be used.</p>
+</li> <li><p><a href="creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance</p></li> <li><p><a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using the username and password created in the previous step.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</p></li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>Start the SharePoint installer:</p> 
+<pre>
+&amp; d:\setup.exe
+</pre>
+</li> <li>
+<p>Follow the instructions of the wizard. When you're prompted for a product key, use the <strong>Enterprise trial product key</strong> that's listed under <strong>Install Instructions</strong> on the Sharepoint download page, or use a key that you already have.</p> <ul> <li>
+<a href="https://www.microsoft.com/en-us/download/details.aspx" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">SharePoint Server 2016 download page</a> </li> <li>
+<a href="https://www.microsoft.com/en-us/download/details.aspx" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">SharePoint Server 2019 download page</a> </li> </ul>
+</li> <li>
+<p>When the installation is finished, click <strong>Close</strong>.</p> <aside class="note"><strong>Note:</strong><span> Don't run the SharePoint Products Configuration wizard, and don't reboot the server yet.</span></aside>
+</li> <li>
+<p>In PowerShell, download and install Chrome:</p> 
+<pre>
+Start-BitsTransfer `
+    -Source 'https://dl.google.com/chrome/install/latest/chrome_installer.exe' `
+    -Destination "$env:Temp\chrome_installer.exe"
+&amp; $env:Temp\chrome_installer.exe
+</pre>
+</li> <li>
+<p>In Chrome, download and install the following updates:</p> <div> <section><p class="_code-tab"><strong>SharePoint Server 2016</strong></p>
+<ol> <li>
+<a href="https://www.microsoft.com/en-us/download/details.aspx" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Security Update for Microsoft SharePoint Enterprise Server 2016 (KB4011127)</a>.</li> <li><p><a href="https://www.microsoft.com/en-us/download/details.aspx" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Update for Microsoft SharePoint Enterprise Server 2016 (KB4011053)</a>.</p></li> <li><p>Check and install <a href="https://docs.microsoft.com/en-us/officeupdates/sharepoint-updates#sharepoint-2016-update-history" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">additional updates</a> if necessary.</p></li> </ol></section> <section><p class="_code-tab"><strong>SharePoint Server 2019</strong></p>
+<ol> <li>Check and install <a href="https://docs.microsoft.com/en-us/officeupdates/sharepoint-updates#sharepoint-2016-update-history" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">updates</a> if necessary.</li> </ol></section> </div>
+</li> <li>
+<p>Return to the PowerShell console and <a href="creating-windows-os-image">generalize the image</a>:</p> 
+<pre>
+&amp; gcesysprep
+</pre> <p>The command automatically shuts down the VM. Wait about 5 minutes for this process to complete.</p>
+</li> <li>
+<p>In Cloud Shell, create a VM image from the VM's boot disk:</p> 
+<pre>
+gcloud compute images create sharepoint \
+  --source-disk=sp-template \
+  --source-disk-zone=$SUBNET_ZONE_1
+</pre>
+</li> <li>
+<p>Delete the VM instance:</p> 
+<pre>
+gcloud compute instances delete sp-template --zone=$SUBNET_ZONE_1
+</pre>
+</li> </ol> <h3 id="creating_vms_and_joining_them_to_active_directory">Creating VMs and joining them to Active Directory</h3> <p>Follow these steps to create the VM instances for the SharePoint farm and join them to your existing Active Directory domain:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create two VM instances for the frontend servers:</p> 
+<pre>
+gcloud compute instances create sp-frontend-1 \
+  --zone=$SUBNET_ZONE_1 \
+  --machine-type=n1-standard-8 \
+  --boot-disk-size=200 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --tags=sharepoint,sharepoint-frontend \
+  --image=sharepoint \
+  --image-project=$GOOGLE_CLOUD_PROJECT
+
+gcloud compute instances create sp-frontend-2 \
+  --zone=$SUBNET_ZONE_2 \
+  --machine-type=n1-standard-8 \
+  --boot-disk-size=200 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --tags=sharepoint,sharepoint-frontend \
+  --image=sharepoint \
+  --image-project=$GOOGLE_CLOUD_PROJECT
+</pre>
+</li> <li>
+<p>Create two VM instances for the application servers:</p> 
+<pre>
+gcloud compute instances create sp-app-1 \
+  --zone=$SUBNET_ZONE_1 \
+  --machine-type=n1-standard-8 \
+  --boot-disk-size=200 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --tags=sharepoint,sharepoint-application \
+  --image=sharepoint \
+  --image-project=$GOOGLE_CLOUD_PROJECT \
+  "--metadata=sysprep-specialize-script-ps1=Add-WindowsFeature RSAT-AD-PowerShell;Add-WindowsFeature RSAT-DNS-Server"
+
+gcloud compute instances create sp-app-2 \
+  --zone=$SUBNET_ZONE_2 \
+  --machine-type=n1-standard-8 \
+  --boot-disk-size=200 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --tags=sharepoint,sharepoint-application \
+  --image=sharepoint \
+  --image-project=$GOOGLE_CLOUD_PROJECT \
+  "--metadata=sysprep-specialize-script-ps1=Add-WindowsFeature RSAT-AD-PowerShell;Add-WindowsFeature RSAT-DNS-Server"
+</pre>
+</li> <li>
+<p>Create two VM instances for the search servers:</p> 
+<pre>
+gcloud compute instances create sp-search-1 \
+  --zone=$SUBNET_ZONE_1 \
+  --machine-type=n1-standard-8 \
+  --boot-disk-size=200 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --tags=sharepoint,sharepoint-search \
+  --image=sharepoint \
+  --image-project=$GOOGLE_CLOUD_PROJECT
+
+gcloud compute instances create sp-search-2 \
+  --zone=$SUBNET_ZONE_2 \
+  --machine-type=n1-standard-8 \
+  --boot-disk-size=200 \
+  --boot-disk-type=pd-ssd \
+  --subnet=$SUBNET_NAME \
+  --tags=sharepoint,sharepoint-search \
+  --image=sharepoint \
+  --image-project=$GOOGLE_CLOUD_PROJECT
+</pre>
+</li> <li>
+<p>Monitor the initialization process of the last VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output sp-search-2 --zone=$SUBNET_ZONE_2
+</pre> <p>Wait about 2 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li>
+<p>For each of the six VM instances, perform the following steps:</p> <ol> <li>
+<a href="creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance.</li> <li>
+<a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using the username and password created in the previous step.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Join the computer to your Active Directory domain:</p> 
+<pre>
+Add-Computer -Domain DOMAIN
+</pre> <p>Replace <var translate="no">DOMAIN</var> with the DNS name of your Active Directory domain.</p>
+</li> <li>
+<p>Restart the computer:</p> 
+<pre>
+Restart-Computer
+</pre> <p>Wait for approximately 1 minute for the restart to complete.</p>
+</li> </ol>
+</li> </ol> <h2 id="creating_the_sharepoint_servers">Creating the SharePoint servers</h2> <p>You now use the custom image to create the VM instances for your SharePoint farm.</p> <p>The VM instances use the <code translate="no" dir="ltr">n1-standard-8</code> machine type. Depending on how you plan to use the SharePoint farm, you might need to use larger machine types. Consult the hardware requirements for a more detailed analysis of your needs and their system requirements:</p> <ul> <li>
+<a href="https://docs.microsoft.com/en-us/sharepoint/install/hardware-and-software-requirements" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Hardware and software requirements for SharePoint Server 2016</a> </li> <li>
+<a href="https://docs.microsoft.com/en-us/sharepoint/install/hardware-and-software-requirements-2019" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Hardware and software requirements for SharePoint Server 2019</a> </li> </ul> <h3 id="setting_up_load_balancing">Setting up load balancing</h3> <p>To enable clients to access SharePoint by using a single virtual IP address, you use an <a href="https://docs.cloud.google.com/load-balancing/docs/internal">internal load balancer</a>. The load balancer distributes requests among the two frontend servers, <code translate="no" dir="ltr">sp-frontend-1</code> and <code translate="no" dir="ltr">sp-frontend-2</code>.</p> <p>To associate the two frontend servers with the load balancer, you first create two <a href="../../instance-groups">instance groups</a>, and then assign these instance group to the load balancer:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create one <a href="../../instance-groups/creating-groups-of-unmanaged-instances">unmanaged instance group</a> per zone:</p> 
+<pre>
+gcloud compute instance-groups unmanaged create sp-frontend-1 --zone=$SUBNET_ZONE_1
+
+gcloud compute instance-groups unmanaged create sp-frontend-2 --zone=$SUBNET_ZONE_2
+</pre>
+</li> <li>
+<p>Add the VM instances running the frontend servers to the instance groups:</p> 
+<pre>
+gcloud compute instance-groups unmanaged add-instances sp-frontend-1 \
+  --instances sp-frontend-1 \
+  --zone=$SUBNET_ZONE_1
+
+gcloud compute instance-groups unmanaged add-instances sp-frontend-2 \
+  --instances sp-frontend-2 \
+  --zone=$SUBNET_ZONE_2
+</pre>
+</li> <li>
+<p>Create a health check that probes the HTTP path of Sharepoint:</p> 
+<pre>
+gcloud compute health-checks create tcp sp-health-check --port 80
+</pre>
+</li> <li>
+<p>Create a load balancer backend and add the two instance groups:</p> 
+<pre>
+gcloud compute backend-services create sp-backend \
+  --load-balancing-scheme internal \
+  --region=$SUBNET_REGION \
+  --health-checks sp-health-check \
+  --protocol=tcp
+
+gcloud compute backend-services add-backend sp-backend \
+  --instance-group=sp-frontend-1 \
+  --instance-group-zone=$SUBNET_ZONE_1 \
+  --region=$SUBNET_REGION
+
+gcloud compute backend-services add-backend sp-backend \
+  --instance-group=sp-frontend-2 \
+  --instance-group-zone=$SUBNET_ZONE_2 \
+  --region=$SUBNET_REGION
+</pre>
+</li> <li>
+<p>Reserve a static IP address for the load balancer: \</p> 
+<pre>
+gcloud compute addresses create sp-frontend \
+  --region=$SUBNET_REGION \
+  --subnet=$SUBNET_NAME
+</pre>
+</li> <li>
+<p>Create a forwarding rule for the load balancer:</p> 
+<pre>
+gcloud compute forwarding-rules create sp-frontend \
+  --load-balancing-scheme=internal \
+  --ports=80 \
+  --network=$VPC_NAME \
+  --subnet=$SUBNET_NAME \
+  --region=$SUBNET_REGION \
+  --address=sp-frontend \
+  --backend-service=sp-backend
+</pre>
+</li> <li>
+<p>Create a firewall rule to allow traffic from the load balancer to the backend services:</p> 
+<pre>
+gcloud compute firewall-rules create allow-http-health-checks \
+  --network=$VPC_NAME --allow tcp:80 \
+  --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+  --target-tags="sharepoint-frontend"
+</pre> <p>The source ranges are the IP ranges for the internal load balancer. For more information, see <a href="../../load-balancing/internal#configure-a-firewall-rule-to-allow-internal-load-balancing">Configure a firewall rule to allow internal load balancing</a>.</p>
+</li> <li>
+<p>Look up the IP address of the load balancer:</p> 
+<pre>
+gcloud compute addresses describe sp-frontend \
+  --region=$SUBNET_REGION \
+  --format=value\(address\)
+</pre> <p>You need this IP address later after you have deployed the SharePoint farm.</p> <aside class="note"><strong>Note:</strong><span> The load balancer won't be in a healthy state until the SharePoint farm is deployed and fully configured.</span></aside>
+</li> </ol> <h3 id="registering_the_load_balancer_in_dns">Registering the load balancer in DNS</h3> <p>To allow clients to use a human-readable URL to access SharePoint, register a name for the load balancer in DNS:</p> <ol> <li>Connect to <code translate="no" dir="ltr">sp-app-1</code> <a href="../connecting-to-windows#windows_gui">by using Remote Desktop</a> and log in as a user that is a member of the <code translate="no" dir="ltr">DnsAdmins</code> group.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell</strong>.</li> <li>
+<p>Create a record that maps the name <code translate="no" dir="ltr">sharepoint</code> to the IP address of the load balancer:</p> 
+<pre>
+Add-DnsServerResourceRecordA `
+  -ComputerName (Get-ADDomainController).Hostname `
+  -Name "sharepoint" `
+  -ZoneName "DOMAIN" `
+  -IPv4Address LOADBALANCER-IP
+</pre> <p>Where:</p> <ul> <li>
+<var translate="no">LOADBALANCER-IP</var> is the IP address of the load balancer.</li> <li>
+<var translate="no">DOMAIN</var> is the DNS domain of your Active Directory domain.</li> </ul>
+</li> </ol> <h2 id="creating_the_sharepoint_farm">Creating the SharePoint farm</h2> <p>Although the six servers have all required software packages installed, they are not yet part of a SharePoint farm. You now create the farm and add the servers to the farm by assigning them roles.</p> <h3 id="creating_a_farm_service_account">Creating a farm service account</h3> <p>To create the SharePoint farm, you need to create a farm service account. The farm service account is an Active Directory user account that's used to run SharePoint services and to access SQL Server.</p> <p>For further details on the farm service account, see <a href="https://docs.microsoft.com/en-us/sharepoint/install/account-permissions-and-security-settings-in-sharepoint-server-2016" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Account permissions and security settings in SharePoint Servers</a>.</p> <p>To create a farm service account in Active Directory, do the following:</p> <ol> <li>Return to the PowerShell prompt on <code translate="no" dir="ltr">sp-app-1</code>.</li> <li>
+<p>Define a password for the farm service account:</p> 
+<pre>
+$FarmServicePassword = Read-Host -Prompt "Enter password for Farm service account" -AsSecureString
+</pre>
+</li> <li>
+<p>Create the farm service account in Active Directory:</p> 
+<pre>
+New-ADUser `
+  -Name "SharePoint Service" `
+  -SamAccountName sp-farm  `
+  -UserPrincipalName "sp-farm@$((Get-ADDomain).DNSRoot)" `
+  -AccountPassword $FarmServicePassword `
+  -PassThru | Enable-ADAccount
+</pre>
+</li> <li><p>Grant the farm service account access to SQL Server by <a href="https://docs.microsoft.com/en-us/sql/relational-databases/security/authentication-access/create-a-login" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">creating a login</a> for <code translate="no" dir="ltr">sp-farm</code>. Configure the login to use Windows authentication so that you don't need to assign a new password.</p></li> </ol> <h3 id="configuring_the_first_server">Configuring the first server</h3> <p>You now create the SharePoint farm by configuring the first server. The first server is special because it hosts the central administration website. You use this site later to configure the farm.</p> <ol> <li>Return to the RDP session on <code translate="no" dir="ltr">sp-app-1</code>.</li> <li>Click <strong>Start</strong> &gt; <strong>Microsoft SharePoint Products</strong> &gt; <strong>SharePoint Products Configuration Wizard</strong>.</li> <li>Follow the steps in <a href="https://docs.microsoft.com/en-us/sharepoint/install/install-sharepoint-server-2016-across-multiple-servers#create-and-configure-the-farm" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Create and configure the farm</a>: <ol> <li>On the <strong>Specify Configuration Database Settings</strong> page, specify the name and password of the <code translate="no" dir="ltr">sp-farm</code> user that you created earlier.</li> <li>On the <strong>Specify Server Role</strong> page, select <strong>Application</strong>.</li> <li>On the <strong>Configure SharePoint Central Administration Web Application</strong> page, specify port <code translate="no" dir="ltr">8000</code>.</li> <li>After the configuration is complete, a browser window opens. Close the window and skip the remaining steps.</li> </ol>
+</li> <li>Click <strong>Start</strong> &gt; <strong>Microsoft SharePoint Products</strong> &gt; <strong>SharePoint Management Shell</strong>.</li> <li>
+<p>Apply pending SharePoint updates:</p> 
+<pre>
+PSConfig.exe -cmd upgrade -inplace b2b -force -cmd applicationcontent -install -cmd installfeatures
+</pre>
+</li> </ol> <h3 id="configuring_remaining_servers">Configuring remaining servers</h3> <p>You can now add the remaining servers to the SharePoint farm.</p> <table> <tr> <th><strong>VM instance</strong></th> <th><strong>Role</strong></th> </tr> <tr> <td><code translate="no" dir="ltr">sp-app-2</code></td> <td><strong>Application</strong></td> </tr> <tr> <td><code translate="no" dir="ltr">sp-frontend-1</code></td> <td>
+<strong>Frontend with distributed cache</strong> </td> </tr> <tr> <td><code translate="no" dir="ltr">sp-frontend-2</code></td> <td><strong>Frontend with distributed cache</strong></td> </tr> <tr> <td><code translate="no" dir="ltr">sp-search-1</code></td> <td><strong>Search</strong></td> </tr> <tr> <td><code translate="no" dir="ltr">sp-search-2</code></td> <td><strong>Search</strong></td> </tr> </table> <p>For each VM, do the following:</p> <ol> <li>Connect to the VM <a href="../connecting-to-windows#windows_gui">by using Remote Desktop</a> and log in as a domain administrator user.</li> <li>Click <strong>Start</strong> &gt; <strong>Microsoft SharePoint Products</strong> &gt; <strong>SharePoint Products Configuration Wizard</strong>.</li> <li>On the <strong>Welcome to SharePoint Products</strong> page, click <strong>Next</strong>.</li> <li>In the dialog box that notifies you that some services might have to be restarted during configuration, click <strong>Yes</strong>.</li> <li>On the <strong>Connect to a server farm</strong> page, select <strong>Connect to an existing server farm</strong>.</li> <li>On the <strong>Specify configuration database settings</strong> page, specify the same database server and database name that you used for the first server.</li> <li>On the next page, enter the passphrase that you defined previously.</li> <li>On the <strong>Specify server role</strong> page, select the role that corresponds to the VM and click <strong>Next</strong>.</li> <li>On the <strong>Completing the SharePoint products configuration wizard</strong> page, confirm your configuration and click <strong>Next</strong>.</li> <li>
+<p>On the <strong>Configuration Successful</strong> page, click <strong>Finish</strong>.</p> <aside class="note"><strong>Note:</strong><span> If deploying the <strong>Frontend with distributed cache</strong> fails with the error <code translate="no" dir="ltr">System.InvalidOperationException was thrown. Additional exception information: cacheHostInfo is null</code>, run the PowerShell script provided in <a href="https://social.technet.microsoft.com/wiki/contents/articles/34617.sharepoint-2016-troubleshooting-configuration-wizard-failed-with-error-cachehostinfo-is-null.aspx#PS_Script" class="external">SharePoint 2016 Troubleshooting: Configuration Wizard failed with error 'CacheHostInfo is null'</a>. Then run the configuration wizard again.</span></aside>
+</li> <li><p>Close the browser window.</p></li> <li><p>Click <strong>Start</strong> &gt; <strong>Microsoft SharePoint Products</strong> &gt; <strong>SharePoint Management Shell</strong></p></li> <li>
+<p>Apply pending SharePoint updates:</p> 
+<pre>
+PSConfig.exe -cmd upgrade -inplace b2b -force -cmd applicationcontent -install -cmd installfeatures
+</pre> <aside class="note"><strong>Note:</strong><span> Run the command on only one server at a time.</span></aside>
+</li> </ol> <h3 id="configuring_the_farm">Configuring the farm</h3> <p>You now use the SharePoint configuration wizard to finalize the configuration of the farm:</p> <ol> <li>Connect to <code translate="no" dir="ltr">sp-app-1</code> <a href="../connecting-to-windows#windows_gui">by using Remote Desktop</a>.</li> <li>Click <strong>Start</strong> &gt; <strong>Google Chrome</strong> to open the Chrome browser.</li> <li>Navigate to <code translate="no" dir="ltr">http://sp-app-1:8000/configurationwizards.aspx</code>
+</li> <li>Log in using a domain admin user.</li> <li>Select <strong>Launch the Farm Configuration Wizard</strong>.</li> <li>On the <strong>Welcome</strong> page, select <strong>Start the Wizard</strong>.</li> <li>On the <strong>Service Applications and Services</strong> page, click <strong>Use existing managed account</strong> and select the <code translate="no" dir="ltr">sp-farm</code> user.</li> <li>Verify the list of services to install and customize the selection according to your requirements.</li> <li>
+<p>Select <strong>Next</strong> to start the configuration process.</p> <p>The process takes approximately 10 to 15 minutes to complete.</p>
+</li> <li><p>On the <strong>Create Site Collection</strong> page, specify a title and select a template, then click <strong>OK</strong>. See <a href="https://docs.microsoft.com/en-us/sharepoint/sites/create-a-site-collection#create-a-site-collection-by-using-central-administration" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Create a site collection by using Central Administration</a> for further details about creating sites.</p></li> <li><p>On the <strong>This completes the Farm Configuration Wizard</strong> page, select <strong>Finish</strong>.</p></li> <li><p>On the Central Administration home page, select <strong>System Settings</strong> &gt; <strong>Manage servers in farm</strong>.</p></li> <li><p>Verify that all servers are marked as <strong>Compliant</strong> and that the status is marked as <strong>No Action Required</strong>.</p></li> </ol> <p>For further information about managing the SharePoint farm, see <a href="https://docs.microsoft.com/en-us/sharepoint/administration/managing-a-minrole-server-farm-in-sharepoint-server-2016" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Managing a MinRole Server Farm in SharePoint Servers 2016 and 2019</a> </p> <h3 id="configuring_alternate_access_mappings">Configuring alternate access mappings</h3> <p>To allow users to access the SharePoint site by using the DNS name of the load balancer, you now configure an alternate access mapping:</p> <ol> <li>On the Central Administration home page, select <strong>System Settings</strong> &gt; <strong>Configure alternate access mappings</strong>.</li> <li>Next to <strong>Alternate Access Mapping Collection</strong>, select <strong>Show All</strong> &gt; <strong>Change alternate access mapping collection</strong>.</li> <li>In the <strong>Select alternate access mapping collection</strong> dialog, select <strong>SharePoint - 80</strong>.</li> <li>Select <strong>Edit public URLs</strong>.</li> <li>
+<p>Configure the following mapping:</p> <ol> <li>
+<p><strong>Default</strong>:</p> 
+<pre>
+http://sharepoint.DOMAIN
+</pre> <p>Where <var translate="no">DOMAIN</var> is the DNS domain of your Active Directory domain.</p>
+</li> <li><p>Clear all other fields.</p></li> </ol>
+</li> <li><p>Click <strong>Save</strong>.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</p></li> <li>
+<p>To have the alternate access mapping take effect, restart IIS on all servers:</p> 
+<pre>
+"sp-app-1", "sp-app-2", "sp-frontend-1", "sp-frontend-2", "sp-search-1", "sp-search-2" | %  { &amp; iisreset $_ }
+</pre>
+</li> </ol> <p>Your SharePoint farm is now ready to use.</p> <h2 id="testing_the_sharepoint_site">Testing the SharePoint site</h2> <p>To verify that you can access the SharePoint site by using the DNS name of the load balancer, follow these steps:</p> <ol> <li>
+<p>In Chrome, navigate to the following address:</p> 
+<pre>
+http://sharepoint.DOMAIN
+</pre> <p>Replace <var translate="no">DOMAIN</var> with the DNS domain of your Active Directory domain.</p>
+</li> <li>
+<p>Log in using an administrative domain user.</p> <p>Because this is the first time you open the site, it takes several minutes for the site to initialize.</p>
+</li> <li><p>Verify that you see the homepage of your SharePoint site.</p></li> <li><p>Under <strong>Documents</strong>, select <strong>Upload</strong>.</p></li> <li><p>Select a test document to upload to the site. You can use an empty Rich Text Document (<code translate="no" dir="ltr">.rtf</code>) if you don't have a document available for testing.</p></li> <li><p>Click <strong>OK</strong> to upload the document.</p></li> </ol> <p>SharePoint periodically crawls documents to update its search index. To avoid waiting for the crawl to happen, initiate a crawl manually:</p> <ol> <li>On <code translate="no" dir="ltr">sp-app-1</code>, click <strong>Start</strong> &gt; <strong>Microsoft SharePoint Products</strong> &gt; <strong>SharePoint Management Shell</strong>.</li> <li>
+<p>Start a full crawl:</p> 
+<pre>
+$Crawler = (Get-SPEnterpriseSearchServiceApplication |Get-SPEnterpriseSearchCrawlContentSource)
+$Crawler.StartFullCrawl()
+</pre>
+</li> </ol> <p>Wait about 5 minutes for the crawl process to complete in the background.</p> <p>You can now verify that the SharePoint search works by searching for the document that you uploaded previously:</p> <ol> <li>Return to Chrome and the SharePoint site.</li> <li>Search for the filename of the file you uploaded by using the search box.</li> <li>Verify that the file shows up in the search results.</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring further costs after you have completed this tutorial, delete the entities that you've created.</p> <h3 id="delete_the_project">Delete the Google Cloud project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/instances/windows/deploying-microsoft-sharepoint-server-on-compute-engine" class="_attribution-link">https://docs.cloud.google.com/compute/docs/instances/windows/deploying-microsoft-sharepoint-server-on-compute-engine</a>
+  </p>
+</div>

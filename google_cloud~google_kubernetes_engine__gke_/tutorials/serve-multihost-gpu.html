@@ -1,0 +1,773 @@
+<h1>Serve LLMs like DeepSeek-R1 671B or Llama 3.1 405B on GKE</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <h2 id="overview">Overview</h2> <p>This guide shows you how to serve state-of-the-art large language models (LLMs) such as <a href="https://github.com/deepseek-ai/DeepSeek-R1">DeepSeek-R1 671B</a> or <a href="https://github.com/meta-llama/llama">Llama 3.1 405B</a> on Google Kubernetes Engine (GKE) using graphical processing units (GPUs) across multiple nodes.</p> <p>This guide demonstrates how to use portable open-source technologies—Kubernetes, <a href="https://docs.vllm.ai/en/latest/">vLLM</a>, and the <a href="https://github.com/kubernetes-sigs/lws">LeaderWorkerSet</a> (LWS) API— to deploy and serve AI/ML workloads on GKE, taking advantage of GKE's granular control, scalability, resilience, portability, and cost-effectiveness.</p>  <aside class="tip"><strong>Tip:</strong><span> For production deployments on GKE, we strongly recommend using <a href="../how-to/machine-learning/inference/inference-quickstart">Inference Quickstart</a> to get tailored best practices and configurations for your model inference.</span></aside> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li><a href="../concepts/choose-cluster-mode">Autopilot mode and Standard mode</a></li> <li><a href="https://docs.cloud.google.com/compute/docs/gpus">Current GPU version availability</a></li> <li><a href="../concepts/gpus">GPUs in GKE</a></li> </ul> <h2 id="background">Background</h2> <p>This section describes the key technologies used in this guide, including the two LLMs used as examples in this guide—DeepSeek-R1 and Llama 3.1 405B.</p> <aside class="note"><strong>Note:</strong><span> We don't recommend using base models like Llama 3 8B for production chatbots due to safety concerns. For more information about best practices, see <a href="https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/safety-system-instructions">System instructions for safety</a>.</span></aside> <h3 id="about-deepseek">DeepSeek-R1</h3> <p>DeepSeek-R1, a 671B parameter large language model by DeepSeek, is designed for logical inference, mathematical reasoning, and real-time problem-solving in various text-based tasks. GKE handles the computational demands of DeepSeek-R1, supporting its capabilities with scalable resources, distributed computing, and efficient networking.</p> <p>To learn more, see the <a href="https://www.deepseek.com/">DeepSeek documentation</a>.</p> <h3 id="about-llama">Llama 3.1 405B</h3> <p>Llama 3.1 405B is a large language model by Meta that's designed for a wide range of natural language processing tasks, including text generation, translation, and question answering. GKE offers the robust infrastructure required to support the distributed training and serving needs of models of this scale.</p> <p>To learn more, see the <a href="https://www.llama.com/">Llama documentation</a>.</p> <h3 id="about-gke">GKE managed Kubernetes service</h3> <p>Google Cloud offers a wide range of services, including GKE, which is well-suited to deploying and managing AI/ML workloads. GKE is a managed Kubernetes service that simplifies deploying, scaling, and managing containerized applications. GKE provides the necessary infrastructure, including scalable resources, distributed computing, and efficient networking, to handle the computational demands of LLMs.</p> <p>To learn more about key Kubernetes concepts, see <a href="../learn/get-started-with-kubernetes">Start learning about Kubernetes</a>. To learn more about the GKE and how it helps you scale, automate, and manage Kubernetes, see <a href="../concepts/kubernetes-engine-overview">GKE overview</a>.</p> <h3 id="about-gpus">GPUs</h3> <p>Graphical processing units (GPUs) let you accelerate specific workloads such as machine learning and data processing. GKE offers nodes equipped with these powerful GPUs, allowing you to configure your cluster for optimal performance in machine learning and data processing tasks. GKE provides a range of machine type options for node configuration, including machine types with NVIDIA H100, L4, and A100 GPUs.</p> <p>To learn more, see <a href="../concepts/gpus">About GPUs in GKE</a>.</p> <h3 id="about-lws">LeaderWorkerSet (LWS)</h3> <p><a href="https://github.com/kubernetes-sigs/lws">LeaderWorkerSet (LWS)</a> is a Kubernetes deployment API that addresses common deployment patterns of AI/ML multi-node inference workloads. Multi-node serving leverages multiple Pods, each potentially running on a different node, to handle the distributed inference workload. LWS enables treating multiple Pods as a group, simplifying the management of distributed model serving.</p> <h3 id="about-vllm">vLLM and multi-host serving</h3> <p>When serving computationally intensive LLMs, we recommend using vLLM and running the workloads across GPUs.</p> <p>vLLM is a highly optimized open source LLM serving framework that can increase serving throughput on GPUs, with features such as the following:</p> <ul> <li>Optimized transformer implementation with <a href="https://huggingface.co/docs/text-generation-inference/en/conceptual/paged_attention">PagedAttention</a>
+</li> <li>Continuous batching to improve the overall serving throughput</li> <li>Distributed serving on multiple GPUs</li> </ul> <p>With especially computationally intensive LLMs that can't fit into a single GPU node, you can use multiple GPU nodes to serve the model. <a href="https://docs.vllm.ai/en/latest/serving/distributed_serving.html#how-to-decide-the-distributed-inference-strategy">vLLM supports running workloads across GPUs with two strategies</a>:</p> <ul> <li><p><strong>Tensor parallelism</strong> splits the matrix multiplications in the transformer layer across multiple GPUs. However, this strategy requires a fast network due to the communication needed between the GPUs, making it less suitable for running workloads across nodes.</p></li> <li><p><strong>Pipeline parallelism</strong> splits the model by layer, or vertically. This strategy does not require constant communication between GPUs, making it a better option when running models across nodes.</p></li> </ul> <p>You can use both strategies in multi-node serving. For example, when using two nodes with eight H100 GPUs each, you can use both strategies:</p> <ul> <li>Two-way pipeline parallelism to shard the model across the two nodes</li> <li>Eight-way tensor parallelism to shard the model across the eight GPUs on each node</li> </ul> <p>To learn more, refer to the <a href="https://docs.vllm.ai/en/latest/">vLLM documentation</a>.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ol> <li>Prepare your environment with a GKE cluster in Autopilot or Standard mode.</li> <li>Deploy vLLM across multiple nodes in your cluster.</li> <li>Use vLLM to serve the model through <code translate="no" dir="ltr">curl</code>.</li> </ol> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ul> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> </cloud-free-trial> <li> <p> Make sure that you have the following role or roles on the project: roles/container.admin, roles/iam.serviceAccountAdmin, roles/iam.securityAdmin </p>  <h4 class="showalways" id="check-for-the-roles">Check for the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> <p> In the <b>Principal</b> column, find all rows that identify you or a group that you're included in. To learn which groups you're included in, contact your administrator. </p> </li> <li> For all rows that specify or include you, check the <b>Role</b> column to see whether the list of roles includes the required roles. </li> </ol>   <h4 class="showalways" id="grant-the-roles">Grant the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> Click <span class="material-icons" aria-hidden="true" translate="no">person_add</span> <b>Grant access</b>. </li> <li> <p> In the <b>New principals</b> field, enter your user identifier. This is typically the email address for a Google Account.</p> </li> <li> Click <b>Select a role</b>, then search for the role. </li>
+<li> To grant additional roles, click <span class="material-icons" aria-hidden="true" translate="no">add</span> <b>Add another role</b> and add each additional role. </li> <li> Click <b>Save</b>. </li> </ol>  </li> </ul> <ul> <li>Create a <a href="https://huggingface.co/">Hugging Face</a> account, if you don't already have one.</li> <li>Review the available <a href="../concepts/gpus#gpu-models">GPU models and machine types</a> to determine which machine type and region meets your needs.</li> <li>Check that your project has sufficient quota for <code translate="no" dir="ltr">NVIDIA_H100_MEGA</code>. This tutorial uses the <code translate="no" dir="ltr">a3-highgpu-8g</code> machine type, which is equipped with 8 <code translate="no" dir="ltr">NVIDIA H100 80GB GPUs</code>. For more information about GPUs and how to manage quotas, see <a href="../concepts/gpus#gpu-quota">Plan GPU quota</a> and <a href="https://docs.cloud.google.com/compute/resource-usage#gpu_quota">GPU quota</a>.</li> </ul> <h2 id="model-access">Get access to the model</h2> <p>You can use the Llama 3.1 405B or DeepSeek-R1 models.</p> <div> <section><p class="_code-tab"><strong>DeepSeek-R1</strong></p>
+<aside class="note"><strong>Note:</strong><span> You must sign the consent agreement to use DeepSeek-R1 in the <a href="https://huggingface.co/deepseek-ai/DeepSeek-R1">Hugging Face repository</a></span></aside> <h3 id="generate-token">Generate an access token</h3> <p>If you don't already have one, generate a new <a href="https://huggingface.co/docs/hub/security-tokens">Hugging Face token</a>:</p> <ol> <li>Click <strong>Your Profile &gt; Settings &gt; Access Tokens</strong>.</li> <li>Select <strong>New Token</strong>.</li> <li>Specify a Name of your choice and a Role of at least <code translate="no" dir="ltr">Read</code>.</li> <li>Select <strong>Generate a token</strong>.</li> </ol></section> <section><p class="_code-tab"><strong>Llama 3.1 405B</strong></p>
+<aside class="note"><strong>Note:</strong><span> You must sign the consent agreement to use Llama 3.1 405B in the <a href="https://huggingface.co/meta-llama/Llama-3.1-405B-Instruct">Hugging Face repository</a></span></aside> <h3 id="generate-token">Generate an access token</h3> <p>If you don't already have one, generate a new <a href="https://huggingface.co/docs/hub/security-tokens">Hugging Face token</a>:</p> <ol> <li>Click <strong>Your Profile &gt; Settings &gt; Access Tokens</strong>.</li> <li>Select <strong>New Token</strong>.</li> <li>Specify a Name of your choice and a Role of at least <code translate="no" dir="ltr">Read</code>.</li> <li>Select <strong>Generate a token</strong>.</li> </ol></section> </div> <h2 id="prepare-environment">Prepare the environment</h2> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell">Cloud Shell</a> to manage resources hosted on Google Cloud. Cloud Shell comes preinstalled with the software you'll need for this tutorial, including <a href="https://kubernetes.io/docs/reference/kubectl/"><code translate="no" dir="ltr">kubectl</code></a> and <a href="https://docs.cloud.google.com/sdk/gcloud"> gcloud CLI</a>.</p> <p>To set up your environment with Cloud Shell, follow these steps:</p> <ol> <li><p>In the Google Cloud console, launch a Cloud Shell session by clicking <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Cloud Shell activation icon"> <strong>Activate Cloud Shell</strong> in the <a href="http://console.cloud.google.com">Google Cloud console</a>. This launches a session in the bottom pane of Google Cloud console.</p></li> <li>
+<p>Set the default environment variables:</p> 
+<pre>gcloud config set project PROJECT_ID
+gcloud config set billing/quota_project PROJECT_ID
+export PROJECT_ID=$(gcloud config get project)
+export CLUSTER_NAME=CLUSTER_NAME
+export REGION=REGION
+export ZONE=ZONE
+export HF_TOKEN=HUGGING_FACE_TOKEN
+export CLUSTER_VERSION=CLUSTER_VERSION
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">PROJECT_ID</var>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of your GKE cluster.</li> <li>
+<var translate="no">CLUSTER_VERSION</var>: the GKE version. For Autopilot support, use 1.33 or later.</li> <li>
+<var translate="no">REGION</var>: the region of your GKE cluster.</li> <li>
+<var translate="no">ZONE</var>: a zone that supports NVIDIA H100 Tensor Core GPUs.</li> </ul>
+</li> </ol> </section> <div id="tutorial-content"> <h2 id="create-cluster">Create a GKE cluster</h2> <p>You can serve models using vLLM across multiple GPU nodes in a GKE Autopilot or Standard cluster. We recommend that you use an Autopilot cluster for a fully managed Kubernetes experience. To choose the GKE mode of operation that's the best fit for your workloads, see <a href="../concepts/choose-cluster-mode">Choose a GKE mode of operation</a>.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p> In Cloud Shell, run the following command:</p> 
+<pre data-language="">  gcloud container clusters create-auto ${CLUSTER_NAME} \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --cluster-version=${CLUSTER_VERSION}
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>Create a GKE Standard cluster with two CPU nodes:</p> 
+<pre data-language="">gcloud container clusters create CLUSTER_NAME \
+    --project=PROJECT_ID \
+    --num-nodes=2 \
+    --location=REGION \
+    --machine-type=e2-standard-16
+</pre>
+</li> <li>
+<p>Create an A3 node pool with two nodes, with eight H100s each:</p> 
+<pre data-language="">gcloud container node-pools create gpu-nodepool \
+    --node-locations=ZONE \
+    --num-nodes=2 \
+    --machine-type=a3-highgpu-8g \
+    --accelerator=type=nvidia-h100-80gb,count=8,gpu-driver-version=LATEST \
+    --placement-type=COMPACT \
+    --cluster=CLUSTER_NAME
+    --location=${REGION}
+</pre>
+</li> </ol></section> </div> <h2 id="configure_kubectl_to_communicate_with_your_cluster">Configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster</h2> <p>Configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster with the following command:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME --location=REGION
+</pre> <h2 id="create-secret">Create a Kubernetes Secret for Hugging Face credentials</h2> <p>Create a Kubernetes Secret that contains the Hugging Face token using the following command:</p> 
+<pre>kubectl create secret generic hf-secret \
+  --from-literal=hf_api_token=${HF_TOKEN} \
+  --dry-run=client -o yaml | kubectl apply -f -
+</pre> <h2 id="install-lws">Install LeaderWorkerSet</h2> <p>To install LWS, run the following command:</p> 
+<pre>kubectl apply --server-side -f https://github.com/kubernetes-sigs/lws/releases/latest/download/manifests.yaml
+</pre> <p>Validate that the LeaderWorkerSet controller is running in the <code translate="no" dir="ltr">lws-system</code> namespace, using the following command:</p> 
+<pre>kubectl get pod -n lws-system
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                     READY   STATUS    RESTARTS   AGE
+lws-controller-manager-546585777-crkpt   1/1     Running   0          4d21h
+lws-controller-manager-546585777-zbt2l   1/1     Running   0          4d21h
+</pre> <h2 id="deploy-vllm">Deploy vLLM Model Server</h2> <p>To deploy the vLLM model server, follow these steps:</p> <ol> <li>
+<p>Apply the manifest, depending on LLM you want to deploy.</p> <div> <section><p class="_code-tab"><strong>DeepSeek-R1</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">vllm-deepseek-r1-A3.yaml</code> manifest.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-h100-80gb
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.8.5
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                python3 -m vllm.entrypoints.openai.api_server --port 8080 --model deepseek-ai/DeepSeek-R1 --tensor-parallel-size 8 --pipeline-parallel-size 2 --trust-remote-code --max-model-len 4096"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              tcpSocket:
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+    workerTemplate:
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-h100-80gb
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.8.5
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm   
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-leader
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+  type: ClusterIP
+</pre> </div> </li> <li>
+<p>Apply the manifest by running the following command:</p> 
+<pre data-language="">kubectl apply -f vllm-deepseek-r1-A3.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Llama 3.1 405B</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">vllm-llama3-405b-A3.yaml</code> manifest.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-h100-80gb
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.8.5
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              tcpSocket:
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+    workerTemplate:
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-h100-80gb
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.8.5
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm   
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-leader
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+  type: ClusterIP
+</pre> </div> </li> <li>
+<p>Apply the manifest by running the following command:</p> 
+<pre data-language="">kubectl apply -f vllm-llama3-405b-A3.yaml
+</pre>
+</li> </ol></section> </div>
+</li> <li><p>Wait for the model checkpoint to finish downloading. This operation might take several minutes to complete.</p></li> <li>
+<p>View the logs from the running model server with the following command:</p> 
+<pre>kubectl logs vllm-0 -c vllm-leader
+</pre> <p>The output should look similar to the following:</p> 
+<pre>INFO 08-09 21:01:34 api_server.py:297] Route: /detokenize, Methods: POST
+INFO 08-09 21:01:34 api_server.py:297] Route: /v1/models, Methods: GET
+INFO 08-09 21:01:34 api_server.py:297] Route: /version, Methods: GET
+INFO 08-09 21:01:34 api_server.py:297] Route: /v1/chat/completions, Methods: POST
+INFO 08-09 21:01:34 api_server.py:297] Route: /v1/completions, Methods: POST
+INFO 08-09 21:01:34 api_server.py:297] Route: /v1/embeddings, Methods: POST
+INFO:     Started server process [7428]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+</pre>
+</li> </ol> <h2 id="serve-model">Serve the model</h2> <p>Set up port forwarding to the model by running the following command:</p> 
+<pre>kubectl port-forward svc/vllm-leader 8080:8080
+</pre> <h3 id="use-curl">Interact with the model using curl</h3> <p>To interact with the model using curl, follow these instructions:</p> <div> <section><p class="_code-tab"><strong>DeepSeek-R1</strong></p>
+<p>In a new terminal, send a request to the server:</p> 
+<pre data-language="">curl http://localhost:8080/v1/completions \
+-H "Content-Type: application/json" \
+-d '{
+    "model": "deepseek-ai/DeepSeek-R1",
+    "prompt": "I have four boxes. I put the red box on the bottom and put the blue box on top. Then I put the yellow box on top the blue. Then I take the blue box out and put it on top. And finally I put the green box on the top. Give me the final order of the boxes from bottom to top. Show your reasoning but be brief",
+    "max_tokens": 1024,
+    "temperature": 0
+}'
+</pre> <p>The output should be similar to the following:</p> 
+<pre data-language="">{
+"id": "cmpl-f2222b5589d947419f59f6e9fe24c5bd",
+"object": "text_completion",
+"created": 1738269669,
+"model": "deepseek-ai/DeepSeek-R1",
+"choices": [
+  {
+    "index": 0,
+    "text": ".\n\nOkay, let's see. The user has four boxes and is moving them around. Let me try to visualize each step. \n\nFirst, the red box is placed on the bottom. So the stack starts with red. Then the blue box is put on top of red. Now the order is red (bottom), blue. Next, the yellow box is added on top of blue. So now it's red, blue, yellow. \n\nThen the user takes the blue box out. Wait, blue is in the middle. If they remove blue, the stack would be red and yellow. But where do they put the blue box? The instruction says to put it on top. So after removing blue, the stack is red, yellow. Then blue is placed on top, making it red, yellow, blue. \n\nFinally, the green box is added on the top. So the final order should be red (bottom), yellow, blue, green. Let me double-check each step to make sure I didn't mix up any steps. Starting with red, then blue, then yellow. Remove blue from the middle, so yellow is now on top of red. Then place blue on top of that, so red, yellow, blue. Then green on top. Yes, that seems right. The key step is removing the blue box from the middle, which leaves yellow on red, then blue goes back on top, followed by green. So the final order from bottom to top is red, yellow, blue, green.\n\n**Final Answer**\nThe final order from bottom to top is \\boxed{red}, \\boxed{yellow}, \\boxed{blue}, \\boxed{green}.\n&lt;/think&gt;\n\n1. Start with the red box at the bottom.\n2. Place the blue box on top of the red box. Order: red (bottom), blue.\n3. Place the yellow box on top of the blue box. Order: red, blue, yellow.\n4. Remove the blue box (from the middle) and place it on top. Order: red, yellow, blue.\n5. Place the green box on top. Final order: red, yellow, blue, green.\n\n\\boxed{red}, \\boxed{yellow}, \\boxed{blue}, \\boxed{green}",
+    "logprobs": null,
+    "finish_reason": "stop",
+    "stop_reason": null,
+    "prompt_logprobs": null
+  }
+],
+"usage": {
+  "prompt_tokens": 76,
+  "total_tokens": 544,
+  "completion_tokens": 468,
+  "prompt_tokens_details": null
+}
+}
+</pre></section> <section><p class="_code-tab"><strong>Llama 3.1 405B</strong></p>
+<p>In a new terminal, send a request to the server:</p> 
+<pre data-language="">curl http://localhost:8080/v1/completions \
+-H "Content-Type: application/json" \
+-d '{
+    "model": "meta-llama/Meta-Llama-3.1-405B-Instruct",
+    "prompt": "San Francisco is a",
+    "max_tokens": 7,
+    "temperature": 0
+}'
+</pre> <p>The output should be similar to the following:</p> 
+<pre data-language="">{"id":"cmpl-0a2310f30ac3454aa7f2c5bb6a292e6c",
+"object":"text_completion","created":1723238375,"model":"meta-llama/Llama-3.1-405B-Instruct","choices":[{"index":0,"text":" top destination for foodies, with","logprobs":null,"finish_reason":"length","stop_reason":null}],"usage":{"prompt_tokens":5,"total_tokens":12,"completion_tokens":7}}
+</pre></section> </div> <h2 id="set-up-ca">Set up the custom autoscaler</h2> <p>In this section, you set up horizontal Pod autoscaling to use custom Prometheus metrics. You use the Google Cloud Managed Service for Prometheus metrics from the vLLM server.</p> <p>To learn more, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed">Google Cloud Managed Service for Prometheus</a>. This should be enabled by default on the GKE cluster.</p> <ol> <li>
+<p>Set up the Custom Metrics Stackdriver Adapter on your cluster:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre>
+</li> <li>
+<p>Add the Monitoring Viewer role to the service account that the Custom Metrics Stackdriver Adapter uses:</p> 
+<pre>gcloud projects add-iam-policy-binding projects/PROJECT_ID \
+    --role roles/monitoring.viewer \
+    --member=principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter
+</pre>
+<aside class="note"><strong>Note:</strong><span> Ensure that the service account that your GKE cluster uses has the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/monitoring">Monitoring Metric Writer</a> role. This tutorial uses the default Compute Engine service account.</span></aside>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">vllm_pod_monitor.yaml</code>:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+ name: vllm-pod-monitoring
+spec:
+ selector:
+   matchLabels:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+ endpoints:
+ - path: /metrics
+   port: 8080
+   interval: 15s
+</pre> </div> </li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f vllm_pod_monitor.yaml
+</pre>
+</li> </ol> <aside class="success"><strong>Success:</strong><span> Google Cloud Managed Service for Prometheus is now configured to scrape the vLLM server metrics and make them visible to the horizontal Pod austoscaling controller.</span></aside> <h3 id="create-load">Create load on the vLLM endpoint</h3> <p>Create load on the vLLM server to test how GKE autoscales with a custom vLLM metric.</p> <ol> <li>
+<p>Set up port forwarding to the model:</p> 
+<pre>kubectl port-forward svc/vllm-leader 8080:8080
+</pre>
+</li> <li>
+<p>Run a bash script (<code translate="no" dir="ltr">load.sh</code>) to send <code translate="no" dir="ltr">N</code> number of parallel requests to the vLLM endpoint:</p> 
+<pre>#!/bin/bash
+# Set the number of parallel processes to run.
+N=PARALLEL_PROCESSES
+# Get the external IP address of the vLLM load balancer service.
+export vllm_service=$(kubectl get service vllm-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+# Loop from 1 to N to start the parallel processes.
+for i in $(seq 1 $N); do
+  # Start an infinite loop to continuously send requests.
+  while true; do
+    # Use curl to send a completion request to the vLLM service.
+    curl http://$vllm_service:8000/v1/completions -H "Content-Type: application/json" -d '{"model": "meta-llama/Llama-3.1-70B", "prompt": "Write a story about san francisco", "max_tokens": 100, "temperature": 0}'
+  done &amp;  # Run in the background
+done
+# Keep the script running until it is manually stopped.
+wait
+</pre> <p>Replace <var translate="no">PARALLEL_PROCESSES</var> with the number of parallel processes that you want to run.</p>
+</li> <li>
+<p>Run the bash script:</p> 
+<pre>nohup ./load.sh &amp;
+</pre>
+</li> </ol> <h3 id="verify-prometheus">Verify that Google Cloud Managed Service for Prometheus ingests the metrics</h3> <p>After Google Cloud Managed Service for Prometheus scrapes the metrics and you're adding load to the vLLM endpoint, you can view metrics on Cloud Monitoring.</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Metrics explorer</strong> page.</p> <p><a href="https://console.cloud.google.com/monitoring/metrics-explorer" target="console" track-name="consoleLink" track-type="tasks" class="button button-primary">Go to Metrics explorer</a> </p>
+</li> <li><p>Click <strong>&lt; &gt; PromQL</strong>.</p></li> <li>
+<p>Enter the following query to observe traffic metrics:</p> 
+<pre>vllm:gpu_cache_usage_perc{cluster='CLUSTER_NAME'}
+</pre>
+</li> </ol> <p>The following image is an example of a graph after the load script execution. This graph shows that Google Cloud Managed Service for Prometheus is ingesting the traffic metrics in response to the load added to the vLLM endpoint:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/vllm-hpa-tpu.png" alt="Traffic metrics captured for the vLLM server"></p> <h3 id="deploy-hpa">Deploy the Horizontal Pod Autoscaler configuration</h3> <p>When you decide which metric to autoscale on, we recommend the following metrics for vLLM:</p> <ul> <li><p><strong><code translate="no" dir="ltr">num_requests_waiting</code></strong>: this metric relates to the number of requests waiting in the model server's queue. This number starts to noticeably grow when the kv cache is full.</p></li> <li><p><strong><code translate="no" dir="ltr">gpu_cache_usage_perc</code></strong>: this metric relates to KV cache utilization, which directly correlates to the number of requests that are processed for a given inference cycle on the model server.</p></li> </ul> <p>We recommend that you use <strong><code translate="no" dir="ltr">num_requests_waiting</code></strong> when you optimize for throughput and cost, and when your latency targets are achievable with your model server's maximum throughput.</p> <p>We recommend that you use <strong><code translate="no" dir="ltr">gpu_cache_usage_perc</code></strong> when you have latency-sensitive workloads where queue-based scaling isn't fast enough to meet your requirements.</p> <p>For further explanation, see <a href="../best-practices/machine-learning/inference/autoscaling">Best practices for autoscaling large language model (LLM) inference workloads with GPUs</a>.</p> <p>When you select an <code translate="no" dir="ltr">averageValue</code> target for your HPA config, you need to determine which metric to autoscale on experimentally. For additional ideas on how to optimize your experiments, see <a href="https://cloud.google.com/blog/products/containers-kubernetes/tuning-the-gke-hpa-to-run-inference-on-gpus">Save on GPUs: Smarter autoscaling for your GKE inferencing workloads</a> blog post. The <a href="https://github.com/GoogleCloudPlatform/ai-on-gke/blob/main/benchmarks/benchmark/tools/profile-generator/README.md">profile-generator</a> used in this blog post also works for vLLM.</p> <p>To deploy the Horizontal Pod Autoscaler configuration using <strong>num_requests_waiting</strong>, follow these steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">vllm-hpa.yaml</code>:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: lws-hpa
+spec:
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: prometheus.googleapis.com|vllm:num_requests_waiting|gauge
+      target:
+        type: AverageValue
+        averageValue: 5
+  scaleTargetRef:
+    apiVersion: leaderworkerset.x-k8s.io/v1
+    kind: LeaderWorkerSet
+    name: vllm
+</pre> </div> <p>The vLLM metrics in Google Cloud Managed Service for Prometheus follow the <code translate="no" dir="ltr">vllm:metric_name</code> format.</p> <section class="key-point"> <b>Best practice</b>: <p>Use <code translate="no" dir="ltr">num_requests_waiting</code> for scaling throughput. Use <code translate="no" dir="ltr">gpu_cache_usage_perc</code> for latency-sensitive GPU use cases.</p> </section>
+</li> <li>
+<p>Deploy the Horizontal Pod Autoscaler configuration:</p> 
+<pre>kubectl apply -f vllm-hpa.yaml
+</pre> <p>GKE schedules another Pod to deploy, which triggers the node pool autoscaler to add a second node before it deploys the second vLLM replica.</p>
+</li> <li>
+<p>Watch the progress of the Pod autoscaling:</p> 
+<pre>kubectl get hpa --watch
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME      REFERENCE              TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+lws-hpa   LeaderWorkerSet/vllm   0/1       1         2         1          6d1h
+lws-hpa   LeaderWorkerSet/vllm   1/1       1         2         1          6d1h
+lws-hpa   LeaderWorkerSet/vllm   0/1       1         2         1          6d1h
+lws-hpa   LeaderWorkerSet/vllm   4/1       1         2         1          6d1h
+lws-hpa   LeaderWorkerSet/vllm   0/1       1         2         2          6d1h
+</pre>
+<aside class="success"><strong>Success:</strong><span> GKE scales up the vLLM server using custom Prometheus metrics.</span></aside>
+</li> </ol> <h2 id="hdml">Speed up model load times with Google Cloud Hyperdisk ML</h2> <p>With these types of LLMs, vLLM can take a significant amount of time to download, load, and warm up on each new replica. For example, that process can take around 90 minutes with Llama 3.1 405B. You can reduce this time (to 20 minutes with Llama 3.1 405B) by downloading the model directly to a Hyperdisk ML volume and mounting that volume to each Pod. To complete this operation, this tutorial uses a Hyperdisk ML volume and a Kubernetes Job. A Job controller in Kubernetes creates one or more Pods and helps ensure that they successfully execute a specific task.</p> <p>To speed up model load times, perform the following steps:</p> <ol> <li>
+<p>Save the following example manifest as <code translate="no" dir="ltr">producer-pvc.yaml</code>:</p> 
+<pre>kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: producer-pvc
+spec:
+  # Specifies the StorageClass to use. Hyperdisk ML is optimized for ML workloads.
+  storageClassName: hyperdisk-ml
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 800Gi
+</pre>
+</li> <li>
+<p>Save the following example manifest as <code translate="no" dir="ltr">producer-job.yaml</code>:</p> <div> <section><p class="_code-tab"><strong>DeepSeek-R1</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: producer-job
+spec:
+  template:  # Template for the Pods the Job will create
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/machine-family
+                operator: In
+                values:
+                - "c3"
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - "ZONE"
+      containers:
+      - name: copy
+        resources:
+          requests:
+            cpu: "32"
+          limits:
+            cpu: "32"
+        image: python:3.11-alpine
+        command:
+        - sh
+        - -c
+        - "pip install 'huggingface_hub==0.24.6' &amp;&amp; \
+          huggingface-cli download deepseek-ai/DeepSeek-R1 --local-dir-use-symlinks=False --local-dir=/data/DeepSeek-R1 --include *.safetensors *.json *.py"
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        volumeMounts:
+          - mountPath: "/data"
+            name: volume
+      restartPolicy: Never
+      volumes:
+        - name: volume
+          persistentVolumeClaim:
+            claimName: producer-pvc
+  parallelism: 1         # Run 1 Pods concurrently
+  completions: 1         # Once 1 Pods complete successfully, the Job is done
+  backoffLimit: 4        # Max retries on failure
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>Llama 3.1 405B</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: producer-job
+spec:
+  template:  # Template for the Pods the Job will create
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/machine-family
+                operator: In
+                values:
+                - "c3"
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - "ZONE"
+      containers:
+      - name: copy
+        resources:
+          requests:
+            cpu: "32"
+          limits:
+            cpu: "32"
+        image: python:3.11-alpine
+        command:
+        - sh
+        - -c
+        - "pip install 'huggingface_hub==0.24.6' &amp;&amp; \
+          huggingface-cli download meta-llama/Meta-Llama-3.1-405B-Instruct --local-dir-use-symlinks=False --local-dir=/data/Meta-Llama-3.1-405B-Instruct --include *.safetensors *.json"
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        volumeMounts:
+          - mountPath: "/data"
+            name: volume
+      restartPolicy: Never
+      volumes:
+        - name: volume
+          persistentVolumeClaim:
+            claimName: producer-pvc
+  parallelism: 1         # Run 1 Pods concurrently
+  completions: 1         # Once 1 Pods complete successfully, the Job is done
+  backoffLimit: 4        # Max retries on failure
+
+</pre> </div> </section> </div>
+</li> <li>
+<p>Follow the instructions in <a href="../how-to/persistent-volumes/hyperdisk-ml">Accelerate AI/ML data loading with Hyperdisk ML</a>, using the two files you created in the prior steps.</p> <p>After this step, you have created and populated the Hyperdisk ML volume with the model data.</p>
+</li> <li>
+<p>Deploy the vLLM multi-node GPU server deployment, which will use the newly created Hyperdisk ML volume for model data.</p> <div> <section><p class="_code-tab"><strong>DeepSeek-R1</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">
+
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.8.5
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                python3 -m vllm.entrypoints.openai.api_server --port 8080 --model /models/DeepSeek-R1 --tensor-parallel-size 8 --pipeline-parallel-size 2 --trust-remote-code --max-model-len 4096"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              tcpSocket:
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /models
+                name: deepseek-r1
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: deepseek-r1
+          persistentVolumeClaim:
+            claimName: hdml-static-pvc
+    workerTemplate:
+      spec:
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.8.5
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /models
+                name: deepseek-r1
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: deepseek-r1
+          persistentVolumeClaim:
+            claimName: hdml-static-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-leader
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+  type: ClusterIP
+</pre> </div> </section> <section><p class="_code-tab"><strong>Llama 3.1 405B</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">
+
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.8.5
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                python3 -m vllm.entrypoints.openai.api_server --port 8080 --model /models/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              tcpSocket:
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /models
+                name: llama3-405b
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: llama3-405b
+          persistentVolumeClaim:
+            claimName: hdml-static-pvc
+    workerTemplate:
+      spec:
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.8.5
+            command:
+              - sh
+              - -c
+              - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+            resources:
+              limits:
+                nvidia.com/gpu: "8"
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - mountPath: /models
+                name: llama3-405b
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: llama3-405b
+          persistentVolumeClaim:
+            claimName: hdml-static-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-leader
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+  type: ClusterIP
+</pre> </div> </section> </div>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete">Delete the deployed resources</h3> <p>To avoid incurring charges to your Google Cloud account for the resources that you created in this guide, run the following command:</p> 
+<pre>ps -ef | grep load.sh | awk '{print $2}' | xargs -n1 kill -9
+</pre>
+
+<pre>gcloud container clusters delete CLUSTER_NAME \
+  --location=ZONE
+</pre> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn more about <a href="../concepts/gpus">GPUs in GKE</a>.</li> <li>Explore the vLLM <a href="https://github.com/vllm-project/vllm">GitHub repository</a> and <a href="https://docs.vllm.ai/en/latest/">documentation</a>.</li> <li>Explore the LWS <a href="https://github.com/kubernetes-sigs/lws">GitHub repository</a>
+</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-multihost-gpu" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-multihost-gpu</a>
+  </p>
+</div>

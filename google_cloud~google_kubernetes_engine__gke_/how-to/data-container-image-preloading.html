@@ -1,0 +1,326 @@
+<h1>Use secondary boot disks to preload data or container images</h1>  <p>This page shows you how to improve workload startup latency by using secondary boot disks in Google Kubernetes Engine (GKE) to preload data or container images on new nodes. This enables workloads to achieve a fast cold start and to improve the overall utilization of provisioned resources.</p> <p>Before reading this page, ensure that you're familiar with Google Cloud, Kubernetes, containers, YAML, containerd runtime, and the Google Cloud CLI.</p> <h2 id="overview">Overview</h2> <p>You can configure node pools with secondary boot disks, available in recent GKE versions. You can tell GKE to provision the nodes and preload them with data, such as a machine learning (ML) model, or a container image. Using preloaded container images or data in a secondary disk has the following benefits for your workloads:</p> <ul> <li>Reduced latency when pulling large container images, or downloading data</li> <li>Faster autoscaling</li> <li>Quicker recovery from disruptions like maintenance events and system errors</li> </ul> <p>The following sections describe how to configure the secondary boot disk in GKE Autopilot and Standard clusters.</p> <h2 id="how-secondary-boot-disks-work">How secondary boot disks work</h2> <p>Your workload can start more quickly by using the preloaded container image or data on secondary boot disks. Secondary boot disks have the following characteristics:</p> <ul> <li>Secondary boot disks are <a href="https://docs.cloud.google.com/compute/docs/disks/persistent-disks">Persistent Disks</a> which are backed by distributed block storage.</li> <li>The Persistent Disk is instantiated from <a href="https://docs.cloud.google.com/compute/docs/images/create-custom">disk images</a> that you create ahead of time.</li> <li>For scalability reasons, each node gets its own Persistent Disk instance created from the disk image. These Persistent Disk instances are deleted when the node is deleted.</li> <li>If the disk image is already in use in the zone, the creation time of all subsequent disks created from the same disk image will be lower.</li> <li>The secondary boot disk type is the same as the node boot disk.</li> <li>The size of the secondary boot disk is decided by disk image size.</li> </ul> <p>Adding secondary boot disks to your node pools does not normally increase the node provisioning time. GKE provisions secondary boot disks from the disk image in parallel with the node provisioning process.</p> <section class="key-point"> <b>Best practice</b>: <p>To support preloaded container images, GKE extends the <a href="https://containerd.io/" track-type="concept" track-name="aurora-bp">containerd</a> runtime with plugins that read the container images from secondary boot disks. Container images are reused by the base layers.</p> <p>Preload large base layers into the secondary boot disk, while the small upper layers can be pulled from the container registry.</p> </section> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<p>Enable the Container File System API.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/apis/library/containerfilesystem.googleapis.com" target="_blank">Enable Container File System API</a></p>
+</li> </ul> <h2 id="requirements">Requirements</h2> <p>The following requirements apply to using secondary boot disk:</p> <ol> <li>Use a supported node image type and GKE version: <ul> <li>Container-Optimized OS with containerd (<code translate="no" dir="ltr">COS_CONTAINERD</code>): <ul> <li>GKE Standard and Autopilot: Version 1.30.1-gke.1329000 or later.</li> </ul>
+</li> <li>Ubuntu with containerd (<code translate="no" dir="ltr">UBUNTU_CONTAINERD</code>): <ul> <li>GKE Standard and Autopilot: Version 1.35.0-gke.1403000 or later.</li> </ul>
+</li> </ul>
+</li> <li>When you modify the disk image, you must create a new node pool. Updating the disk image on existing nodes is not supported.</li> <li>Configure <a href="image-streaming">Image streaming</a> to use the secondary boot disk feature.</li> <li>
+<p>Prepare the disk image with data ready during build time or with preloaded container images. Ensure that your cluster has access to the disk image to load onto the nodes.</p> <section class="key-point"> <b>Best practice</b>: <p>Automate the disk image in a CI/CD pipeline.</p> </section>
+</li> </ol> <h2 id="limitations">Limitations</h2> <p>You can't update secondary boot disks for existing nodes. To attach a new disk image, create a new node pool.</p> <h2 id="pricing">Pricing</h2> <p>When you create node pools with secondary boot disks, GKE attaches a <a href="https://docs.cloud.google.com/compute/docs/disks/persistent-disks">Persistent Disk</a> to each node within the node pool. Persistent Disks are billed based on <a href="https://docs.cloud.google.com/compute/all-pricing#disk">Compute Engine disk pricing</a>.</p> <h2 id="prepare">Prepare the secondary boot disk image</h2> <p>To prepare the secondary boot disk image, choose either the <strong>Images</strong> tab for preloading container images or choose the <strong>Data</strong> tab for preloading data, then complete the following instructions:</p> <div> <section><p class="_code-tab"><strong>Images</strong></p>
+<p>GKE provides a tool called <a href="https://github.com/GoogleCloudPlatform/ai-on-gke/tree/main/tools/gke-disk-image-builder"><code translate="no" dir="ltr">gke-disk-image-builder</code></a> to create a virtual machine (VM), pull the container images on a disk, and then create a disk image from that disk.</p> <p>To create a disk image with multiple preloaded container images, complete the following steps:</p> <ol> <li>Create a <a href="https://docs.cloud.google.com/storage/docs/creating-buckets">Cloud Storage bucket</a> to store the execution logs of <code translate="no" dir="ltr">gke-disk-image-builder</code>.</li> <li>Create a disk image with <code translate="no" dir="ltr">gke-disk-image-builder</code>.</li> </ol> 
+<pre data-language="">go run ./cli \
+    --project-name=PROJECT_ID \
+    --image-name=DISK_IMAGE_NAME \
+    --zone=LOCATION \
+    --gcs-path=gs://LOG_BUCKET_NAME \
+    --disk-size-gb=10 \
+    --container-image=docker.io/library/python:latest \
+    --container-image=docker.io/library/nginx:latest
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">PROJECT_ID</var>: the name of your Google Cloud project.</li> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of the image of the disk. For example, <code translate="no" dir="ltr">nginx-python-image</code>.</li> <li>
+<var translate="no">LOCATION</var>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones/viewing-regions-zones">cluster location</a>.</li> <li>
+<var translate="no">LOG_BUCKET_NAME</var>: the name of the Cloud Storage bucket to store the execution logs. For example,<code translate="no" dir="ltr">gke-secondary-disk-image-logs/</code>.</li> </ul> <aside class="note"><strong>Note:</strong><span> The values that you specify for the<code translate="no" dir="ltr">--container-image</code> flag must include an image tag (such as <code translate="no" dir="ltr">:latest</code>) or an image digest (such as <code translate="no" dir="ltr">@sha256:exampledigestvalue</code>). If you specify only the image name, the command fails.</span></aside> <p>When you create a disk image with <a href="https://github.com/GoogleCloudPlatform/ai-on-gke/tree/main/tools/gke-disk-image-builder"><code translate="no" dir="ltr">gke-disk-image-builder</code></a>, Google Cloud creates multiple resources to complete the process (for example, a VM instance, a temporary disk, and a persistent disk). After its execution, the image builder cleans up all the resources, except the disk image that you created.</p></section> <section><p class="_code-tab"><strong>Data</strong></p>
+<p>Create a custom disk image as the data source by completing the following steps:</p> <ol> <li>
+<a href="https://docs.cloud.google.com/compute/docs/instances/create-start-instance#create_a_vm_instance_with_additional_non-boot_disks">Create a VM with a blank disk</a>.</li> <li>
+<a href="https://docs.cloud.google.com/compute/docs/connect/standard-ssh">Use SSH to connect to the VM</a>. <ol> <li>
+<a href="https://docs.cloud.google.com/compute/docs/disks/format-mount-disk-linux#mounting">Mount the blank disk</a>.</li> <li>
+<a href="https://docs.cloud.google.com/storage/docs/downloading-objects#downloading-an-object">Download the data onto the blank disk</a>.</li> </ol>
+</li> <li>
+<a href="https://docs.cloud.google.com/compute/docs/images/create-custom#create_image">Create a custom image from the disk</a>.</li> </ol></section> </div> <h2 id="configure">Configure the secondary boot disk</h2> <p>You can configure the secondary boot disk in a GKE Autopilot or Standard cluster.</p> <section class="key-point"> <b>Best practices</b>: <p>Use an Autopilot cluster for a fully managed Kubernetes experience. To choose the GKE mode of operation that's the best fit for your workloads, see <a href="../concepts/choose-cluster-mode" track-type="concept" track-name="aurora-bp">Choose a GKE mode of operation</a>.</p> </section> <h3 id="use-autopilot">Use GKE Autopilot</h3> <p>In this section, you create a disk image allowlist to allow the disk image in an existing GKE Autopilot cluster. Then, you modify the Pod node selector to use a secondary boot disk.</p> <h4 id="allowlist-disk-images">Allow the disk images in your project</h4> <p>In this section, you create a <code translate="no" dir="ltr">GCPResourceAllowlist</code> to allow GKE to create nodes with secondary boot disks from the disk images in your Google Cloud project.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">allowlist-disk.yaml</code>:</p> 
+<pre>apiVersion: "node.gke.io/v1"
+kind: GCPResourceAllowlist
+metadata:
+  name: gke-secondary-boot-disk-allowlist
+spec:
+  allowedResourcePatterns:
+  - "projects/PROJECT_ID/global/images/.*"
+</pre> <p>Replace the <var translate="no">PROJECT_ID</var> with your project ID to host the disk image.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f allowlist-disk.yaml
+</pre> <p>GKE creates nodes with secondary boot disks from all disk images in the project.</p>
+</li> </ol> <h4 id="update-pod-node-selector">Update the Pod node selector to use a secondary boot disk</h4> <p>In this section, you modify the Pod specification so that GKE creates the nodes with the secondary boot disk.</p> <ol> <li>
+<p>Add a <code translate="no" dir="ltr">nodeSelector</code> to your Pod template:</p> 
+<pre>nodeSelector:
+    cloud.google.com.node-restriction.kubernetes.io/gke-secondary-boot-disk-DISK_IMAGE_NAME: CONTAINER_IMAGE_CACHE.PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of your disk image.</li> <li>
+<var translate="no">PROJECT_ID</var>: your project ID to host the disk image.</li> </ul>
+</li> <li><p>Use the <code translate="no" dir="ltr">kubectl apply</code> command to apply the Kubernetes specification with the Pod template.</p></li> <li>
+<p>Confirm that the secondary boot disk cache is in use:</p> 
+<pre>kubectl get events --all-namespaces
+</pre> <p>The output is similar to the following:</p> 
+<pre>75s         Normal      SecondaryDiskCachin
+node/gke-pd-cache-demo-default-pool-75e78709-zjfm   Image
+gcr.io/k8s-staging-jobsejt/pytorch-mnist:latest is backed by secondary disk cache
+</pre>
+<aside class="note"><strong>Note:</strong><span> Be aware that Kubernetes might throttle events if the volume is high. The missing event is not a definite indication that the secondary boot disk was not used. The next step is more reliable way to verify that the secondary boot disk was used.</span></aside>
+</li> <li>
+<p>The more reliable way to confirm that the secondary boot disk cache is in use:</p> <p>Query the log from the node you are interested in using this log name:</p> 
+<pre>logName="projects/PROJECT_ID/logs/gcfs-snapshotter"
+</pre> <p>Replace <code translate="no" dir="ltr">PROJECT_ID</code> with your Google Cloud project ID.</p> <p>The log similar to: <code translate="no" dir="ltr">Image gcr.io/k8s-staging-jobsejt/pytorch-mnist:latest is backed by secondary boot disk caching by 100.0%...</code> is an indication that the secondary boot disk cache was used.</p>
+</li> <li>
+<p>Check the image pull latency:</p> 
+<pre>kubectl describe pod POD_NAME
+</pre> <p>Replace <var translate="no">POD_NAME</var> with the name of the Pod.</p> <p>The output is similar to following:</p> 
+<pre>…
+  Normal  Pulled     15m   kubelet            Successfully pulled image "docker.io/library/nginx:latest" in 0.879149587s
+…
+</pre>
+</li> </ol> <p>The expected image pull latency for the cached container image should be significantly reduced, regardless of image size.</p> <h3 id="use-standard">Use GKE Standard</h3> <p>To create a GKE Standard cluster and a node pool, complete the following instructions, choosing either the Images or Data tab based on whether you want to preload container images or preload data onto the secondary boot disk:</p> <div> <section><p class="_code-tab"><strong>Images</strong></p>
+<p>To configure a secondary boot disk, either use the Google Cloud CLI or Terraform:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Create a GKE Standard cluster with image streaming enabled:</p> 
+<pre data-language="bash">gcloud container clusters create CLUSTER_NAME \
+    --location=LOCATION \
+    --cluster-version=VERSION \
+    --enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of your cluster.</li> <li>
+<var translate="no">LOCATION</var>: the cluster location.</li> <li>
+<var translate="no">VERSION</var>: the GKE version to use. The GKE version must be <code translate="no" dir="ltr">1.28.3-gke.1067000</code> or later.</li> </ul>
+</li> <li>
+<p>Create a node pool with a secondary boot disk in the same project:</p> 
+<pre data-language="bash">gcloud container node-pools create NODE_POOL_NAME \
+--cluster=CLUSTER_NAME \
+--location LOCATION \
+--enable-image-streaming \
+--secondary-boot-disk=disk-image=global/images/DISK_IMAGE_NAME,mode=CONTAINER_IMAGE_CACHE
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">NODE_POOL_NAME</var>: the name of the node pool.</li> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of the existing cluster.</li> <li>
+<var translate="no">LOCATION</var>: the compute zone or zones separated by comma of the cluster.</li> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of your disk image.</li> </ul> <p>To create a node pool with a secondary boot disk from the disk image in a different project, complete the steps in <a href="#secondary-disk-different-project">Use a secondary boot disk in a different project</a>.</p>
+</li> <li>
+<p>Add a <code translate="no" dir="ltr">nodeSelector</code> to your Pod template:</p> 
+<pre data-language="bash">nodeSelector:
+    cloud.google.com/gke-nodepool: NODE_POOL_NAME
+</pre>
+</li> <li>
+<p>Confirm that the secondary boot disk cache is in use:</p> 
+<pre data-language="bash">kubectl get events --all-namespaces
+</pre> <p>The output is similar to the following:</p> 
+<pre data-language="bash">75s       Normal      SecondaryDiskCachin
+node/gke-pd-cache-demo-default-pool-75e78709-zjfm Image
+gcr.io/k8s-staging-jobsejt/pytorch-mnist:latest is backed by secondary disk cache
+</pre>
+<aside class="note"><strong>Note:</strong><span> Be aware that Kubernetes might throttle events if the volume is high. The missing event is not a definite indication that the secondary boot disk was not used. The next step is more reliable way to verify that the secondary boot disk was used.</span></aside>
+</li> <li>
+<p>The more reliable way to confirm that the secondary boot disk cache is in use:</p> <p>Query the log from the node you are interested in using this log name:</p> 
+<pre data-language="bash">logName="projects/PROJECT_ID/logs/gcfs-snapshotter"
+</pre> <p>Replace <code translate="no" dir="ltr">PROJECT_ID</code> with your Google Cloud project ID.</p> <p>The log similar to: <code translate="no" dir="ltr">Image gcr.io/k8s-staging-jobsejt/pytorch-mnist:latest is backed by secondary boot disk caching by 100.0%...</code> is an indication that the secondary boot disk cache was used.</p>
+</li> <li>
+<p>Check the image pull latency by running the following command:</p> 
+<pre data-language="bash">kubectl describe pod POD_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of the Pod.</p> <p>The output is similar to following:</p> 
+<pre data-language="bash">…
+  Normal  Pulled     15m   kubelet            Successfully pulled image "docker.io/library/nginx:latest" in 0.879149587s
+…
+</pre>
+</li> </ol> <p>The expected image pull latency for the cached container image should be no more than a few seconds, regardless of image size.</p></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<ol> <li>
+<p>To create a cluster with the default node pool using Terraform, refer to the following example:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_container_cluster" "default" {
+  name               = "default"
+  location           = "us-central1-a"
+  initial_node_count = 1
+
+  # secondary_boot_disks require GKE 1.28.3-gke.106700 or later, which should
+  # be true for all release channels apart from EXTENDED.
+  # If required, Use `release_channel = "EXTENDED"` and set `min_master_version`.
+}</pre> </div> </li> <li>
+<p>Create a node pool with a secondary boot disk in the same project:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_container_node_pool" "secondary-boot-disk-container" {
+  name               = "secondary-boot-disk-container"
+  location           = "us-central1-a"
+  cluster            = google_container_cluster.default.name
+  initial_node_count = 1
+
+  node_config {
+    machine_type = "e2-medium"
+    image_type   = "COS_CONTAINERD"
+    gcfs_config {
+      enabled = true
+    }
+    secondary_boot_disks {
+      disk_image = ""
+      mode       = "CONTAINER_IMAGE_CACHE"
+    }
+  }
+}</pre> </div> <p>To learn more about using Terraform, see <a href="../resources/use-terraform-gke">Terraform support for GKE</a>.</p>
+</li> <li>
+<p>Add a <code translate="no" dir="ltr">nodeSelector</code> to your Pod template:</p> 
+<pre data-language="">nodeSelector:
+    cloud.google.com/gke-nodepool: NODE_POOL_NAME
+</pre>
+</li> <li>
+<p>Confirm that the secondary boot disk cache is in use:</p> 
+<pre data-language="">kubectl get events --all-namespaces
+</pre> <p>The output is similar to the following:</p> 
+<pre data-language="">75s       Normal      SecondaryDiskCachin
+node/gke-pd-cache-demo-default-pool-75e78709-zjfm Image
+gcr.io/k8s-staging-jobsejt/pytorch-mnist:latest is backed by secondary disk cache
+</pre>
+</li> <li>
+<p>Check the image pull latency by running the following command:</p> 
+<pre data-language="">kubectl describe pod POD_NAME
+</pre> <p>Replace <var translate="no">POD_NAME</var> with the name of the Pod.</p> <p>The output is similar to following:</p> 
+<pre data-language="">…
+  Normal  Pulled     15m   kubelet            Successfully pulled image "docker.io/library/nginx:latest" in 0.879149587s
+…
+</pre>
+</li> </ol> <p>The expected image pull latency for the cached container image should be no more than a few seconds, regardless of image size.</p> <p>To learn more about using Terraform, see <a href="../resources/use-terraform-gke">Terraform support for GKE</a>.</p></section> </div></section> <section><p class="_code-tab"><strong>Data</strong></p>
+<p>You can configure a secondary boot disk and preload data by using the Google Cloud CLI or Terraform:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Create a GKE Standard cluster with image streaming enabled:</p> 
+<pre data-language="bash">gcloud container clusters create CLUSTER_NAME \
+    --location=LOCATION \
+    --cluster-version=VERSION \
+    --enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of your cluster.</li> <li>
+<var translate="no">LOCATION</var>: the cluster location.</li> <li>
+<var translate="no">VERSION</var>: the GKE version to use. The GKE version must be 1.28.3-gke.1067000 or later.</li> </ul>
+</li> <li>
+<p>Create a node pool with a secondary boot disk by using the <code translate="no" dir="ltr">--secondary-boot-disk</code> flag:</p> 
+<pre data-language="bash">gcloud container node-pools create NODE_POOL_NAME \
+--cluster=CLUSTER_NAME \
+--location LOCATION \
+--enable-image-streaming \
+--secondary-boot-disk=disk-image=global/images/DISK_IMAGE_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">NODE_POOL_NAME</var>: the name of the node pool.</li> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of the existing cluster.</li> <li>
+<var translate="no">LOCATION</var>: the compute zone or zones separated by comma of the cluster.</li> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of your disk image.</li> </ul> <p>To create a node pool with a secondary boot disk from the disk image in a different project, complete the steps in <a href="#secondary-disk-different-project">Use a secondary boot disk in a different project</a>.</p> <p>GKE creates a node pool where each node has a secondary disk with preloaded data. GKE attaches and mounts the secondary boot disk on the node.</p>
+</li> <li>
+<p>To access the data, mount the secondary boot disk image in the Pod containers by using a hostPath volume mount. Set <code translate="no" dir="ltr">/usr/local/data_path_sbd</code> to the path in your container where you want the data to reside:</p> 
+<pre data-language="bash">apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-name
+spec:
+  containers:
+  ...
+    volumeMounts:
+    - mountPath: /usr/local/data_path_sbd
+      name: data-path-sbd
+  ...
+  volumes:
+  - name: data-path-sbd
+    hostPath:
+      path: /mnt/disks/gke-secondary-disks/gke-DISK_IMAGE_NAME-disk
+</pre> <p>Replace <var translate="no">DISK_IMAGE_NAME</var> with the name of your disk image.</p> <aside class="note"><strong>Note:</strong><span> the secondary boot disk is shared by all containers on the same node. Any data written to the secondary boot disk by one container is visible to all other containers on the node that mount it. To prevent accidental changes, you can mount the volume in read-only mode.</span></aside>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<ol> <li>
+<p>To create a cluster with the default node pool using Terraform, refer to the following example:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_container_cluster" "default" {
+  name               = "default"
+  location           = "us-central1-a"
+  initial_node_count = 1
+
+  # secondary_boot_disks require GKE 1.28.3-gke.106700 or later, which should
+  # be true for all release channels apart from EXTENDED.
+  # If required, Use `release_channel = "EXTENDED"` and set `min_master_version`.
+}</pre> </div> </li> <li>
+<p>Create a node pool with a secondary boot disk in the same project:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_container_node_pool" "secondary-boot-disk-data" {
+  name               = "secondary-boot-disk-data"
+  location           = "us-central1-a"
+  cluster            = google_container_cluster.default.name
+  initial_node_count = 1
+
+  node_config {
+    machine_type = "e2-medium"
+    image_type   = "COS_CONTAINERD"
+    gcfs_config {
+      enabled = true
+    }
+    secondary_boot_disks {
+      disk_image = ""
+    }
+  }
+}</pre> </div> <p>To learn more about using Terraform, see <a href="../resources/use-terraform-gke">Terraform support for GKE</a>.</p>
+</li> <li>
+<p>To access the data, mount the secondary boot disk image in the Pod containers by using a hostPath volume mount. Set <code translate="no" dir="ltr">/usr/local/data_path_sbd</code> to the path in your container where you want the data to reside:</p> 
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-name
+spec:
+  containers:
+  ...
+    volumeMounts:
+    - mountPath: /usr/local/data_path_sbd
+      name: data-path-sbd
+  ...
+  volumes:
+  - name: data-path-sbd
+    hostPath:
+      path: /mnt/disks/gke-secondary-disks/gke-DISK_IMAGE_NAME-disk
+</pre> <p>Replace the <var translate="no">DISK_IMAGE_NAME</var> with the name of your disk image.</p>
+</li> </ol></section> </div></section> </div> <h4 id="cluster-autoscaling">Cluster autoscaling with secondary boot disks</h4> <p>To create a node pool and configure cluster autoscaling on a secondary boot disk, use Google Cloud CLI:</p> 
+<pre>  gcloud container node-pools create NODE_POOL_NAME \
+      --cluster=CLUSTER_NAME \
+      --location LOCATION \
+      --enable-image-streaming \
+      --secondary-boot-disk=disk-image=global/images/DISK_IMAGE_NAME,mode=CONTAINER_IMAGE_CACHE \
+      --enable-autoscaling \
+      --num-nodes NUM_NODES \
+      --min-nodes MIN_NODES \
+      --max-nodes MAX_NODES
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">NODE_POOL_NAME</var>: the name of the node pool.</li> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of the existing cluster.</li> <li>
+<var translate="no">LOCATION</var>: the compute zone or zones separated by comma of the cluster.</li> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of your disk image.</li> <li>
+<var translate="no">MIN_NODES</var>: the minimum number of nodes to automatically scale for the specified node pool per zone. To specify the minimum number of nodes for the entire node pool in GKE versions 1.24 and later, use <code translate="no" dir="ltr">--total-min-nodes</code>. The flags <code translate="no" dir="ltr">--total-min-nodes</code> and <code translate="no" dir="ltr">--total-max-nodes</code> are mutually exclusive with the flags <code translate="no" dir="ltr">--min-nodes</code> and <code translate="no" dir="ltr">--max-nodes</code>.</li> <li>
+<var translate="no">MAX_NODES</var>: the maximum number of nodes to automatically scale for the specified node pool per zone. To specify the maximum number of nodes for the entire node pool in GKE versions 1.24 and later, use <code translate="no" dir="ltr">--total-max-nodes</code>. The flags <code translate="no" dir="ltr">--total-min-nodes</code> and <code translate="no" dir="ltr">--total-max-nodes</code> are mutually exclusive with the flags <code translate="no" dir="ltr">--min-nodes</code> and <code translate="no" dir="ltr">--max-nodes</code>.</li> </ul> <h4 id="node-auto-provisioning">Node auto-provisioning with secondary boot disks</h4> <p>In GKE 1.30.1-gke.1329000 and later, you can <a href="node-auto-provisioning">configure node auto-provisioning</a> to automatically create and delete node pools to meet the resource demands of your workloads.</p> <ol> <li>
+<p>Create a disk image allowlist custom resource for secondary boot disk for GKE node auto-provisioning similar to the following:</p> 
+<pre>apiVersion: "node.gke.io/v1"
+kind: GCPResourceAllowlist
+metadata:
+  name: gke-secondary-boot-disk-allowlist
+spec:
+  allowedResourcePatterns:
+  - "projects/&lt;PROJECT_ID&gt;/global/images/.*"
+</pre> <p>Replace the <var translate="no">PROJECT_ID</var> with your project ID to host the disk image.</p>
+</li> <li>
+<p>Deploy the allowlist custom resource in the cluster, run the following command:</p> 
+<pre>kubectl apply -f ALLOWLIST_FILE
+</pre> <p>Replace the <var translate="no">ALLOWLIST_FILE</var> with the manifest filename.</p>
+</li> <li>
+<p>Update the Pod node selector to use secondary boot disk:</p> 
+<pre>nodeSelector:
+    cloud.google.com.node-restriction.kubernetes.io/gke-secondary-boot-disk-DISK_IMAGE_NAME:CONTAINER_IMAGE_CACHE.PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of your disk image.</li> <li>
+<var translate="no">PROJECT_ID</var>: your project ID to host the disk image.</li> </ul>
+</li> </ol> <h2 id="secondary-disk-different-project">Use a secondary boot disk in a different project</h2> <p>When you create a node pool with a secondary boot disk, you can tell GKE to use the disk image in a different project by using the <code translate="no" dir="ltr">--secondary-boot-disk</code> flag.</p> <ol> <li>
+<p>Create a node pool with a secondary boot disk from the disk image in a different project by using the <code translate="no" dir="ltr">--secondary-boot-disk</code> flag. For example:</p> 
+<pre>gcloud beta container node-pools create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location LOCATION \
+    --enable-image-streaming \
+    --secondary-boot-disk=disk-image=projects/IMAGE_PROJECT_ID/global/images/DISK_IMAGE_NAME,mode=CONTAINER_IMAGE_CACHE
+
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">DISK_IMAGE_NAME</var>: the name of your disk image.</li> <li>
+<var translate="no">IMAGE_PROJECT_ID</var>: the name of the project that the disk image belongs to.</li> </ul> <p>GKE creates a node pool where each node has a secondary disk with preloaded data. GKE attaches and mounts the secondary boot disk onto the node.</p>
+</li> <li>
+<p>Grant access to disk images belonging to a different project by adding "Compute Image User" roles for the cluster service accounts:</p> <ul> <li>Default compute service account: <var translate="no">CLUSTER_PROJECT_NUMBER</var>@cloudservices.gserviceaccount.com</li> <li>GKE service account: service-<var translate="no">CLUSTER_PROJECT_NUMBER</var>@container-engine-robot.iam.gserviceaccount.com</li> </ul> 
+<pre>gcloud projects add-iam-policy-binding IMAGE_PROJECT_ID \
+    --member serviceAccount:CLUSTER_PROJECT_NUMBER@cloudservices.gserviceaccount.com \
+    --role roles/compute.imageUser
+
+gcloud projects add-iam-policy-binding IMAGE_PROJECT_ID \
+    --member serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com \
+    --role roles/compute.imageUser
+</pre>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Use <a href="image-streaming">Use Image streaming to pull container images</a> to pull container images by streaming the image data as your workloads need it.</li> <li>See <a href="nccl-fast-socket">Improve workload efficiency using NCCL Fast Socket</a> to learn how to use the <a href="https://github.com/google/nccl-fastsocket">NVIDIA Collective Communication Library (NCCL) Fast Socket plugin</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/data-container-image-preloading" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/data-container-image-preloading</a>
+  </p>
+</div>

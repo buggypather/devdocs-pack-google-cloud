@@ -1,0 +1,130 @@
+<h1>Provision and use mixed Local SSDs for raw block and ephemeral storage</h1>  <p>This document shows you how to provision and partition <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd">Local SSDs</a> in Google Kubernetes Engine (GKE) to support workloads that require both a standard ephemeral storage file system and unformatted raw block storage on the same node.</p> <p>Use this configuration for stateful applications and highly optimized databases. These workloads often require direct disk access for increased performance, but also need standard ephemeral file storage for sidecars, logs, or container caches. By using mixed Local SSD capacity, you can reduce cluster management overhead and maximize hardware utilization, because you don't need to dedicate separate nodes or full disks exclusively to raw block infrastructure.</p> <p>When you create a cluster or node pool with mixed Local SSD capacity, GKE partitions every physically attached Local SSD as follows:</p> <ul> <li>
+<strong>Ephemeral storage:</strong> the requested ephemeral capacity is divided equally across the Local SSDs and combined to provide the node's standard ephemeral file storage. When ephemeral capacity is partitioned across multiple Local SSDs, the storage is combined into a <a href="https://en.wikipedia.org/wiki/Standard_RAID_levels#RAID_0">RAID-0</a> array. You can access the ephemeral storage using standard <a href="local-ssd#use"><code translate="no" dir="ltr">emptyDir</code> volumes</a>.</li> <li>
+<strong>Raw block storage:</strong> the remainder of the physical capacity on each disk is presented to the node as distinct, unformatted raw block devices.</li> </ul> <p>This document is for Platform admins and operators and DevOps who want to optimize hardware utilization and storage performance in GKE for specialized workloads.</p> <h2 id="considerations">Considerations</h2> <p>In addition to the <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#limitations">Compute Engine Local SSD limitations</a>, review the following GKE-specific considerations before configuring mixed Local SSD modes:</p> <ul> <li>
+<strong>Autopilot compatibility:</strong> GKE Autopilot clusters do not support mixed raw block and ephemeral storage. To learn how to use Local SSDs for standard ephemeral storage in Autopilot, see <a href="local-ssd#local-ssd-autopilot">Local SSDs in Autopilot clusters</a>.</li> <li>
+<strong>Custom ComputeClasses:</strong> custom ComputeClasses don't support mixed Local SSD configuration.</li> <li>
+<strong>Operating system:</strong> mixed Local SSD mode is supported only on Linux node images (Container-Optimized OS and Ubuntu). Windows Server node pools aren't supported.</li> <li>
+<strong>Maintenance events:</strong> we don't recommend using Local SSD as raw block storage for storage-optimized Z3 or Z4D VMs. Data on these VMs might not survive maintenance events. For more information, see <a href="local-ssd-raw">Provision and use Local SSD-backed raw block storage</a>.</li> <li>
+<strong>Shared I/O:</strong> because both the ephemeral RAID-0 array and your targeted raw block partitions rely on the same underlying physical SSDs, intensive operations on one logical partition might impact the throughput of the other. For information about maximum throughput limits, see <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#performance">Local SSD performance</a>.</li> <li>
+<strong>Pricing:</strong> when you use mixed modes to partition Local SSD capacity, you pay for the total underlying physical Local SSD capacity attached to the node, regardless of how much capacity is allocated for ephemeral storage compared to raw block storage. For more information, see <a href="https://cloud.google.com/products/compute/pricing/storage-optimized">Local SSD pricing</a>.</li> <li>
+<strong>Manual configuration:</strong> to use Local SSD-backed raw block storage, you must manually configure the devices because GKE doesn't format or mount the raw block partitions. You are also responsible for managing node capacity and handling potential disruptions from colocated workloads. Using a <a href="https://kubernetes.io/docs/concepts/storage/volumes/#local">local PersistentVolume object</a> provides integrated Pod scheduling. If your workloads don't require data to persist across the Pod lifecycle, or if they lack specialized performance needs, use the <a href="local-ssd">fully ephemeral Local SSD configuration</a> instead. The fully ephemeral configuration is suitable for most use cases.</li> <li>
+<strong>Node memory swap:</strong> you can combine mixed Local SSD capacity with node memory swap by using the boot disk profile or the ephemeral Local SSD profile. The dedicated Local SSD profile isn't supported with mixed Local SSD capacity. For more information, see <a href="../node-memory-swap#mixed-local-ssd">Node memory swap with mixed Local SSD capacity</a>.</li> </ul> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <p>To use this feature, GKE nodes must run version 1.37.0-gke.3570000 or later.</p> <h3 id="required-roles">Required roles</h3> <p> To get the permissions that you need to create clusters and node pools with mixed Local SSD capacity, ask your administrator to grant you the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.admin">Kubernetes Engine Admin </a> (<code translate="no" dir="ltr">roles/container.admin</code>) IAM role on your project. For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <h2 id="create-cluster-node-pool">Create a cluster or node pool with mixed Local SSD storage</h2> <p>You can allocate ephemeral capacity and reserve raw block partitions by using the <code translate="no" dir="ltr">capacity</code> property of the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd</code> flag.</p> <p>Create your cluster or node pool by specifying the <code translate="no" dir="ltr">capacity</code> subfield with the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd</code> flag.</p> <p>If your machine type allows a configurable number of Local SSDs, you must also specify the <code translate="no" dir="ltr">count</code> subfield. If your machine type has a fixed number of Local SSDs, for example, <code translate="no" dir="ltr">-lssd</code> types, you can omit the <code translate="no" dir="ltr">count</code> subfield because GKE automatically calculates the disk count based on the VM shape.</p> <h3 id="create-cluster">Create a cluster with mixed Local SSD storage</h3> <p>To create a new cluster, use the <code translate="no" dir="ltr">gcloud container clusters create</code> command. These settings apply to the default node pool only. If subsequent node pools need mixed Local SSD storage, specify the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd</code> flag when you create the node pool. The maximum number of disks you can attach <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#choose_number_local_ssds">varies by machine type and region</a>.</p> <p>If the version for your cluster is earlier than <code translate="no" dir="ltr">1.37.0-gke.3570000</code>, add one of the following flags to the following cluster creation commands:</p> <ul> <li>The <code translate="no" dir="ltr">--cluster-version=<var translate="no">VERSION</var></code> flag with <code translate="no" dir="ltr"><var translate="no">VERSION</var></code> set to <code translate="no" dir="ltr">1.37.0-gke.3570000</code> or later, or</li> <li>The <code translate="no" dir="ltr">--release-channel=rapid</code> flag.</li> </ul> <p><strong>For machine types with a configurable Local SSD count, run the following:</strong></p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --machine-type=MACHINE_TYPE \
+    --ephemeral-storage-local-ssd count=NUMBER_OF_DISKS,capacity=CAPACITY
+</pre> <p><strong>For machine types with a fixed Local SSD count, run the following:</strong></p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --machine-type=MACHINE_TYPE \
+    --ephemeral-storage-local-ssd capacity=CAPACITY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster you want to create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type to use. For a list of supported machine types, see <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#machine-series-lssd">Machine series support</a>. You cannot use Local SSDs with the default <code translate="no" dir="ltr">e2-medium</code> machine type, because <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#limitations">shared-core machine types</a> don't support them.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUMBER_OF_DISKS</var></code>: for machine types with a configurable Local SSD count, the number of Local SSD disks to provision on each node.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">CAPACITY</var></code>: the total Local SSD capacity to format for ephemeral storage. This value must be greater than 0 and strictly less than the total physical Local SSD capacity (disk count × per-disk size), for example, <code translate="no" dir="ltr">200GB</code>. Note the following:</p> <ul> <li>The value can't be changed after the cluster is created.</li> <li>GKE reserves part of this capacity for system use, so allocatable ephemeral storage is less than <code translate="no" dir="ltr"><var translate="no">CAPACITY</var></code>. For more information, see <a href="../../concepts/plan-node-sizes#local_ephemeral_storage_reservation">Local ephemeral storage reservation</a>.</li> </ul>
+</li> </ul> <h3 id="node-pool">Create a node pool with mixed Local SSD storage</h3> <p>To add a node pool to an existing cluster, use the <code translate="no" dir="ltr">gcloud container node-pools create</code> command.</p> <p>If the version for your node pool is earlier than <code translate="no" dir="ltr">1.37.0-gke.3570000</code>, you must do the following:</p> <ul> <li>Add the <code translate="no" dir="ltr">--node-version=<var translate="no">VERSION</var></code> flag to the following node pool creation commands, with <code translate="no" dir="ltr"><var translate="no">VERSION</var></code> set to <code translate="no" dir="ltr">1.37.0-gke.3570000</code> or later.</li> <li>Ensure that the cluster control plane is on version <code translate="no" dir="ltr">1.37.0-gke.3570000</code> or later.</li> </ul> <p><strong>For machine types with a configurable Local SSD count, run the following:</strong></p> 
+<pre>gcloud container node-pools create POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --machine-type=MACHINE_TYPE \
+    --ephemeral-storage-local-ssd count=NUMBER_OF_DISKS,capacity=CAPACITY
+</pre> <p><strong>For machine types with a fixed Local SSD count, run the following:</strong></p> 
+<pre>gcloud container node-pools create POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --machine-type=MACHINE_TYPE \
+    --ephemeral-storage-local-ssd capacity=CAPACITY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of the new node pool you want to create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type to use. For a list of supported machine types, see <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#machine-series-lssd">Machine series support</a>. You cannot use Local SSDs with the default <code translate="no" dir="ltr">e2-medium</code> machine type, because <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#limitations">shared-core machine types</a> don't support them.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUMBER_OF_DISKS</var></code>: for machine types with a configurable Local SSD count, the number of Local SSD disks to provision on each node.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">CAPACITY</var></code>: the total Local SSD capacity to format for ephemeral storage. This value must be greater than 0 and strictly less than the total physical Local SSD capacity (disk count × per-disk size), for example, <code translate="no" dir="ltr">200GB</code>. Note the following:</p> <ul> <li>The value can't be changed after the node pool is created.</li> <li>GKE reserves part of this capacity for system use, so allocatable ephemeral storage is less than <code translate="no" dir="ltr"><var translate="no">CAPACITY</var></code>. For more information, see <a href="../../concepts/plan-node-sizes#local_ephemeral_storage_reservation">Local ephemeral storage reservation</a>.</li> </ul>
+</li> </ul> <h3 id="verify-labels">Verify the node labels</h3> <p>After provisioning, to verify that the nodes have the correct labels for both ephemeral and raw block storage, run the following command:</p> 
+<pre>kubectl describe node NODE_NAME
+</pre> <p>The output should contain both of the following node labels:</p> <ul> <li><code translate="no" dir="ltr">cloud.google.com/gke-ephemeral-storage-local-ssd: "true"</code></li> <li><code translate="no" dir="ltr">cloud.google.com/gke-local-nvme-ssd-partition: "true"</code></li> </ul> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">cloud.google.com/gke-local-nvme-ssd-partition: "true"</code> label is distinct from the <code translate="no" dir="ltr">cloud.google.com/gke-local-nvme-ssd=true</code> label that is used for fully raw block configuration. For more information about using fully raw block configuration, see <a href="local-ssd-raw#create">Local SSD-backed raw block storage</a>.</span></aside> <h2 id="access-ephemeral-capacity">Access the ephemeral capacity</h2> <p>Access your reserved ephemeral storage through <a href="local-ssd#use"><code translate="no" dir="ltr">emptyDir</code> volumes</a> exactly as you would for any other GKE ephemeral volume.</p> <h2 id="access-raw-block-capacity">Access the raw block capacity</h2> <p>To access your raw block capacity, you create a StorageClass object, provision a local PersistentVolume object, and claim it using a PersistentVolumeClaim object.</p> <aside class="warning"><strong>Warning:</strong><span> The standard raw block workflow uses a community RAID DaemonSet (<code translate="no" dir="ltr">gke-daemonset-raid-disks.yaml</code>) together with the <a href="local-ssd-raw#run-local-volume-static-provisioner">local volume static provisioner</a>. If you adapt the RAID <code translate="no" dir="ltr">DaemonSet</code> for your mixed configuration nodes (for example, by modifying its <code translate="no" dir="ltr">nodeSelector</code>), you must <em>not</em> run this RAID configuration. GKE already manages the ephemeral portion of each disk, and running the RAID DaemonSet breaks your node's ephemeral capacity.</span></aside> <h3 id="create-storageclass">Create a StorageClass</h3> <p>Because you are provisioning your PersistentVolume objects without the community static provisioner, we recommend creating a StorageClass object with the <code translate="no" dir="ltr">volumeBindingMode: WaitForFirstConsumer</code> field. This delays binding until Pod scheduling, ensuring that Kubernetes chooses a Local SSD from an appropriate node that can run the Pod.</p> 
+<pre>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: "local-storage"
+provisioner: "kubernetes.io/no-provisioner"
+volumeBindingMode: "WaitForFirstConsumer"
+</pre> <h3 id="create-persistentvolume">Create the PersistentVolume</h3> <p>Local PersistentVolume objects have important limitations regarding node upgrades, scaling, and cluster autoscaling. Before creating your volumes, review the <a href="local-ssd-raw#limitations_of_local_persistentvolumes">Limitations of local PersistentVolumes</a> to understand how lifecycle events affect your data.</p> <p>To create the PersistentVolume object, complete the following steps to find the symbolic link path to the Local SSD partition, determine its exact remaining capacity, and configure the manifest.</p> <h4 id="find_the_partition_capacity">Find the partition capacity</h4> <p>Run the following command on the target node to find the exact raw block capacity left over for the partition.</p> 
+<pre>kubectl debug node/NODE_NAME -it --image=ubuntu -- \
+    sh -c 'ls -l /host/dev/disk/by-id/ | grep partition; lsblk -o NAME,SIZE,TYPE'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node where the Local SSD is attached.</p> <p>The output shows the mapping between device names and partition symlinks so that you can verify which partition corresponds to which device. It also lists the block devices attached to the node and their sizes.</p> <p>For example, if you attach two Local SSDs to the node and allocate 200 GB to ephemeral storage (<code translate="no" dir="ltr">capacity=200GB</code>), the output is similar to the following:</p> 
+<pre>google-local-ssd-partition0 -&gt; /dev/nvme0n1p2
+google-local-ssd-partition1 -&gt; /dev/nvme0n2p2
+NAME          SIZE TYPE
+...
+nvme0n1       375G disk
+|-nvme0n1p1   100G part
+| `-md0     199.9G raid0
+`-nvme0n1p2   275G part
+nvme0n2       375G disk
+|-nvme0n2p1   100G part
+| `-md0     199.9G raid0
+`-nvme0n2p2   275G part
+</pre> <p>Note the mapping between the <code translate="no" dir="ltr">google-local-ssd-partition</code> symlink and the underlying device name, as well as the size of that partition. You use the size as the <code translate="no" dir="ltr"><var translate="no">PARTITION_SIZE</var></code> and the symlink path as the <code translate="no" dir="ltr"><var translate="no">LOCAL_SSD_SYMLINK_PATH</var></code> in the PersistentVolume manifest.</p> <p>For example, in the preceding output, the <code translate="no" dir="ltr">/dev/disk/by-id/google-local-ssd-partition0</code> symlink points to the <code translate="no" dir="ltr">nvme0n1p2</code> partition, which has a size of <code translate="no" dir="ltr">275G</code>.</p> <p>The <code translate="no" dir="ltr">kubectl debug</code> command leaves a temporary Pod running in the default namespace. To prevent it from consuming resources, delete this Pod by running the following command:</p> 
+<pre>kubectl delete pod DEBUG_POD_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DEBUG_POD_NAME</var></code> with the name of the Pod created by the <code translate="no" dir="ltr">kubectl debug</code> command, which is printed when you run the command.</p> <h4 id="configure_the_persistentvolume_manifest">Configure the PersistentVolume manifest</h4> <p>Configure the volume manifest with the partition size you found. The <code translate="no" dir="ltr">nodeAffinity</code> field is required for local volumes. It helps ensure that Kubernetes schedules Pods claiming this volume to the specific node where the Local SSD is physically attached. The following example shows a manifest for a raw block Local SSD partition:</p> 
+<pre>apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: "example-local-pv"
+spec:
+  capacity:
+    storage: PARTITION_SIZE
+  accessModes:
+  - "ReadWriteOnce"
+  volumeMode: "Block"
+  persistentVolumeReclaimPolicy: "Retain"
+  storageClassName: "local-storage"
+  local:
+    path: "LOCAL_SSD_SYMLINK_PATH"
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: "kubernetes.io/hostname"
+          operator: "In"
+          values:
+          - "NODE_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PARTITION_SIZE</var></code>: the actual raw block capacity left over that you found in the first step. Use the <code translate="no" dir="ltr">Gi</code> suffix (for example, <code translate="no" dir="ltr">275Gi</code>) so that the value matches the capacity of the partition exactly.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code>: the name of the node where the Local SSD is attached.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCAL_SSD_SYMLINK_PATH</var></code>: the symbolic link path to the unformatted Local SSD partition that you found in the first step. For each Local SSD attached to the node pool, the host OS creates a symbolic link to access the remaining raw block capacity. The paths follow a zero-indexed pattern. For example, if you attach three Local SSDs, the raw block paths for the partitions are the following: <ul> <li><code translate="no" dir="ltr">/dev/disk/by-id/google-local-ssd-partition0</code></li> <li><code translate="no" dir="ltr">/dev/disk/by-id/google-local-ssd-partition1</code></li> <li><code translate="no" dir="ltr">/dev/disk/by-id/google-local-ssd-partition2</code></li> </ul>
+</li> </ul> <h3 id="create-persistentvolumeclaim">Create the PersistentVolumeClaim</h3> <p>Create a PersistentVolumeClaim object to claim the volume. The corresponding specification looks like the following:</p> 
+<pre>apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "example-local-pvc"
+spec:
+  accessModes:
+  - "ReadWriteOnce"
+  volumeMode: "Block"
+  storageClassName: "local-storage"
+  resources:
+    requests:
+      storage: PARTITION_SIZE
+</pre> <h2 id="use-volume">Use the volume in a Pod</h2> <p>You can use the PersistentVolume object in a Pod by referencing the PersistentVolumeClaim object in a <code translate="no" dir="ltr">volumeDevices</code> specification. The following is a sample Pod manifest that uses the <code translate="no" dir="ltr">example-local-pvc</code> claim:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: "example-pod"
+spec:
+  containers:
+  - name: "app"
+    image: "ubuntu:22.04"
+    command: ["/bin/sh", "-c"]
+    args: ["tail -f /dev/null"]
+    volumeDevices:
+    - name: "raw"
+      devicePath: "/dev/xvda"
+  volumes:
+  - name: "raw"
+    persistentVolumeClaim:
+      claimName: "example-local-pvc"
+</pre> <p>Because you are using the <code translate="no" dir="ltr">kubernetes.io/no-provisioner</code> provisioner, GKE does not automatically clean up local volumes. If you delete the PersistentVolume object, you must manually erase data from the underlying disk before the disk can be safely reused.</p> <h2 id="troubleshooting">Troubleshooting</h2> <p>For troubleshooting instructions, see <a href="../../troubleshooting/troubleshooting-gke-storage#local-ssds">Troubleshooting storage in GKE</a>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to use <a href="local-ssd">fully ephemeral Local SSD storage</a> for workload caching.</li> <li>Learn how to provision <a href="local-ssd-raw">fully raw block Local SSD volumes</a> for dedicated high-performance database storage.</li> <li>Learn how to <a href="../stateful-apps">deploy a stateful application</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/mixed-local-ssd" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/mixed-local-ssd</a>
+  </p>
+</div>

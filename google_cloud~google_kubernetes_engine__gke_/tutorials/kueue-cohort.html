@@ -1,0 +1,391 @@
+<h1>Implement a Job queuing system with quota sharing between namespaces on GKE</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial uses <a href="https://kueue.sigs.k8s.io" target="_blank" class="external">Kueue</a> to show you how to implement a Job queueing system, configure workload resource and quota sharing between different namespaces on Google Kubernetes Engine (GKE), and to maximize the utilization of your cluster.</p> <h2 id="background">Background</h2> <p>As an infrastructure engineer or cluster administrator, maximizing utilization between namespaces is very important. A batch of Jobs in one namespace might not fully use the full quota assigned to the namespace, while another namespace may have multiple pending Jobs. In order to efficiently use the cluster resources among Jobs in different namespaces and to increase the flexibility of quota management, you can configure cohorts in Kueue. A cohort is a group of ClusterQueues that can borrow unused quota from one another. A ClusterQueue governs a pool of resources such as CPU, memory, and hardware accelerators.</p> <p>You can find a more detailed definition of all these concepts in the <a href="https://kueue.sigs.k8s.io/docs/concepts" target="_blank" class="external">Kueue documentation</a> </p> <aside class="note"><strong>Note:</strong><span> Kueue refers to jobs defined with an arbitrary API as Workloads, to avoid the confusion with the specific Kubernetes Job API.</span></aside> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> This tutorial is for infrastructure engineers or cluster administrators that want to implement a Job queueing system on Kubernetes using Kueue with quota sharing. <p>This tutorial will mimic two teams in two different namespaces, where each team has their dedicated resources, but can borrow from each other. A third set of resources can be used as spillover when jobs accumulate.</p> <p>Utilize <a href="https://prometheus-operator.dev/" target="_blank" class="external">Prometheus operator</a> to monitor Jobs and resource allocation in different namespaces.</p> <p>This tutorial covers the following necessary steps:</p> <ol> <li>Create a GKE cluster</li> <li>Create the <a href="https://kueue.sigs.k8s.io/docs/concepts/resource_flavor/" target="_blank" class="external">ResourceFlavors</a> </li> <li>For each team, create a <a href="https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/" target="_blank" class="external">ClusterQueue</a> and <a href="https://kueue.sigs.k8s.io/docs/concepts/local_queue/" target="_blank" class="external">LocalQueue</a> </li> <li>Create Jobs and observe the admitted workloads</li> <li>Borrow unused quota with <a href="https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/#cohort" target="_blank" class="external">cohorts</a> </li> <li>Add a spillover ClusterQueue governing Spot VMs</li> </ol> </section> <section id="costs"> <h2 id="costs">Costs</h2> This tutorial uses the following billable components of Google Cloud: <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing">GKE</a></li> </ul> <p>Use the <a href="https://cloud.google.com/products/calculator" target="_blank">Pricing Calculator</a> to generate a cost estimate based on your projected usage.</p> <p>When you finish this tutorial, you can avoid continued billing by deleting the resources you created. For more information, see <a href="#clean-up">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <h3 id="set_up_your_project">Set up your project</h3> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, click <b>Create project</b> to begin creating a new Google Cloud project.</p>  <p class="showalways"><b>Roles required to create a project</b></p> <p> To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, click <b>Create project</b> to begin creating a new Google Cloud project.</p>  <p class="showalways"><b>Roles required to create a project</b></p> <p> To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> </cloud-free-trial> </ol> <h3 id="set_defaults_for_the">Set defaults for the Google Cloud CLI</h3> <ol> <li><p>In the Google Cloud console, start a Cloud Shell instance: <br> <a track-type="solution" track-name="internalLink" track-metadata-position="body" target="console" class="button button-primary" href="https://console.cloud.google.com/">Open Cloud Shell</a></p></li> <li>
+<p>Download the source code for this sample app:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+cd kubernetes-engine-samples/batch/kueue-cohort
+</pre>
+</li> <li>
+<p>Set the default environment variables:</p> 
+<pre>gcloud config set project PROJECT_ID
+gcloud config set compute/region COMPUTE_REGION
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">PROJECT_ID</var>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<var translate="no">COMPUTE_REGION</var>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">Compute Engine region</a>.</li> </ul>
+</li> </ol> <h2 id="create_a_cluster">Create a GKE cluster</h2> <ol> <li>
+<p>Create a GKE cluster named <code translate="no" dir="ltr">kueue-cohort</code>:</p> <p>You will create a cluster with 6 nodes (2 per zone) in the default pool and no autoscaling. Those will be all the resources available for the teams in the beginning, so they will have to compete for them.</p> <p>You will see later how Kueue manages the workloads that both teams will send to the respective queues.</p> 
+<pre>  gcloud container clusters create kueue-cohort --location COMPUTE_REGION \
+  --release-channel rapid --machine-type e2-standard-4 --num-nodes 2
+</pre>
+<aside class="note"><strong>Note:</strong><span> This step can take up to five minutes to complete.</span></aside> <p>The outcome is similar to the following once the cluster is created:</p> 
+<pre>  kubeconfig entry generated for kueue-cohort.
+  NAME: kueue-cohort
+  LOCATION: us-central1
+  MASTER_VERSION: 1.26.2-gke.1000
+  MASTER_IP: 35.224.108.58
+  MACHINE_TYPE: e2-medium
+  NODE_VERSION: 1.26.2-gke.1000
+  NUM_NODES: 6
+  STATUS: RUNNING
+</pre> <p>Where the <code translate="no" dir="ltr">STATUS</code> is <code translate="no" dir="ltr">RUNNING</code> for the <code translate="no" dir="ltr">kueue-cluster</code>.</p>
+</li> <li>
+<p>Create a node pool named <code translate="no" dir="ltr">spot</code>.</p> <p>This node pool uses Spot VM and has autoscaling enabled. It starts with 0 nodes, but later you will make it available to the teams for use as overspill capacity.</p> 
+<pre>gcloud container node-pools create spot --cluster=kueue-cohort --location COMPUTE_REGION  \
+--spot --enable-autoscaling --max-nodes 20 --num-nodes 0 \
+--machine-type e2-standard-4
+</pre>
+</li> <li>
+<p>Install the release version of Kueue to the cluster:</p> 
+<pre>VERSION=VERSION
+kubectl apply -f \
+  https://github.com/kubernetes-sigs/kueue/releases/download/$VERSION/manifests.yaml
+</pre> <p>Replace <var translate="no">VERSION</var> with the letter v following the latest version of Kueue, for example <code translate="no" dir="ltr">v0.4.0</code>. For more information about Kueue versions, see <a href="https://github.com/kubernetes-sigs/kueue/releases" class="external">Kueue releases</a>.</p> <aside class="note"><strong>Note:</strong><span> The samples in the repo require v0.3.0 or later.</span></aside> <p>Wait until the Kueue controller is ready:</p> 
+<pre>watch kubectl -n kueue-system get pods
+</pre> <p>The output should be similar to the following before you can continue:</p> 
+<pre>NAME                                        READY   STATUS    RESTARTS   AGE
+kueue-controller-manager-6cfcbb5dc5-rsf8k   2/2     Running   0          3m
+</pre>
+</li> <li>
+<p>Create two new namespaces called <code translate="no" dir="ltr">team-a</code> and <code translate="no" dir="ltr">team-b</code>:</p> 
+<pre>kubectl create namespace team-a
+kubectl create namespace team-b
+</pre> <p>Jobs will be generated on each namespace.</p>
+</li> </ol> </section> <div id="tutorial-content"> <h2 id="create_the_resourceflavors">Create the ResourceFlavors</h2> <p>A ResourceFlavor represents resource variations in your cluster nodes, such as different VMs (for example spot versus on-demand), architectures (for example, x86 vs ARM CPUs), brands and models (for example, Nvidia A100 versus T4 GPUs).</p> <p>ResourceFlavors use node labels and taints to match with a set of nodes in the cluster.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: on-demand # This ResourceFlavor will be used for the CPU resource
+spec:
+  nodeLabels:
+    cloud.google.com/gke-provisioning: standard # This label was applied automatically by GKE
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: spot # This ResourceFlavor will be used as added resource for the CPU resource
+spec:
+  nodeLabels:  
+    cloud.google.com/gke-provisioning: spot # This label was applied automatically by GKE</pre> </div> <p>In this manifest:</p> <ul> <li>The ResourceFlavor <code translate="no" dir="ltr">on-demand</code> has its label set to <code translate="no" dir="ltr">cloud.google.com/gke-provisioning: standard</code>.</li> <li>The ResourceFlavor <code translate="no" dir="ltr">spot</code> has its label set to <code translate="no" dir="ltr">cloud.google.com/gke-provisioning: spot</code>.</li> </ul> <aside class="note"><strong>Note:</strong><span> These labels require GKE 1.26 or later</span></aside> <p>When a workload is assigned a ResourceFlavor, Kueue assigns the Pods of the workload to nodes that match the node labels defined for the ResourceFlavor.</p> <p>Deploy the ResourceFlavor:</p> 
+<pre>kubectl apply -f flavors.yaml
+</pre> <h2 id="create_the_clusterqueue_and_localqueue">Create the ClusterQueue and LocalQueue</h2> <p>Create two ClusterQueues <code translate="no" dir="ltr">cq-team-a</code> and <code translate="no" dir="ltr">cq-team-b</code>, and their corresponding LocalQueues <code translate="no" dir="ltr">lq-team-a</code> and <code translate="no" dir="ltr">lq-team-b</code> respectively namespaced to <code translate="no" dir="ltr">team-a</code> and <code translate="no" dir="ltr">team-b</code>.</p> <p>ClusterQueues are cluster-scoped object that governs a pool of resources such as CPU, memory, and hardware accelerators. Batch administrators can restrict the visibility of these objects to batch users.</p> <p>LocalQueues are namespaced objects that batch users can list. They point to CluterQueues, from which resources are allocated to run the LocalQueue workloads.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: cq-team-a
+spec:
+  cohort: all-teams # cq-team-a and cq-team-b share the same cohort
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: team-a #Only team-a can submit jobs direclty to this queue, but will be able to share it through the cohort
+  resourceGroups:
+  - coveredResources: ["cpu", "memory"]
+    flavors:
+    - name: on-demand
+      resources:
+      - name: "cpu"
+        nominalQuota: 10
+        borrowingLimit: 5
+      - name: "memory"
+        nominalQuota: 10Gi
+        borrowingLimit: 15Gi
+    - name: spot # This ClusterQueue doesn't have nominalQuota for spot, but it can borrow from others
+      resources:
+      - name: "cpu"
+        nominalQuota: 0
+      - name: "memory"
+        nominalQuota: 0
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  namespace: team-a # LocalQueue under team-a namespace
+  name: lq-team-a
+spec:
+  clusterQueue: cq-team-a # Point to the ClusterQueue team-a-cq</pre> </div> <p>ClusterQueues allows resources to have multiple flavors. In this case, both ClusterQueues have two flavors, <code translate="no" dir="ltr">on-demand</code> and <code translate="no" dir="ltr">spot</code>, each providing <code translate="no" dir="ltr">cpu</code> resources. The quota of the ResourceFlavor <code translate="no" dir="ltr">spot</code> is set to <code translate="no" dir="ltr">0</code>, and will not be used for now.</p> <p>Both ClusterQueues share the same cohort called <code translate="no" dir="ltr">all-teams</code>, defined in <code translate="no" dir="ltr">.spec.cohort</code>. When two or more ClusterQueues share the same cohort, they can borrow unused quota from each other.</p> <p>You can learn more about how cohorts work and the borrowing semantics in the <a href="https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/#cohort" target="_blank" class="external">Kueue documentation</a> </p> <p>Deploy the ClusterQueues and LocalQueues:</p> 
+<pre>kubectl apply -f cq-team-a.yaml
+kubectl apply -f cq-team-b.yaml
+</pre> <h2 id="optional_monitor_workloads_using_kube-prometheus">(Optional) Monitor Workloads using kube-prometheus</h2> <p>You can use Prometheus to monitor your active and pending Kueue workloads. To monitor the workloads being brought up and observe the load on each ClusterQueue, deploy <a href="https://github.com/prometheus-operator/kube-prometheus">kube-prometheus</a> to the cluster under the namespace <code translate="no" dir="ltr">monitoring</code>:</p> <ol> <li>
+<p>Download the source code for Prometheus operator:</p> 
+<pre>cd
+git clone https://github.com/prometheus-operator/kube-prometheus.git
+</pre>
+</li> <li>
+<p>Create the CustomResourceDefinitions(CRDs):</p> 
+<pre>kubectl create -f kube-prometheus/manifests/setup
+</pre>
+</li> <li>
+<p>Create the monitoring components:</p> 
+<pre>kubectl create -f kube-prometheus/manifests
+</pre>
+</li> <li>
+<p>Allow the <code translate="no" dir="ltr">prometheus-operator</code> to scrape metrics from Kueue components:</p> 
+<pre>kubectl apply -f https://github.com/kubernetes-sigs/kueue/releases/download/$VERSION/prometheus.yaml
+</pre>
+</li> <li>
+<p>Change to the working directory:</p> 
+<pre>cd kubernetes-engine-samples/batch/kueue-cohort
+</pre>
+</li> <li>
+<p>Set up port forwarding to the Prometheus service running in your GKE cluster:</p> 
+<pre>kubectl --namespace monitoring port-forward svc/prometheus-k8s 9090
+</pre>
+</li> <li>
+<p>Open the Prometheus web UI on <a href="localhost:9090">localhost:9090</a> in the browser.</p> <p>In the Cloud Shell:</p> <ol> <li><p>Click <strong>Web Preview</strong>.</p></li> <li><p>Click <strong>Change port</strong> and set the port number to <code translate="no" dir="ltr">9090</code>.</p></li> <li><p>Click <strong>Change and Preview</strong>.</p></li> </ol> <p>The following Prometheus web UI appears.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-kueue-prometheus.png" alt="Screenshot of the Prometheus web UI" title="Screenshot of the Prometheus web UI"></p>
+</li> <li>
+<p>In the <strong>Expression</strong> query box, enter the following query to create the first panel that monitors the active workloads for <code translate="no" dir="ltr">cq-team-a</code> ClusterQueue:</p> 
+<pre>kueue_pending_workloads{cluster_queue="cq-team-a", status="active"} or kueue_admitted_active_workloads{cluster_queue="cq-team-a"}
+</pre>
+</li> <li><p>Click <strong>Add panel</strong>.</p></li> <li>
+<p>In the <strong>Expression</strong> query box, enter the following query to create another panel that monitors the active workloads for <code translate="no" dir="ltr">cq-team-b</code> ClusterQueue:</p> 
+<pre>kueue_pending_workloads{cluster_queue="cq-team-b", status="active"} or kueue_admitted_active_workloads{cluster_queue="cq-team-b"}
+</pre>
+</li> <li><p>Click <strong>Add panel</strong>.</p></li> <li>
+<p>In the <strong>Expression</strong> query box, enter the following query to create a panel that monitors the number of nodes in the cluster:</p> 
+<pre>count(kube_node_info)
+</pre>
+</li> </ol> <h2 id="gmp-monitoring">(Optional) Monitor Workloads using Google Cloud Managed Service for Prometheus</h2> <p>You can use <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a> to monitor your active and pending Kueue workloads. A full list of metrics can be found in the Kueue <a href="https://kueue.sigs.k8s.io/docs/reference/metrics/">documentation</a>.</p> <ol> <li>
+<p>Setup Identity and RBAC for metrics access:</p> <p>The following configuration creates 4 Kubernetes resources, that provide metrics access for the Google Cloud Managed Service for Prometheus collectors.</p> <ul> <li><p>A ServiceAccount named <code translate="no" dir="ltr">kueue-metrics-reader</code> within the <code translate="no" dir="ltr">kueue-system</code> namespace, will be used to authenticate when accessing the Kueue metrics.</p></li> <li><p>A Secret associated with the <code translate="no" dir="ltr">kueue-metrics-reader</code> service account, stores an authentication token, that is used by the collector, to authenticate with metrics endpoint exposed by the Kueue deployment.</p></li> <li><p>A Role named <code translate="no" dir="ltr">kueue-secret-reader</code> in the <code translate="no" dir="ltr">kueue-system</code> namespace, which allows reading the secret containing the service account token.</p></li> <li><p>A ClusterRoleBinding that grants the <code translate="no" dir="ltr">kueue-metrics-reader</code> service account the <code translate="no" dir="ltr">kueue-metrics-reader</code> ClusterRole.</p></li> </ul> 
+<pre>apiVersion: v1
+kind: ServiceAccount
+metadata:
+ name: kueue-metrics-reader
+ namespace: kueue-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+ name: kueue-metrics-reader-token
+ namespace: kueue-system
+ annotations:
+   kubernetes.io/service-account.name: kueue-metrics-reader
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+ name: kueue-secret-reader
+ namespace: kueue-system
+rules:
+-   resources:
+ -   secrets
+ apiGroups: [""]
+ verbs: ["get", "list", "watch"]
+ resourceNames: ["kueue-metrics-reader-token"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+ name: kueue-metrics-reader
+subjects:
+-   kind: ServiceAccount
+ name: kueue-metrics-reader
+ namespace: kueue-system
+roleRef:
+ kind: ClusterRole
+ name: kueue-metrics-reader
+ apiGroup: rbac.authorization.k8s.io
+</pre>
+</li> <li>
+<p>Configure RoleBinding for Google Cloud Managed Service for Prometheus:</p> <p>Depending on if you are using a Autopilot or Standard cluster, you will need to create the RoleBinding in either the <code translate="no" dir="ltr">gke-gmp-system</code> or <code translate="no" dir="ltr">gmp-system</code> namespace. This resource allows the collector service account to access the <code translate="no" dir="ltr">kueue-metrics-reader-token</code> secret to authenticate and scrape the Kueue metrics.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: gmp-system:collector:kueue-secret-reader
+    namespace: kueue-system
+  roleRef:
+    name: kueue-secret-reader
+    kind: Role
+    apiGroup: rbac.authorization.k8s.io
+  subjects:
+  -   name: collector
+    namespace: gke-gmp-system
+    kind: ServiceAccount
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: gmp-system:collector:kueue-secret-reader
+    namespace: kueue-system
+  roleRef:
+    name: kueue-secret-reader
+    kind: Role
+    apiGroup: rbac.authorization.k8s.io
+  subjects:
+  -   name: collector
+    namespace: gmp-system
+    kind: ServiceAccount
+</pre></section> </div>
+</li> <li>
+<p>Configure Pod Monitoring resource:</p> <p>The following resource configures the monitoring for the Kueue depployment, it specifies that metrics are exposed on the /metrics path over HTTPS. It uses the <code translate="no" dir="ltr">kueue-metrics-reader-token</code> secret for authentication when scraping the metrics.</p> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+name: kueue
+namespace: kueue-system
+spec:
+selector:
+ matchLabels:
+   control-plane: controller-manager
+endpoints:
+-   port: 8443
+ interval: 30s
+ path: /metrics
+ scheme: https
+ tls:
+   insecureSkipVerify: true
+ authorization:
+   type: Bearer
+   credentials:
+     secret:
+       name: kueue-metrics-reader-token
+       key: token
+</pre>
+</li> </ol> <h3 id="query_exported_metrics">Query exported metrics</h3> <ul> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-cm">Query exported metrics with Cloud Monitoring</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query">Query exported metrics with Grafana</a></li> </ul> <h3 id="sample_promql_queries_for_monitoring_kueue_based_systems">Sample PromQL queries for monitoring Kueue based systems</h3> <p>These PromQL queries allow you to monitor key Kueue metrics such as job throughput, resource utilization by queue, and workload wait times to understand system performance and identify potential bottlenecks.</p> <h4 id="job_throughput">Job Throughput</h4> <p>This calculates the per-second rate of admitted workloads over 5 minutes for each cluster_queue. This metric can help in breaking it down by queue helps pinpoint bottlenecks and summing it provides the overall system throughput.</p> <p>Query: </p>
+
+<pre>sum(rate(kueue_admitted_workloads_total[5m])) by (cluster_queue)</pre> <h4 id="resource_utilization">Resource Utilization</h4> <p>This assumes <code translate="no" dir="ltr">metrics.enableClusterQueueResources</code> is enabled. It calculates the ratio of current CPU usage to the nominal CPU quota for each queue. A value close to 1 indicates high utilization. You can adapt this for memory or other resources by changing the resource label.</p> <p>To install a custom-configured released version of Kueue in your cluster, follow the Kueue <a href="https://kueue.sigs.k8s.io/docs/installation/#install-a-custom-configured-released-version">documentation.</a></p> <p>Query: </p>
+
+<pre>sum(kueue_cluster_queue_resource_usage{resource="cpu"}) by (cluster_queue) / sum(kueue_cluster_queue_nominal_quota{resource="cpu"}) by (cluster_queue)</pre> <h4 id="queue_wait_times">Queue Wait Times</h4> <p>This provides the 90th percentile wait time for workloads in a specific queue. You can modify the quantile value (e.g. 0.5 for median, 0.99 for 99th percentile) to understand the wait time distribution.</p> <p>Query: </p>
+
+<pre>histogram_quantile(0.9, kueue_admission_wait_time_seconds_bucket{cluster_queue="QUEUE_NAME"})</pre> <h2 id="create_jobs_and_observe_the_admitted_workloads">Create Jobs and observe the admitted workloads</h2> <p>In this section, you create Kubernetes Jobs under the namespace <code translate="no" dir="ltr">team-a</code> and <code translate="no" dir="ltr">team-b</code>. A Job controller in Kubernetes creates one or more Pods and helps ensure that they successfully execute a specific task.</p> <p>Generate Jobs to both ClusterQueues that will sleep for 10 seconds, with three paralleled Jobs and will be completed with three completions. It will then be cleaned up after 60 seconds.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: team-a # Job under team-a namespace
+  generateName: sample-job-team-a-
+  labels:
+    kueue.x-k8s.io/queue-name: lq-team-a # Point to the LocalQueue
+spec:
+  ttlSecondsAfterFinished: 60 # Job will be deleted after 60 seconds
+  parallelism: 3 # This Job will have 3 replicas running at the same time
+  completions: 3 # This Job requires 3 completions
+  suspend: true # Set to true to allow Kueue to control the Job when it starts
+  template:
+    spec:
+      containers:
+      - name: dummy-job
+        image: gcr.io/k8s-staging-perf-tests/sleep:latest
+        args: ["10s"] # Sleep for 10 seconds
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+      restartPolicy: Never</pre> </div> <p><code translate="no" dir="ltr">job-team-a.yaml</code> creates Jobs under the namespace <code translate="no" dir="ltr">team-a</code> and points to the LocalQueue <code translate="no" dir="ltr">lq-team-a</code> and the ClusterQueue <code translate="no" dir="ltr">cq-team-a</code>.</p> <p>Similarly, <code translate="no" dir="ltr">job-team-b.yaml</code> creates Jobs under <code translate="no" dir="ltr">team-b</code> namespace, and points to the LocalQueue <code translate="no" dir="ltr">lq-team-b</code> and the ClusterQueue <code translate="no" dir="ltr">cq-team-b</code>.</p> <ol> <li>
+<p>Start a new terminal and navigate to the <code translate="no" dir="ltr">kueue-cohort</code> directory:</p> 
+<pre>cd ~/kubernetes-engine-samples/batch/kueue-cohort
+</pre>
+</li> <li>
+<p>To generate a Job every second, run the following script:</p> 
+<pre>./create_jobs.sh job-team-a.yaml 1
+</pre>
+</li> <li>
+<p>Start another terminal and navigate to the <code translate="no" dir="ltr">kueue-cohort</code> directory:</p> 
+<pre>cd ~/kubernetes-engine-samples/batch/kueue-cohort
+</pre>
+</li> <li>
+<p>Create Jobs for the <code translate="no" dir="ltr">team-b</code> namespace:</p> 
+<pre>./create_jobs.sh job-team-b.yaml 1
+</pre>
+</li> <li>
+<p>Observe the Jobs being queued up in Prometheus. Or with this command:</p> 
+<pre>watch -n 2 kubectl get clusterqueues -o wide
+</pre>
+</li> </ol> <p>The output should be similar to the following:</p> 
+<pre>    NAME        COHORT      STRATEGY         PENDING WORKLOADS   ADMITTED WORKLOADS
+    cq-team-a   all-teams   BestEffortFIFO   0                   5
+    cq-team-b   all-teams   BestEffortFIFO   0                   4
+</pre> <h2 id="borrow_unused_quota_with_cohorts">Borrow unused quota with cohorts</h2> <p>ClusterQueues might not be at full capacity at all times. Quotas usage is not maximized when workloads are not evenly spread out among ClusterQueues. If ClusterQueues share the same cohort between each other, ClusterQueues can borrow quotas from other ClusterQueues to maximize the quota utilization.</p> <ol> <li><p>Once there are Jobs queued up for both ClusterQueues <code translate="no" dir="ltr">cq-team-a</code> and <code translate="no" dir="ltr">cq-team-b</code>, stop the script for the <code translate="no" dir="ltr">team-b</code> namespace by pressing <code translate="no" dir="ltr">CTRL+c</code> on the corresponding terminal.</p></li> <li>
+<p>Once all the pending Jobs from the namespace <code translate="no" dir="ltr">team-b</code> are processed, the jobs from the namespace <code translate="no" dir="ltr">team-a</code> can borrow the available resources in <code translate="no" dir="ltr">cq-team-b</code>:</p> 
+<pre>kubectl describe clusterqueue cq-team-a
+</pre> <p>Because <code translate="no" dir="ltr">cq-team-a</code> and <code translate="no" dir="ltr">cq-team-b</code> share the same cohort called <code translate="no" dir="ltr">all-teams</code>, these ClusterQueues are able to share resources that are not utilized.</p> 
+<pre>  Flavors Usage:
+    Name:  on-demand
+    Resources:
+      Borrowed:  5
+      Name:      cpu
+      Total:     15
+      Borrowed:  5Gi
+      Name:      memory
+      Total:     15Gi
+</pre>
+</li> <li>
+<p>Resume the script for the <code translate="no" dir="ltr">team-b</code> namespace.</p> 
+<pre>./create_jobs.sh job-team-b.yaml 3
+</pre> <p>Observe how the borrowed resources from <code translate="no" dir="ltr">cq-team-a</code> go back to <code translate="no" dir="ltr">0</code>, while the resources from <code translate="no" dir="ltr">cq-team-b</code> are used for its own workloads:</p> 
+<pre>kubectl describe clusterqueue cq-team-a
+</pre>
+
+<pre>  Flavors Usage:
+    Name:  on-demand
+    Resources:
+      Borrowed:  0
+      Name:      cpu
+      Total:     9
+      Borrowed:  0
+      Name:      memory
+      Total:     9Gi
+</pre>
+</li> </ol> <h2 id="increase_quota_with">Increase quota with Spot VMs</h2> <p>When quota needs to be temporarily increased, for example to meet high demand in pending workloads, you can configure Kueue to accommodate the demand by adding more ClusterQueues to the cohort. ClusterQueues with unused resources can share those resources with other ClusterQueues that belong to the same cohort.</p> <p>At the beginning of the tutorial, you created a node pool named <code translate="no" dir="ltr">spot</code> using Spot VMs and a ResourceFlavor named <code translate="no" dir="ltr">spot</code> with the label set to <code translate="no" dir="ltr">cloud.google.com/gke-provisioning: spot</code>. Create a ClusterQueue to use this node pool and the ResourceFlavor that represents it:</p> <ol> <li>
+<p>Create a new ClusterQueue called <code translate="no" dir="ltr">cq-spot</code> with cohort set to <code translate="no" dir="ltr">all-teams</code>:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: spot-cq
+spec:
+  cohort: all-teams # Same cohort as cq-team-a and cq-team-b
+  resourceGroups:
+  - coveredResources: ["cpu", "memory"]
+    flavors:
+    - name: spot
+      resources:
+      - name: "cpu"
+        nominalQuota: 40
+      - name: "memory"
+        nominalQuota: 144Gi</pre> </div> <p>Because this ClusterQueue shares the same cohort with <code translate="no" dir="ltr">cq-team-a</code> and <code translate="no" dir="ltr">cq-team-b</code>, both ClusterQueue <code translate="no" dir="ltr">cq-team-a</code> and <code translate="no" dir="ltr">cq-team-b</code> can borrow resources up to 15 CPU requests, and 15 Gi of memory.</p> 
+<pre>cd ~/kubernetes-engine-samples/batch/kueue-cohort
+kubectl apply -f cq-spot.yaml
+</pre>
+</li> <li>
+<p>In Prometheus, observe how the admitted workloads spike for both <code translate="no" dir="ltr">cq-team-a</code> and <code translate="no" dir="ltr">cq-team-b</code> thanks to the added quota by <code translate="no" dir="ltr">cq-spot</code> who shares the same cohort. Or with this command:</p> 
+<pre>watch -n 2 kubectl get clusterqueues -o wide
+</pre>
+</li> <li>
+<p>In Prometheus, observe the number of nodes in the cluster. Or with this command:</p> 
+<pre>watch -n 2 kubectl get nodes -o wide
+</pre>
+</li> <li><p>Stop both scripts by pressing <code translate="no" dir="ltr">CTRL+c</code> for <code translate="no" dir="ltr">team-a</code> and <code translate="no" dir="ltr">team-b</code> namespace.</p></li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h3 id="delete_the_individual_resource">Delete the individual resource</h3> <ol> <li>
+<p>Delete the Kueue quota system:</p> 
+<pre>kubectl delete -n team-a localqueue lq-team-a
+kubectl delete -n team-b localqueue lq-team-b
+kubectl delete clusterqueue cq-team-a
+kubectl delete clusterqueue cq-team-b
+kubectl delete clusterqueue cq-spot
+kubectl delete resourceflavor default
+kubectl delete resourceflavor on-demand
+kubectl delete resourceflavor spot
+</pre>
+</li> <li>
+<p>Delete the Kueue manifest:</p> 
+<pre>VERSION=VERSION
+kubectl delete -f \
+  https://github.com/kubernetes-sigs/kueue/releases/download/$VERSION/manifests.yaml
+</pre>
+</li> <li>
+<p>Delete the cluster:</p> 
+<pre>gcloud container clusters delete kueue-cohort --location=COMPUTE_REGION
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li><p>Learn more about <a href="kueue-intro">Deploy a batch system using Kueue</a>.</p></li> <li><p>Learn more about <a href="../how-to/jobs">Jobs on GKE</a>.</p></li> <li><p><a href="https://kueue.sigs.k8s.io/" target="_blank" class="external">Learn more about Kueue</a> </p></li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/kueue-cohort" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/kueue-cohort</a>
+  </p>
+</div>

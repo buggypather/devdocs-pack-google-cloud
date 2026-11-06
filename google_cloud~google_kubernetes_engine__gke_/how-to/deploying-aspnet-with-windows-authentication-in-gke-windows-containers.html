@@ -1,0 +1,391 @@
+<h1>Deploy ASP.NET apps with Windows Authentication in GKE Windows containers</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial shows how to create an ASP.NET web application that uses IIS with <a href="https://docs.microsoft.com/aspnet/web-api/overview/security/integrated-windows-authentication" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Integrated Windows Authentication</a>, and how to deploy it using a Windows container to a Google Kubernetes Engine (GKE) cluster that has domain-joined Windows Server nodes. This configuration is useful for deploying ASP.NET applications in Windows containers on Google Cloud so that the applications can authenticate to other Windows resources. The tutorial also shows how to create a group Managed Service Account (gMSA) in Active Directory and how to configure the web application deployment in GKE to use it.</p> <p>This tutorial is intended for system admins. It assumes that you are familiar with Active Directory and have experience working with Google Kubernetes Engine (GKE).</p> <aside class="note"><strong>Note:</strong><span> This tutorial requires that you have completed a related tutorial, <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain#costs" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Configuring Active Directory for VMs to automatically join a domain</a>, as explained later in this document.</span></aside> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Create a GKE cluster that has domain-joined Windows Server nodes and configure the cluster to support Active Directory gMSAs.</li> <li>Build and deploy an ASP.NET web application container image that uses IIS with Integrated Windows Authentication.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> 
+<p> In this document, you use the following billable components of Google Cloud: </p> <ul> 
+<li><a href="https://cloud.google.com//compute/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Compute Engine</a></li> <li><a href="https://cloud.google.com//kubernetes-engine/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">GKE</a></li> <li><a href="https://cloud.google.com//artifact-registry/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Artifact Registry</a></li> <li>Other costs that are associated with the related tutorial <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain#costs" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Configuring Active Directory for VMs to automatically join a domain</a>: <ul> <li><a href="https://cloud.google.com//vpc/network-pricing#vpc-pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Serverless VPC Access</a></li> <li><a href="https://cloud.google.com//run/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Run</a></li> <li><a href="https://cloud.google.com/artifact-registry/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Artifact Registry</a></li> <li><a href="https://cloud.google.com//secret-manager/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Secret Manager</a></li> <li><a href="https://cloud.google.com//scheduler/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Scheduler</a></li> </ul> </li>
+</ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <li>
+<p>Follow the steps in the <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Configuring Active Directory for VMs to automatically join a domain</a> tutorial to create the Active Directory domain-join Cloud Run service.</p> <aside class="note"><strong>Note:</strong><span> <em>Do not</em> perform the steps in the <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cleaning up</a> section, because you use the resources from that tutorial in this tutorial.</span></aside>
+</li> <li>
+<p>If you are running this tutorial in a different Google Cloud project than the one where you created a VM to test the automatic domain joining, then perform the steps for <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain#enabling_a_project_for_automatic_domain_joining" track-type="tutorial" track-name="internalLink" track-metadata-position="body">enabling a project for automatic domain joining</a> in your Google Cloud project.</p> <p>When you complete the other tutorial, you have a new Cloud Run service and its URL is printed in the PowerShell window (the value of the <code translate="no" dir="ltr">$RegisterUrl</code> variable). Note the address of the service, because you use it in this tutorial.</p>
+</li> <li>
+<p>Make sure that you've enabled the APIs for Compute Engine, GKE, Cloud Build, Artifact Registry, and Cloud Resource Manager API:</p> <p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Enable the APIs</a> </p> <p>When you complete this tutorial, you can avoid continued billing by deleting the resources you created. For more information, see <a href="#additional_considerations_for_production_applications" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cleaning up</a>.</p>
+</li> </ol> </section> <div id="tutorial-content"> <h2 id="architecture">Architecture</h2> <p>Windows-based applications that run in a domain-joined Windows Server often use Microsoft Active Directory (AD) identities to authenticate users and applications. Common use cases for this are the following:</p> <ul> <li>Creating ASP.NET web applications that use <a href="https://docs.microsoft.com/aspnet/web-api/overview/security/integrated-windows-authentication" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Integrated Windows Authentication</a> to authenticate Active Directory users as they attempt to sign in to the web application.</li> <li>Creating applications that use the server's Active Directory computer account to access resources over the network, such as a remote SMB share or a remote Microsoft SQL Server instance.</li> </ul> <p>Windows containers cannot be domain-joined and therefore do not have computer accounts in Active Directory. Because of this, ASP.NET web applications that run on Windows containers cannot authenticate Active Directory users through Integrated Windows Authentication, and therefore cannot access secured resources in the network. For more information about how ASP.NET accesses secured resources, see <a href="https://docs.microsoft.com/iis/manage/configuring-security/application-pool-identities#accessing-the-network" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Application Pool Identities</a> in the Microsoft documentation.</p> <p>Instead of using a computer account, Windows containers can use an Active Directory group Managed Service Account (gMSA) identity to access Active Directory and other secured resources in the network, such as file shares and SQL Server instances. For more information, see <a href="https://docs.microsoft.com/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Group Managed Service Accounts Overview</a> in the Microsoft documentation.</p> <p>The following architectural diagram shows the resources that are used in this tutorial:</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/deploying-aspnet-with-windows-authentication-in-gke-windows-containers-architecture.svg" alt="Active Domain domain-joined Windows Server containers on GKE."></p> <p>The diagram shows the following elements:</p> <ul> <li>
+<strong>Development VM</strong>. In this tutorial, you create a Windows Server VM that you use for building the ASP.NET web application container image and for creating the gMSA.</li> <li>
+<strong>GKE cluster and nodes</strong>. The GKE cluster in this tutorial has both a Linux node pool and a Windows Server node pool that are used in the following ways: <ul> <li>The Linux nodes run system components that run only on the Linux operating systems, such as the GKE metrics server.</li> <li>The Windows Server nodes are used for hosting Windows Server containers and are joined to an Active Directory domain.</li> </ul>
+</li> <li>
+<strong>Active Directory infrastructure</strong>. To get the GKE Windows nodes to be domain-joined, you first run through the <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Configuring Active Directory for VMs to automatically join a domain</a> tutorial. In that tutorial, you create a Cloud Run service that's responsible for registering new computers (instances) in Active Directory, and providing to each new instance a temporary password that the instance uses to complete the domain join process. Each new instance in the Windows Server node pool calls the Cloud Run service to join itself to the Active Directory domain.</li> <li>
+<strong>Network load balancer</strong>. When an on-premises user opens their browser and browses to the ASP.NET web application, the traffic goes through a network load balancer. The load balancer is created by GKE when you create a GKE LoadBalancer service for your web application. The user also authenticates to the web application by passing their Active Directory credentials to the web application.</li> </ul> <h2 id="creating_the_infrastructure">Creating the infrastructure</h2> <p>After you've finished the related tutorial, you create the infrastructure components for the current tutorial, which includes the following:</p> <ul> <li>A Windows Server VM that has an ASP.NET web application container image.</li> <li>A GKE cluster that has a Windows Server node pool.</li> <li>Firewall rules that give the GKE Pods access to Active Directory.</li> <li>A webhook in the GKE cluster that handles the configuration and population of gMSA resources in deployments.</li> </ul> <h3 id="create_a_development_vm">Create a development VM</h3> <p>The Windows Server container image that you create must match the Windows Server version of the VM where you build the container image. This version must also match the Windows Server version of your GKE Window Server nodes. Creating a container image or running a container in a different version of Windows Server results in an error. For more information about the compatibility requirements of Windows containers, see <a href="https://docs.microsoft.com/virtualization/windowscontainers/deploy-containers/version-compatibility" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Matching container host version with container image versions</a>.</p> <p>This tutorial uses the Long-Term Servicing Channel (LTSC) 2022 version of Windows Server for the VM, the Windows Server nodes in GKE, and the container image. For more information, see <a href="creating-a-cluster-windows#version_mapping" track-type="tutorial" track-name="internalLink" track-metadata-position="body">version mapping</a> between Windows Server versions and GKE versions.</p> <aside class="note"><strong>Note:</strong><span> If you plan on using multiple versions of Windows Server in the GKE cluster, then you can build <a href="../tutorials/building-windows-multi-arch-images" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Windows Server multi-arch images</a>. This tutorial does not cover this topic.</span></aside> <ol> <li> <p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> <p> At the bottom of the Google Cloud console, a <a href="https://docs.cloud.google.com/shell/docs/how-cloud-shell-works">Cloud Shell</a> session starts and displays a command-line prompt. Cloud Shell is a shell environment with the Google Cloud CLI already installed and with values already set for your current project. It can take a few seconds for the session to initialize. </p> </li> <li>If PowerShell is open, close it by typing <code translate="no" dir="ltr">exit</code>.</li> <li>
+<p>Set environment variables for the network and subnetwork name and for the Active Directory service URL:</p> 
+<pre>export NETWORK_NAME=NETWORK-NAME
+export SUBNETWORK_NAME=SUBNETWORK-NAME
+export AD_JOIN_SERVICE_URL=AD-JOIN-SERVICE-URL
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK-NAME</var></code>: The VPC network to deploy VMs in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNETWORK-NAME</var></code>: The subnet to deploy VMs in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AD-JOIN-SERVICE-URL</var></code>: The URL of the Cloud Run service you deployed in the <a href="#before-you-begin" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Before you begin</a> section.</li> </ul>
+</li> <li>
+<p>Set your Google Cloud project ID and region for the current environment:</p> 
+<pre>gcloud config set project PROJECT-ID
+gcloud config set compute/zone ZONE-NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT-ID</var></code>: Your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE-NAME</var></code>: The zone to deploy all VMs in. To reduce latency, we recommend that you select a zone in the same region where you deployed the Active Directory domain-join Cloud Run service.</li> </ul>
+</li> <li>
+<p>Create a service account for the development VM:</p> 
+<pre>export SERVICE_ACCOUNT_NAME=dev-vm
+export SERVICE_ACCOUNT_EMAIL=$SERVICE_ACCOUNT_NAME@$GOOGLE_CLOUD_PROJECT.iam.gserviceaccount.com
+
+gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
+    --display-name="Development VM Service Account"
+</pre>
+</li> <li>
+<p>Grant the service account <a href="https://docs.cloud.google.com/artifact-registry/docs/access-control" track-type="tutorial" track-name="internalLink" track-metadata-position="body">access</a> to Artifact Registry:</p> 
+<pre>gcloud projects add-iam-policy-binding $GOOGLE_CLOUD_PROJECT \
+    --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
+    --role="roles/artifactregistry.writer"
+</pre>
+</li> <li>
+<p>Grant the service account access to GKE:</p> 
+<pre>gcloud projects add-iam-policy-binding $GOOGLE_CLOUD_PROJECT \
+    --member="serviceAccount:$SERVICE_ACCOUNT_EMAIL" \
+    --role="roles/container.admin"
+</pre> <p>The service account is granted the <code translate="no" dir="ltr">container.admin</code> role because this role has permissions both to create GKE clusters in the project and to manage resources in clusters, including role-based access control (RBAC) resources. RBAC resources are necessary in order to control which Pod is permitted to use a gMSA.</p>
+</li> <li>
+<p>Create a new Windows Server 2022 VM:</p> 
+<pre>gcloud compute instances create gmsa-dev-vm \
+    --image-project windows-cloud \
+    --image-family windows-2022-core \
+    --machine-type n1-standard-2 \
+    --boot-disk-type=pd-ssd \
+    --boot-disk-size=100GB \
+    --network $NETWORK_NAME \
+    --subnet $SUBNETWORK_NAME \
+    --service-account=$SERVICE_ACCOUNT_EMAIL \
+    --scopes https://www.googleapis.com/auth/cloud-platform \
+    --metadata sysprep-specialize-script-ps1="iex((New-Object System.Net.WebClient).DownloadString('$AD_JOIN_SERVICE_URL')); Add-WindowsFeature RSAT-AD-PowerShell"
+</pre>
+<aside class="note"><strong>Note:</strong><span> If the VMs in your VPC have ways of accessing the internet without an external IP address, such as using <a href="https://docs.cloud.google.com/nat" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud NAT</a>, you can remove the external IP address or add the <code translate="no" dir="ltr">--no-address</code> parameter to the command before running it.</span></aside> <p>If you plan to deploy your containerized applications to Windows Server 2019 containers, change the <code translate="no" dir="ltr">--image-family</code> parameter value to <code translate="no" dir="ltr">windows-2019-core-for-containers</code>.</p> <p>The scope <code translate="no" dir="ltr">https://www.googleapis.com/auth/cloud-platform</code> enables the instance to access all Google Cloud APIs, depending on the IAM roles that are defined for the instance's service account.</p> <p>The VM is created with an <a href="https://docs.cloud.google.com/compute/docs/ip-addresses#externaladdresses" track-type="tutorial" track-name="internalLink" track-metadata-position="body">external IP address</a> to enable it to communicate with the internet. You need the VM to have internet access so that it can download several utilities, such as <a href="https://www.powershellgallery.com/packages/Install-Git" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">git</a> and <a href="https://www.powershellgallery.com/packages/install-kubectl" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">kubectl</a>, and to download the ASP.NET web application from GitHub.</p> <p>During the <code translate="no" dir="ltr">sysprep</code> stage, the new instance is joined to the Active Directory domain to enable you to remotely access the instance by using your domain account. The script in the <code translate="no" dir="ltr">sysprep</code> command also installs the PowerShell module for Active Directory.</p>
+</li> </ol> <h3 id="create-an-artifact-registry-repo">Create an Artifact Registry Docker repository</h3> <ol> <li>
+<p>In Cloud Shell, set the default location for new Artifact Registry repositories:</p> 
+<pre>gcloud config set artifacts/location LOCATION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code> with a <a href="https://docs.cloud.google.com/artifact-registry/docs/repositories/repo-locations#location-r" track-type="tutorial" track-name="internalLink" track-metadata-position="body">region</a> where you want to create the Artifact Registry repository. To reduce latency, we recommend that you select the same region where you deployed the development VM.</p>
+</li> <li>
+<p>Create the Artifact Registry Docker repository:</p> 
+<pre>gcloud artifacts repositories create windows-container-images \
+    --repository-format=docker
+</pre>
+</li> </ol> <h3 id="create-the-gke-cluster">Create a GKE cluster</h3> <ol> <li>
+<p>In Cloud Shell, set an environment variable for the name of the GKE cluster:</p> 
+<pre>export GKE_CLUSTER_NAME=cluster-1
+</pre>
+</li> <li>
+<p>Create the GKE cluster:</p> 
+<pre>gcloud container clusters create $GKE_CLUSTER_NAME \
+    --release-channel rapid \
+    --network $NETWORK_NAME \
+    --subnetwork $SUBNETWORK_NAME \
+    --enable-ip-alias
+</pre> <p>Setting the <a href="../concepts/release-channels" track-type="tutorial" track-name="internalLink" track-metadata-position="body"><code translate="no" dir="ltr">--release-channel</code> parameter</a> to <code translate="no" dir="ltr">rapid</code> deploys the GKE cluster with the latest Kubernetes version. The <code translate="no" dir="ltr">--enable-ip-alias</code> parameter turns on <a href="https://docs.cloud.google.com/vpc/docs/alias-ip" track-type="tutorial" track-name="internalLink" track-metadata-position="body">alias IP</a>. Alias IP is required for Windows Server nodes.</p>
+</li> </ol> <h3 id="create-a-windows-server-node-pool-in-gke">Create a Windows Server node pool in GKE</h3> <p>When you create a new GKE cluster through the CLI, the cluster is created with a Linux node pool. To use Windows Server on GKE, you create a Windows Server node pool.</p> <p>GKE clusters must have at least one Linux node to run the cluster's internal (system) containers. A GKE cluster cannot be created with only Windows Server nodes.</p> <ol> <li>
+<p>In Cloud Shell, set an environment variable for the name of the Windows server node pool:</p> 
+<pre>export NODE_POOL_NAME=windows-server-pool
+</pre>
+</li> <li>
+<p>Create a GKE Windows Server node pool:</p> 
+<pre>gcloud container node-pools create $NODE_POOL_NAME \
+    --cluster $GKE_CLUSTER_NAME \
+    --machine-type n1-standard-2 \
+    --image-type WINDOWS_LTSC_CONTAINERD \
+    --windows-os-version=ltsc2022 \
+    --num-nodes 2 \
+    --no-enable-autoupgrade \
+    --metadata sysprep-specialize-script-ps1="iex((New-Object System.Net.WebClient).DownloadString('$AD_JOIN_SERVICE_URL'))"
+</pre> <p>If you plan to deploy your containerized applications to Windows Server 2019 containers, change the <code translate="no" dir="ltr">--windows-os-version</code> parameter to <code translate="no" dir="ltr">ltsc2019</code>.</p> <p>The <code translate="no" dir="ltr">sysprep-specialize-script-ps1</code> metadata key is a <a href="https://docs.cloud.google.com/compute/docs/instances/startup-scripts/windows#metadata-keys" track-type="tutorial" track-name="internalLink" track-metadata-position="body">built-in key</a> that points to a PowerShell script that is executed during the <a href="https://docs.cloud.google.com/compute/docs/instances/windows/creating-windows-os-image#create_server_image" track-type="tutorial" track-name="internalLink" track-metadata-position="body">GCESysprep</a> step, before the instance boots for the first time.</p> <p>The <a href="https://docs.microsoft.com/powershell/module/microsoft.powershell.utility/invoke-expression" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external"><code translate="no" dir="ltr">iex</code></a> cmdlet downloads the PowerShell script from the Active Directory domain-join service that you deployed to Cloud Run. It then runs the script that joins the new instance to the Active Directory domain.</p> <p>The <code translate="no" dir="ltr">--no-enable-autoupgrade</code> parameter disables <a href="node-auto-upgrades" track-type="tutorial" track-name="internalLink" track-metadata-position="body">node auto upgrade</a> for all nodes in the pool. It does this because upgrading a node's Windows image can cause incompatibility between the node's Windows Server version and the Pod's Windows Server version. For more information, see <a href="creating-a-cluster-windows#upgrading_windows_server_node_pools" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Upgrading Windows Server node pools</a>.</p> <p>After each node is created, the <code translate="no" dir="ltr">domain-join</code> PowerShell script joins the node to the domain.</p>
+</li> <li>
+<p>Wait several minutes until the node pool is created and then run the following command to verify that all the nodes joined the domain:</p> 
+<pre>kubectl get node \
+-l cloud.google.com/gke-nodepool=$NODE_POOL_NAME \
+-o custom-columns=":metadata.name" --no-headers \
+    | xargs -I{} gcloud compute instances get-serial-port-output {} --port 1 \
+    | grep "sysprep-specialize-script-ps1:.*success" --ignore-case
+</pre> <p>If the nodes have been joined to the domain, the output is the following:</p> 
+<pre>
+timestamp GCEMetadataScripts: sysprep-specialize-script-ps1: Successfully registered computer account.
+timestamp GCEMetadataScripts: sysprep-specialize-script-ps1: Computer successfully joined to domain
+
+Specify --start=152874 in the next get-serial-port-output invocation to get only the new output starting from here.
+</pre> <p>If you want to see the full script output, remove <code translate="no" dir="ltr">.*success</code> from the <code translate="no" dir="ltr">grep</code> command.</p>
+</li> </ol> <h3 id="grant-the-gke-pods-access-to-active-directory">Grant the GKE Pods access to Active Directory</h3> <p>You need to create a firewall rule that permits the GKE cluster's Pods to access your domain controllers by using the following protocols:</p> <ul> <li>Kerberos (UDP/88, TCP/88)</li> <li>NTP (UDP/123)</li> <li>RPC (TCP/135, TCP/49152-65535)</li> <li>LDAP (UDP/389, TCP/389)</li> <li>SMB (UDP/445, TCP/445)</li> <li>LDAP GC (TCP/3268)</li> <li>Active Directory Web Services (TCP/9389)</li> </ul> <p>You can apply the rule based on a service account that you have assigned to your domain controllers, or you can apply it by using a network tag as is done in this tutorial. To learn more about Active Directory related ports, see the documentation on <a href="https://docs.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements#active-directory-port-and-protocol-requirements" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Active Directory port and protocol requirements</a> and <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/firewalls" track-type="tutorial" track-name="internalLink" track-metadata-position="body">using Active Directory across firewalls</a>.</p> <p>If you are using the <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/overview" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Managed Service for Microsoft Active Directory</a> (Managed Microsoft AD), you can skip this procedure.</p> <ol> <li>
+<p>In Cloud Shell, get the GKE cluster's Pod IP address range:</p> 
+<pre>CLUSTER_IP_RANGE=`gcloud container clusters describe $GKE_CLUSTER_NAME --format="value(clusterIpv4Cidr)"`
+</pre>
+</li> <li>
+<p>Create a firewall rule to give the GKE Pods access to Active Directory:</p> 
+<pre>gcloud compute firewall-rules create allow-gke-pods-to-ad \
+    --network $NETWORK_NAME \
+    --allow udp:88,tcp:88,udp:123,tcp:135,tcp:49152-65535,udp:389,tcp:389,udp:445,tcp:445,tcp:3268,tcp:9389 \
+    --source-ranges=$CLUSTER_IP_RANGE \
+    --target-tags DC-TAG
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DC-TAG</var></code> with the network tag that's assigned to your domain controllers' VMs.</p>
+</li> </ol> <h3 id="configure-gke-to-support-the-use-of-gmsas">Configure GKE to support the use of gMSAs</h3> <p>To use a gMSA in Windows Server nodes, you need to create the gMSA object in Active Directory, create a matching gMSA resource in GKE, and enable newly created Pods to fetch their gMSA credentials.</p> <ol> <li>
+<p>In Cloud Shell, download and run the gMSA webhook script:</p> 
+<pre>export K8S_GMSA_DEPLOY_DOWNLOAD_REV=b685a27adc40511bb5756dfb3ada2e8578ee72e1
+curl https://raw.githubusercontent.com/kubernetes-sigs/windows-gmsa/$K8S_GMSA_DEPLOY_DOWNLOAD_REV/admission-webhook/deploy/deploy-gmsa-webhook.sh -o deploy-gmsa-webhook.sh &amp;&amp; chmod +x deploy-gmsa-webhook.sh
+
+./deploy-gmsa-webhook.sh --file ./gmsa-webhook.yml --namespace gmsa-webhook --overwrite
+rm -drf gmsa-webhook-certs
+</pre> <p>The script adds the gMSA <a href="https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">custom resource definition</a> (CRD) manifest to your GKE cluster and deploys a webhook that provides the gMSA specifications to Pods. You can now store gMSA specifications in your cluster and configure gMSAs for Pods and containers.</p> <p>To learn more about Kubernetes and gMSAs, see <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-gmsa/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Configure GMSA for Windows Pods and containers</a>.</p>
+</li> </ol> <p>Your GKE cluster is now ready to run Windows applications that require the use of a gMSA. For example, you can run an ASP.NET web application in your Windows Server nodes. You can configure the application to sign in users with Windows authentication or have the application use the Pod's gMSA to access a remote network share or a SQL Server database.</p> <h2 id="integrating_with_active_directory">Integrating with Active Directory</h2> <p>Next, you create a gMSA for your ASP.NET web application in Active Directory, configure how it can be used and by whom, and then add its configuration to GKE.</p> <h3 id="log_in_and_start_powershell">Log in and start PowerShell</h3> <ol> <li>
+<a href="https://docs.cloud.google.com/compute/docs/instances/connecting-to-windows" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Connect to</a> the <code translate="no" dir="ltr">gmsa-dev-vm</code> VM.</li> <li>
+<p>Log in to Windows using an Active Directory account that is permitted to create a gMSA.</p> <p>Your account needs to be a member of the <code translate="no" dir="ltr">Domain Admins</code> group or must be able to create <code translate="no" dir="ltr">msDS-GroupManagedServiceAccount</code> objects. For more information, see <a href="https://docs.microsoft.com/windows-server/security/group-managed-service-accounts/getting-started-with-group-managed-service-accounts#BKMK_Step1" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Provisioning group Managed Service Accounts</a>.</p> <p>If you use Managed Microsoft AD, then your account needs to be a member of the <code translate="no" dir="ltr">Cloud Service Managed Service Account Administrators</code> group. For more information, see <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/create-gmsa#delegate-administration" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Delegate administration of Managed Service Accounts</a>.</p>
+</li> <li><p>Type <code translate="no" dir="ltr">15</code> to exit the menu to command line (PowerShell).</p></li> </ol> <h3 id="install_a_container_runtime">Install a container runtime</h3> <p>Windows Server 2022 requires a container runtime, such as Docker Community Edition (CE), to create and run Windows containers. For more information about installing a container runtime on Windows Server, see <a href="https://learn.microsoft.com/virtualization/windowscontainers/quick-start/set-up-environment" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Get started: Prep Windows for containers</a> in the Microsoft documentation.</p> <p>If you created the development VM using the <code translate="no" dir="ltr">windows-2019-core-for-containers</code> image, you can skip the following procedure, because the image already has Docker installed.</p> <ol> <li>
+<p>Install Docker Community Edition (CE):</p> 
+<pre>Invoke-WebRequest -UseBasicParsing -o install-docker-ce.ps1 `
+   "https://raw.githubusercontent.com/microsoft/Windows-Containers/Main/helpful_tools/Install-DockerCE/install-docker-ce.ps1"
+.\install-docker-ce.ps1
+</pre> <p>If during the install process the remote desktop connection closes, reconnect to the VM.</p>
+</li> <li><p>Wait for the install process to complete and then type <code translate="no" dir="ltr">exit</code> to close the new PowerShell window.</p></li> <li><p>Type <code translate="no" dir="ltr">15</code> to exit the menu to command line (PowerShell).</p></li> </ol> <h3 id="create_a_kds_root_key">Create a KDS root key</h3> <p>Before you create a gMSA, you must make sure that your Active Directory domain controller has a <a href="https://docs.microsoft.com/windows-server/security/group-managed-service-accounts/create-the-key-distribution-services-kds-root-key" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Key Distribution Services (KDS) root key</a>. Active Directory uses the KDS root key to generate passwords for gMSAs.</p> <p>If you are using Managed Microsoft AD, you can skip the following procedure because Managed Microsoft AD creates the KDS root key when you create the domain.</p> <ol> <li>
+<p>On <code translate="no" dir="ltr">gmsa-dev-vm</code>, check if Active Directory already has the KDS root key:</p> 
+<pre>Get-KdsRootKey
+</pre> <p>This command displays the key ID if it exists.</p>
+</li> <li>
+<p>If you do not get a key ID in response, create the key:</p> 
+<pre>Add-KdsRootKey -EffectiveTime ((get-date).addhours(-10))
+</pre>
+</li> </ol> <h3 id="create_the_gmsa">Create the gMSA</h3> <p>When you create a gMSA, you need to provide the names of the computers that have access to the gMSA. As a security best practice, you should grant permission to the gMSA only to the instances where your application runs. When you create a domain-joined Windows Server node pool, a new Active Directory group is created for the node pool's computers. The name of the group matches the name of the managed instance group (MIG) that GKE creates for the node pool.</p> <ol> <li>
+<p>In PowerShell, set variables for the Google Cloud project ID, the cluster name, the Windows node pool name, the gMSA name, and the AD domain name:</p> 
+<pre>$ProjectId = "PROJECT-ID"
+$GkeClusterName = "cluster-1"
+$PermittedNodePool = "windows-server-pool"
+$GmsaName = "WebApp-01"
+$AdDomain = (Get-ADDomain).DNSRoot
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT-ID</var></code> with your Google Cloud project ID.</p>
+</li> <li>
+<p>Set the cluster configuration for the <code translate="no" dir="ltr">gcloud</code> tool:</p> 
+<pre>gcloud config set project $ProjectId
+gcloud config set compute/zone "ZONE-NAME"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ZONE-NAME</var></code> with the zone where you deployed the GKE cluster.</p>
+</li> <li>
+<p>Retrieve the domain name of the Active Directory group that was created for the node pool:</p> 
+<pre>$InstanceGroupUri = gcloud container node-pools describe $PermittedNodePool `
+    --cluster $GkeClusterName `
+    --format="value(instanceGroupUrls)"
+$InstanceGroupName=([System.Uri]$instanceGroupUri).Segments[-1]
+$GroupDN=(Get-ADGroup -Filter "name -eq '$InstanceGroupName'")
+
+Write-Host $GroupDN.DistinguishedName
+</pre>
+</li> <li>
+<p>Create the gMSA:</p> 
+<pre>New-ADServiceAccount -Name $GmsaName `
+-DNSHostName "$GmsaName.$AdDomain" `
+-PrincipalsAllowedToRetrieveManagedPassword $GroupDN
+</pre>
+</li> <li>
+<p>Verify that the gMSA was created:</p> 
+<pre>Get-ADServiceAccount -Identity $GmsaName
+</pre> <p>If the gMSA was created, the output is similar to the following:</p> 
+<pre>
+DistinguishedName : CN=WebApp01,CN=Managed Service Accounts,DC=corp,DC=example,DC=com
+Enabled           : True
+Name              : WebApp01
+ObjectClass       : msDS-GroupManagedServiceAccount
+ObjectGUID        : 5afcff45-cf15-467d-aaeb-d65e53288253
+SamAccountName    : WebApp01$
+SID               : S-1-5-21-780151012-601164977-3226406772-2103
+UserPrincipalName :
+</pre>
+</li> </ol> <h3 id="add-the-gmsa-to-gke">Add the gMSA to GKE</h3> <p>To use a gMSA in a Kubernetes cluster, you need to create a gMSA resource in Kubernetes and configure which namespaces and accounts are permitted to use it.</p> <ol> <li>
+<p>On <code translate="no" dir="ltr">gmsa-dev-vm</code>, in PowerShell, install the <code translate="no" dir="ltr">git</code> tool:</p> 
+<pre>Install-Script -Name Install-Git -Force
+Install-Git.ps1
+$env:Path += ";c:\program files\git\bin"
+</pre>
+</li> <li>
+<p>Install the <code translate="no" dir="ltr">kubectl</code> tool:</p> 
+<pre>$version = (Invoke-WebRequest -UseBasicParsing -Uri "https://dl.k8s.io/release/stable.txt").Content
+$uri = "https://dl.k8s.io/release/$version/bin/windows/amd64/kubectl.exe"
+New-Item -Type Directory $env:ProgramFiles\kubectl
+Start-BitsTransfer -Source $uri -Destination $env:ProgramFiles\kubectl\
+$env:Path += ";$env:ProgramFiles\kubectl"
+</pre>
+</li> <li>
+<p>Install the <code translate="no" dir="ltr">gke-gcloud-auth-plugin</code> binary:</p> 
+<pre>gcloud components install gke-gcloud-auth-plugin
+</pre> <p>Wait for several minutes for the installation process to finish.</p>
+</li> <li>
+<p>Initialize the <code translate="no" dir="ltr">kubectl</code> tool with your GKE cluster's credentials:</p> 
+<pre>gcloud container clusters get-credentials $GkeClusterName
+</pre>
+</li> <li>
+<p>Create the <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-gmsa/#create-gmsa-credential-spec-resources" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">gMSA credentials specification</a> file:</p> 
+<pre>Install-Module CredentialSpec -Force
+$GmsaName = $GmsaName.ToLower()
+$CredSpecFile = Join-Path $env:TEMP "$GmsaName-credspec.json"
+New-CredentialSpec -AccountName $GmsaName -Path $CredSpecFile
+
+$CredentialsSpec=@{
+"apiVersion" = "windows.k8s.io/v1";
+"kind" = "GMSACredentialSpec";
+"metadata" = @{"name" = $GmsaName}
+"credspec" = (Get-Content $CredSpecFile | ConvertFrom-Json)
+}
+
+$CredentialsSpec | ConvertTo-Json -Depth 5 | Set-Content $CredSpecFile
+</pre> <p>The name of the <code translate="no" dir="ltr">GMSACredentialSpec</code> resource in Kubernetes <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">must use lowercase characters</a>.</p> <p>The script changes the capitalization of the <code translate="no" dir="ltr">$GmsaName</code> variable to comply with this restriction.</p> <p>The script displays a warning message that testing the Managed Service Account failed, which is expected. Your development VM is not a member of the group that's assigned to the gMSA, and therefore you cannot test the gMSA from the VM. The warning message does not stop the command from generating the gMSA credentials specification.</p>
+</li> <li>
+<p>Add the gMSA credentials specification to the GKE cluster:</p> 
+<pre>kubectl apply -f $CredSpecFile
+</pre>
+</li> <li>
+<p>Clone the GitHub repository:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+cd kubernetes-engine-samples/windows/aspnet-gmsa/
+</pre>
+</li> <li>
+<p>Add the gMSA RBAC objects to your cluster:</p> 
+<pre>kubectl apply -f gmsa-rbac-webapp-01.yaml
+</pre> <p>The <code translate="no" dir="ltr">gmsa-rbac-webapp-01.yaml</code> creates a <code translate="no" dir="ltr">ClusterRole</code> RBAC object for the gMSA and then binds the new cluster role to the default service account in the <code translate="no" dir="ltr">default</code> namespace. If you are deploying your application to a different namespace, edit the <code translate="no" dir="ltr">gmsa-rbac-webapp-01.yaml</code> file and change the namespace for the role binding and for the service account.</p>
+</li> </ol> <h2 id="deploying_and_using_the_web_application">Deploying and using the web application</h2> <p>Next, you build the web application and the container image, deploy the new container image to your GKE cluster, and open the web application in the browser to verify that the web application can use the gMSA.</p> <h3 id="build_and_deploy_the_aspnet_web_application">Build and deploy the ASP.NET web application</h3> <ol> <li>
+<p>On <code translate="no" dir="ltr">gmsa-dev-vm</code>, in PowerShell, set variables for the registry location, registry name, and image tag:</p> 
+<pre>$RegistryLocation = "LOCATION-docker.pkg.dev"
+$ProjectsRegistry = "$RegistryLocation/$ProjectId"
+$ImageTag = "$ProjectsRegistry/windows-container-images/test-gmsa:latest"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code> with the location where you created the Artifact Registry repository.</p>
+</li> <li>
+<p>Build the container image:</p> 
+<pre>docker build -t $ImageTag -f Dockerfile-WINDOWS_LTSC2022 .
+</pre> <p>To build container images for Windows Server 2019, set the <code translate="no" dir="ltr">-f</code> parameter value to <code translate="no" dir="ltr">Dockerfile-WINDOWS_LTSC2019</code>.</p>
+</li> <li>
+<p>Push the container image to Artifact Registry:</p> 
+<pre>gcloud auth configure-docker $RegistryLocation --quiet
+docker push $ImageTag
+</pre>
+</li> <li>
+<p>Download the application's YAML file and update it with your gMSA configuration:</p> 
+<pre>$ApplicationYaml = Join-Path $env:TEMP "gmsa-test-webapp-01.yaml"
+
+(Get-Content gmsa-test-webapp-01.yaml.template) `
+-Replace '\${image_path}',$ImageTag | `
+Set-Content $ApplicationYaml
+</pre> <p>If you create Windows Server 2019 nodes in GKE, edit the application's YAML file and change the value of <code translate="no" dir="ltr">cloud.google.com/gke-windows-os-version</code> from <code translate="no" dir="ltr">2022</code> to <code translate="no" dir="ltr">2019</code>.</p>
+</li> <li>
+<p>Deploy the web application to your GKE cluster:</p> 
+<pre>kubectl apply -f $ApplicationYaml
+</pre>
+</li> </ol> <h3 id="verify_that_the_aspnet_web_application_is_running">Verify that the ASP.NET web application is running</h3> <p>The web application is exposed to the internet using a <code translate="no" dir="ltr">LoadBalancer</code> service. Before you can browse to the web application, you need to wait for the Pod and the service to deploy. Deploying the Pod can take several minutes because Windows Server Core container images are large (the web application image is larger than 7 GB) and it takes some time for the node to download the image and create the container.</p> <ol> <li>
+<p>Check the status of the Pod:</p> 
+<pre>kubectl get pods --selector=app=gmsa-test-webapp-01
+</pre> <p>Repeat the command until the output shows that the Pod status is <strong>Running</strong>:</p> 
+<pre>NAME                                   READY     STATUS    RESTARTS   AGE
+gmsa-test-webapp-01-76c6d64975-zrtgq   1/1       Running   0          28s
+</pre> <p>If the status of the Pod remains <strong>Pending</strong> and does not change to either <strong>ContainerCreating</strong> or <strong>Running</strong>, <a href="https://docs.cloud.google.com/compute/docs/instances/view-vm-image#viewing_source_image" track-type="tutorial" track-name="internalLink" track-metadata-position="body">check the source image of your Windows node</a> to make sure it is Windows Server 2022. You can also check the <a href="creating-a-cluster-windows#version_mapping" track-type="tutorial" track-name="internalLink" track-metadata-position="body">version mapping</a> table to see how GKE versions map to Windows Server versions. If the versions don't match, duplicate the <code translate="no" dir="ltr">Dockerfile-WINDOWS_LTSC2022</code> file, set the <a href="https://hub.docker.com/_/microsoft-dotnet-framework-aspnet/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">base container image</a> in the new file to matches the Windows Server version of your nodes, and then repeat the steps to <a href="#build_and_deploy_the_aspnet_web_application" track-type="tutorial" track-name="internalLink" track-metadata-position="body">build and deploy the ASP.NET web application</a>.</p>
+</li> <li>
+<p>Check the status of the service:</p> 
+<pre>kubectl get service --selector=app=gmsa-test-webapp-01
+</pre> <p>Repeat the command until the output shows the service has an external IP address:</p> 
+<pre>
+NAME                   TYPE           CLUSTER-IP    EXTERNAL-IP      PORT(S)        AGE
+gmsa-test-webapp-01    LoadBalancer   10.44.2.112   external-ip    80:32233/TCP   17s
+</pre>
+</li> <li><p>Note the <strong>external-ip</strong> value in the output; you need this value later.</p></li> </ol> <h3 id="run_preliminary_tests_in_the_aspnet_web_application">Run preliminary tests in the ASP.NET web application</h3> <p>The Pod is now running and is accessible from the internet through a network load balancer. Next, you run preliminary tests to verify that the container was deployed successfully and that it has permissions to use the gMSA.</p> <ol> <li>
+<p>In a browser, go to <code translate="no" dir="ltr">http://<var translate="no">EXTERNAL-IP</var></code> to see the gMSA test web application.</p> <p>Replace <code translate="no" dir="ltr"><var translate="no">EXTERNAL-IP</var></code> with the IP address that you got in the preceding procedure.</p>
+</li> <li>
+<p>Scroll to the <strong>Preflight Checks</strong> section and then click the <strong>Run Preflight Checks</strong> button to verify that all tests passed.</p> <p>If the tests pass, the output is the following:</p> 
+<pre>
+[PASS]  Active Directory RSAT PowerShell Module Installed
+
+[PASS]  IIS Document Root found
+        C:\inetpub\wwwroot\
+
+[PASS]  PowerShell Scripts Folder found
+        C:\inetpub\wwwroot\Powershell\
+
+[PASS]  Container Diagnostic Script found
+        C:\inetpub\wwwroot\Powershell\\containerDiag.ps1
+
+[PASS]  Domain Diagnostic Script found
+        C:\inetpub\wwwroot\Powershell\\domainDiag.ps1
+
+[RES]   Result: PASS   All checks passed! Please proceed to run the different tests.
+</pre>
+</li> <li><p>Scroll to the <strong>Container Information</strong> section and then click the <strong>Run Script</strong> button. Verify that you see information about the container and the node, and that no error is displayed.</p></li> </ol> <h3 id="use_the_gmsa_in_windows_containers">Use the gMSA in Windows Containers</h3> <p>You can now verify that the gMSA setup is working correctly by running several tests in the web application. Each of the tests uses the gMSA for a different purpose. If all tests are successful, then you configured the gMSA properly.</p> <h4 id="validate_the_gmsa_container_configuration">Validate the gMSA container configuration</h4> <ul> <li>
+<p>Scroll to the <strong>Domain Connectivity</strong> section, type the name of your gMSA (<code translate="no" dir="ltr">WebApp-01</code>) in the <strong>Account Name</strong> box, and then click <strong>Run Script</strong>. Wait a few seconds for the tests to finish.</p> <p>The output is similar to the following:</p> 
+<pre>
+*****   C O N T A I N E R   D I A G N O S T I C S   *****
+
+[INFO]  Starting script execution at 01-05-2021-13:53:11
+
+[INFO]  Using gMSA: WebApp-01
+
+[PASS]  gMSA Account found in Active Directory
+        CN=WebApp01,CN=Managed Service Accounts,DC=corp,DC=example,DC=com
+
+[PASS]  This Container (gmsa-test-webapp01-5bc485b8d5-9lbb7) is running on a GKE Windows Node that is authorized to use WebApp01
+
+[INFO]  Script execution complete at 01-05-2021-13:53:12
+
+*****      E N D   O F   D I A G N O S T I C S      *****
+</pre> <p>The script uses two PowerShell cmdlets to test access to the gMSA:</p> <ul> <li>
+<a href="https://docs.microsoft.com/powershell/module/activedirectory/get-adserviceaccount" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external"><code translate="no" dir="ltr">Get-ADServiceAccount</code></a>: This cmdlet retrieves information about a gMSA. If this cmdlt runs successfully, then the container is running with a valid gMSA.</li> <li>
+<a href="https://docs.microsoft.com/powershell/module/activedirectory/test-adserviceaccount" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external"><code translate="no" dir="ltr">Test-ADServiceAccount</code></a>: This cmdlet tests if it can retrieve the gMSA credentials. If the cmdlt runs successfully, then the container is running in a Windows Server node that is permitted to access the gMSA credentials.</li> </ul>
+</li> </ul> <h4 id="sign_users_in_with_windows_authentication">Sign users in with Windows Authentication</h4> <ol> <li>In the top navigation bar of the page, click <strong>Login</strong>.</li> <li>When you are prompted to enter your credentials, enter your domain username and password.</li> <li>
+<p>If you see the <strong>Secure</strong> page with your account information, and you're not prompted for credentials, then your browser automatically logged you in using your current identity.</p> <p>After you're authenticated, you see the <strong>Secure</strong> page. Make sure you see the following three sections:</p> <ul> <li>
+<strong>User information</strong>: Displays your username and the type of authentication that was used.</li> <li>
+<strong>Groups</strong>: Displays the list of groups that you belong to. The group names in the list are retrieved from Active Directory.</li> <li>
+<strong>User Claims</strong>: Displays the list of claims for the user as provided by Active Directory during sign-in. The group membership claims show the Active Directory Group <a href="https://wikipedia.org/wiki/Security_Identifier" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">SID</a>, not their names.</li> </ul>
+</li> </ol> <p>In addition to supporting Integrated Windows Authentication, the ASP.NET web application can use its gMSA for authentication when calling remote servers. Using the gMSA, the web application and any other application running in the Windows container can access resources in the network that require Windows authentication, such as SQL Server instances and SMB-based network shares.</p> <h2 id="troubleshooting">Troubleshooting</h2> <p>If you encounter any error messages during the setup process or while testing the web application, refer to the following troubleshooting pages:</p> <ul> <li>
+<a href="../troubleshooting/windows-server-node-pools" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Troubleshooting Windows Server on GKE</a> </li> <li>Kubernetes documentation on <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-gmsa/#troubleshooting" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">troubleshooting Windows Server containers</a> </li> <li>Microsoft documentation on <a href="https://docs.microsoft.com/virtualization/windowscontainers/manage-containers/gmsa-troubleshooting" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">troubleshooting gMSAs for Windows Containers</a> </li> </ul> <h2 id="additional_considerations_for_production_applications">Additional considerations for production applications</h2> <p>The instructions you have followed were written to provide an optimal path for purposes of the tutorial. For a production environment, you might make changes to some of the procedures to make the result more robust, as described in the following sections.</p> <h3 id="windows_server_node_pool_considerations">Windows Server node pool considerations</h3> <p>If you plan to deploy your own application that uses a gMSA, and the application supports client sessions, we recommend that you create at least two nodes in the node pool. Having multiple nodes lets you use out-of-process session storage to verify that your application can handle distributed sessions properly.</p> <p>In this tutorial, you create a single Windows Server node pool to host your applications. However, there might be situations where you want to create multiple Windows Server node pools in your cluster—for example, one node pool with HDD persistent disks (PDs) and another node pool with SSD PDs. If you need to deploy your application to multiple node pools, provide an array of Active Directory group objects to the <code translate="no" dir="ltr">PrincipalsAllowedToRetrieveManagedPassword</code> parameter, when you <a href="#create_the_gmsa" track-type="tutorial" track-name="internalLink" track-metadata-position="body">create the gMSA</a> using the <code translate="no" dir="ltr">New-ADServiceAccount</code> cmdlet.</p> <h3 id="gmsa_and_service_principal_name_spn_considerations">gMSA and service principal name (SPN) considerations</h3> <p>If your application requires you to authenticate users using Kerberos (for example, to support identity delegation), then you need to access your application by using a custom DNS and configure the gMSA with a <a href="https://docs.microsoft.com/windows/win32/ad/service-principal-names" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">service principal name (SPN)</a>. For example, if your load balancer exposes the application on GKE through <code translate="no" dir="ltr">https://my-web-app/</code>, then you need to create an SPN named <code translate="no" dir="ltr">HTTP/my-web-app</code> in one of the following ways:</p> <ul> <li>
+<p>For a new gMSA, create the gMSA with the required SPNs. For example:</p> 
+<pre>New-ADServiceAccount -Name $GmsaName `
+-DNSHostName "$GmsaName.$AdDomain" `
+-PrincipalsAllowedToRetrieveManagedPassword $Groups `
+-ServicePrincipalNames "HTTP/my-web-app", "HTTP/my-web-app.$AdDomain"
+</pre>
+</li> <li>
+<p>For an existing gMSA, call <code translate="no" dir="ltr">Set-ADServiceAccount</code> to add the required SPNs to the gMSA. For example:</p> 
+<pre>Set-ADServiceAccount $GmsaName -ServicePrincipalNames @{Add="HTTP/my-web-app", "HTTP/my-web-app.$AdDomain"}
+</pre>
+</li> </ul> <p>Depending on your DNS configuration, you might also need to create an SPN for <code translate="no" dir="ltr">HTTP/www.my-web-app</code> and <code translate="no" dir="ltr">HTTP/www.my-web-app.$AdDomain</code>.</p> <p>For non-HTTP protocols, such as a WCF service that's configured with TCP binding and Windows Authentication, you might need to create other types of SPNs, such as a <code translate="no" dir="ltr">HOST/</code> SPN.</p> <h3 id="choosing_the_iis_application_pool_identity">Choosing the IIS application pool identity</h3> <p>ASP.NET Web applications run in Windows on the IIS web server. In IIS, you configure groups of web applications that share the same process. This group is called an <a href="https://docs.microsoft.com/iis/configuration/system.applicationhost/applicationpools/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">application pool</a>. Each application pool is hosted in a dedicated process that's named <code translate="no" dir="ltr">w3wp</code>. IIS application pools provide process configuration, such as whether the process is a 32-bit or 64-bit process, and they provide the process's identity. When you run a web application in a Windows container, you set the application pool's process identity to use the built-in <a href="https://docs.microsoft.com/virtualization/windowscontainers/manage-containers/gmsa-configure-app" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Network Service</a> account.</p> <p>The local <a href="https://docs.microsoft.com/iis/manage/configuring-security/application-pool-identities" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">application pool identity</a> accounts, which IIS also supports, are not required in Windows containers. The application pool identity accounts were created by IIS as a means to enforce a <a href="https://docs.microsoft.com/iis/manage/configuring-security/application-pool-identities#securing-resources" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">local security boundary</a> when running multiple web applications on the same IIS instance. With Windows containers, where each web application is hosted in a separate container, there is no need to create a security boundary within the container, because the container itself provides the security boundary.</p> <p>Even though the application pool identity is configured to use the Network Service account, if the application makes a request to an external resource that requires authentication, the application authenticates by using the gMSA that you configured for the Windows container.</p> <aside class="note"><strong>Note:</strong><span> You can still configure application pools in IIS to use the application pool identity accounts—for example, if you want to host multiple web applications in the same container and you require a local security boundary. As noted, when a web application authenticates to external network resources, it uses the gMSA whether the identity is set to an application pool identity account or to the NetworkService account.</span></aside> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h3 id="removing_individual_resources">Removing individual resources</h3> <p>If you want to keep your Google Cloud project but you don't want to delete the Google Cloud resources that you created for this tutorial, you can remove the resources individually.</p> <h4 id="revert_active_directory_changes">Revert Active Directory changes</h4> <ol> <li>Connect to the development VM and log in as a user that has administrative access to your Active Directory domain.</li> <li>
+<p>In the <code translate="no" dir="ltr">gmsa-dev-vm</code> VM, if PowerShell isn't already open, open it:</p> 
+<pre>PowerShell
+</pre>
+</li> <li>
+<p>Delete the gMSA:</p> 
+<pre>Remove-ADServiceAccount -Identity "WebApp-01" -Confirm:$false
+</pre>
+</li> </ol> <h4 id="delete_cloud_resources">Delete cloud resources</h4> <ol> <li>
+
+<p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> </li> <li>
+<p>Initialize the <code translate="no" dir="ltr">gcloud</code> environment:</p> 
+<pre>gcloud config set project PROJECT-ID
+gcloud config set compute/zone ZONE-NAME
+gcloud config set artifacts/location LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT-ID</var></code>: Your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE-NAME</var></code>: The zone where you deployed the GKE cluster and development VM.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The region where you deployed the Artifact Registry repository.</li> </ul>
+</li> <li>
+<p>Delete the development VM:</p> 
+<pre>gcloud compute instances delete gmsa-dev-vm --quiet
+</pre>
+</li> <li>
+<p>Delete the service account:</p> 
+<pre>gcloud iam service-accounts delete dev-vm@$GOOGLE_CLOUD_PROJECT.iam.gserviceaccount.com --quiet
+</pre>
+</li> <li>
+<p>Delete the GKE cluster:</p> 
+<pre>gcloud container clusters delete cluster-1 --quiet
+</pre>
+</li> <li>
+<p>If you created a firewall rule for your Active Directory controllers, delete it:</p> 
+<pre>gcloud compute firewall-rules delete allow-gke-pods-to-ad --quiet
+</pre>
+</li> <li>
+<p>Delete the Artifact Registry Docker repository:</p> 
+<pre>gcloud artifacts repositories delete windows-container-images --quiet
+</pre>
+</li> </ol> <p>To finish, follow the clean-up steps in <a href="https://docs.cloud.google.com/architecture/configuring-active-directory-for-vms-to-automatically-join-the-domain#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Configuring Active Directory for VMs to automatically join a domain</a>.</p> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Read about <a href="../concepts/windows-server-gke" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Windows Server containers on GKE</a>.</li> <li>Learn about <a href="creating-a-cluster-windows" track-type="tutorial" track-name="internalLink" track-metadata-position="body">creating a GKE cluster using Windows Server node pools</a>.</li> <li>Read of additional ways to <a href="deploying-windows-app" track-type="tutorial" track-name="internalLink" track-metadata-position="body">deploy Windows Server applications</a>.</li> <li>Review our <a href="https://docs.cloud.google.com/compute/docs/instances/windows/best-practices" track-type="tutorial" track-name="internalLink" track-metadata-position="body">best practices for deploying an Active Directory resource forest on Google Cloud</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploying-aspnet-with-windows-authentication-in-gke-windows-containers" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploying-aspnet-with-windows-authentication-in-gke-windows-containers</a>
+  </p>
+</div>

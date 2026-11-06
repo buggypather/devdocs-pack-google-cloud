@@ -1,0 +1,155 @@
+<h1>Run a small batch workload with GPUs and Flex-start VMs</h1>  <aside class="beta"> <p> <strong> Preview — flex-start </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> This guide shows you how to optimize GPU provisioning for medium- and small-scale training workloads by using Flex-start VMs. Flex-start VMs are created by using the <a href="../concepts/dws">flex-start</a> consumption option. In this guide, you use Flex-start VMs to deploy a workload that consists of two Kubernetes Jobs. Each Job requires one GPU. GKE automatically provisions a <em>single node</em> with two A100 GPUs to run <em>both Jobs</em>. <p>If your workload requires multi-node distributed processing, consider using <em>flex-start with queued provisioning</em>. For more information, see <a href="provisioningrequest">Run a large-scale workload with flex-start with queued provisioning</a>.</p> <p>This guide is intended for Machine learning (ML) engineers, Platform admins and operators, and for Data and AI specialists who are interested in using Kubernetes container orchestration capabilities for running batch workloads. For more information about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="dws-pricing">Flex-start pricing</h2> <p>Flex-start is recommended if your workload requires dynamically provisioned resources as needed, for up to seven days with short-term reservations, no complex quota management, and cost-effective access. Flex-start is powered by Dynamic Workload Scheduler and is billed using <a href="https://cloud.google.com/products/dws/pricing">Dynamic Workload Scheduler pricing</a>:</p> <ul> <li>Can receive a discount (up to 53%) for vCPUs, GPUs, TPUs, and any attached Local SSD disks.</li> <li>You pay as you go (PAYG).</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Verify that you have an <a href="../concepts/autopilot-overview">Autopilot cluster</a> or a <a href="creating-a-regional-cluster">Standard cluster</a> that's running version 1.33.0-gke.1712000 or later.</li> <li>Verify that you're familiar with <a href="../concepts/dws#limitations">limitations of flex-start</a>.</li> <li>When using a Standard cluster, verify that you maintain at least one node pool without flex-start enabled for the cluster to function correctly.</li> <li>Verify that you have quota for <a href="https://docs.cloud.google.com/compute/resource-usage#preemptible-quotas">preemptible GPUs</a> in your node locations.</li> </ul> <p>If you don't have a cluster or your cluster doesn't meet the requirements, you can create a <a href="creating-a-regional-cluster">Standard regional cluster</a> using the gcloud CLI. Add the following flags so that you can learn about flex-start:</p> 
+<pre>--location=us-central1 \
+--node-locations=us-central1-a,us-central1-b \
+--machine-type=g2-standard-8
+</pre> <p>When you create a <a href="#node-pool-flex">flex-start node pool</a>, use the previously mentioned flags and <code translate="no" dir="ltr">--accelerator type=nvidia-l4,count=1</code>.</p> <p>If you have a Standard cluster that meets the requirements, the next sections guide you through selecting a GPU accelerator type and machine type for your cluster.</p> <h3 id="choose_a_gpu_accelerator_type">Choose a GPU accelerator type</h3> <p>If you use a cluster in Autopilot mode, skip this section and go to the <a href="#run-training-workload">Run a batch workload</a> section.</p> <p>GPU availability is specific to each zone. You need to find a <a href="https://docs.cloud.google.com/compute/docs/gpus/gpu-regions-zones">GPU accelerator type</a> that is available in a zone that the Standard cluster is in. If you have a regional Standard cluster, the zone in which the GPU accelerator type is available must be in the region that the cluster is in. When you create the node pool, you specify the accelerator type and the zones for the nodes. If you specify an accelerator type that isn't available in the cluster's location, the node pool creation fails.</p> <p>Run the following commands to get your cluster's location and a supported GPU accelerator type.</p> <ol> <li>
+<p>Get the location that the cluster is in:</p> 
+<pre>gcloud container clusters list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                LOCATION  MASTER_VERSION      MASTER_IP     MACHINE_TYPE  NODE_VERSION        NUM_NODES  STATUS   STACK_TYPE
+example-cluster-1   us-west2  1.33.2-gke.1111000  34.102.3.122  e2-medium     1.33.2-gke.1111000  9          RUNNING  IPV4
+</pre>
+</li> <li>
+<p>List the available GPU accelerator types, excluding Virtual Workstations in the location:</p> 
+<pre>gcloud compute accelerator-types list | grep CONTROL_PLANE_LOCATION | grep -v "Workstation"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code> with the cluster's location.</p> <p>For example, to get a list of GPU accelerator types in the <code translate="no" dir="ltr">us-west2</code> region, run the following command:</p> 
+<pre>gcloud compute accelerator-types list | grep us-west2 | grep -v "Workstation"
+</pre> <p>The output is similar to the following:</p> 
+<pre>nvidia-b200            us-west2-c                 NVIDIA B200 180GB
+nvidia-tesla-p4        us-west2-c                 NVIDIA Tesla P4
+nvidia-tesla-t4        us-west2-c                 NVIDIA T4
+nvidia-tesla-p4        us-west2-b                 NVIDIA Tesla P4
+nvidia-tesla-t4        us-west2-b                 NVIDIA T4
+</pre>
+</li> </ol> <h3 id="choose_a_compatible_machine_type">Choose a compatible machine type</h3> <p>If you use a cluster in Autopilot mode, skip this section and go to the <a href="#run-training-workload">Run a batch workload</a> section.</p> <p>After you know which GPUs are available in the cluster's location, you can determine the compatible machine types. Google Cloud restricts GPUs to specific machine series. Use the following steps to find a machine type:</p> <ol> <li>Refer to the <a href="https://docs.cloud.google.com/compute/docs/gpus#gpu-models">GPU models available</a> table.</li> <li>Locate the row for the GPU accelerator type you have chosen.</li> <li>Look at the "Machine series" column for that row. This column tells you which machine series you must use.</li> <li>To see the machine type names you can specify, click the link on the machine series.</li> </ol> <p>The only exception is the <a href="https://docs.cloud.google.com/compute/docs/gpus#n1-gpus">N1 machine series</a>, which provides additional guidance on which N1 machine types you can use with your chosen accelerator type.</p> <p>Before using an accelerator-optimized machine, make sure that it's supported with flex-start provisioning mode, as shown in <a href="../concepts/dws#consumption_option_availability_by_machine_type">Consumption option availability by machine type</a>.</p> <h3 id="determine_the_accelerator_count">Determine the accelerator count</h3> <p>If you use a cluster in Autopilot mode, skip this section and go to the <a href="#run-training-workload">Run a batch workload</a> section.</p> <p>To create a node pool, you need to determine the number of accelerators to attach to each node in the node pool. Valid values depend on your accelerator type and machine type. Each machine type has a limit on how many GPUs it can support. To determine what value to use (besides the default of <code translate="no" dir="ltr">1</code>):</p> <ol> <li>Refer to <a href="https://docs.cloud.google.com/compute/docs/gpus">GPU machine types</a>.</li> <li>In the table, search for your accelerator type for your machine series type.</li> <li>Use the value in the "GPU count" column.</li> </ol> <h2 id="node-pool-flex">Create a node pool with flex-start (Standard only)</h2> <p>If you use an Autopilot cluster, skip this section; you don't need to manually create node pools. When you deploy your Job or Pod manifest in the <a href="#run-training-workload">Run a batch workload</a> section, GKE Autopilot automatically provisions the required Flex-start VMs based on your <code translate="no" dir="ltr">nodeSelector</code>.</p> <p>To create a node pool with flex-start enabled on an existing Standard cluster, you can use the gcloud CLI or Terraform. </p>
+<div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Create a node pool with flex-start:</p> 
+<pre data-language="bash">gcloud container node-pools create NODE_POOL_NAME \
+    --cluster CLUSTER_NAME \
+    --location CONTROL_PLANE_LOCATION \
+    --project PROJECT_ID \
+    --accelerator type=ACCELERATOR_TYPE,count=COUNT \
+    --machine-type MACHINE_TYPE \
+    --max-run-duration MAX_RUN_DURATION \
+    --flex-start \
+    --node-locations NODE_ZONES \
+    --num-nodes 0 \
+    --enable-autoscaling \
+    --total-min-nodes 0 \
+    --total-max-nodes 5 \
+    --location-policy ANY \
+    --no-enable-autorepair \
+    --consolidation-delay=CONSOLIDATION_DELAY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name you choose for your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the Standard cluster you want to modify.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">compute region</a> for the cluster control plane.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCELERATOR_TYPE</var></code>: the specific type of accelerator (for example, <code translate="no" dir="ltr">nvidia-tesla-t4</code> for NVIDIA T4) to attach to the instances.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COUNT</var></code>: the number of accelerators to attach to the instances. The default value is <code translate="no" dir="ltr">1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the type of machine to use for nodes.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_RUN_DURATION</var></code>: optional. The maximum runtime of a node in seconds, up to the default of seven days. The number that you enter must end in <code translate="no" dir="ltr">s</code>. For example, to specify one day, enter <code translate="no" dir="ltr">86400s</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONSOLIDATION_DELAY</var></code>: optional. The duration that Cluster Autoscaler waits before it can scale down underutilized nodes. Use this setting to delay scale-down and keep the node pool for later reuse by other Pods. The number that you enter must end in <code translate="no" dir="ltr">s</code>. For example, to specify one hour, enter <code translate="no" dir="ltr">3600s</code>. Available in GKE version <code translate="no" dir="ltr">1.34.1-gke.2364000</code> and later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_ZONES</var></code>: a comma-separated list of one or more zones where GKE creates the node pool.</li> </ul> <p>In this command, the <code translate="no" dir="ltr">--flex-start</code> flag instructs <code translate="no" dir="ltr">gcloud</code> to create a node pool with Flex-start VMs.</p> <p>GKE creates a node pool with nodes that contain two instances of the specified accelerator type. The node pool initially has zero nodes and autoscaling is enabled</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>You can use flex-start with GPUs by using a <a href="https://github.com/terraform-google-modules/terraform-google-kubernetes-engine">Terraform module</a>.</p> <ol> <li>Add the following block to your Terraform configuration:</li> </ol> 
+<pre data-language="">resource "google_container_node_pool" "gpu_dws_pool" {
+name = "gpu-dws-pool"
+
+queued_provisioning {
+    enabled = false
+}
+
+}
+node_config {
+    machine_type = "MACHINE_TYPE"
+    accelerator_type = "ACCELERATOR_TYPE"
+    accelerator_count = COUNT
+    node_locations = ["NODE_ZONES"]
+    flex_start = true
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the type of machine to use for nodes.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCELERATOR_TYPE</var></code>: the specific type of accelerator (for example, <code translate="no" dir="ltr">nvidia-tesla-t4</code> for NVIDIA T4) to attach to the instances.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COUNT</var></code>: the number of accelerators to attach to the instances. The default value is <code translate="no" dir="ltr">1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_ZONES</var></code>: the comma-separated list of one or more zones where GKE creates the node pool.</li> </ul> <p>Terraform calls Google Cloud APIs to create a cluster with a node pool that uses Flex-start VMs with GPUs. The node pool initially has zero nodes and autoscaling is enabled. To learn more about Terraform, see the <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/container_cluster"><code translate="no" dir="ltr">google_container_node_pool</code> resource spec on terraform.io</a>.</p> </section> </div> <h3 id="verify-flex">Verify the status of flex-start in the node pool</h3> <p>Run the following command:</p> 
+<pre>gcloud container node-pools describe NODE_POOL_NAME \
+    --cluster CLUSTER_NAME \
+    --location CONTROL_PLANE_LOCATION \
+    --format="get(config.flexStart)"
+</pre> <p>If flex-start is enabled in the node pool, the field <code translate="no" dir="ltr">flexStart</code> is set to <code translate="no" dir="ltr">True</code>.</p> <h2 id="run-training-workload">Run a batch workload</h2> In this section, you create two Kubernetes Jobs that require one GPU each. A Job controller in Kubernetes creates one or more Pods and helps ensure that they successfully execute a specific task. <ol> <li><p>In the <a href="http://console.cloud.google.com">Google Cloud console</a>, launch a Cloud Shell session by clicking <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Cloud Shell activation icon"> <strong>Activate Cloud Shell</strong>. A session opens in the bottom pane of the Google Cloud console.</p></li> <li>
+<p>Create a file named <code translate="no" dir="ltr">dws-flex-start.yaml</code>:</p> 
+<pre>apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-1
+spec:
+  template:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-flex-start: "true"
+        cloud.google.com/gke-accelerator: ACCELERATOR_TYPE
+      containers:
+      - name: container-1
+        image: gcr.io/k8s-staging-perf-tests/sleep:latest
+        args: ["10s"] # Sleep for 10 seconds
+        resources:
+          requests:
+              nvidia.com/gpu: 1
+          limits:
+              nvidia.com/gpu: 1
+      restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-2
+spec:
+  template:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-flex-start: "true"
+        cloud.google.com/gke-accelerator: ACCELERATOR_TYPE
+      containers:
+      - name: container-2
+        image: gcr.io/k8s-staging-perf-tests/sleep:latest
+        args: ["10s"] # Sleep for 10 seconds
+        resources:
+          requests:
+              nvidia.com/gpu: 1
+          limits:
+              nvidia.com/gpu: 1
+      restartPolicy: OnFailure
+</pre>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">dws-flex-start.yaml</code> manifest:</p> 
+<pre>kubectl apply -f dws-flex-start.yaml
+</pre>
+</li> <li>
+<p>Verify that the Jobs are running on the same node:</p> 
+<pre>kubectl get pods -l "job-name in (job-1,job-2)" -o wide
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME    READY   STATUS      RESTARTS   AGE   IP       NODE               NOMINATED NODE   READINESS GATES
+job-1   0/1     Completed   0          19m   10.(...) gke-flex-zonal-a2  &lt;none&gt;           &lt;none&gt;
+job-2   0/1     Completed   0          19m   10.(...) gke-flex-zonal-a2  &lt;none&gt;           &lt;none&gt;
+</pre>
+</li> </ol> <aside class="success"><strong>Success:</strong><span> You have successfully deployed two Jobs on the <em>same</em> node by using Flex-start VMs. GKE deployed two Jobs on a newly provisioned Flex-start VM.</span></aside> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources that you used on this page, either delete the project that contains the resources, or keep the project and delete the individual resources.</p> <h3 id="delete-project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h3 id="delete-individual-resource">Delete the individual resource</h3> <ol> <li>
+<p>Delete the Jobs:</p> 
+<pre>kubectl delete job -l "job-name in (job-1,job-2)"
+</pre>
+</li> <li>
+<p>Delete the node pool:</p> 
+<pre>gcloud container node-pools delete NODE_POOL_NAME \
+      --location CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Delete the cluster:</p> 
+<pre>gcloud container clusters delete CLUSTER_NAME
+</pre>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="../concepts/gpus">GPUs in GKE</a>.</li> <li>Learn more about <a href="node-auto-provisioning">node auto-provisioning</a>.</li> <li>Learn more about <a href="../best-practices/batch-platform-on-gke">Best practices for running batch workloads on GKE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/dws-flex-start-training" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/dws-flex-start-training</a>
+  </p>
+</div>

@@ -1,0 +1,271 @@
+<h1>Query plan and timeline</h1> <p>Embedded within query jobs, BigQuery includes diagnostic query plan and timing information. This is similar to the information provided by statements such as <code translate="no" dir="ltr">EXPLAIN</code> in other database and analytical systems. This information can be retrieved from the API responses of methods such as <a href="https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/get"><code translate="no" dir="ltr">jobs.get</code></a>.</p> <p>For long-running queries, BigQuery will periodically update these statistics. These updates happen independently of the rate at which the job status is polled, but typically won't happen more frequently than every 30 seconds. Additionally, query jobs that don't use execution resources, such as dry run requests or results that can be served from cached results, won't include the additional diagnostic information, though other statistics may be present.</p> <h2 id="background">Background</h2> <p>When BigQuery executes a query, it converts the SQL into an execution graph that consists of <em>stages</em>. Stages are composed of <em>steps</em>, the elemental operations that perform the query's logic. BigQuery leverages a heavily distributed parallel architecture that executes stages in parallel for reduced latency. Stages communicate with one another by using <strong>shuffle</strong>, a fast distributed memory architecture.</p> <p>The query plan uses the terms <em>work units</em> and <em>workers</em> to describe stage parallelism. Elsewhere within BigQuery, you may encounter the term <em>slot</em>, which is an abstracted representation of multiple facets of query execution, including compute, memory, and I/O resources. Slots execute the individual work units of a stage in parallel. Top level job statistics provide individual query cost using <code translate="no" dir="ltr">totalSlotMs</code> based on this abstracted accounting.</p> <p>Another important property of the query execution is that BigQuery can modify the query plan while a query is running. For example, BigQuery introduces <em>repartition stages</em> to improve data distribution between query workers, which improves parallelism and reduces query latency.</p> <p>In addition to the query plan, query jobs also expose a <strong>timeline</strong> of execution, which provides an accounting of units of work completed, pending, and active. A query can have multiple stages with active workers simultaneously, and the timeline is intended to show overall progress of the query.</p> <h2 id="viewing_information_cloud_console">View the execution graph with the Google Cloud console</h2> <p>In the <a href="https://console.cloud.google.com/bigquery" class="external">Google Cloud console</a>, you can see details of the query plan for a completed query by clicking the <strong>Execution Details</strong> button.</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/explanation-button.png" alt="The query
+plan." class="screenshot"> </p> <h2 id="query_plan_information">Query plan information</h2> <p>Within the API response, query plans are represented as a list of query stages. Each item in the list shows per-stage overview statistics, detailed step information, and stage timing classifications. Not all details are rendered within the Google Cloud console, but they can all be present within the API responses.</p> <h3 id="understand_the_execution_graph">Understand the execution graph</h3> <p>In the Google Cloud console, you can see the query plan details by clicking the <strong>Execution graph</strong> tab.</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-tab.png" alt="The execution graph tab." class="screenshot"> </p> <p>The <strong>Execution graph</strong> panel is organized as follows:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-layout.png" alt="The execution graph layout." class="screenshot"> </p> <ul> <li>In the center is the <strong>execution graph</strong>. It shows stages as nodes and shuffle memory exchanged between stages as edges.</li> <li>The left panel has the <strong>query text heatmap</strong>. It shows the main query text that the query executed along with any referenced views or SQL user-defined functions.</li> <li>The right panel has the query or stage details.</li> </ul> <h4 id="navigating_the_execution_graph">Navigating the execution graph</h4> <p>The execution graph applies a color scheme to the nodes in the graph based on slot-time, where nodes with a darker red take more slot-time relative to the rest of the stages in the graph.</p> <p>To navigate around the execution graph, you can:</p> <ul> <li>Click and hold on the graph background to pan to different areas of the graph.</li> <li>Use the mouse scroll wheel to zoom in and out of the graph.</li> <li>Click and hold on the <strong>minimap</strong> on the top-right to pan to different areas of the graph.</li> </ul> <p>Clicking on a stage in the graph shows the selected stage's details. The stage details have:</p> <ul> <li>Statistics. See <a href="#stage-overview">Stage overview</a> for details about the statistics.</li> <li>Step details. Steps describe the individual operations that execute the query's logic.</li> </ul> <h4 id="step_details">Step details</h4> <p>Stages are made up of steps, the individual operations that execute the query's logic. Steps have <em>substeps</em> that describe what the step did in pseudocode. Substeps use variables to describe relationships between steps. Variables begin with a dollar sign followed by a unique number. Variable numbers are not shared across stages.</p> <p>The following image shows a stage's steps:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-step-details.png" alt="The execution graph step details." class="screenshot"> </p> <p>Here is an example of a stage's steps:</p> 
+<pre>
+  READ
+  $30:l_orderkey, $31:l_quantity
+  FROM lineitem
+
+  AGGREGATE
+  GROUP BY $100 := $30
+  $70 := SUM($31)
+
+  WRITE
+  $100, $70
+  TO __stage00_output
+  BY HASH($100)
+</pre> <p>The example's steps describe the following:</p> <ul> <li>The stage read the columns l_orderkey and l_quantity from the table lineitem and stored the values in the variables $30 and $31, respectively.</li> <li>The stage aggregated the variables $30 and $31, storing aggregations into the variables $100 and $70, respectively.</li> <li>The stage wrote the results of the variables $100 and $70 to shuffle. The stage ordered the results in shuffle memory based on $100.</li> </ul> <p>See <a href="#interpret-and-optimize-steps">Interpret and optimize steps</a> for full details about the type of steps and how to optimize them.</p> <p>BigQuery might truncate substeps when the query's execution graph was complex enough that providing complete substeps would cause payload size issues when retrieving query information.</p> <h4 id="query_text_heatmap">Query text heatmap</h4> <p>BigQuery can map some stage steps to portions of query text. The query text heatmap shows all corresponding query text with stage steps. It highlights the query text based on the total slot-time of stages whose steps have mapped query text.</p> <p>The following image shows the highlighted query text:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-query-text.png" alt="The execution graph highlighted query text." class="screenshot"> </p> <p>Holding the pointer over a mapped portion of the query text shows a tooltip that lists all stage steps that map to the query text along with stage slot-time. Clicking on a mapped query text selects the stage in the execution graph and opens the stage details in the right panel.</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-stage-selection.png" alt="The execution graph associates the query text with the stage." class="screenshot"> </p> <p>A single portion of query text can map to multiple stages. The tooltip lists each mapped stage and its slot-time. Clicking on the query text highlights the corresponding stages and grays out the rest of the graph. Subsequently clicking on a specific stage shows its details.</p> <p>The following image shows how the query text relates to the step details:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-query-text-step-details.png" alt="The execution graph associates the query text with the step." class="screenshot"> </p> <p>In a stage's <strong>Step details</strong> section, if a step maps to query text, the step has a code icon. The behavior of the code icon depends on the number of mapped locations:</p> <ul> <li>Single location: Clicking the icon directly navigates to and highlights the mapped portion of query text.</li> <li>Multiple locations or hierarchy: Clicking the icon opens a dialog with a hierarchical list of context references, such as nested function calls or view references. Selecting a location from this menu navigates to and highlights the relevant code lines.</li> </ul> <p>The following image shows the hierarchical menu and the highlighted query text:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/execution-graph-context-menu.png" alt="The execution graph hierarchical context menu." class="screenshot"> </p> <p>When navigated to, the BigQuery console highlights the code lines and scrolls to them.</p> <p>It is important to keep in mind that the heatmap color is based on the entire stage's slot-time. Because BigQuery does not measure the slot-time of steps, the heatmap does not represent the actual slot-time for that specific portion of mapped query text. In most cases, a stage performs just a single complex step, like a join or aggregate. Thus the heatmap color is appropriate. However, when a stage is made up of steps that perform multiple complex operations, the heatmap color may overrepresent the actual slot-time in the heatmap. In such cases, it is important to understand the other steps that make up the stage to get a more complete understanding of the query's performance.</p> <p>If a query uses views or persistent routines, and the stage's steps have mappings to a view's or routine's query text, then the query text heatmap shows the view's or routine's name and query text with their mappings. However, if the resource is deleted, or if you lose the <code translate="no" dir="ltr">bigquery.tables.get</code> <a href="access-control">IAM permission</a> on the view or the <code translate="no" dir="ltr">bigquery.routines.get</code> IAM permission on the routine, then the query text heatmap doesn't show the stage steps' mappings for that resource.</p> <h3 id="stage-overview">Stage overview</h3> <p>The overview fields for each stage can include the following:</p> <table> <thead> <tr> <th>API field</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">id</code></td> <td>Unique numeric ID for the stage.</td> </tr> <tr> <td><code translate="no" dir="ltr">name</code></td> <td>Simple summary name for the stage. The <code translate="no" dir="ltr">steps</code> within the stage provide additional details about execution steps.</td> </tr> <tr> <td><code translate="no" dir="ltr">status</code></td> <td>Execution status of the stage. Possible states include PENDING, RUNNING, COMPLETE, FAILED, and CANCELLED.</td> </tr> <tr> <td><code translate="no" dir="ltr">inputStages</code></td> <td>A list of the IDs that form the dependency graph of the stage. For example, a JOIN stage often needs two dependent stages that prepare the data on the left and right side of the JOIN relationship.</td> </tr> <tr> <td><code translate="no" dir="ltr">startMs</code></td> <td>Timestamp, in epoch milliseconds, that represents when the first worker within the stage began execution.</td> </tr> <tr> <td><code translate="no" dir="ltr">endMs</code></td> <td>Timestamp, in epoch milliseconds, that represents when the last worker completed execution.</td> </tr> <tr> <td><code translate="no" dir="ltr">steps</code></td> <td>More detailed list of execution steps within the stage. See next section for more information.</td> </tr> <tr> <td><code translate="no" dir="ltr">recordsRead</code></td> <td>Input size of the stage as number of records, across all stage workers.</td> </tr> <tr> <td><code translate="no" dir="ltr">recordsWritten</code></td> <td>Output size of the stage as number of records, across all stage workers.</td> </tr> <tr> <td><code translate="no" dir="ltr">parallelInputs</code></td> <td>Number of parallelizable units of work for the stage. Depending on the stage and query, this may represent the number of columnar segments within a table, or the number of partitions within an intermediate shuffle.</td> </tr> <tr> <td><code translate="no" dir="ltr">completedParallelInputs</code></td> <td>Number of units work within the stage that were completed. For some queries, not all inputs within a stage need to be completed for the stage to complete.</td> </tr> <tr> <td><code translate="no" dir="ltr">shuffleOutputBytes</code></td> <td>Represents the total bytes written across all workers within a query stage.</td> </tr> <tr> <td><code translate="no" dir="ltr">shuffleOutputBytesSpilled</code></td> <td>Queries that transmit significant data between stages may need to fallback to disk-based transmission. The spilled bytes statistic communicates how much data was spilled to disk. Depends on an optimization algorithm so it is not deterministic for any given query.</td> </tr> </tbody> </table> <h3 id="per-stage_timing_classification">Per-stage timing classification</h3> <p>The query stages provide stage timing classifications, in both relative and absolute form. As each stage of execution represents work undertaken by one or more independent workers, information is provided in both average and worst-case times. These times represent the average performance for all workers in a stage as well as the long-tail slowest worker performance for a given classification. The average and max times are furthermore broken down into absolute and relative representations. For ratio-based statistics, the data is provided as a fraction of the longest time spent by any worker in any segment.</p> <p>The Google Cloud console presents stage timing using the relative timing representations.</p> <p>The stage timing information is reported as follows:</p> <table> <thead> <tr> <th>Relative timing</th> <th>Absolute timing</th> <th>Ratio numerator</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">waitRatioAvg</code></td> <td><code translate="no" dir="ltr">waitMsAvg</code></td> <td>Time the average worker spent waiting to be scheduled.</td> </tr> <tr> <td><code translate="no" dir="ltr">waitRatioMax</code></td> <td><code translate="no" dir="ltr">waitMsMax</code></td> <td>Time the slowest worker spent waiting to be scheduled.</td> </tr> <tr> <td><code translate="no" dir="ltr">readRatioAvg</code></td> <td><code translate="no" dir="ltr">readMsAvg</code></td> <td>Time the average worker spent reading input data.</td> </tr> <tr> <td><code translate="no" dir="ltr">readRatioMax</code></td> <td><code translate="no" dir="ltr">readMsMax</code></td> <td>Time the slowest worker spent reading input data.</td> </tr> <tr> <td><code translate="no" dir="ltr">computeRatioAvg</code></td> <td><code translate="no" dir="ltr">computeMsAvg</code></td> <td>Time the average worker spent CPU bound.</td> </tr> <tr> <td><code translate="no" dir="ltr">computeRatioMax</code></td> <td><code translate="no" dir="ltr">computeMsMax</code></td> <td>Time the slowest worker spent CPU bound.</td> </tr> <tr> <td><code translate="no" dir="ltr">writeRatioAvg</code></td> <td><code translate="no" dir="ltr">writeMsAvg</code></td> <td>Time the average worker spent writing output data.</td> </tr> <tr> <td><code translate="no" dir="ltr">writeRatioMax</code></td> <td><code translate="no" dir="ltr">writeMsMax</code></td> <td>Time the slowest worker spent writing output data.</td> </tr> </tbody> </table> <h3 id="per-stage_step_information">Step overview</h3> <p>Steps contain the operations that each worker within a stage executes, presented as an ordered list of operations. Each step operation has a category, with some operations providing more detailed information. The operation categories present in the query plan include the following:</p> <table> <thead> <tr> <th>Step category</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">READ</code></td> <td>A read of one or more columns from an input table or from intermediate shuffle. Only the first sixteen columns that are read are returned in the step details.</td> </tr> <tr> <td><code translate="no" dir="ltr">WRITE</code></td> <td>A write of one or more columns to an output table or to intermediate shuffle. For <code translate="no" dir="ltr">HASH</code> partitioned outputs from a stage, this also includes the columns used as the partition key.</td> </tr> <tr> <td><code translate="no" dir="ltr">COMPUTE</code></td> <td>Expression evaluation and SQL functions.</td> </tr> <tr> <td><code translate="no" dir="ltr">FILTER</code></td> <td>Used by <code translate="no" dir="ltr">WHERE</code>, <code translate="no" dir="ltr">OMIT IF</code>, and <code translate="no" dir="ltr">HAVING</code> clauses.</td> </tr> <tr> <td><code translate="no" dir="ltr">SORT</code></td> <td>
+<code translate="no" dir="ltr">ORDER BY</code> operation that includes the column keys and the sort order.</td> </tr> <tr> <td><code translate="no" dir="ltr">AGGREGATE</code></td> <td>Implements aggregations for clauses like <code translate="no" dir="ltr">GROUP BY</code> or <code translate="no" dir="ltr">COUNT</code>, among others.</td> </tr> <tr> <td><code translate="no" dir="ltr">LIMIT</code></td> <td>Implements the <code translate="no" dir="ltr">LIMIT</code> clause.</td> </tr> <tr> <td><code translate="no" dir="ltr">JOIN</code></td> <td>Implements joins for clauses like <code translate="no" dir="ltr">JOIN</code>, among others; includes the join type and possibly the join conditions.</td> </tr> <tr> <td><code translate="no" dir="ltr">ANALYTIC_FUNCTION</code></td> <td>An invocation of a window function (also known as an "analytic function").</td> </tr> <tr> <td><code translate="no" dir="ltr">USER_DEFINED_FUNCTION</code></td> <td>An invocation to a user-defined function.</td> </tr> <tr> <td><code translate="no" dir="ltr">UPDATE</code></td> <td>Modifies existing rows in a target table for an <code translate="no" dir="ltr">UPDATE</code> statement; includes the modified columns and the target table.</td> </tr> <tr> <td><code translate="no" dir="ltr">DELETE</code></td> <td>Removes rows from a target table for a <code translate="no" dir="ltr">DELETE</code> statement; includes the referenced columns and the target table.</td> </tr> <tr> <td><code translate="no" dir="ltr">MERGE</code></td> <td>Modifies rows in a target table for a <code translate="no" dir="ltr">MERGE</code> statement; includes the modified columns and the target table.</td> </tr> <tr> <td><code translate="no" dir="ltr">EXPORT</code></td> <td>Writes output columns to a destination table for data manipulation language (DML) statements or query result exports.</td> </tr> </tbody> </table> <h2 id="interpret-and-optimize-steps">Interpret and optimize steps</h2> <p>The following sections explain how to interpret the steps in a query plan and provide ways to optimize your queries.</p> <h3 id="read_step">
+<code translate="no" dir="ltr">READ</code> step</h3> <p>The <code translate="no" dir="ltr">READ</code> step means that a stage is accessing data for processing. Data can be read directly from the tables referenced in a query, or from shuffle memory. When data from a previous stage is read, BigQuery reads data from shuffle memory. The amount of data scanned impacts cost when using on-demand slots and affects performance when using reservations.</p> <h4 id="potential_performance_issues">Potential performance issues</h4> <ul> <li>
+<strong>Large scan of unpartitioned table:</strong> if the query only needs a small portion of the data, then this might indicate that a table scan is inefficient. <a href="partitioned-tables">Partitioning</a> could be a good optimization strategy.</li> <li>
+<strong>Scan of a large table with a small filter ratio:</strong> this suggests that the filter isn't effectively reducing the data scanned. Consider revising the filter conditions.</li> <li>
+<strong>Shuffle bytes spilled over to disk:</strong> this suggests that the data isn't stored effectively using optimization techniques such as clustering, which could maintain similar data in clusters.</li> </ul> <h4 id="optimize">Optimize</h4> <ul> <li>
+<strong>Targeted filtering:</strong> use <code translate="no" dir="ltr">WHERE</code> clauses strategically to filter out irrelevant data as early as possible in the query. This reduces the amount of data that needs to be processed by the query.</li> <li>
+<strong>Partitioning and clustering:</strong> BigQuery uses table partitioning and clustering to efficiently locate specific data segments. Ensure your tables are partitioned and clustered based on your typical query patterns to minimize data scanned during <code translate="no" dir="ltr">READ</code> steps.</li> <li>
+<strong>Select relevant columns:</strong> avoid using <code translate="no" dir="ltr">SELECT *</code> statements. Instead, select specific columns or use <code translate="no" dir="ltr">SELECT * EXCEPT</code> to avoid reading unnecessary data.</li> <li>
+<strong>Materialized views:</strong> materialized views can precompute and store frequently used aggregations, potentially reducing the need to read base tables during <code translate="no" dir="ltr">READ</code> steps for queries that use those views.</li> </ul> <h3 id="compute_step">
+<code translate="no" dir="ltr">COMPUTE</code> step</h3> <p>In the <code translate="no" dir="ltr">COMPUTE</code> step, BigQuery performs the following actions on your data:</p> <ul> <li>Evaluates expressions in the query's <code translate="no" dir="ltr">SELECT</code>, <code translate="no" dir="ltr">WHERE</code>, <code translate="no" dir="ltr">HAVING</code>, and other clauses, including calculations, comparisons, and logical operations.</li> <li>Executes built-in SQL functions and user-defined functions.</li> <li>Filters rows of data based on conditions in the query.</li> </ul> <h4 id="optimize_2">Optimize</h4> <p>The query plan can reveal bottlenecks within the <code translate="no" dir="ltr">COMPUTE</code> step. Look for stages with extensive computations or a high number of rows processed.</p> <ul> <li>
+<strong>Correlate the <code translate="no" dir="ltr">COMPUTE</code> step with data volume:</strong> if a stage shows significant computation and processes a large volume of data, then it might be a good candidate for optimization.</li> <li>
+<strong>Skewed data:</strong> for stages where the compute maximum is significantly higher than the compute average, this indicates that the stage spent a disproportionate amount of time processing a few slices of data. Consider looking at the distribution of data to see if there is data skew.</li> <li>
+<strong>Consider data types:</strong> use appropriate data types for your columns. For example, using integers, datetimes, and timestamps instead of strings can improve performance.</li> </ul> <h3 id="write_step">
+<code translate="no" dir="ltr">WRITE</code> step</h3> <p><code translate="no" dir="ltr">WRITE</code> steps happen for intermediate data and final output.</p> <ul> <li>
+<strong>Writing to shuffle memory:</strong> in a multi-stage query, the <code translate="no" dir="ltr">WRITE</code> step often involves sending the processed data to another stage for further processing. This is typical for shuffle memory, which combines or aggregates data from multiple sources. The data written during this stage is typically an intermediate result, not the final output.</li> <li>
+<strong>Final output:</strong> the query result is written to either the destination or a temporary table.</li> </ul> <h4 id="hash_partitioning">Hash Partitioning</h4> <p>When a stage in the query plan writes data to a hash partitioned output, BigQuery writes the columns included in the output and the column chosen as the partition key.</p> <h4 id="optimize_3">Optimize</h4> <p>While the <code translate="no" dir="ltr">WRITE</code> step itself might not be directly optimized, understanding its role can help you identify potential bottlenecks in earlier stages:</p> <ul> <li>
+<strong>Minimize data written:</strong> focus on optimizing preceding stages with filtering and aggregation to reduce the amount of data written during this step.</li> <li>
+<p><strong>Partitioning:</strong> writing benefits greatly from table partitioning. If the data that you write is confined to specific partitions, then BigQuery can perform faster writes.</p> <p>If the DML statement has a <code translate="no" dir="ltr">WHERE</code> clause with a static condition against a table partition column, then BigQuery only modifies the relevant table partitions.</p>
+</li> <li><p><strong>Denormalization trade-offs:</strong> denormalization can sometimes lead to smaller result sets in intermediate <code translate="no" dir="ltr">WRITE</code> step. However, there are drawbacks such as increased storage usage and data consistency challenges.</p></li> </ul> <h3 id="join_step">
+<code translate="no" dir="ltr">JOIN</code> step</h3> <p>In the <code translate="no" dir="ltr">JOIN</code> step, BigQuery combines data from two data sources. Joins can include join conditions. Joins are resource intensive. When joining large data in BigQuery, the join keys are shuffled independently to line up on the same slot, so that the join is performed locally on each slot.</p> <p>The query plan for the <code translate="no" dir="ltr">JOIN</code> step typically reveals the following details:</p> <ul> <li>
+<strong>Join pattern:</strong> this indicates the type of join used. Each type defines how many rows from the joined tables are included in the result set.</li> <li>
+<strong>Join columns:</strong> these are the columns used to match rows between the sources of data. The choice of columns is crucial for join performance.</li> </ul> <h4 id="join_patterns">Join patterns</h4> <ul> <li>
+<strong>Broadcast join:</strong> when one table, typically the smaller one, can fit in memory on a single worker node or slot, BigQuery can broadcast it to all other nodes to perform the join efficiently. Look for <code translate="no" dir="ltr">JOIN EACH WITH ALL</code> in the step details.</li> <li>
+<strong>Hash join:</strong> when tables are large or a broadcast join isn't suitable, a hash join might be used. BigQuery uses hash and shuffle operations to shuffle the left and right tables so that the matching keys end up in the same slot to perform a local join. Hash joins are an expensive operation since the data needs to be moved, but they enable efficient matching of rows across hashes. Look for <code translate="no" dir="ltr">JOIN EACH WITH EACH</code> in the step details.</li> <li>
+<strong>Self join:</strong> a SQL antipattern in which a table is joined to itself.</li> <li>
+<strong>Cross join:</strong> a SQL antipattern that can cause significant performance issues because it generates larger output data than the inputs.</li> <li>
+<strong>Skewed join:</strong> the data distribution across the join key in one table is very skewed and can lead to performance issues. Look for cases where the max compute time is much greater than the average compute time in the query plan. For more information, see <a href="query-insights#high_cardinality_join">High cardinality join</a> and <a href="query-insights#partition_skew">Partition skew</a>.</li> </ul> <h4 id="debugging">Debugging</h4> <ul> <li>
+<strong>Large data volume:</strong> if the query plan shows a significant amount of data processed during the <code translate="no" dir="ltr">JOIN</code> step, investigate the join condition and join keys. Consider filtering or using more selective join keys.</li> <li>
+<strong>Skewed data distribution:</strong> analyze the data distribution of join keys. If one table is very skewed, explore strategies such as splitting the query or prefiltering.</li> <li>
+<strong>High cardinality joins:</strong> joins that produce significantly more rows than the number of left and right input rows can drastically reduce query performance. Avoid joins that produce a very large number of rows.</li> <li>
+<strong>Incorrect ordering of table:</strong> Ensure you've chosen the appropriate join type, such as <code translate="no" dir="ltr">INNER</code> or <code translate="no" dir="ltr">LEFT</code>, and ordered tables from largest to smallest based on your query's requirements.</li> </ul> <h4 id="optimize_4">Optimize</h4> <ul> <li>
+<strong>Selective join keys:</strong> for join keys, use <code translate="no" dir="ltr">INT64</code> instead of <code translate="no" dir="ltr">STRING</code> when possible. <code translate="no" dir="ltr">STRING</code> comparisons are slower than <code translate="no" dir="ltr">INT64</code> comparisons because they compare each character in a string. Integers only require a single comparison.</li> <li>
+<strong>Filter before joining:</strong> apply <code translate="no" dir="ltr">WHERE</code> clause filters on individual tables before the join. This reduces the amount of data involved in the join operation.</li> <li>
+<strong>Avoid functions on join columns:</strong> avoid calling functions on join columns. Instead, standardize your table data during the ingestion or post-ingestion process using ELT SQL pipelines. This approach eliminates the need to modify join columns dynamically, which enables more efficient joins without compromising data integrity.</li> <li>
+<strong>Avoid self joins:</strong> self-joins are commonly used to compute row-dependent relationships. However, self-joins can potentially quadruple the number of output rows, leading to performance issues. Instead of relying on self-joins, consider using window (analytic) functions.</li> <li>
+<strong>Large tables first:</strong> even though the SQL query optimizer can determine which table should be on which side of the join, order your joined tables appropriately. The best practice is to place the largest table first, followed by the smallest, and then by decreasing size.</li> <li>
+<strong>Denormalization:</strong> in some cases, strategically denormalizing tables (adding redundant data) can eliminate joins altogether. However, this approach comes with storage and data consistency trade-offs.</li> <li>
+<strong>Partitioning and clustering:</strong> partitioning tables based on join keys and clustering colocated data can significantly speed up joins by letting BigQuery target relevant data partitions.</li> <li>
+<strong>Optimizing skewed joins:</strong> to avoid performance issues associated with skewed joins, pre-filter data from the table as early as possible or split the query into two or more queries.</li> </ul> <h3 id="aggregate_step">
+<code translate="no" dir="ltr">AGGREGATE</code> step</h3> <p>In the <code translate="no" dir="ltr">AGGREGATE</code> step, BigQuery aggregates and groups data.</p> <h4 id="debugging_2">Debugging</h4> <ul> <li>
+<strong>Stage details:</strong> check the number of input rows to and output rows from the aggregation, and the shuffle size to determine how much data reduction the aggregate step achieved and whether data shuffling was involved.</li> <li>
+<strong>Shuffle size:</strong> a large shuffle size might indicate that a significant amount of data was moved across worker nodes during the aggregation.</li> <li>
+<strong>Check data distribution:</strong> ensure the data is evenly distributed across partitions. Skewed data distribution can lead to imbalanced workloads in the aggregate step.</li> <li>
+<strong>Review aggregations:</strong> analyze the aggregation clauses to confirm they are necessary and efficient.</li> </ul> <h4 id="optimize_5">Optimize</h4> <ul> <li>
+<strong>Clustering:</strong> cluster your tables on columns frequently used in <code translate="no" dir="ltr">GROUP
+BY</code>, <code translate="no" dir="ltr">COUNT</code>, or other aggregation clauses.</li> <li>
+<strong>Partitioning:</strong> choose a partitioning strategy that aligns with your query patterns. Consider using ingestion-time partitioned tables to reduce the amount of data scanned during the aggregation.</li> <li>
+<strong>Aggregate earlier:</strong> if possible, perform aggregations earlier in the query pipeline. This can reduce the amount of data that needs to be processed during the aggregation.</li> <li>
+<strong>Shuffling optimization:</strong> if shuffling is a bottleneck, explore ways to minimize it. For example, denormalize tables or use clustering to colocate relevant data.</li> </ul> <h4 id="edge_cases">Edge cases</h4> <ul> <li>
+<strong>DISTINCT aggregates:</strong> queries with <code translate="no" dir="ltr">DISTINCT</code> aggregates can be computationally expensive, especially on large datasets. Consider alternatives like <code translate="no" dir="ltr">APPROX_COUNT_DISTINCT</code> for approximate results.</li> <li>
+<strong>Large number of groups:</strong> if the query produces a vast number of groups, it might consume a substantial amount of memory. In such cases, think about limiting the number of groups or using a different aggregation strategy.</li> </ul> <h3 id="repartition_step">
+<code translate="no" dir="ltr">REPARTITION</code> step</h3> <p>Both <code translate="no" dir="ltr">REPARTITION</code> and <code translate="no" dir="ltr">COALESCE</code> are optimization techniques that BigQuery applies directly to the shuffled data in the query.</p> <ul> <li>
+<strong><code translate="no" dir="ltr">REPARTITION</code>:</strong> this operation aims to rebalance data distribution across worker nodes. Suppose that after shuffling, one worker node ends up with a disproportionately large amount of data. The <code translate="no" dir="ltr">REPARTITION</code> step redistributes the data more evenly, preventing any single worker from becoming a bottleneck. This is particularly important for computationally intensive operations like joins.</li> <li>
+<strong><code translate="no" dir="ltr">COALESCE</code>:</strong> this step happens when you have many small buckets of data after shuffling. The <code translate="no" dir="ltr">COALESCE</code> step combines these buckets into larger ones, reducing the overhead associated with managing numerous small pieces of data. This can be especially beneficial when dealing with very small intermediate result sets.</li> </ul> <p>If you see <code translate="no" dir="ltr">REPARTITION</code> or <code translate="no" dir="ltr">COALESCE</code> steps in your query plan, it doesn't necessarily mean there's a problem with your query. It's often a sign that BigQuery is proactively optimizing data distribution for better performance. However, if you see these operations repeatedly, it might indicate that your data is inherently skewed or that your query is causing excessive data shuffling.</p> <h4 id="optimize_6">Optimize</h4> <p>To reduce the number of <code translate="no" dir="ltr">REPARTITION</code> steps, try the following:</p> <ul> <li>
+<strong>Data distribution:</strong> ensure that your tables are partitioned and clustered effectively. Well-distributed data reduces the likelihood of significant imbalances after shuffling.</li> <li>
+<strong>Query structure:</strong> analyze the query for potential sources of data skew. For example, are there highly selective filters or joins that result in a small subset of data being processed on a single worker?</li> <li>
+<strong>Join strategies:</strong> experiment with different join strategies to see if they lead to a more balanced data distribution.</li> </ul> <p>To reduce the number of <code translate="no" dir="ltr">COALESCE</code> steps, try the following:</p> <ul> <li>
+<strong>Aggregation strategies:</strong> consider performing aggregations earlier in the query pipeline. This can help reduce the number of small intermediate result sets that might cause <code translate="no" dir="ltr">COALESCE</code> steps.</li> <li>
+<strong>Data volume:</strong> if you're dealing with very small datasets, <code translate="no" dir="ltr">COALESCE</code> might not be a significant concern.</li> </ul> <p>Don't over-optimize. Premature optimization might make your queries more complex without yielding significant benefits.</p> <h3 id="dml_steps">
+<code translate="no" dir="ltr">UPDATE</code>, <code translate="no" dir="ltr">DELETE</code>, and <code translate="no" dir="ltr">MERGE</code> steps</h3> <p>The <code translate="no" dir="ltr">UPDATE</code>, <code translate="no" dir="ltr">DELETE</code>, and <code translate="no" dir="ltr">MERGE</code> steps appear in stages that execute data manipulation language (DML) statements against a target table.</p> <p>The step details typically include the following substeps:</p> <ul> <li>
+<strong>Columns:</strong> the columns read from or written to the target table.</li> <li>
+<strong>Target table (<code translate="no" dir="ltr">FROM</code> or <code translate="no" dir="ltr">INTO</code>):</strong> the target table modified by the statement, using <code translate="no" dir="ltr">FROM</code> for <code translate="no" dir="ltr">UPDATE</code> and <code translate="no" dir="ltr">DELETE</code> steps, and <code translate="no" dir="ltr">INTO</code> for <code translate="no" dir="ltr">MERGE</code> steps.</li> </ul> <h3 id="export_step">
+<code translate="no" dir="ltr">EXPORT</code> step</h3> <p>The <code translate="no" dir="ltr">EXPORT</code> step writes output data to a destination table. This step commonly appears in the final stages of DML statements—such as the <code translate="no" dir="ltr">INSERT</code>, <code translate="no" dir="ltr">UPDATE</code>, <code translate="no" dir="ltr">DELETE</code>, and <code translate="no" dir="ltr">MERGE</code> statements—and in queries that materialize results to a destination table.</p> <p>The step details typically include the following substeps:</p> <ul> <li>
+<strong>Output columns:</strong> the list of variables written to the destination table.</li> <li>
+<strong>Destination table (<code translate="no" dir="ltr">TO</code>):</strong> the destination table receiving the exported rows.</li> </ul> <h2 id="explanation_for_federated_queries">Explanation for federated queries</h2> <p><a href="federated-queries-intro">Federated queries</a> let you send a query statement to an external data source by using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/federated_query_functions#external_query"><code translate="no" dir="ltr">EXTERNAL_QUERY</code> function</a>. Federated queries are subject to the optimization technique known as <a href="federated-queries-intro#sql_pushdowns">SQL pushdowns</a> and the query plan shows operations pushed down to the external data source, if any. For example, if you run the following query:</p> 
+<pre>SELECT id, name
+FROM EXTERNAL_QUERY("&lt;connection&gt;", "SELECT * FROM company")
+WHERE country_code IN ('ee', 'hu') AND name like '%TV%'
+</pre> <p>The query plan will show the following stage steps:</p> 
+<pre>$1:id, $2:name, $3:country_code
+FROM table_for_external_query_$_0(
+  SELECT id, name, country_code
+  FROM (
+    /*native_query*/
+    SELECT * FROM company
+  )
+  WHERE in(country_code, 'ee', 'hu')
+)
+WHERE and(in($3, 'ee', 'hu'), like($2, '%TV%'))
+$1, $2
+TO __stage00_output
+</pre> <p>In this plan, <code translate="no" dir="ltr">table_for_external_query_$_0(...)</code> represents the <code translate="no" dir="ltr">EXTERNAL_QUERY</code> function. In the parentheses you can see the query that the external data source executes. Based on that, you can notice that:</p> <ul> <li>An external data source returns only 3 selected columns.</li> <li>An external data source returns only rows for which <code translate="no" dir="ltr">country_code</code> is either <code translate="no" dir="ltr">'ee'</code> or <code translate="no" dir="ltr">'hu'</code>.</li> <li>The <code translate="no" dir="ltr">LIKE</code> operator is not push down and is evaluated by BigQuery.</li> </ul> <p>For comparison, if there are no pushdowns, the query plan will show the following stage steps:</p> 
+<pre>$1:id, $2:name, $3:country_code
+FROM table_for_external_query_$_0(
+  SELECT id, name, description, country_code, primary_address, secondary address
+  FROM (
+    /*native_query*/
+    SELECT * FROM company
+  )
+)
+WHERE and(in($3, 'ee', 'hu'), like($2, '%TV%'))
+$1, $2
+TO __stage00_output
+</pre> <p>This time an external data source returns all the columns and all the rows from the <code translate="no" dir="ltr">company</code> table and BigQuery performs filtering.</p> <h2 id="timeline_metadata">Timeline metadata</h2> <p>The query timeline reports progress at specific points in time, providing snapshot views of overall query progress. The timeline is represented as a series of samples that report the following details:</p> <table> <thead> <tr> <th>Field</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">elapsedMs</code></td> <td>Milliseconds elapsed since the start of query execution.</td> </tr> <tr> <td><code translate="no" dir="ltr">totalSlotMs</code></td> <td>A cumulative representation of the slot milliseconds used by the query.</td> </tr> <tr> <td><code translate="no" dir="ltr">pendingUnits</code></td> <td>Total units of work scheduled and waiting for execution.</td> </tr> <tr> <td><code translate="no" dir="ltr">activeUnits</code></td> <td>Total active units of work being processed by workers.</td> </tr> <tr> <td><code translate="no" dir="ltr">completedUnits</code></td> <td>Total units of work that have been completed while executing this query.</td> </tr> </tbody> </table> <h2 id="an_example_query">An example query</h2> <p>The following query counts the number of rows in the Shakespeare public dataset and has a second conditional count that restricts results to rows that reference 'hamlet':</p> 
+<pre>SELECT
+  COUNT(1) as rowcount,
+  COUNTIF(corpus = 'hamlet') as rowcount_hamlet
+FROM `publicdata.samples.shakespeare`
+</pre> <p>Click <strong>Execution details</strong> to see the query plan:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/queryplan_hamlet_stages.png" alt="The hamlet query plan."></p> <p>The color indicators show the relative timings for all steps across all stages.</p> <p>To learn more about the steps of the execution stages, click <span class="material-icons" aria-hidden="true" translate="no">arrow_drop_down</span> to expand the details for the stage:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/queryplan_hamlet_steps.png" alt="The hamlet query plan step
+details."></p> <p>In this example, the longest time in any segment was the time the single worker in Stage 01 spent waiting for Stage 00 to complete. This is because Stage 01 was dependent on Stage 00's input, and couldn't start until the first stage wrote its output into intermediate shuffle.</p> <h2 id="error_reporting">Error reporting</h2> <p>It is possible for query jobs to fail mid-execution. Because plan information is updated periodically, you can observe where within the execution graph the failure occurred. Within the Google Cloud console, successful or failed stages are labeled with a checkmark or exclamation point next to the stage name.</p> <p>For more information about interpreting and addressing errors, see the <a href="https://docs.cloud.google.com/bigquery/troubleshooting-errors">troubleshooting guide</a>.</p> <h2 id="api_sample_representation">API sample representation</h2> <p>Query plan information is embedded in the job response information, and you can retrieve it by calling <a href="https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/jobs/get"><code translate="no" dir="ltr">jobs.get</code></a>. For example, the following excerpt of a JSON response for a job returning the sample hamlet query shows both the query plan and timeline information.</p> 
+<pre>
+"statistics": {
+  "creationTime": "1576544129234",
+  "startTime": "1576544129348",
+  "endTime": "1576544129681",
+  "totalBytesProcessed": "2464625",
+  "query": {
+    "queryPlan": [
+      {
+        "name": "S00: Input",
+        "id": "0",
+        "startMs": "1576544129436",
+        "endMs": "1576544129465",
+        "waitRatioAvg": 0.04,
+        "waitMsAvg": "1",
+        "waitRatioMax": 0.04,
+        "waitMsMax": "1",
+        "readRatioAvg": 0.32,
+        "readMsAvg": "8",
+        "readRatioMax": 0.32,
+        "readMsMax": "8",
+        "computeRatioAvg": 1,
+        "computeMsAvg": "25",
+        "computeRatioMax": 1,
+        "computeMsMax": "25",
+        "writeRatioAvg": 0.08,
+        "writeMsAvg": "2",
+        "writeRatioMax": 0.08,
+        "writeMsMax": "2",
+        "shuffleOutputBytes": "18",
+        "shuffleOutputBytesSpilled": "0",
+        "recordsRead": "164656",
+        "recordsWritten": "1",
+        "parallelInputs": "1",
+        "completedParallelInputs": "1",
+        "status": "COMPLETE",
+        "steps": [
+          {
+            "kind": "READ",
+            "substeps": [
+              "$1:corpus",
+              "FROM publicdata.samples.shakespeare"
+            ]
+          },
+          {
+            "kind": "AGGREGATE",
+            "substeps": [
+              "$20 := COUNT($30)",
+              "$21 := COUNTIF($31)"
+            ]
+          },
+          {
+            "kind": "COMPUTE",
+            "substeps": [
+              "$30 := 1",
+              "$31 := equal($1, 'hamlet')"
+            ]
+          },
+          {
+            "kind": "WRITE",
+            "substeps": [
+              "$20, $21",
+              "TO __stage00_output"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "S01: Output",
+        "id": "1",
+        "startMs": "1576544129465",
+        "endMs": "1576544129480",
+        "inputStages": [
+          "0"
+        ],
+        "waitRatioAvg": 0.44,
+        "waitMsAvg": "11",
+        "waitRatioMax": 0.44,
+        "waitMsMax": "11",
+        "readRatioAvg": 0,
+        "readMsAvg": "0",
+        "readRatioMax": 0,
+        "readMsMax": "0",
+        "computeRatioAvg": 0.2,
+        "computeMsAvg": "5",
+        "computeRatioMax": 0.2,
+        "computeMsMax": "5",
+        "writeRatioAvg": 0.16,
+        "writeMsAvg": "4",
+        "writeRatioMax": 0.16,
+        "writeMsMax": "4",
+        "shuffleOutputBytes": "17",
+        "shuffleOutputBytesSpilled": "0",
+        "recordsRead": "1",
+        "recordsWritten": "1",
+        "parallelInputs": "1",
+        "completedParallelInputs": "1",
+        "status": "COMPLETE",
+        "steps": [
+          {
+            "kind": "READ",
+            "substeps": [
+              "$20, $21",
+              "FROM __stage00_output"
+            ]
+          },
+          {
+            "kind": "AGGREGATE",
+            "substeps": [
+              "$10 := SUM_OF_COUNTS($20)",
+              "$11 := SUM_OF_COUNTS($21)"
+            ]
+          },
+          {
+            "kind": "WRITE",
+            "substeps": [
+              "$10, $11",
+              "TO __stage01_output"
+            ]
+          }
+        ]
+      }
+    ],
+    "estimatedBytesProcessed": "2464625",
+    "timeline": [
+      {
+        "elapsedMs": "304",
+        "totalSlotMs": "50",
+        "pendingUnits": "0",
+        "completedUnits": "2"
+      }
+    ],
+    "totalPartitionsProcessed": "0",
+    "totalBytesProcessed": "2464625",
+    "totalBytesBilled": "10485760",
+    "billingTier": 1,
+    "totalSlotMs": "50",
+    "cacheHit": false,
+    "referencedTables": [
+      {
+        "projectId": "publicdata",
+        "datasetId": "samples",
+        "tableId": "shakespeare"
+      }
+    ],
+    "statementType": "SELECT"
+  },
+  "totalSlotMs": "50"
+},
+</pre> <h2 id="using_execution_information">Using execution information</h2> <p>BigQuery query plans provide information about how the service executes queries, but the managed nature of the service limits whether some details are directly actionable. Many optimizations happen automatically by using the service, which can differ from other environments where tuning, provisioning, and monitoring can require dedicated, knowledgeable staff.</p> <p>For specific techniques that can improve query execution and performance, see the <a href="best-practices-performance-overview">best practices documentation</a>. The query plan and timeline statistics can help you understand whether certain stages dominate resource utilization. For example, a JOIN stage that generates far more output rows than input rows can indicate an opportunity to filter earlier in the query.</p> <p>Additionally, timeline information can help identify whether a given query is slow in isolation or due to effects from other queries contending for the same resources. If you observe that the number of active units remains limited throughout the lifetime of the query but the amount of queued units of work remains high, this can represent cases where reducing the number of concurrent queries can significantly improve overall execution time for certain queries.</p> <aside class="note"><strong>Note:</strong><span> Some query processing takes place outside of the context of any stage. In some cases, significant latency or slot usage can be accrued before the first stage is dispatched, or after the last stage completes. Examples include some forms of partition pruning and various metadata operations.</span></aside><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/query-plan-explanation" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/query-plan-explanation</a>
+  </p>
+</div>

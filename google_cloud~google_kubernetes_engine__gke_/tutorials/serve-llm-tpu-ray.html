@@ -1,0 +1,1597 @@
+<h1>Serve an LLM using TPUs on GKE with KubeRay</h1>  <p>This tutorial shows how to serve a large language model (LLM) using Tensor Processing Units (TPUs) on Google Kubernetes Engine (GKE) with the <a href="../add-on/ray-on-gke/concepts/overview">Ray Operator add-on</a>, and the <a href="https://docs.vllm.ai/en/latest/">vLLM</a> serving framework.</p> <p>In this tutorial, you can serve LLM models on TPU v5e or TPU Trillium (v6e) as follows:</p> <ul> <li>
+<a href="https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct">Llama 3 8B instruct</a> on a single-host TPU v5e.</li> <li>
+<a href="https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3">Mistral 7B instruct v0.3</a> on a single-host TPU v5e.</li> <li>
+<a href="https://huggingface.co/meta-llama/Llama-3.1-70B">Llama 3.1 70B</a> on a single-host TPU Trillium (v6e).</li> <li>
+<a href="https://huggingface.co/google/gemma-4-e4b-it">Google Gemma 4 E4B-it</a> composed with Llama 3 8B on a single-host TPU v5e or TPU Trillium (v6e).</li> </ul> <aside class="note"><strong>Note:</strong><span> To serve Gemma 4 on TPUs, you can also use the <a href="https://hub.docker.com/r/vllm/vllm-tpu/tags"><code translate="no" dir="ltr">vllm-tpu:gemma4</code></a> Docker images and follow the recipes for <a href="https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Gemma4">TPU Trillium (v6e)</a> and <a href="https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM/Gemma4">Ironwood (TPU7x)</a>.</span></aside><aside class="note"><strong>Note:</strong><span> We don't recommend using base models like Llama 3 8B for production chatbots due to safety concerns. For more information about best practices, see <a href="https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/safety-system-instructions">System instructions for safety</a>.</span></aside> <p>This guide is for generative AI customers, new and existing GKE users, ML engineers, MLOps (DevOps) engineers, or platform administrators interested in using Kubernetes container orchestration capabilities to serve models using Ray, on TPUs with vLLM.</p> <h2 id="background">Background</h2> <p>This section describes the key technologies used in this guide.</p> <h3 id="about-gke">GKE managed Kubernetes service</h3> <p>Google Cloud offers a wide range of services, including GKE, which is well-suited to deploying and managing AI/ML workloads. GKE is a managed Kubernetes service that simplifies deploying, scaling, and managing containerized applications. GKE provides the necessary infrastructure, including scalable resources, distributed computing, and efficient networking, to handle the computational demands of LLMs.</p> <p>To learn more about key Kubernetes concepts, see <a href="../learn/get-started-with-kubernetes">Start learning about Kubernetes</a>. To learn more about the GKE and how it helps you scale, automate, and manage Kubernetes, see <a href="../concepts/kubernetes-engine-overview">GKE overview</a>.</p> <h3 id="about-ray">Ray operator</h3> <p>The Ray Operator add-on on GKE provides an end-to-end AI/ML platform for serving, training, and fine-tuning machine learning workloads. In this tutorial, you use <a href="https://docs.ray.io/en/latest/serve/index.html">Ray Serve</a>, a framework in Ray, to serve popular LLMs from Hugging Face.</p> <h3 id="about-tpus">TPUs</h3> <p>TPUs are Google's custom-developed application-specific integrated circuits (ASICs) used to accelerate machine learning and AI models built using frameworks such as <a href="https://www.tensorflow.org/">TensorFlow</a>, <a href="https://pytorch.org/">PyTorch</a>, and <a href="https://github.com/google/jax">JAX</a>.</p> <p>This tutorial covers serving LLM models on TPU v5e or TPU Trillium (v6e) nodes with TPU topologies configured based on each model requirements for serving prompts with low latency.</p> <h3 id="about-vllm">vLLM</h3> <p>vLLM is a highly optimized open source LLM serving framework that can increase serving throughput on TPUs, with features such as:</p> <ul> <li>Optimized transformer implementation with <a href="https://huggingface.co/docs/text-generation-inference/en/conceptual/paged_attention">PagedAttention</a>
+</li> <li>Continuous batching to improve the overall serving throughput</li> <li>Tensor parallelism and distributed serving on multiple GPUs</li> </ul> <p>To learn more, refer to the <a href="https://docs.vllm.ai/en/latest/">vLLM documentation</a>.</p> <h2 id="objectives">Objectives</h2> <p>This tutorial covers the following steps:</p> <ol> <li>Create a GKE cluster with a TPU node pool.</li> <li>Deploy a <a href="https://ray-project.github.io/kuberay/reference/api/#rayservice">RayCluster</a> custom resource with a single-host TPU slice. GKE deploys the RayCluster custom resource as Kubernetes Pods.</li> <li>Serve an LLM.</li> <li>Interact with the models.</li> </ol> <p>You can optionally configure the following model serving resources and techniques that the Ray Serve framework supports:</p> <ul> <li>Deploy a RayService custom resource.</li> <li>Compose multiple models with model composition.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Create a <a href="https://huggingface.co/">Hugging Face</a> account, if you don't already have one.</li> <li>Ensure that you have a <a href="https://huggingface.co/docs/hub/security-tokens">Hugging Face token</a>.</li> <li>Ensure that you have access to the Hugging Face model that you want to use. You usually gain this access by signing an agreement and requesting access from the model owner on the Hugging Face model page.</li> <li>Ensure that you have the following <a href="https://docs.cloud.google.com/iam/docs/roles-permissions">IAM roles</a>: <ul> <li><code translate="no" dir="ltr">roles/container.admin</code></li> <li><code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code></li> <li><code translate="no" dir="ltr">roles/container.clusterAdmin</code></li> <li><code translate="no" dir="ltr">roles/artifactregistry.writer</code></li> </ul>
+</li> </ul> <h2 id="prepare_your_environment">Prepare your environment</h2> <ol> <li><p>Check that you have enough quota in your Google Cloud project for a single-host TPU v5e or a single-host TPU Trillium (v6e). To manage your quota, see <a href="../how-to/tpus#ensure-quota">TPU quotas</a>.</p></li> <li><p>In the Google Cloud console, start a Cloud Shell instance: <br> <a track-type="solution" track-name="internalLink" track-metadata-position="body" target="console" class="button button-primary" href="https://console.cloud.google.com/">Open Cloud Shell</a></p></li> <li>
+<p>Clone the sample repository:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples.git
+cd kubernetes-engine-samples
+</pre>
+</li> <li>
+<p>Navigate to the working directory:</p> 
+<pre>cd ai-ml/gke-ray/rayserve/llm
+</pre>
+</li> <li>
+<p>Set the default environment variables for the GKE cluster creation:</p> <div> <section><p class="_code-tab"><strong>Llama-3-8B-Instruct</strong></p>
+
+<pre data-language="">export PROJECT_ID=$(gcloud config get project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export CLUSTER_NAME=vllm-tpu
+export COMPUTE_REGION=REGION
+export COMPUTE_ZONE=ZONE
+export HF_TOKEN=HUGGING_FACE_TOKEN
+export GSBUCKET=vllm-tpu-bucket
+export KSA_NAME=vllm-sa
+export NAMESPACE=default
+export MODEL_ID="meta-llama/Meta-Llama-3-8B-Instruct"
+export VLLM_IMAGE=docker.io/vllm/vllm-tpu:866fa4550d572f4ff3521ccf503e0df2e76591a1
+export SERVICE_NAME=vllm-tpu-head-svc
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">HUGGING_FACE_TOKEN</var></code>: your Hugging Face access token.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region where you have TPU quota. Ensure that the TPU version that you want to use is available in this region. To learn more, see <a href="../concepts/plan-tpus#availability-autopilot">TPU availability in GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone with available TPU quota.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VLLM_IMAGE</var></code>: the vLLM TPU image. You can use the public <code translate="no" dir="ltr">docker.io/vllm/vllm-tpu:866fa4550d572f4ff3521ccf503e0df2e76591a1</code> image or <a href="#build-vllm-tpu">build your own TPU image</a>.</li> </ul></section> <section><p class="_code-tab"><strong>Mistral-7B</strong></p>
+
+<pre data-language="">export PROJECT_ID=$(gcloud config get project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export CLUSTER_NAME=vllm-tpu
+export COMPUTE_REGION=REGION
+export COMPUTE_ZONE=ZONE
+export HF_TOKEN=HUGGING_FACE_TOKEN
+export GSBUCKET=vllm-tpu-bucket
+export KSA_NAME=vllm-sa
+export NAMESPACE=default
+export MODEL_ID="mistralai/Mistral-7B-Instruct-v0.3"
+export TOKENIZER_MODE=mistral
+export VLLM_IMAGE=docker.io/vllm/vllm-tpu:866fa4550d572f4ff3521ccf503e0df2e76591a1
+export SERVICE_NAME=vllm-tpu-head-svc
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">HUGGING_FACE_TOKEN</var></code>: your Hugging Face access token.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region where you have TPU quota. Ensure that the TPU version that you want to use is available in this region. To learn more, see <a href="../concepts/plan-tpus#availability-autopilot">TPU availability in GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone with available TPU quota.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VLLM_IMAGE</var></code>: the vLLM TPU image. You can use the public <code translate="no" dir="ltr">docker.io/vllm/vllm-tpu:866fa4550d572f4ff3521ccf503e0df2e76591a1</code> image or <a href="#build-vllm-tpu">build your own TPU image</a>.</li> </ul></section> <section><p class="_code-tab"><strong>Llama 3.1 70B</strong></p>
+
+<pre data-language="">export PROJECT_ID=$(gcloud config get project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export CLUSTER_NAME=vllm-tpu
+export COMPUTE_REGION=REGION
+export COMPUTE_ZONE=ZONE
+export HF_TOKEN=HUGGING_FACE_TOKEN
+export GSBUCKET=vllm-tpu-bucket
+export KSA_NAME=vllm-sa
+export NAMESPACE=default
+export MODEL_ID="meta-llama/Llama-3.1-70B"
+export MAX_MODEL_LEN=8192
+export VLLM_IMAGE=docker.io/vllm/vllm-tpu:866fa4550d572f4ff3521ccf503e0df2e76591a1
+export SERVICE_NAME=vllm-tpu-head-svc
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">HUGGING_FACE_TOKEN</var></code>: your Hugging Face access token.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region where you have TPU quota. Ensure that the TPU version that you want to use is available in this region. To learn more, see <a href="../concepts/plan-tpus#availability-autopilot">TPU availability in GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone with available TPU quota.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VLLM_IMAGE</var></code>: the vLLM TPU image. You can use the public <code translate="no" dir="ltr">docker.io/vllm/vllm-tpu:866fa4550d572f4ff3521ccf503e0df2e76591a1</code> image or <a href="#build-vllm-tpu">build your own TPU image</a>.</li> </ul></section> </div>
+</li> <li>
+<p>Pull down the vLLM container image:</p> 
+<pre>sudo usermod -aG docker ${USER}
+newgrp docker
+docker pull ${VLLM_IMAGE}
+</pre>
+</li> </ol> <h3 id="create_cluster">Create a cluster</h3> <p>You can serve an LLM on TPUs with Ray in a GKE Autopilot or Standard cluster by using the Ray Operator add-on.</p> <section class="key-point"> <b>Best practices</b>: <p>Use an Autopilot cluster for a fully managed Kubernetes experience. To choose the GKE mode of operation that's the best fit for your workloads, see <a href="../concepts/choose-cluster-mode" track-type="concept" track-name="aurora-bp">Choose a GKE mode of operation</a>.</p> </section> <p>Use Cloud Shell to create an Autopilot or Standard cluster:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ol> <li>
+<p>Create a GKE Autopilot cluster with the Ray Operator add-on enabled:</p> 
+<pre data-language="">gcloud container clusters create-auto ${CLUSTER_NAME}  \
+    --enable-ray-operator \
+    --release-channel=rapid \
+    --location=${COMPUTE_REGION}
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>Create a Standard cluster with the Ray Operator add-on enabled:</p> 
+<pre data-language="">gcloud container clusters create ${CLUSTER_NAME} \
+    --release-channel=rapid \
+    --location=${COMPUTE_ZONE} \
+    --workload-pool=${PROJECT_ID}.svc.id.goog \
+    --machine-type="n1-standard-4" \
+    --addons=RayOperator,GcsFuseCsiDriver
+</pre>
+</li> <li>
+<p>Create a single-host TPU slice node pool:</p> <div> <section><p class="_code-tab"><strong>Llama-3-8B-Instruct</strong></p>
+
+<pre data-language="">gcloud container node-pools create tpu-1 \
+    --location=${COMPUTE_ZONE} \
+    --cluster=${CLUSTER_NAME} \
+    --machine-type=ct5lp-hightpu-8t \
+    --num-nodes=1
+</pre> <p>GKE creates a TPU v5e node pool with a <code translate="no" dir="ltr">ct5lp-hightpu-8t</code> machine type.</p></section> <section><p class="_code-tab"><strong>Mistral-7B</strong></p>
+
+<pre data-language="">gcloud container node-pools create tpu-1 \
+    --location=${COMPUTE_ZONE} \
+    --cluster=${CLUSTER_NAME} \
+    --machine-type=ct5lp-hightpu-8t \
+    --num-nodes=1
+</pre> <p>GKE creates a TPU v5e node pool with a <code translate="no" dir="ltr">ct5lp-hightpu-8t</code> machine type.</p></section> <section><p class="_code-tab"><strong>Llama 3.1 70B</strong></p>
+
+<pre data-language="">gcloud container node-pools create tpu-1 \
+    --location=${COMPUTE_ZONE} \
+    --cluster=${CLUSTER_NAME} \
+    --machine-type=ct6e-standard-8t \
+    --num-nodes=1
+</pre> <p>GKE creates a TPU v6e node pool with a <code translate="no" dir="ltr">ct6e-standard-8t</code> machine type.</p></section> </div>
+</li> </ol></section> </div> <h3 id="configure-kubectl">Configure kubectl to communicate with your cluster</h3> <p>To configure kubectl to communicate with your cluster, run the following command:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">gcloud container clusters get-credentials ${CLUSTER_NAME} \
+    --location=${COMPUTE_REGION}
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">gcloud container clusters get-credentials ${CLUSTER_NAME} \
+    --location=${COMPUTE_ZONE}
+</pre></section> </div> <h3 id="configure-kubernetes-secret">Create a Kubernetes Secret for Hugging Face credentials</h3> <p>To create a Kubernetes Secret that contains the Hugging Face token, run the following command:</p> 
+<pre>kubectl create secret generic hf-secret \
+    --from-literal=hf_api_token=${HF_TOKEN} \
+    --dry-run=client -o yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <h3 id="create-bucket">Create a Cloud Storage bucket</h3> <p>To accelerate the vLLM deployment startup time and minimize required disk space per node, use the <a href="../how-to/persistent-volumes/cloud-storage-fuse-csi-driver">Cloud Storage FUSE CSI driver</a> to mount the downloaded model and compilation cache to the Ray nodes.</p> <p>In Cloud Shell, run the following command:</p> 
+<pre>gcloud storage buckets create gs://${GSBUCKET} \
+    --uniform-bucket-level-access
+</pre> <p>This command creates a Cloud Storage bucket to store the model files you download from Hugging Face.</p> <h3 id="sa-bucket-access">Set up a Kubernetes ServiceAccount to access the bucket</h3> <ol> <li>
+<p>Create the Kubernetes ServiceAccount:</p> 
+<pre>kubectl create serviceaccount ${KSA_NAME} \
+    --namespace ${NAMESPACE}
+</pre>
+</li> <li>
+<p>Grant the Kubernetes ServiceAccount read-write access to the Cloud Storage bucket:</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://${GSBUCKET} \
+    --member "principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/${NAMESPACE}/sa/${KSA_NAME}" \
+    --role "roles/storage.objectUser"
+</pre> <p>GKE creates the following resources for the LLM:</p> <ol> <li>A Cloud Storage bucket to store the downloaded model and the compilation cache. A <a href="../how-to/persistent-volumes/cloud-storage-fuse-csi-driver">Cloud Storage FUSE CSI driver</a> reads the content of the bucket.</li> <li>
+<a href="../how-to/persistent-volumes/cloud-storage-fuse-csi-driver#file-cache">Volumes with file caching enabled</a> and the <a href="../how-to/persistent-volumes/cloud-storage-fuse-csi-driver#parallel-download">parallel download</a> feature of Cloud Storage FUSE.</li> </ol> <section class="key-point"> <b>Best practice</b>: <p>Use a file cache backed by <code translate="no" dir="ltr"><a href="https://kubernetes.io/docs/concepts/storage/volumes/#emptydir">tmpfs</a></code> or <code translate="no" dir="ltr"><a href="../how-to/persistent-volumes/gce-pd-csi-driver">Hyperdisk / Persistent Disk</a></code> depending on the expected size of the model contents, for example, weight files. In this tutorial, you use Cloud Storage FUSE file cache backed by RAM.</p> </section>
+</li> </ol> <h2 id="deploy-raycluster">Deploy a RayCluster custom resource</h2> <p>Deploy a RayCluster custom resource, which typically consists of one system Pod and multiple worker Pods.</p> <div> <section><p class="_code-tab"><strong>Llama-3-8B-Instruct</strong></p>
+<p>Create the RayCluster custom resource to deploy the Llama 3 8B instruction tuned model by completing the following steps:</p> <ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-cluster.tpu-v5e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: vllm-tpu
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+      spec:
+        serviceAccountName: $KSA_NAME
+        containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8000
+                name: serve
+              - containerPort: 8471
+                name: slicebuilder
+              - containerPort: 8081
+                name: mxla
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+        volumes:
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: gcs-fuse-csi-ephemeral
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: $GSBUCKET
+              mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+  workerGroupSpecs:
+  - groupName: tpu-group
+    replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    numOfHosts: 1
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+      spec:
+        serviceAccountName: $KSA_NAME
+        containers:
+          - name: ray-worker
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+              requests:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+            env:
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+        volumes:
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: gcs-fuse-csi-ephemeral
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: $GSBUCKET
+              mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+          cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; tpu/ray-cluster.tpu-v5e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <p>The <code translate="no" dir="ltr">envsubst</code> command replaces the environment variables in the manifest.</p>
+</li> </ol> <p>GKE creates a RayCluster custom resource with a <code translate="no" dir="ltr">workergroup</code> that contains a TPU v5e single-host in a <code translate="no" dir="ltr">2x4</code> topology.</p></section> <section><p class="_code-tab"><strong>Mistral-7B</strong></p>
+<p>Create the RayCluster custom resource to deploy the Mistral-7B model by completing the following steps:</p> <ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-cluster.tpu-v5e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: vllm-tpu
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+      spec:
+        serviceAccountName: $KSA_NAME
+        containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8000
+                name: serve
+              - containerPort: 8471
+                name: slicebuilder
+              - containerPort: 8081
+                name: mxla
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+        volumes:
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: gcs-fuse-csi-ephemeral
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: $GSBUCKET
+              mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+  workerGroupSpecs:
+  - groupName: tpu-group
+    replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    numOfHosts: 1
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+      spec:
+        serviceAccountName: $KSA_NAME
+        containers:
+          - name: ray-worker
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+              requests:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+            env:
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+        volumes:
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: gcs-fuse-csi-ephemeral
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: $GSBUCKET
+              mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+          cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; tpu/ray-cluster.tpu-v5e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <p>The <code translate="no" dir="ltr">envsubst</code> command replaces the environment variables in the manifest.</p>
+</li> </ol> <p>GKE creates a RayCluster custom resource with a <code translate="no" dir="ltr">workergroup</code> that contains a TPU v5e single-host in a <code translate="no" dir="ltr">2x4</code> topology.</p></section> <section><p class="_code-tab"><strong>Llama 3.1 70B</strong></p>
+<p>Create the RayCluster custom resource to deploy the Llama 3.1 70B model by completing the following steps:</p> <ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-cluster.tpu-v6e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: vllm-tpu
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+      spec:
+        serviceAccountName: $KSA_NAME
+        containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            ports:
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8000
+                name: serve
+              - containerPort: 8471
+                name: slicebuilder
+              - containerPort: 8081
+                name: mxla
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+        volumes:
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: gcs-fuse-csi-ephemeral
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: $GSBUCKET
+              mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+  workerGroupSpecs:
+  - groupName: tpu-group
+    replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    numOfHosts: 1
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+          gke-gcsfuse/cpu-limit: "0"
+          gke-gcsfuse/memory-limit: "0"
+          gke-gcsfuse/ephemeral-storage-limit: "0"
+      spec:
+        serviceAccountName: $KSA_NAME
+        containers:
+          - name: ray-worker
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            resources:
+              limits:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+              requests:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+        volumes:
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: gcs-fuse-csi-ephemeral
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: $GSBUCKET
+              mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+          cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; tpu/ray-cluster.tpu-v6e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <p>The <code translate="no" dir="ltr">envsubst</code> command replaces the environment variables in the manifest.</p>
+</li> </ol> <p>GKE creates a RayCluster custom resource with a <code translate="no" dir="ltr">workergroup</code> that contains a TPU v6e single-host in a <code translate="no" dir="ltr">2x4</code> topology.</p></section> </div> <h2 id="connect-raycluster">Connect to the RayCluster custom resource</h2> <p>After the RayCluster custom resource is created, you can connect to the RayCluster resource and start serving the model.</p> <ol> <li>
+<p>Verify that GKE created the RayCluster Service:</p> 
+<pre>kubectl --namespace ${NAMESPACE} get raycluster/vllm-tpu \
+    --output wide
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME       DESIRED WORKERS   AVAILABLE WORKERS   CPUS   MEMORY   GPUS   TPUS   STATUS   AGE   HEAD POD IP      HEAD SERVICE IP
+vllm-tpu   1                 1                   ###    ###G     0      8      ready    ###   ###.###.###.###  ###.###.###.###
+</pre> <p>Wait until the <code translate="no" dir="ltr">STATUS</code> is <code translate="no" dir="ltr">ready</code> and the <code translate="no" dir="ltr">HEAD POD IP</code> and <code translate="no" dir="ltr">HEAD SERVICE IP</code> columns have an IP address.</p>
+</li> <li>
+<p>Establish <code translate="no" dir="ltr">port-forwarding</code> sessions to the Ray head:</p> 
+<pre>pkill -f "kubectl .* port-forward .* 8265:8265"
+pkill -f "kubectl .* port-forward .* 10001:10001"
+kubectl --namespace ${NAMESPACE} port-forward service/${SERVICE_NAME} 8265:8265 2&gt;&amp;1 &gt;/dev/null &amp;
+kubectl --namespace ${NAMESPACE} port-forward service/${SERVICE_NAME} 10001:10001 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre>
+</li> <li>
+<p>Verify that the Ray client can connect to the remote RayCluster custom resource:</p> 
+<pre>docker run --net=host -it ${VLLM_IMAGE} \
+ray list nodes --address http://localhost:8265
+</pre> <p>The output is similar to the following:</p> 
+<pre>======== List: YYYY-MM-DD HH:MM:SS.NNNNNN ========
+Stats:
+------------------------------
+Total: 2
+
+Table:
+------------------------------
+    NODE_ID    NODE_IP          IS_HEAD_NODE  STATE    STATE_MESSAGE    NODE_NAME          RESOURCES_TOTAL                   LABELS
+0  XXXXXXXXXX  ###.###.###.###  True          ALIVE                     ###.###.###.###    CPU: 2.0                          ray.io/node_id: XXXXXXXXXX
+                                                                                           memory: #.### GiB
+                                                                                           node:###.###.###.###: 1.0
+                                                                                           node:__internal_head__: 1.0
+                                                                                           object_store_memory: #.### GiB
+1  XXXXXXXXXX  ###.###.###.###  False         ALIVE                     ###.###.###.###    CPU: 100.0                       ray.io/node_id: XXXXXXXXXX
+                                                                                           TPU: 8.0
+                                                                                           TPU-v#e-8-head: 1.0
+                                                                                           accelerator_type:TPU-V#E: 1.0
+                                                                                           memory: ###.### GiB
+                                                                                           node:###.###.###.###: 1.0
+                                                                                           object_store_memory: ##.### GiB
+                                                                                           tpu-group-0: 1.0
+</pre>
+</li> </ol> <h2 id="prepare_workload">Deploy the model with vLLM</h2> <p>To deploy a specific model with vLLM, follow these instructions.</p> <div> <section><p class="_code-tab"><strong>Llama-3-8B-Instruct</strong></p>
+
+<pre data-language="">docker run \
+    --env MODEL_ID=${MODEL_ID} \
+    --net=host \
+    --volume=./tpu:/workspace/vllm/tpu \
+    -it \
+    ${VLLM_IMAGE} \
+    serve run serve_tpu:model \
+    --address=ray://localhost:10001 \
+    --app-dir=./tpu \
+    --runtime-env-json='{"env_vars": {"MODEL_ID": "meta-llama/Meta-Llama-3-8B-Instruct"}}'
+</pre></section> <section><p class="_code-tab"><strong>Mistral-7B</strong></p>
+
+<pre data-language="">docker run \
+    --env MODEL_ID=${MODEL_ID} \
+    --env TOKENIZER_MODE=${TOKENIZER_MODE} \
+    --net=host \
+    --volume=./tpu:/workspace/vllm/tpu \
+    -it \
+    ${VLLM_IMAGE} \
+    serve run serve_tpu:model \
+    --address=ray://localhost:10001 \
+    --app-dir=./tpu \
+    --runtime-env-json='{"env_vars": {"MODEL_ID": "mistralai/Mistral-7B-Instruct-v0.3", "TOKENIZER_MODE": "mistral"}}'
+</pre></section> <section><p class="_code-tab"><strong>Llama 3.1 70B</strong></p>
+
+<pre data-language="">docker run \
+    --env MAX_MODEL_LEN=${MAX_MODEL_LEN} \
+    --env MODEL_ID=${MODEL_ID} \
+    --net=host \
+    --volume=./tpu:/workspace/vllm/tpu \
+    -it \
+    ${VLLM_IMAGE} \
+    serve run serve_tpu:model \
+    --address=ray://localhost:10001 \
+    --app-dir=./tpu \
+    --runtime-env-json='{"env_vars": {"MAX_MODEL_LEN": "8192", "MODEL_ID": "meta-llama/Meta-Llama-3.1-70B"}}'
+</pre></section> </div> <h3 id="view-ray-dashboard">View the Ray Dashboard</h3> <p>You can view your Ray Serve deployment and relevant logs from the Ray Dashboard.</p> <ol> <li>Click the <img src="https://docs.cloud.google.com/static/shell/docs/images/web_preview.svg" alt="Web Preview icon"> <strong>Web Preview</strong> button, which can be found on the top right of the Cloud Shell taskbar.</li> <li>Click <strong>Change port</strong> and set the port number to <code translate="no" dir="ltr">8265</code>.</li> <li>Click <strong>Change and Preview</strong>.</li> <li>On the Ray Dashboard, click the <strong>Serve</strong> tab.</li> </ol> <p>After the Serve deployment has a <code translate="no" dir="ltr">HEALTHY</code> status, the model is ready to begin processing inputs.</p> <h2 id="serve-model">Serve the model</h2> <p>This guide highlights models that support text generation, a technique that allows text content creation from a prompt.</p> <div> <section><p class="_code-tab"><strong>Llama-3-8B-Instruct</strong></p>
+<ol> <li>
+<p>Set up port forwarding to the server:</p> 
+<pre data-language="">pkill -f "kubectl .* port-forward .* 8000:8000"
+kubectl --namespace ${NAMESPACE} port-forward service/${SERVICE_NAME} 8000:8000 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre>
+</li> <li>
+<p>Send a prompt to the Serve endpoint:</p> 
+<pre data-language="">curl -X POST http://localhost:8000/v1/generate -H "Content-Type: application/json" -d '{"prompt": "What are the top 5 most popular programming languages? Be brief.", "max_tokens": 1024}'
+</pre>
+</li> </ol> <section class="expandable"> <p class="showalways">Expand the following section to see an example of the output.</p> 
+<pre data-language="">{"prompt": "What
+are the top 5 most popular programming languages? Be brief.", "text": " (Note:
+This answer may change over time.)\n\nAccording to the TIOBE Index, a widely
+followed measure of programming language popularity, the top 5 languages
+are:\n\n1. JavaScript\n2. Python\n3. Java\n4. C++\n5. C#\n\nThese rankings are
+based on a combination of search engine queries, web traffic, and online
+courses. Keep in mind that other sources may have slightly different rankings.
+(Source: TIOBE Index, August 2022)", "token_ids": [320, 9290, 25, 1115, 4320,
+1253, 2349, 927, 892, 9456, 11439, 311, 279, 350, 3895, 11855, 8167, 11, 264,
+13882, 8272, 6767, 315, 15840, 4221, 23354, 11, 279, 1948, 220, 20, 15823,
+527, 1473, 16, 13, 13210, 198, 17, 13, 13325, 198, 18, 13, 8102, 198, 19, 13,
+356, 23792, 20, 13, 356, 27585, 9673, 33407, 527, 3196, 389, 264, 10824, 315,
+2778, 4817, 20126, 11, 3566, 9629, 11, 323, 2930, 14307, 13, 13969, 304, 4059,
+430, 1023, 8336, 1253, 617, 10284, 2204, 33407, 13, 320, 3692, 25, 350, 3895,
+11855, 8167, 11, 6287, 220, 2366, 17, 8, 128009]}</pre> </section></section> <section><p class="_code-tab"><strong>Mistral-7B</strong></p>
+<ol> <li>
+<p>Set up port forwarding to the server:</p> 
+<pre data-language="">pkill -f "kubectl .* port-forward .* 8000:8000"
+kubectl --namespace ${NAMESPACE} port-forward service/${SERVICE_NAME} 8000:8000 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre>
+</li> <li>
+<p>Send a prompt to the Serve endpoint:</p> 
+<pre data-language="">curl -X POST http://localhost:8000/v1/generate -H "Content-Type: application/json" -d '{"prompt": "What are the top 5 most popular programming languages? Be brief.", "max_tokens": 1024}'
+</pre>
+</li> </ol> <section class="expandable"> <p class="showalways">Expand the following section to see an example of the output.</p> 
+<pre data-language="">{"prompt": "What are the top 5 most popular programming languages? Be brief.",
+"text": "\n\n1. JavaScript: Widely used for web development, particularly for
+client-side scripting and building dynamic web page content.\n\n2. Python:
+Known for its simplicity and readability, it's widely used for web
+development, machine learning, data analysis, and scientific computing.\n\n3.
+Java: A general-purpose programming language used in a wide range of
+applications, including Android app development, web services, and
+enterprise-level applications.\n\n4. C#: Developed by Microsoft, it's often
+used for Windows desktop apps, game development (Unity), and web development
+(ASP.NET).\n\n5. TypeScript: A superset of JavaScript that adds optional
+static typing and other features for large-scale, maintainable JavaScript
+applications.", "token_ids": [781, 781, 29508, 29491, 27049, 29515, 1162,
+1081, 1491, 2075, 1122, 5454, 4867, 29493, 7079, 1122, 4466, 29501, 2973,
+7535, 1056, 1072, 4435, 11384, 5454, 3652, 3804, 29491, 781, 781, 29518,
+29491, 22134, 29515, 1292, 4444, 1122, 1639, 26001, 1072, 1988, 3205, 29493,
+1146, 29510, 29481, 13343, 2075, 1122, 5454, 4867, 29493, 6367, 5936, 29493,
+1946, 6411, 29493, 1072, 11237, 22031, 29491, 781, 781, 29538, 29491, 12407,
+29515, 1098, 3720, 29501, 15460, 4664, 17060, 4610, 2075, 1065, 1032, 6103,
+3587, 1070, 9197, 29493, 3258, 13422, 1722, 4867, 29493, 5454, 4113, 29493,
+1072, 19123, 29501, 5172, 9197, 29491, 781, 781, 29549, 29491, 1102, 29539,
+29515, 9355, 1054, 1254, 8670, 29493, 1146, 29510, 29481, 3376, 2075, 1122,
+9723, 25470, 14189, 29493, 2807, 4867, 1093, 2501, 1240, 1325, 1072, 5454,
+4867, 1093, 2877, 29521, 29491, 12466, 1377, 781, 781, 29550, 29491, 6475,
+7554, 29515, 1098, 26434, 1067, 1070, 27049, 1137, 14401, 12052, 1830, 25460,
+1072, 1567, 4958, 1122, 3243, 29501, 6473, 29493, 9855, 1290, 27049, 9197,
+29491, 2]}</pre> </section></section> <section><p class="_code-tab"><strong>Llama 3.1 70B</strong></p>
+<ol> <li>
+<p>Set up port forwarding to the server:</p> 
+<pre data-language="">pkill -f "kubectl .* port-forward .* 8000:8000"
+kubectl --namespace ${NAMESPACE} port-forward service/${SERVICE_NAME} 8000:8000 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre>
+</li> <li>
+<p>Send a prompt to the Serve endpoint:</p> 
+<pre data-language="">curl -X POST http://localhost:8000/v1/generate -H "Content-Type: application/json" -d '{"prompt": "What are the top 5 most popular programming languages? Be brief.", "max_tokens": 1024}'
+</pre>
+</li> </ol> <section class="expandable"> <p class="showalways">Expand the following section to see an example of the output.</p> 
+<pre data-language="">{"prompt": "What are
+the top 5 most popular programming languages? Be brief.", "text": " This is a
+very subjective question, but there are some general guidelines to follow when
+selecting a language. For example, if you\u2019re looking for a language
+that\u2019s easy to learn, you might want to consider Python. It\u2019s one of
+the most popular languages in the world, and it\u2019s also relatively easy to
+learn. If you\u2019re looking for a language that\u2019s more powerful, you
+might want to consider Java. It\u2019s a more complex language, but it\u2019s
+also very popular. Whichever language you choose, make sure you do your
+research and pick one that\u2019s right for you.\nThe most popular programming
+languages are:\nWhy is C++ so popular?\nC++ is a powerful and versatile
+language that is used in many different types of software. It is also one of
+the most popular programming languages, with a large community of developers
+who are always creating new and innovative ways to use it. One of the reasons
+why C++ is so popular is because it is a very efficient language. It allows
+developers to write code that is both fast and reliable, which is essential
+for many types of software. Additionally, C++ is very flexible, meaning that
+it can be used for a wide range of different purposes. Finally, C++ is also
+very popular because it is easy to learn. There are many resources available
+online and in books that can help anyone get started with learning the
+language.\nJava is a versatile language that can be used for a variety of
+purposes. It is one of the most popular programming languages in the world and
+is used by millions of people around the globe. Java is used for everything
+from developing desktop applications to creating mobile apps and games. It is
+also a popular choice for web development. One of the reasons why Java is so
+popular is because it is a platform-independent language. This means that it
+can be used on any type of computer or device, regardless of the operating
+system. Java is also very versatile and can be used for a variety of different
+purposes.", "token_ids": [1115, 374, 264, 1633, 44122, 3488, 11, 719, 1070,
+527, 1063, 4689, 17959, 311, 1833, 994, 27397, 264, 4221, 13, 1789, 3187, 11,
+422, 499, 3207, 3411, 369, 264, 4221, 430, 753, 4228, 311, 4048, 11, 499,
+2643, 1390, 311, 2980, 13325, 13, 1102, 753, 832, 315, 279, 1455, 5526, 15823,
+304, 279, 1917, 11, 323, 433, 753, 1101, 12309, 4228, 311, 4048, 13, 1442,
+499, 3207, 3411, 369, 264, 4221, 430, 753, 810, 8147, 11, 499, 2643, 1390,
+311, 2980, 8102, 13, 1102, 753, 264, 810, 6485, 4221, 11, 719, 433, 753, 1101,
+1633, 5526, 13, 1254, 46669, 4221, 499, 5268, 11, 1304, 2771, 499, 656, 701,
+3495, 323, 3820, 832, 430, 753, 1314, 369, 499, 627, 791, 1455, 5526, 15840,
+15823, 527, 512, 10445, 374, 356, 1044, 779, 5526, 5380, 34, 1044, 374, 264,
+8147, 323, 33045, 4221, 430, 374, 1511, 304, 1690, 2204, 4595, 315, 3241, 13,
+1102, 374, 1101, 832, 315, 279, 1455, 5526, 15840, 15823, 11, 449, 264, 3544,
+4029, 315, 13707, 889, 527, 2744, 6968, 502, 323, 18699, 5627, 311, 1005, 433,
+13, 3861, 315, 279, 8125, 3249, 356, 1044, 374, 779, 5526, 374, 1606, 433,
+374, 264, 1633, 11297, 4221, 13, 1102, 6276, 13707, 311, 3350, 2082, 430, 374,
+2225, 5043, 323, 15062, 11, 902, 374, 7718, 369, 1690, 4595, 315, 3241, 13,
+23212, 11, 356, 1044, 374, 1633, 19303, 11, 7438, 430, 433, 649, 387, 1511,
+369, 264, 7029, 2134, 315, 2204, 10096, 13, 17830, 11, 356, 1044, 374, 1101,
+1633, 5526, 1606, 433, 374, 4228, 311, 4048, 13, 2684, 527, 1690, 5070, 2561,
+2930, 323, 304, 6603, 430, 649, 1520, 5606, 636, 3940, 449, 6975, 279, 4221,
+627, 15391, 3S74, 264, 33045, 4221, 430, 649, 387, 1511, 369, 264, 8205, 315,
+10096, 13, 1102, 374, 832, 315, 279, 1455, 5526, 15840, 15823, 304, 279, 1917,
+323, 374, 1511, 555, 11990, 315, 1274, 2212, 279, 24867, 13, 8102, 374, 1511,
+369, 4395, 505, 11469, 17963, 8522, 311, 6968, 6505, 10721, 323, 3953, 13,
+1102, 374, 1101, 264, 5526, 5873, 369, 3566, 4500, 13, 3861, 315, 279, 8125,
+3249, 8102, 374, 779, 5526, 374, 1606, 433, 374, 264, 5452, 98885, 4221, 13,
+1115, 3445, 430, 433, 649, 387, 1511, 389, 904, 955, 315, 6500, 477, 3756, 11,
+15851, 315, 279, 10565, 1887, 13, 8102, 374, 1101, 1633, 33045, 323, 649, 387,
+1511, 369, 264, 8205, 315, 2204, 10096, 13, 128001]}</pre> </section></section> </div>
+<aside class="success"><strong>Success:</strong><span> You have deployed an LLM with a <a href="https://ray-project.github.io/kuberay/reference/api/#rayservice">RayCluster</a> custom resource in a single-host TPU slice.</span></aside> <h2 id="additional_configuration">Additional configuration</h2> <p>You can optionally configure the following model serving resources and techniques that the Ray Serve framework supports:</p> <ul> <li>
+<a href="#deploy-rayservice">Deploy a RayService custom resource</a>. In the preceding steps of this tutorial, you use RayCluster instead of RayService. We recommend RayService for production environments.</li> <li>
+<a href="#model-composition">Compose multiple models with model composition</a>. Configure model multiplexing and model composition that are supported by the <a href="https://docs.ray.io/en/latest/serve/index.html">Ray Serve</a> framework. Model composition lets you chain together inputs and outputs across multiple LLMs and scale your models as a single application.</li> <li>
+<a href="#build-vllm-tpu">Build and deploy your own TPU image</a>. We recommend this option if you need finer-grained control over the contents of your Docker image.</li> </ul> <h3 id="deploy-rayservice">Deploy a RayService</h3> <p>You can deploy the same models from this tutorial by using a <a href="../add-on/ray-on-gke/concepts/overview#rayservice">RayService</a> custom resource.</p> <ol> <li>
+<p>Delete the RayCluster custom resource that you created in this tutorial:</p> 
+<pre>kubectl --namespace ${NAMESPACE} delete raycluster/vllm-tpu
+</pre>
+</li> <li>
+<p>Create the RayService custom resource to deploy a model:</p> <div> <section><p class="_code-tab"><strong>Llama-3-8B-Instruct</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-service.tpu-v5e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-tpu
+spec:
+  serveConfigV2: |
+    applications:
+      - name: llm
+        import_path: ai-ml.gke-ray.rayserve.llm.tpu.serve_tpu:model
+        deployments:
+        - name: VLLMDeployment
+          num_replicas: 1
+        runtime_env:
+          working_dir: "https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/archive/main.zip"
+          env_vars:
+            MODEL_ID: "$MODEL_ID"
+            MAX_MODEL_LEN: "$MAX_MODEL_LEN"
+            DTYPE: "$DTYPE"
+            TOKENIZER_MODE: "$TOKENIZER_MODE"
+            TPU_CHIPS: "8"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_XLA_CACHE_PATH
+              value: "/data"
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+    workerGroupSpecs:
+    - groupName: tpu-group
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      numOfHosts: 1
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+            - name: ray-worker
+              image: $VLLM_IMAGE
+              imagePullPolicy: IfNotPresent
+              resources:
+                limits:
+                  cpu: "100"
+                  google.com/tpu: "8"
+                  ephemeral-storage: 40G
+                  memory: 200G
+                requests:
+                  cpu: "100"
+                  google.com/tpu: "8"
+                  ephemeral-storage: 40G
+                  memory: 200G
+              env:
+                - name: JAX_PLATFORMS
+                  value: "tpu"
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_api_token
+                - name: VLLM_XLA_CACHE_PATH
+                  value: "/data"
+              volumeMounts:
+              - name: gcs-fuse-csi-ephemeral
+                mountPath: /data
+              - name: dshm
+                mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+            cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; tpu/ray-service.tpu-v5e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <p>The <code translate="no" dir="ltr">envsubst</code> command replaces the environment variables in the manifest.</p> <p>GKE creates a RayService with a <code translate="no" dir="ltr">workergroup</code> that contains a TPU v5e single-host in a <code translate="no" dir="ltr">2x4</code> topology.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Mistral-7B</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-service.tpu-v5e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-tpu
+spec:
+  serveConfigV2: |
+    applications:
+      - name: llm
+        import_path: ai-ml.gke-ray.rayserve.llm.tpu.serve_tpu:model
+        deployments:
+        - name: VLLMDeployment
+          num_replicas: 1
+        runtime_env:
+          working_dir: "https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/archive/main.zip"
+          env_vars:
+            MODEL_ID: "$MODEL_ID"
+            MAX_MODEL_LEN: "$MAX_MODEL_LEN"
+            DTYPE: "$DTYPE"
+            TOKENIZER_MODE: "$TOKENIZER_MODE"
+            TPU_CHIPS: "8"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_XLA_CACHE_PATH
+              value: "/data"
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+    workerGroupSpecs:
+    - groupName: tpu-group
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      numOfHosts: 1
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+            - name: ray-worker
+              image: $VLLM_IMAGE
+              imagePullPolicy: IfNotPresent
+              resources:
+                limits:
+                  cpu: "100"
+                  google.com/tpu: "8"
+                  ephemeral-storage: 40G
+                  memory: 200G
+                requests:
+                  cpu: "100"
+                  google.com/tpu: "8"
+                  ephemeral-storage: 40G
+                  memory: 200G
+              env:
+                - name: JAX_PLATFORMS
+                  value: "tpu"
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_api_token
+                - name: VLLM_XLA_CACHE_PATH
+                  value: "/data"
+              volumeMounts:
+              - name: gcs-fuse-csi-ephemeral
+                mountPath: /data
+              - name: dshm
+                mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+            cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; tpu/ray-service.tpu-v5e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <p>The <code translate="no" dir="ltr">envsubst</code> command replaces the environment variables in the manifest.</p> <p>GKE creates a RayService with a <code translate="no" dir="ltr">workergroup</code> containing a TPU v5e single-host in a <code translate="no" dir="ltr">2x4</code> topology.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Llama 3.1 70B</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-service.tpu-v6e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-tpu
+spec:
+  serveConfigV2: |
+    applications:
+      - name: llm
+        import_path: ai-ml.gke-ray.rayserve.llm.tpu.serve_tpu:model
+        deployments:
+        - name: VLLMDeployment
+          num_replicas: 1
+        runtime_env:
+          working_dir: "https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/archive/main.zip"
+          env_vars:
+            MODEL_ID: "$MODEL_ID"
+            MAX_MODEL_LEN: "$MAX_MODEL_LEN"
+            DTYPE: "$DTYPE"
+            TOKENIZER_MODE: "$TOKENIZER_MODE"
+            TPU_CHIPS: "8"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            imagePullPolicy: IfNotPresent
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: VLLM_XLA_CACHE_PATH
+              value: "/data"
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+    workerGroupSpecs:
+    - groupName: tpu-group
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      numOfHosts: 1
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+            - name: ray-worker
+              image: $VLLM_IMAGE
+              imagePullPolicy: IfNotPresent
+              resources:
+                limits:
+                  cpu: "100"
+                  google.com/tpu: "8"
+                  ephemeral-storage: 40G
+                  memory: 200G
+                requests:
+                  cpu: "100"
+                  google.com/tpu: "8"
+                  ephemeral-storage: 40G
+                  memory: 200G
+              env:
+                - name: JAX_PLATFORMS
+                  value: "tpu"
+                - name: HUGGING_FACE_HUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_api_token
+                - name: VLLM_XLA_CACHE_PATH
+                  value: "/data"
+              volumeMounts:
+              - name: gcs-fuse-csi-ephemeral
+                mountPath: /data
+              - name: dshm
+                mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; tpu/ray-service.tpu-v6e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre> <p>The <code translate="no" dir="ltr">envsubst</code> command replaces the environment variables in the manifest.</p>
+</li> </ol> <p>GKE creates a RayCluster custom resource where the Ray Serve application is deployed and the subsequent RayService custom resource is created.</p></section> </div>
+</li> <li>
+<p>Verify the status of the RayService resource:</p> 
+<pre>kubectl --namespace ${NAMESPACE} get rayservices/vllm-tpu
+</pre> <p>Wait for the Service status to change to <code translate="no" dir="ltr">Running</code>:</p> 
+<pre>NAME       SERVICE STATUS   NUM SERVE ENDPOINTS
+vllm-tpu   Running          1
+</pre>
+</li> <li>
+<p>Retrieve the name of the RayCluster head service:</p> 
+<pre>SERVICE_NAME=$(kubectl --namespace=${NAMESPACE} get rayservices/vllm-tpu \
+    --template={{.status.activeServiceStatus.rayClusterStatus.head.serviceName}})
+</pre>
+<aside class="note"><strong>Note:</strong><span> If the RayCluster head service value is not retrieved, manually update the <code translate="no" dir="ltr">SERVICE_NAME</code> value by running the <code translate="no" dir="ltr">kubectl get services --namespace
+${NAMESPACE}</code> command.</span></aside>
+</li> <li>
+<p>Establish <code translate="no" dir="ltr">port-forwarding</code> sessions to the Ray head to view the Ray dashboard:</p> 
+<pre>pkill -f "kubectl .* port-forward .* 8265:8265"
+kubectl --namespace ${NAMESPACE} port-forward service/${SERVICE_NAME} 8265:8265 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre>
+</li> <li><p><a href="#view-ray-dashboard">View the Ray Dashboard</a>.</p></li> <li><p><a href="#serve-model">Serve the model</a>.</p></li> <li>
+<p>Clean up the RayService resource:</p> 
+<pre>kubectl --namespace ${NAMESPACE} delete rayservice/vllm-tpu
+</pre>
+</li> </ol> <h3 id="model-composition">Compose multiple models with model composition</h3> <p><a href="https://docs.ray.io/en/latest/serve/model_composition.html">Model composition</a> is a technique for composing multiple models into a single application.</p> <p>In this section, you use a GKE cluster to compose two models, Llama 3 8B IT and Gemma 4 E4B-it, into a single application:</p> <ul> <li>The first model is the assistant model that answers questions asked in the prompt.</li> <li>The second model is the summarizer model. The output of the assistant model is chained into the input of the summarizer model. The final result is the summarized version of the response from the assistant model.</li> </ul> <ol> <li><p>Ensure that you have access to the <a href="https://huggingface.co/google/gemma-4-e4b-it">Gemma 4 E4B-it model on Hugging Face</a>. Accept the model license terms on Hugging Face if you haven't done so already. Ensure that you have <a href="#configure-kubernetes-secret">created the Kubernetes Secret for Hugging Face credentials</a>.</p></li> <li>
+<p>Set up your environment:</p> 
+<pre>export ASSIST_MODEL_ID=meta-llama/Meta-Llama-3-8B-Instruct
+export SUMMARIZER_MODEL_ID=google/gemma-4-e4b-it
+</pre>
+</li> <li>
+<p>For Standard clusters, create an additional single-host TPU slice node pool:</p> 
+<pre>gcloud container node-pools create tpu-2 \
+  --location=${COMPUTE_ZONE} \
+  --cluster=${CLUSTER_NAME} \
+  --machine-type=MACHINE_TYPE \
+  --num-nodes=1
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code> with any of the following machine types:</p> <ul> <li>
+<code translate="no" dir="ltr">ct5lp-hightpu-8t</code> to provision TPU v5e.</li> <li>
+<code translate="no" dir="ltr">ct6e-standard-8t</code> to provision TPU v6e.</li> </ul> <p>Autopilot clusters automatically provision the required nodes.</p>
+</li> <li>
+<p>Deploy the RayService resource based on the TPU version that you want to use:</p> <div> <section><p class="_code-tab"><strong>TPU v5e</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-service.tpu-v5e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-tpu
+spec:
+  serveConfigV2: |
+    applications:
+    - name: llm
+      route_prefix: /
+      import_path:  ai-ml.gke-ray.rayserve.llm.model-composition.serve_tpu:multi_model
+      deployments:
+      - name: MultiModelDeployment
+        num_replicas: 1
+      runtime_env:
+        working_dir: "https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/archive/main.zip"
+        env_vars:
+          ASSIST_MODEL_ID: "$ASSIST_MODEL_ID"
+          SUMMARIZER_MODEL_ID: "$SUMMARIZER_MODEL_ID"
+          TPU_CHIPS: "16"
+          TPU_HEADS: "2"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+    workerGroupSpecs:
+    - replicas: 2
+      minReplicas: 1
+      maxReplicas: 2
+      numOfHosts: 1
+      groupName: tpu-group
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: llm
+            image: $VLLM_IMAGE
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            resources:
+              limits:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+              requests:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+            cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; model-composition/ray-service.tpu-v5e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>TPU v6e</strong></p>
+<ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">ray-service.tpu-v6e-singlehost.yaml</code> manifest:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-tpu
+spec:
+  serveConfigV2: |
+    applications:
+    - name: llm
+      route_prefix: /
+      import_path:  ai-ml.gke-ray.rayserve.llm.model-composition.serve_tpu:multi_model
+      deployments:
+      - name: MultiModelDeployment
+        num_replicas: 1
+      runtime_env:
+        working_dir: "https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/archive/main.zip"
+        env_vars:
+          ASSIST_MODEL_ID: "$ASSIST_MODEL_ID"
+          SUMMARIZER_MODEL_ID: "$SUMMARIZER_MODEL_ID"
+          TPU_CHIPS: "16"
+          TPU_HEADS: "2"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: ray-head
+            image: $VLLM_IMAGE
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8G
+              requests:
+                cpu: "2"
+                memory: 8G
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+    workerGroupSpecs:
+    - replicas: 2
+      minReplicas: 1
+      maxReplicas: 2
+      numOfHosts: 1
+      groupName: tpu-group
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: llm
+            image: $VLLM_IMAGE
+            env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-secret
+                    key: hf_api_token
+              - name: VLLM_XLA_CACHE_PATH
+                value: "/data"
+            resources:
+              limits:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+              requests:
+                cpu: "100"
+                google.com/tpu: "8"
+                ephemeral-storage: 40G
+                memory: 200G
+            volumeMounts:
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GSBUCKET
+                mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:parallel-downloads-per-file:100,file-cache:max-parallel-downloads:-1,file-cache:download-chunk-size-mb:10,file-cache:max-size-mb:-1"
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 2x4</pre> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">envsubst &lt; model-composition/ray-service.tpu-v6e-singlehost.yaml | kubectl --namespace ${NAMESPACE} apply -f -
+</pre>
+</li> </ol></section> </div>
+</li> <li>
+<p>Wait for the status of the RayService resource to change to <code translate="no" dir="ltr">Running</code>:</p> 
+<pre>kubectl --namespace ${NAMESPACE} get rayservice/vllm-tpu
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME       SERVICE STATUS   NUM SERVE ENDPOINTS
+vllm-tpu   Running          2
+</pre> <p>In this output, the <code translate="no" dir="ltr">RUNNING</code> status indicates the RayService resource is ready.</p>
+</li> <li>
+<p>Confirm that GKE created the Service for the Ray Serve application:</p> 
+<pre>kubectl --namespace ${NAMESPACE} get service/vllm-tpu-serve-svc
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                 TYPE        CLUSTER-IP        EXTERNAL-IP   PORT(S)    AGE
+vllm-tpu-serve-svc   ClusterIP   ###.###.###.###   &lt;none&gt;        8000/TCP   ###
+</pre>
+</li> <li>
+<p>Establish <code translate="no" dir="ltr">port-forwarding</code> sessions to the Ray head:</p> 
+<pre>pkill -f "kubectl .* port-forward .* 8265:8265"
+pkill -f "kubectl .* port-forward .* 8000:8000"
+kubectl --namespace ${NAMESPACE} port-forward service/vllm-tpu-serve-svc 8265:8265 2&gt;&amp;1 &gt;/dev/null &amp;
+kubectl --namespace ${NAMESPACE} port-forward service/vllm-tpu-serve-svc 8000:8000 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre>
+</li> <li>
+<p>Send a request to the model:</p> 
+<pre>curl -X POST http://localhost:8000/ -H "Content-Type: application/json" -d '{"prompt": "What is the most popular programming language for machine learning and why?", "max_tokens": 1000}'
+</pre> <p>The output is similar to the following:</p> 
+<pre>  {"text": [" used in various data science projects, including building machine learning models, preprocessing data, and visualizing results.\n\nSure, here is a single sentence summarizing the text:\n\nPython is the most popular programming language for machine learning and is widely used in data science projects, encompassing model building, data preprocessing, and visualization."]}
+</pre>
+</li> </ol> <h3 id="build-vllm-tpu">Build and deploy the TPU image</h3> <p>This tutorial uses hosted TPU images from <a href="https://hub.docker.com/r/vllm/vllm-tpu/tags">vLLM</a>. vLLM provides a <code translate="no" dir="ltr">Dockerfile.tpu</code> image that builds vLLM on top of the required PyTorch XLA image that includes TPU dependencies. However, you can also build and deploy your own TPU image for finer-grained control over the contents of your Docker image.</p> <aside class="note"><strong>Note:</strong><span> You need to be granted the <a href="https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions">roles/artifactregistry.admin role</a> to create and manage Artifact Registry repositories.</span></aside> <ol> <li>
+<p>Create a Docker repository to store the container images for this guide:</p> 
+<pre>gcloud artifacts repositories create vllm-tpu --repository-format=docker --location=${COMPUTE_REGION} &amp;&amp; \
+gcloud auth configure-docker ${COMPUTE_REGION}-docker.pkg.dev
+</pre>
+</li> <li>
+<p>Clone the vLLM repository:</p> 
+<pre>git clone https://github.com/vllm-project/vllm.git
+cd vllm
+</pre>
+</li> <li>
+<p>Build the image:</p> 
+<pre>docker build -f ./docker/Dockerfile.tpu . -t vllm-tpu
+</pre>
+</li> <li>
+<p>Tag the TPU image with your Artifact Registry name:</p> 
+<pre>export VLLM_IMAGE=${COMPUTE_REGION}-docker.pkg.dev/${PROJECT_ID}/vllm-tpu/vllm-tpu:TAG
+docker tag vllm-tpu ${VLLM_IMAGE}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">TAG</var></code> with the name of the tag that you want to define. If you don't specify a tag, Docker applies the default latest tag.</p>
+</li> <li>
+<p>Push the image to Artifact Registry:</p> 
+<pre>docker push ${VLLM_IMAGE}
+</pre>
+</li> </ol> <h2 id="delete_the_individual_resources">Delete the individual resources</h2> <p>If you used an existing project and you don't want to delete it, you can delete the individual resources.</p> <ol> <li>
+<p>Delete the RayCluster custom resource:</p> 
+<pre>kubectl --namespace ${NAMESPACE} delete rayclusters vllm-tpu
+</pre>
+</li> <li>
+<p>Delete the Cloud Storage bucket:</p> 
+<pre>gcloud storage rm -r gs://${GSBUCKET}
+</pre>
+</li> <li>
+<p>Delete the Artifact Registry repository:</p> 
+<pre>gcloud artifacts repositories delete vllm-tpu \
+    --location=${COMPUTE_REGION}
+</pre>
+</li> <li>
+<p>Delete the cluster:</p> 
+<pre>gcloud container clusters delete ${CLUSTER_NAME} \
+    --location=LOCATION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code> with any of the following environment variables:</p> <ul> <li>For Autopilot clusters, use <code translate="no" dir="ltr">COMPUTE_REGION</code>.</li> <li>For Standard clusters, use <code translate="no" dir="ltr">COMPUTE_ZONE</code>.</li> </ul>
+</li> </ol> <h2 id="delete_the_project">Delete the project</h2> <p>If you deployed the tutorial in a new Google Cloud project, and if you no longer need the project, then delete it by completing the following steps:</p> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Discover how to run optimized AI/ML workloads with <a href="../integrations/ai-infra">GKE platform orchestration capabilities</a>.</li> <li>Learn how to use Ray Serve on GKE, by viewing the <a href="https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/tree/main/ai-ml/gke-ray/rayserve">sample code in GitHub</a>.</li> <li>Learn how to collect and view metrics for Ray clusters running on GKE, by completing the steps in <a href="../add-on/ray-on-gke/how-to/collect-view-logs-metrics">Collect and view logs and metrics for Ray clusters on GKE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-llm-tpu-ray" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-llm-tpu-ray</a>
+  </p>
+</div>

@@ -1,0 +1,84 @@
+<h1>Create clones of persistent volumes</h1>  <p>This document shows you how to use Kubernetes volume cloning to clone <a href="../../concepts/persistent-volumes">persistent volumes</a> in your Google Kubernetes Engine (GKE) clusters.</p> <h2 id="overview">Overview</h2> <p>A clone is a new independent volume that is a duplicate of an existing Kubernetes volume. A clone is similar to a <a href="volume-snapshots">volume snapshot</a> in that it's a copy of a volume at a specific point in time. However, rather than creating a snapshot object from the source volume, volume cloning provisions the clone with all the data from the source volume.</p> <h2 id="requirements">Requirements</h2> <p>To use volume cloning on GKE, you must meet the following requirements:</p> <ul> <li>The source PersistentVolumeClaim must be in the same namespace as the destination PersistentVolumeClaim.</li> <li>Use a CSI driver that supports volume cloning. The in-tree persistent disk driver does not support volume cloning. <ul> <li>The <a href="https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver" class="external">Compute Engine persistent disk CSI Driver</a> version 1.4.0 and later supports volume cloning, and is installed by default on new Linux clusters running GKE version 1.22 or later. You can also <a href="gce-pd-csi-driver#enabling_the_on_an_existing_cluster">enable the Compute Engine persistent disk CSI Driver on an existing cluster</a>.</li> </ul>
+</li> </ul> <p>To verify the Compute Engine persistent disk CSI Driver version, run the following command in the gcloud CLI:</p> 
+<pre>kubectl describe daemonsets pdcsi-node --namespace=kube-system | grep "gke.gcr.io/gcp-compute-persistent-disk-csi-driver"
+</pre> <p>If the output shows a version earlier than <code translate="no" dir="ltr">1.4.0</code>, <a href="../upgrading-a-cluster#upgrade_cp">manually upgrade your control plane</a> to get the latest version.</p> <h2 id="limitations">Limitations</h2> <ul> <li>Both volumes must use the same <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#volume-mode" class="external">volume mode</a>. By default, GKE sets the VolumeMode to <code translate="no" dir="ltr">ext4</code>.</li> <li>All <a href="https://docs.cloud.google.com/compute/docs/disks/create-disk-from-source#restrictions">restrictions for creating a disk clone from an existing disk</a> on Compute Engine also apply to GKE.</li> <li>You can create a regional disk clone from a zonal disk, but you should be aware of the <a href="https://docs.cloud.google.com/compute/docs/disks/create-disk-from-source#restrictions_2">restrictions of this approach</a>. </li> <li>Cloning must be done in a compatible zone. Use <a href="https://kubernetes.io/docs/concepts/storage/storage-classes/#allowed-topologies" class="external">allowedTopologies</a> to restrict the topology of provisioned volumes to specific zones. Alternatively, <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector" class="external">nodeSelectors</a> or <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity" class="external">Affinity and anti-affinity</a> can be used to constrain a Pod so that it is restricted to run on particular node that runs in a compatible zone. <ul> <li>For zonal to zonal cloning, the clone zone must match the source disk zone.</li> <li>For zonal to regional cloning, one of the replica zones of the clone must match the zone of the source disk.</li> </ul>
+</li> </ul> <h2 id="using_volume_cloning">Using volume cloning</h2> <p>To provision a volume clone, you add a reference to an existing PersistentVolumeClaim in the same namespace to the <code translate="no" dir="ltr">dataSource</code> field of a new PersistentVolumeClaim. The following exercise shows you how to provision a source volume with data, create a volume clone, and consume the clone.</p> <h3 id="create-source">Create a source volume</h3> <p>To create a source volume, follow the instructions in <a href="gce-pd-csi-driver#using_the_for_linux_clusters">Using the Compute Engine persistent disk CSI Driver for Linux clusters</a> to create a StorageClass, a PersistentVolumeClaim, and a Pod to consume the new volume. You'll use the PersistentVolumeClaim that you create as the source for the volume clone.</p> <h3 id="add-file">Add a test file to the source volume</h3> <p>Add a test file to the source volume. You can look for this test file in the volume clone to verify that cloning was successful.</p> <ol> <li>
+<p>Create a test file in a Pod:</p> 
+<pre>kubectl exec POD_NAME \
+    -- sh -c 'echo "Hello World!" &gt; /var/lib/www/html/hello.txt'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of a Pod that consumes the source volume. For example, if you followed the instructions in <a href="gce-pd-csi-driver#using_the_for_linux_clusters">Using the Compute Engine persistent disk CSI Driver for Linux clusters</a>, replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with <code translate="no" dir="ltr">web-server</code>.</p>
+</li> <li>
+<p>Verify that the file exists:</p> 
+<pre>kubectl exec POD_NAME \
+    -- sh -c 'cat /var/lib/www/html/hello.txt'
+</pre> <p>The output is similar to the following:</p> 
+<pre>Hello World!
+</pre>
+</li> </ol> <h3 id="create-clone">Clone the source volume</h3> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">podpvc-clone.yaml</code>:</p> 
+<pre>kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: podpvc-clone
+spec:
+  dataSource:
+    name: PVC_NAME
+    kind: PersistentVolumeClaim
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: STORAGE_CLASS_NAME
+  resources:
+    requests:
+      storage: STORAGE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of the source PersistentVolumeClaim that you created in <a href="#create-source">Create a source volume</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">STORAGE_CLASS_NAME</var></code>: the name of the StorageClass to use, which must be the same as the StorageClass of the source PersistentVolumeClaim.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">STORAGE</var></code>: the amount of storage to request, which must be at least the size of the source PersistentVolumeClaim.</li> </ul>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f podpvc-clone.yaml
+</pre>
+</li> </ol> <h3 id="consume-volume">Create a Pod that consumes the cloned volume</h3> <p>The following example creates a Pod that consumes the volume clone that you created.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">web-server-clone.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: web-server-clone
+spec:
+  containers:
+   - name: web-server-clone
+     image: nginx
+     volumeMounts:
+       - mountPath: /var/lib/www/html
+         name: mypvc
+  volumes:
+   - name: mypvc
+     persistentVolumeClaim:
+       claimName: podpvc-clone
+       readOnly: false
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f web-server-clone.yaml
+</pre>
+</li> <li>
+<p>Verify that the test file exists:</p> 
+<pre>kubectl exec web-server-clone \
+    -- sh -c 'cat /var/lib/www/html/hello.txt'
+</pre> <p>The output is similar to the following:</p> 
+<pre>Hello World!
+</pre>
+</li> </ol> <h2 id="clean_up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used on this page, follow these steps.</p> <ol> <li>
+<p>Delete the <code translate="no" dir="ltr">Pod</code> objects:</p> 
+<pre>kubectl delete pod POD_NAME web-server-clone
+</pre>
+</li> <li>
+<p>Delete the <code translate="no" dir="ltr">PersistentVolumeClaim</code> objects:</p> 
+<pre>kubectl delete pvc podpvc podpvc-clone
+</pre>
+</li> </ol><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/volume-cloning" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/volume-cloning</a>
+  </p>
+</div>

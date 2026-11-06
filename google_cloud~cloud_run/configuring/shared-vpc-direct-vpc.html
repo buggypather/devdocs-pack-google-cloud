@@ -1,0 +1,317 @@
+<h1>Direct VPC egress with a Shared VPC network</h1> <p>Direct VPC egress lets your Cloud Run service or job send traffic to a <a href="https://docs.cloud.google.com/vpc/docs/shared-vpc#shared_vpc_networks">Shared VPC network</a> without a Serverless VPC Access connector. To connect your workload, you grant Identity and Access Management (IAM) permissions on the shared subnet and attach your Cloud Run service or job to that subnet.</p> <h2 id="before_you_begin">Before you begin</h2> <ul> <li>
+<p>Review the following IP address configuration sections:</p> <ul> <li><p><a href="#direct-vpc-ip-allocation">IP address allocation</a> for guidance with allocating IP addresses from your subnet.</p></li> <li><p><a href="networking-best-practices#alt-ip-address">IP address exhaustion strategies</a> for using alternative IP address ranges.</p></li> </ul>
+</li> </ul> <h2 id="limitations">Limitations</h2> <p>The following limitations apply to Cloud Run services, functions, jobs, worker pools, and instances: </p>
+<ul> <li>You might experience connection establishment delays of a minute or more on instance startup when using Direct VPC egress. We recommend configuring a <a href="healthchecks#healthcheck-endpoint" track-type="inline link">HTTP startup probe</a> that tests a connection to an egress destination used by the application before the application accepts requests. This egress connectivity test should either implement retries or the startup probe should be set with appropriate period and threshold configurations to act as a retry.</li> <li>Cloud Run jobs that run for more than 1 hour might experience connection breaks. These can occur during <a href="task-timeout#observing_and_handling_maintenance_events" track-type="inline link">maintenance events</a> that migrate the job from one machine to another. The container receives a <code translate="no" dir="ltr">SIGTSTP</code> signal 10 seconds before the event and a <code translate="no" dir="ltr">SIGCONT</code> signal after the event. After the container receives the <code translate="no" dir="ltr">SIGCONT</code> signal, retry the connection.</li> <li>With Cloud NAT, you might experience cold start delays of 30s or more on instance startup when using Direct VPC egress. For better startup performance, we recommend using <a href="vpc-connectors">Serverless VPC Access connectors</a> with Cloud NAT.</li> <li>Cloud Run supports throughput of up to 1 Gbps per individual container instance. Exceeding this amount results in performance throttling.</li> <li><p>A <a href="https://docs.cloud.google.com/run/quotas#cloud_run_limits" track-type="inline link">Cloud Run usage quota</a> limits the maximum number of container instances you can configure to use Direct VPC egress. The maximum number is configured per Cloud Run revision or job execution. To increase the default limits, see <a href="https://docs.cloud.google.com/run/quotas#increase" track-type="inline link">how to increase quotas.</a></p></li> <li>Cloud Run services, jobs, worker pools, and instances might experience connection breaks during networking infrastructure maintenance events. We recommend that you use client libraries that can handle occasional connection resets.</li> <li>Network Intelligence Center supports only <a href="https://docs.cloud.google.com/network-intelligence-center/docs/connectivity-tests/concepts/overview">Connectivity Tests</a> and <a href="https://docs.cloud.google.com/network-intelligence-center/docs/flow-analyzer/overview">Flow Analyzer</a> for IPv4 and IPv6 subnet ranges.</li> <li>Even though worker pools and Cloud Run instances support Direct VPC ingress, you can't use network tags to define the target of an ingress firewall rule.</li> <li>Ingress to worker pools and Cloud Run instances are only supported using Direct VPC, not Serverless VPC Access connectors. Connectors don't support ingress.</li> 
+</ul> <p>The following items are not supported by Direct VPC egress:</p> <ul> <li>VPC Flow Logs doesn't provide the name of the Cloud Run revision.</li> <li>VPC firewall rules logging</li> <li>Packet Mirroring</li> <li>
+<a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags" track-type="inline link">Network tags</a> or <a href="../securing/service-identity" track-type="inline link">service identity</a> in ingress firewall rules.</li> <li>Firewall rules cannot use Resource Manager tags attached to Cloud Run workloads.</li> <li>Inspecting egress traffic with Cloud Next Generation Firewall Enterprise, such as intrusion detection and prevention service, URL filtering service, and TLS inspection.</li> </ul> <h2 id="iam">Set up IAM permissions</h2> <p>Before Cloud Run in a Shared VPC service project can access a Shared VPC network, you must first make sure the Cloud Run service agent has sufficient permissions to use the subnet.</p> <ol> <li>
+<p>To access the Shared VPC network, grant sufficient permissions to the Cloud Run service agent by adding one of the following roles:</p> <ul> <li>
+<p><a href="https://docs.cloud.google.com/iam/docs/roles-permissions/compute#compute.networkUser">Compute Network User (<code translate="no" dir="ltr">roles/compute.networkUser</code>)</a> on the Shared VPC host project. Subnets with external IPv6 also require the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/compute#compute.publicIpAdmin">Compute Public IP Admin (<code translate="no" dir="ltr">roles/compute.publicIpAdmin</code>)</a> role.</p> <p>For example, to grant the Compute Network User role, run the following command:</p> 
+<pre>gcloud projects add-iam-policy-binding HOST_PROJECT_ID \
+--member "serviceAccount:service-SERVICE_PROJECT_NUMBER@serverless-robot-prod.iam.gserviceaccount.com" \
+--role "roles/compute.networkUser"</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">HOST_PROJECT_ID</var>: the ID of your Shared VPC host project.</li> <li>
+<var translate="no">SERVICE_PROJECT_NUMBER</var>: the Shared VPC service project number where you deploy your Cloud Run service or job.</li> </ul>
+</li> <li>
+<p><a href="https://docs.cloud.google.com/iam/docs/roles-permissions/compute#compute.networkViewer">Compute Network Viewer (<code translate="no" dir="ltr">compute.networkViewer</code>)</a> on the Shared VPC host project and the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/compute#compute.networkUser">Compute Network User (<code translate="no" dir="ltr">compute.networkUser</code>)</a> role on the Shared VPC subnet. Subnets with external IPv6 also require the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/compute#compute.publicIpAdmin">Compute Public IP Admin (<code translate="no" dir="ltr">roles/compute.publicIpAdmin</code>)</a> role.</p> <p>For example, to grant the Compute Network User role on the subnet, run the following command:</p> 
+<pre>gcloud compute networks subnets add-iam-policy-binding SUBNET_NAME \
+  --region REGION \
+  --member "serviceAccount:service-SERVICE_PROJECT_NUMBER@serverless-robot-prod.iam.gserviceaccount.com" \
+  --role "roles/compute.networkUser" \
+  --project HOST_PROJECT_ID</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SUBNET_NAME</var>: the fully qualified resource name of the subnet that you want to run your Cloud Run services.</li> <li>
+<var translate="no">REGION</var>: the region for your Cloud Run service, which must match the region of your subnet.</li> <li>
+<var translate="no">SERVICE_PROJECT_NUMBER</var>: the Shared VPC service project number where you deploy your Cloud Run service or job.</li> <li>
+<var translate="no">HOST_PROJECT_ID</var>: the ID of your Shared VPC host project.</li> </ul>
+</li> </ul>
+</li> <li>
+<p>The Cloud Run service agent requires the <strong>Cloud Run Service Agent</strong> role on your Cloud Run project. You can verify that the role was not manually removed by running the following command:</p> 
+<pre>gcloud projects get-iam-policy SERVICE_PROJECT_ID \
+  --flatten bindings \
+  --filter "bindings.role:roles/run.serviceAgent"</pre> <p>Replace <var translate="no">SERVICE_PROJECT_ID</var> with the project ID of your Cloud Run service or job.</p>
+</li> </ol> <p>For more granular control, you can ensure that the Cloud Run service agent has the following permissions:</p> <ul> <li>
+<code translate="no" dir="ltr">compute.networks.get</code> on the Shared VPC host project</li> <li>
+<code translate="no" dir="ltr">compute.subnetworks.get</code> on the host project or the specific subnet</li> <li>
+<code translate="no" dir="ltr">compute.subnetworks.use</code> on the host project or the specific subnet</li> <li>
+<code translate="no" dir="ltr">compute.addresses.get</code> on the Shared VPC service project</li> <li>
+<code translate="no" dir="ltr">compute.addresses.list</code> on the Shared VPC service project</li> <li>
+<code translate="no" dir="ltr">compute.addresses.create</code> on the Shared VPC service project (required only for <a href="vpc-dual-stack-subnet">dual-stack subnets with external IPv6</a>)</li> <li>
+<code translate="no" dir="ltr">compute.addresses.delete</code> on the Shared VPC service project (required only for dual-stack subnets with external IPv6)</li> <li>
+<code translate="no" dir="ltr">compute.addresses.createInternal</code> on the Shared VPC service project</li> <li>
+<code translate="no" dir="ltr">compute.addresses.deleteInternal</code> on the Shared VPC service project</li> <li>
+<code translate="no" dir="ltr">compute.regionOperations.get</code> on the Shared VPC service project</li> </ul> <h2 id="direct-vpc-ip-allocation">IP address allocation</h2> <p>To place your Cloud Run service, job, worker pool, or instance on a VPC network, specify either a VPC network or a subnet, or both. If you specify only a network, the subnet uses the same name as the network. Cloud Run allocates IP addresses from your subnet.</p> <p>IP addresses are ephemeral, so don't create policies based on individual IPs. If you need to create a policy based on IPs, such as in firewall rules, you must use the IP address range of the entire subnet.</p> <p>To change the network or subnet that your Cloud Run resource uses, create a new deployment of your revision, job tasks, or instance that uses the new network and subnet values.</p> <h3 id="scale_up_and_scale_down">Scale up and scale down</h3> <p>For faster scale up during a traffic surge, Cloud Run reserves IP addresses in blocks of 16 (<code translate="no" dir="ltr">28</code> subnet mask) at a time. <a href="vpc-direct-vpc#view-allocated">See which IP addresses Cloud Run has allocated</a>. To ensure that you have enough IPv4 addresses available for use across Cloud Run, your subnet's IPv4 address range must be <code translate="no" dir="ltr">/26</code> or larger.</p> <p>For IP allocation efficiency and ease of management, place multiple resources on the same subnet. If your IPv4 address space is limited, see <a href="#supported-ip-ranges">Supported IPv4 ranges</a> for more options.</p> <p>To delete the subnet, you must first delete or redeploy your Cloud Run services, jobs, worker pools, or instances to stop using the subnet, and then wait 1-2 hours.</p> <h3 id="ip-consumption-services">IP address consumption for services and worker pools</h3> <p>At steady state, Cloud Run uses 2 times (2X) as many IP addresses as the number of container instances. When a revision scales down, Cloud Run retains its IP addresses for up to 20 minutes. In total, reserve at least 2X the number of IP addresses, plus a buffer to account for revision updates.</p> <p>For example, if you upgrade revisions so that <code translate="no" dir="ltr">revision 1</code> scales from 100 container instances down to zero while <code translate="no" dir="ltr">revision 2</code> scales from zero up to 100, Cloud Run retains the <code translate="no" dir="ltr">revision 1</code> IP addresses for up to 20 minutes after scaling down. During the 20-minute retention window, you must reserve at least 400 IP addresses (<code translate="no" dir="ltr">(100 + 100) * 2</code>).</p> <h3 id="ip-consumption-jobs">IP consumption for jobs</h3> <p>For Cloud Run jobs, each task consumes 1 IP address for the duration of its execution plus 7 minutes after it completes. Ensure that your subnet is large enough to accommodate all concurrent job task executions, with a minimum reservation <code translate="no" dir="ltr">/26</code> subnet required.</p> <p>For example:</p> <ul> <li>A single-task job that runs daily and always completes at least 7 minutes before the next execution consumes a maximum of 1 IP address on the subnet.</li> <li>A 10-task job running every 10 minutes, with each task running for 15 minutes, consumes 1 IP address for 22 minutes per task (3 executions consume IP addresses at the same time), as shown in the following example. The job therefore consumes 30 IP addresses at steady state. <figure style="text-align: center; width: 800px"> <a href="https://docs.cloud.google.com/static/run/docs/images/ip-consumption.png"> <img src="https://docs.cloud.google.com/static/run/docs/images/ip-consumption.png" border="0" alt=""></a>  </figure>
+</li> <li>A single-task job that takes 1 minute to run and executes 100 times per minute requires roughly 800 IP addresses depending on the exact time of execution.</li> </ul> <h3 id="ip-consumption-instances">IP address consumption for Cloud Run instances</h3> <p>Each Cloud Run instance consumes four IP addresses on the subnet for as long as it is connected to the VPC network.</p> <p>IP addresses are not static for any Cloud Run resource, even though Cloud Run instances are long lived. These IP address bindings don't persist across stops, restarts, or updates. When you stop, restart, or update an instance, a new private IP address is assigned to the instance.</p> <h3 id="supported-ip-ranges">Supported IPv4 ranges</h3> <p>Cloud Run supports the following IPv4 ranges for your subnet:</p> <ul> <li>
+<a href="https://tools.ietf.org/html/rfc1918#section-3">RFC 1918</a> <ul> <li><code translate="no" dir="ltr">10.0.0.0/8</code></li> <li><code translate="no" dir="ltr">172.16.0.0/12</code></li> <li><code translate="no" dir="ltr">192.168.0.0/16</code></li> </ul>
+</li> <li>
+<a href="https://tools.ietf.org/html/rfc6598#section-7">RFC 6598</a> <ul> <li><code translate="no" dir="ltr">100.64.0.0/10</code></li> </ul>
+</li> <li>Class E <ul> <li><code translate="no" dir="ltr">240.0.0.0/4</code></li> </ul>
+</li> </ul> <aside class="note"><strong>Note:</strong><span> Test non-RFC 1918 setups to identify possible compatibility issues with non-Google Cloud resources or hardware. Learn more about <a href="https://docs.cloud.google.com/vpc/docs/subnets#ipv4-ranges">creating subnets with non-RFC 1918 IP ranges</a>.</span></aside> <h2 id="deploy-service">Deploy a service</h2> <p>Direct VPC egress allows your Cloud Run service to send traffic to a Shared VPC network without a Serverless VPC Access connector. Network costs scale to zero just like the service itself. You can also <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">add network tags</a> directly on Cloud Run service revisions for more granular network security, such as applying <a href="https://docs.cloud.google.com/firewall/docs/firewalls">VPC firewall rules</a>.</p> <p>You can configure Direct VPC egress with a service by using the Google Cloud console, Google Cloud CLI, or YAML.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to Cloud Run:</p> <p><a href="https://console.cloud.google.com/run" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li>
+<p>Select <strong>Services</strong> from the Cloud Run navigation menu:</p> <ol> <li><p>If you are configuring a new service, click <strong>Deploy container</strong> and fill out the initial service settings page. Then click <strong>Containers, Networking, Security</strong> to expand the service configuration page.</p></li> <li><p>If you are configuring an existing service, click the service.</p></li> </ol>
+</li> <li><p>Click the <strong>Networking</strong> tab.</p></li> <li><p>Click <strong>Connect to a VPC for outbound traffic</strong>.</p></li> <li><p>Click <strong>Send traffic directly to a VPC</strong>.</p></li> <li><p>Select <strong>Networks shared with me</strong>.</p></li> <li><p>In the <strong>Network</strong> field, select the Shared VPC network that you want to send traffic to.</p></li> <li><p>In the <strong>Subnet</strong> field, select the subnet where your service receives IP addresses from.</p></li> <li><p>Optional: Enter the names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> that you want to associate with your service or services. Network tags are specified at the revision-level. Each service revision can have different network tags, such as <code translate="no" dir="ltr">network-tag-2</code>.</p></li> <li>
+<p>For <strong>Traffic routing</strong>, select one of the following:</p> <ul> <li>
+<b>Route only requests to private IPs to the VPC</b> to send only traffic to internal addresses through the Shared VPC network.</li> <li>
+<b>Route all traffic to the VPC</b> to send all outbound traffic through the Shared VPC network.</li> </ul>
+</li> <li><p>Click <b>Create</b> for a new service. Click <b>View diff &amp; redeploy</b>, then <b>Deploy changes</b> for an existing service.</p></li> <li><p>To verify that your service is on your Shared VPC network, click the service, then click the <strong>Networking</strong> tab. The network and subnet are listed in the <strong>VPC</strong> card.</p></li> </ol> <p>You can now send requests from your Cloud Run service to any resource on the Shared VPC network, as allowed by your firewall rules.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p> To place your service on the shared subnet, specify the fully qualified resource names for the Shared VPC network and subnet by running the following command:</p> 
+<pre data-language="bash">gcloud run deploy SERVICE_NAME \
+  --image IMAGE_URL \
+  --network projects/HOST_PROJECT_ID/global/networks/VPC_NETWORK \
+  --subnet projects/HOST_PROJECT_ID/regions/REGION/subnetworks/SUBNET_NAME \
+  --network-tags NETWORK_TAG_NAMES \
+  --vpc-egress=EGRESS_SETTING \
+  --region REGION \
+  --max-instances MAX
+  </pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SERVICE_NAME</var>: the name of your Cloud Run service.</li> <li>
+<var translate="no">IMAGE_URL</var>: the image URL of the service.</li> <li>
+<var translate="no">HOST_PROJECT_ID</var>: the ID of your Shared VPC project.</li> <li>
+<var translate="no">VPC_NETWORK</var>: the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">REGION</var>: the region for your Cloud Run service, which must match the region of your subnet.</li> <li>
+<var translate="no">SUBNET_NAME</var>: the fully qualified resource name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var> with the comma-separated names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> you want to associate with a service. For services, network tags are specified at the revision-level. Each service revision can have different network tags, such as <code translate="no" dir="ltr">network-tag-2</code>.</li> <li>
+<var translate="no">EGRESS_SETTING</var> with an <a href="https://docs.cloud.google.com/sdk/gcloud/reference/run/deploy#--vpc-egress">egress setting value</a>: <ul> <li>
+<code translate="no" dir="ltr">all-traffic</code>: Sends all outbound traffic through the Shared VPC network.</li> <li>
+<code translate="no" dir="ltr">private-ranges-only</code>: Sends only traffic to internal addresses through the Shared VPC network.</li> </ul>
+</li> <li>
+<var translate="no">MAX</var>: the maximum number of instances to use for the Shared VPC network. The maximum number of instances allowed for services is 100.</li> </ul> <p>For more details and optional arguments, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/run/deploy"><code translate="no" dir="ltr">gcloud</code> reference</a>.</p></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>If you are creating a new service, skip this step. If you are updating an existing service, download its <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run services describe SERVICE --format export &gt; service.yaml</pre>
+</li> <li>
+<p>Update the following attributes:</p> 
+<pre data-language="">apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: SERVICE_NAME
+  labels:
+    cloud.googleapis.com/location: REGION
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/network-interfaces: '[{"network":"NETWORK","subnetwork":"SUBNET","tags":"NETWORK_TAG_NAMES"}]'
+        run.googleapis.com/vpc-access-egress: EGRESS_SETTING
+    spec:
+      containers:
+      - image: IMAGE</pre> <p>Replace:</p> <ul> <li>
+<var translate="no">SERVICE_NAME</var> with the name of your Cloud Run service. Service names must be 49 characters or less and must be unique per region and project.</li> <li>
+<var translate="no">REGION</var> with the region for your Cloud Run service, which must match the region of your subnet.</li> <li>
+<var translate="no">NETWORK</var> with the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">SUBNET_NAME</var> with the fully qualified resource name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var> with the names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> you want to associate with a service. For services, network tags are specified at the revision-level. Each service revision can have different network tags, such as <code translate="no" dir="ltr">network-tag-2</code>.</li> <li>
+<var translate="no">EGRESS_SETTING</var> with an <a href="https://docs.cloud.google.com/sdk/gcloud/reference/run/deploy#--vpc-egress">egress setting value</a>: <ul> <li>
+<code translate="no" dir="ltr">all-traffic</code>: Sends all outbound traffic through the Shared VPC network.</li> <li>
+<code translate="no" dir="ltr">private-ranges-only</code>: Sends only traffic to internal addresses through the Shared VPC network.</li> </ul>
+</li> <li>
+<var translate="no">IMAGE</var> with the URL of your service container image.</li> </ul>
+</li> <li>
+<p>Create or update the service using the following command:</p> 
+<pre data-language="">gcloud run services replace service.yaml</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<p>To learn how to apply or remove a Terraform configuration, see <a href="https://docs.cloud.google.com/docs/terraform/basic-commands">Basic Terraform commands</a>.</p> <ol> <li>
+<p>Add the following to your <code translate="no" dir="ltr">main.tf</code> file:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">/**
+ * Copyright 2024 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+# Example configuration of a Cloud Run service with direct VPC
+
+resource "google_cloud_run_v2_service" "default" {
+  name     = "cloudrun-service"
+  location = "us-central1"
+
+  deletion_protection = false # set to "true" in production
+
+  template {
+    containers {
+      image = "us-docker.pkg.dev/cloudrun/container/hello"
+    }
+    vpc_access {
+      network_interfaces {
+        network    = "default"
+        subnetwork = "default"
+        tags       = ["tag1", "tag2", "tag3"]
+      }
+    }
+  }
+}
+</pre> </div> </li> </ol></section> </div>
+<aside class="note"><strong>Note:</strong><span> Administrators can restrict the egress settings that developers can select by setting the <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints#available_constraints"><code translate="no" dir="ltr">run.allowedVPCEgress</code></a> organization policy.</span></aside> <p>Optionally, <a href="../authenticating/public">make your service public</a> if you want to allow unauthenticated access to the service.</p> <h2 id="execute-job">Create a job</h2> <p>Direct VPC egress allows your Cloud Run job to send traffic to a Shared VPC network without a Serverless VPC Access connector. You can also <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">add network tags</a> directly on Cloud Run jobs for more granular network security, such as applying <a href="https://docs.cloud.google.com/firewall/docs/firewalls">VPC firewall rules</a>.</p> <p>You can configure Direct VPC egress with a job by using the Google Cloud console, Google Cloud CLI, or YAML.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the Cloud Run <strong>Jobs</strong> page:</p> <p><a href="https://console.cloud.google.com/run/jobs" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>If you are configuring a new job, click <strong>Deploy container</strong> to fill out the initial <strong>Create job</strong> form as needed. If you are configuring an existing job, click the <strong>Jobs</strong> tab, select a job, then click <strong>Edit</strong>.</p></li> <li><p>Click <strong>Container, Variables &amp; Secrets, Connections, Security</strong> to expand the job properties page.</p></li> <li><p>Click the <strong>Connections</strong> tab.</p></li> <li><p>Click <strong>Connect to a VPC for outbound traffic</strong>.</p></li> <li><p>Click <strong>Send traffic directly to a VPC</strong>.</p></li> <li><p>Select <strong>Networks shared with me</strong>.</p></li> <li><p>In the <strong>Network</strong> field, select the Shared VPC network that you want to send traffic to.</p></li> <li><p>In the <strong>Subnet</strong> field, select the subnet where your job receives IP addresses from.</p></li> <li><p>Optional: Enter the names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> that you want to associate with a job. For jobs, network tags are specified at the execution-level. Each job execution can have different network tags, such as <code translate="no" dir="ltr">network-tag-2</code>.</p></li> <li>
+<p>For <strong>Traffic routing</strong>, select one of the following:</p> <ul> <li>
+<b>Route only requests to private IPs to the VPC</b> to send only traffic to internal addresses through the Shared VPC network.</li> <li>
+<b>Route all traffic to the VPC</b> to send all outbound traffic through the Shared VPC network.</li> </ul>
+</li> <li><p>Click <strong>Create</strong> or <strong>Update</strong>.</p></li> <li><p>To verify that your job is on your Shared VPC network, click the job, then click the <strong>Configuration</strong> tab. The network and subnet are listed in the <strong>VPC</strong> card.</p></li> </ol> <p>You can now execute your Cloud Run job and send requests from the job to any resource on the Shared VPC network, as allowed by your firewall rules.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p> To place your job on the shared subnet, specify the fully qualified resource names for the Shared VPC network and subnet by running the following command:</p> 
+<pre data-language="bash">gcloud run jobs create JOB_NAME \
+  --image IMAGE_URL \
+  --network projects/HOST_PROJECT_ID/global/networks/VPC_NETWORK \
+  --subnet projects/HOST_PROJECT_ID/regions/REGION/subnetworks/SUBNET_NAME \
+  --network-tags NETWORK_TAG_NAMES \
+  --vpc-egress=EGRESS_SETTING \
+  --region REGION \
+  </pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">JOB_NAME</var>: the name of your Cloud Run job.</li> <li>
+<var translate="no">IMAGE_URL</var>: the image URL of the job.</li> <li>
+<var translate="no">HOST_PROJECT_ID</var>: the ID of your Shared VPC host project.</li> <li>
+<var translate="no">VPC_NETWORK</var>: the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">REGION</var>: the region for your Cloud Run job, which must match the region of the subnet.</li> <li>
+<var translate="no">SUBNET_NAME</var>: the fully qualified resource name of your name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var> with the comma-separated names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> you want to associate with a job. Each job execution can have different network tags, such as <code translate="no" dir="ltr">network-tag-2</code>.</li> <li>
+<var translate="no">EGRESS_SETTING</var> with an <a href="https://docs.cloud.google.com/sdk/gcloud/reference/run/deploy#--vpc-egress">egress setting value</a>: <ul> <li>
+<code translate="no" dir="ltr">all-traffic</code>: Sends all outbound traffic through the Shared VPC network.</li> <li>
+<code translate="no" dir="ltr">private-ranges-only</code>: Sends only traffic to internal addresses through the Shared VPC network.</li> </ul>
+</li> </ul> <p>For more details and optional arguments, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/run/deploy"><code translate="no" dir="ltr">gcloud</code> reference</a>.</p></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>If you are creating a new job, skip this step. If you are updating an existing job, download its <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1#job">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run jobs describe JOB --format export &gt; job.yaml</pre>
+</li> <li>
+<p>Update the following attributes:</p> 
+<pre data-language="">apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: JOB_NAME
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+  labels:
+    cloud.googleapis.com/location: REGION
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/network-interfaces: '[{"network":"NETWORK","subnetwork":"SUBNET","tags":"NETWORK_TAG_NAMES"}]'
+        run.googleapis.com/vpc-access-egress: EGRESS_SETTING
+    spec:
+      containers:
+      - image: IMAGE</pre> <p>Replace:</p> <ul> <li>
+<var translate="no">JOB_NAME</var> with the name of your Cloud Run job. Job names must be 49 characters or less and must be unique per region and project.</li> <li>
+<var translate="no">REGION</var> with the region for your Cloud Run job, which must match the region of your subnet.</li> <li>
+<var translate="no">NETWORK</var> with the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">SUBNET</var> with the fully qualified resource name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var> with the names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> you want to associate with a job. For jobs, network tags are specified at the execution-level. Each job execution can have different network tags, such as <code translate="no" dir="ltr">network-tag-2</code>.</li> <li>
+<var translate="no">EGRESS_SETTING</var> with an <a href="https://docs.cloud.google.com/sdk/gcloud/reference/run/deploy#--vpc-egress">egress setting value</a>: <ul> <li>
+<code translate="no" dir="ltr">all-traffic</code>: Sends all outbound traffic through the Shared VPC network.</li> <li>
+<code translate="no" dir="ltr">private-ranges-only</code>: Sends only traffic to internal addresses through the Shared VPC network.</li> </ul>
+</li> <li>
+<var translate="no">IMAGE</var> with the URL of your job container image.</li> </ul>
+</li> <li>
+<p>Create or update the job using the following command:</p> 
+<pre data-language="">gcloud run jobs replace job.yaml</pre>
+</li> </ol></section> </div>
+<aside class="note"><strong>Note:</strong><span> Administrators can restrict the egress settings that developers can select by setting the <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints#available_constraints"><code translate="no" dir="ltr">run.allowedVPCEgress</code></a> organization policy.</span></aside> <h2 id="set_up_a_dual-stack_subnet">Set up a dual-stack subnet</h2> <p>To add a dual-stack subnet with an IPv6 range on a Cloud Run resource, see <a href="vpc-dual-stack-subnet">Set up a dual-stack subnet</a>.</p> <h2 id="disconnect-service">Disconnect a service</h2> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ul> <li>
+<p>To remove your service from the Shared VPC network:</p> <ol> <li>
+<p>In the Google Cloud console, go to the Cloud Run <strong>Services</strong> page:</p> <p><a href="https://console.cloud.google.com/run/services" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>Click the service.</p></li> <li><p>Click the <strong>Networking</strong> tab.</p></li> <li><p>Clear the checkbox next to <strong>Connect to a VPC for outbound traffic</strong>.</p></li> <li><p>Click <strong>View diff &amp; redeploy</strong>, then <strong>Deploy changes</strong>.</p></li> <li><p>To verify that your service is no longer on your Shared VPC network, click the <strong>Networking</strong> tab. The network and subnet are no longer listed in the <strong>VPC</strong> card.</p></li> </ol>
+</li> <li>
+<p>To remove only the network tags while keeping the service connected to the Shared VPC network:</p> <ol> <li><p>Click the service that contains the network tags you want to remove.</p></li> <li><p>Click the <strong>Networking</strong> tab.</p></li> <li><p>Clear the names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> that you no longer want to associate with your service.</p></li> <li><p>Click <strong>View diff &amp; redeploy</strong>, then <strong>Deploy changes</strong>.</p></li> </ol>
+</li> </ul></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ul> <li>
+<p>To remove your service from the Shared VPC network, run the following command:</p> 
+<pre data-language="bash">gcloud run services update SERVICE_NAME --region=REGION \
+--clear-network</pre>
+</li> <li>
+<p>To remove only the network tags while keeping the service connected to the Shared VPC network, run the following command:</p> 
+<pre data-language="bash">gcloud run services update SERVICE_NAME --region=REGION \
+--clear-network-tags</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SERVICE_NAME</var>: the name of your Cloud Run service.</li> <li>
+<var translate="no">REGION</var>: the region for your Cloud Run service.</li> </ul>
+</li> </ul></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ul> <li>
+<p>To remove your service from the Shared VPC network:</p> <ol> <li>
+<p>Download the service's <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run services describe SERVICE_NAME --format export &gt; service.yaml</pre>
+</li> <li>
+<p>Remove the following content from your <code translate="no" dir="ltr">service.yaml</code> file:</p> 
+<pre data-language="">run.googleapis.com/network-interfaces: '[{"network":"NETWORK","subnetwork":"SUBNET","tags":"NETWORK_TAG_NAMES"}]'</pre> <p>Where</p> <ul> <li>
+<var translate="no">NETWORK</var>: the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">SUBNET</var>: the fully qualified resource name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var>: the names of the network tags if you had associated them with a service.</li> </ul>
+</li> <li>
+<p>Update the service using the following command:</p> 
+<pre data-language="">gcloud run services replace service.yaml</pre>
+</li> </ol>
+</li> <li>
+<p>To remove only the network tags while keeping the service connected to the Shared VPC network:</p> <ol> <li>
+<p>Download the service's <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run services describe SERVICE_NAME --format export &gt; service.yaml</pre>
+</li> <li>
+<p>Remove the <code translate="no" dir="ltr">tags</code> variable from the content in your <code translate="no" dir="ltr">service.yaml</code> file, leaving the <code translate="no" dir="ltr">network</code> and <code translate="no" dir="ltr">subnetwork</code> variables in place, as shown in the following example:</p> 
+<pre data-language="">run.googleapis.com/network-interfaces: '[{"network":"NETWORK","subnetwork":"SUBNET"}]'</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">NETWORK</var>: the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">SUBNET</var>: the fully qualified resource name of your subnet.</li> </ul>
+</li> <li>
+<p>Update the service using the following command:</p> 
+<pre data-language="">gcloud run services replace service.yaml</pre>
+</li> </ol>
+</li> </ul></section> </div> <h2 id="disconnect-job">Disconnect a job</h2> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ul> <li>
+<p>To remove your job from the Shared VPC network:</p> <ol> <li>
+<p>In the Google Cloud console, go to the Cloud Run <strong>Jobs</strong> page:</p> <p><a href="https://console.cloud.google.com/run/jobs" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>Click the job you want to remove, then click <strong>Edit and deploy new revision</strong>.</p></li> <li><p>Click the <strong>Configuration</strong> tab.</p></li> <li><p>Clear <strong>Connect to a VPC for outbound traffic</strong>.</p></li> <li><p>Click <strong>Update</strong>.</p></li> <li><p>To verify that your job is no longer on your Shared VPC network, click the <strong>Configuration</strong> tab. The network and subnet are no longer listed in the <strong>VPC</strong> card.</p></li> </ol>
+</li> <li>
+<p>To remove only the network tags while keeping the job connected to the Shared VPC network:</p> <ol> <li><p>Click the job that contains the network tags you want to remove, then click <strong>Edit and deploy new revision</strong>.</p></li> <li><p>Click the <strong>Connections</strong> tab.</p></li> <li><p>Clear the names of the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags#restrictions">network tags</a> that you no longer want to associate with your job.</p></li> <li><p>Click <strong>Update</strong>.</p></li> </ol>
+</li> </ul></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ul> <li>
+<p>To remove your job from the Shared VPC network, run the following command:</p> 
+<pre data-language="bash">gcloud run jobs update JOB_NAME --region=REGION \
+  --clear-network
+  </pre>
+</li> <li>
+<p>To remove only the network tags while keeping the job connected to the Shared VPC network, run the following command:</p> 
+<pre data-language="bash">gcloud run jobs update JOB_NAME --region=REGION \
+  --clear-network-tags
+  </pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">JOB_NAME</var>: the name of your Cloud Run job.</li> <li>
+<var translate="no">REGION</var>: the region for your Cloud Run job.</li> </ul>
+</li> </ul></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ul> <li>
+<p>To remove your job from the Shared VPC network:</p> <ol> <li>
+<p>Download the job's <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1#job">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run jobs describe JOB_NAME --format export &gt; job.yaml</pre>
+</li> <li>
+<p>Remove the following content from your <code translate="no" dir="ltr">job.yaml</code> file:</p> 
+<pre data-language="">run.googleapis.com/network-interfaces: '[{"network":"NETWORK","subnetwork":"SUBNET","tags":"NETWORK_TAG_NAMES"}]'</pre> <p>Where</p> <ul> <li>
+<var translate="no">NETWORK</var>: the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">SUBNET</var>: the fully qualified resource name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var>: the names of the network tags if you had associated them with a job.</li> </ul>
+</li> <li>
+<p>Update the job using the following command:</p> 
+<pre data-language="">gcloud run jobs replace job.yaml</pre>
+</li> </ol>
+</li> <li>
+<p>To remove only the network tags while keeping the job connected to the Shared VPC network:</p> <ol> <li>
+<p>Download the job's <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1#job">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run jobs describe JOB_NAME --format export &gt; job.yaml</pre>
+</li> <li>
+<p>Remove the following content from your <code translate="no" dir="ltr">job.yaml</code> file:</p> 
+<pre data-language="">run.googleapis.com/network-interfaces: '[{"network":"NETWORK","subnetwork":"SUBNET","tags":"NETWORK_TAG_NAMES"}]'</pre> <p>Where</p> <ul> <li>
+<var translate="no">NETWORK</var>: the fully qualified resource name of your Shared VPC network.</li> <li>
+<var translate="no">SUBNET</var>: the fully qualified resource name of your subnet.</li> <li>Optional: <var translate="no">NETWORK_TAG_NAMES</var>: the names of the network tags if you had associated them with a job.</li> </ul>
+</li> <li>
+<p>Update the job using the following command:</p> 
+<pre data-language="">gcloud run jobs replace job.yaml</pre>
+</li> </ol>
+</li> </ul></section> </div> <h2 id="troubleshooting">Troubleshooting</h2> <h3 id="delete-subnet">Cannot delete subnet</h3> <p>To delete a subnet, you must first delete all resources that use it. If Cloud Run is using a subnet, you must <a href="connecting-vpc#disconnect">disconnect Cloud Run</a> from the Shared VPC network or move it to a different subnet before deleting the subnet.</p> <aside class="note"><strong>Note:</strong><span> After you delete or move your Cloud Run resources, wait 1-2 hours for Cloud Run to release the IPs before you delete the subnet.</span></aside> <h3 id="detach-host">Cannot detach Shared VPC network</h3> <p>To detach the Shared VPC network in the host project, follow the steps to <a href="https://docs.cloud.google.com/vpc/docs/deprovisioning-shared-vpc">Deprovision Shared VPC</a> and be sure to disconnect any Cloud Run <a href="connecting-vpc#disconnect">services</a> or <a href="connecting-vpc#disconnect">jobs</a> from the Shared VPC network.</p> <p>To see which Cloud Run resources are using the Shared VPC network, run the following command:</p> 
+<pre>gcloud compute shared-vpc list-associated-resources HOST_PROJECT_ID</pre> <p>Replace <var translate="no">HOST_PROJECT_ID</var> with the ID of your Shared VPC host project.</p> <h3 id="direct_vpc_egress_subnet_runs_out_of_ipv4_addresses">Direct VPC egress subnet runs out of IPv4 addresses</h3> <p>The following error occurs when you try to deploy:</p> 
+<pre>Instance failed to start because of insufficient free IP addresses in the
+subnetwork SUBNET_ID when attempting to create an address in the
+subnetwork. Please consider moving to a subnetwork with more available IP
+addresses.</pre> <p>If the subnet of the VPC network runs out of IPv4 addresses, it is logged by Cloud Logging. When this occurs, Cloud Run cannot start any more service instances or job tasks until more IPv4 addresses become available.</p> <p>To resolve this issue, follow the <a href="networking-best-practices#alt-ip-address">IP address exhaustion strategies</a>.</p> <h3 id="view_allocated_ip_addresses">View allocated IP addresses</h3> <p>To see which IP addresses Cloud Run has allocated, go to the <a href="https://console.cloud.google.com/networking/addresses">IP addresses page</a> in the Google Cloud console or run the following command from the Google Cloud CLI:</p> 
+<pre>gcloud compute addresses list</pre><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/configuring/shared-vpc-direct-vpc" class="_attribution-link">https://docs.cloud.google.com/run/docs/configuring/shared-vpc-direct-vpc</a>
+  </p>
+</div>

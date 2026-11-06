@@ -1,0 +1,402 @@
+<h1>Serve scalable LLMs on GKE with TorchServe</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial shows you how to deploy and serve a scalable machine learning (ML) model to a Google Kubernetes Engine (GKE) cluster using the <a href="https://pytorch.org/serve/">TorchServe framework</a>. You serve a pre-trained PyTorch model that generates predictions based on user requests. After you deploy the model, you get a prediction URL that your application uses to send prediction requests. This method lets you scale the model and web application independently. When you deploy the ML workload and application on Autopilot, GKE chooses the most efficient underlying machine type and size to run the workloads.</p> <p>This tutorial is intended for Machine learning (ML) engineers, Platform admins and operators, and for Data and AI specialists who are interested in using GKE Autopilot to reduce administrative overhead for node configuration, scaling, and upgrades. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before reading this page, ensure that you're familiar with <a href="../concepts/autopilot-overview" track-type="tutorial" track-name="internalLink" track-metadata-position="body">GKE Autopilot mode</a>.</p> <h2 id="about-tutorial-application">About the tutorial application</h2> <p>The application is a small Python web application created using the <a href="https://fastdash.app/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Fast Dash framework</a>. You use the application to send prediction requests to the T5 model. This application captures user text inputs and language pairs and sends the information to the model. The model translates the text and returns the result to the application, which displays the result to the user. For more information about Fast Dash, see <a href="https://docs.fastdash.app/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">the Fast Dash documentation</a>.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Prepare a pre-trained T5 model from the <a href="https://huggingface.co/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Hugging Face</a> repository for serving by packaging it as a container image and pushing it to Artifact Registry</li> <li>Deploy the model to an Autopilot cluster</li> <li>Deploy the Fast Dash application that communicates with the model</li> <li>Autoscale the model based on Prometheus metrics</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://docs.cloud.google.com/kubernetes-engine/pricing#gpu-pods" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE Autopilot mode</a></li> <li><a href="https://docs.cloud.google.com/artifact-registry/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">Artifact Registry</a></li> <li><a href="https://docs.cloud.google.com/storage/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">Cloud Storage</a></li> <li><a href="https://docs.cloud.google.com/build/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">Cloud Build</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine, Cloud Storage, Artifact Registry, and Cloud Build APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com storage.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine, Cloud Storage, Artifact Registry, and Cloud Build APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com storage.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com</pre>
+</li> </div> </cloud-free-trial> </ol> </section> <div id="tutorial-content"> <h2 id="prepare_the_environment">Prepare the environment</h2> <p>Clone the example repository and open the tutorial directory:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples.git
+cd kubernetes-engine-samples/ai-ml/t5-model-serving
+</pre> <h2 id="create-cluster">Create the cluster</h2> <p>Run the following command:</p> 
+<pre>gcloud container clusters create-auto ml-cluster \
+    --release-channel=RELEASE_CHANNEL \
+    --cluster-version=CLUSTER_VERSION \
+    --location=us-central1
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RELEASE_CHANNEL</var></code>: the release channel for your cluster. Must be one of <code translate="no" dir="ltr">rapid</code>, <code translate="no" dir="ltr">regular</code>, or <code translate="no" dir="ltr">stable</code>. Choose a channel that has GKE version 1.28.3-gke.1203000 or later to use L4 GPUs. To see the versions available in a specific channel, see <a href="../how-to/release-channels#viewing_the_default_and_available_versions_for_release_channels">View the default and available versions for release channels</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE version to use. Must be <code translate="no" dir="ltr">1.28.3-gke.1203000</code> or later.</li> </ul> <p>This operation takes several minutes to complete.</p> <h2 id="create-repository">Create an Artifact Registry repository</h2> <ol> <li>
+<p>Create a new Artifact Registry standard repository with the Docker format in the same region as your cluster:</p> 
+<pre>gcloud artifacts repositories create models \
+    --repository-format=docker \
+    --location=us-central1 \
+    --description="Repo for T5 serving image"
+</pre>
+</li> <li>
+<p>Verify the repository name:</p> 
+<pre>gcloud artifacts repositories describe models \
+    --location=us-central1
+</pre> <p>The output is similar to the following:</p> <p> <code translate="no" dir="ltr">none {:.devsite-disable-click-to-copy}
+Encryption: Google-managed key
+Repository Size: 0.000MB
+createTime: '2023-06-14T15:48:35.267196Z'
+description: Repo for T5 serving image
+format: DOCKER
+mode: STANDARD_REPOSITORY
+name: projects/<var translate="no">PROJECT_ID</var>/locations/us-central1/repositories/models
+updateTime: '2023-06-14T15:48:35.267196Z'</code></p>
+</li> </ol> <h2 id="package-model">Package the model</h2> <p>In this section, you package the model and the serving framework in a single container image using Cloud Build and push the resulting image to the Artifact Registry repository.</p> <ol> <li>
+<p>Review the Dockerfile for the container image:</p> 
+<div class="github-docwidget-gitinclude-code"> 
+<pre># Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ARG BASE_IMAGE=pytorch/torchserve:0.12.0-cpu
+
+FROM alpine/git
+
+ARG MODEL_NAME=t5-small
+ARG MODEL_REPO=https://huggingface.co/${MODEL_NAME}
+ENV MODEL_NAME=${MODEL_NAME}
+ENV MODEL_VERSION=${MODEL_VERSION}
+
+RUN git clone "${MODEL_REPO}" /model
+
+FROM ${BASE_IMAGE}
+
+ARG MODEL_NAME=t5-small
+ARG MODEL_VERSION=1.0
+ENV MODEL_NAME=${MODEL_NAME}
+ENV MODEL_VERSION=${MODEL_VERSION}
+
+COPY --from=0 /model/. /home/model-server/
+COPY handler.py \
+     model.py \
+     requirements.txt \
+     setup_config.json /home/model-server/
+
+RUN  torch-model-archiver \
+     --model-name="${MODEL_NAME}" \
+     --version="${MODEL_VERSION}" \
+     --model-file="model.py" \
+     --serialized-file="pytorch_model.bin" \
+     --handler="handler.py" \
+     --extra-files="config.json,spiece.model,tokenizer.json,setup_config.json" \
+     --runtime="python" \
+     --export-path="model-store" \
+     --requirements-file="requirements.txt"
+
+FROM ${BASE_IMAGE}
+
+ENV PATH /home/model-server/.local/bin:$PATH
+ENV TS_CONFIG_FILE /home/model-server/config.properties
+# CPU inference will throw a warning cuda warning (not error)
+# Could not load dynamic library 'libnvinfer_plugin.so.7'
+# This is expected behaviour. see: https://stackoverflow.com/a/61137388
+ENV TF_CPP_MIN_LOG_LEVEL 2
+
+COPY --from=1 /home/model-server/model-store/ /home/model-server/model-store
+COPY config.properties /home/model-server/
+</pre> </div> <p>This Dockerfile defines the following multiple stage build process:</p> <ol> <li>Download the model artifacts from the Hugging Face repository.</li> <li>Package the model using the <a href="https://github.com/pytorch/serve/tree/master/model-archiver" target="github" track-type="tutorial" track-name="gitHubLink" track-metadata-position="body">PyTorch Serving Archive</a> tool. This creates a model archive (.mar) file that the inference server uses to load the model.</li> <li>Build the final image with PyTorch Serve.</li> </ol>
+</li> <li>
+<p>Build and push the image using Cloud Build:</p> 
+<pre>gcloud builds submit model/ \
+    --region=us-central1 \
+    --config=model/cloudbuild.yaml \
+    --substitutions=_LOCATION=us-central1,_MACHINE=gpu,_MODEL_NAME=t5-small,_MODEL_VERSION=1.0
+</pre> <p>The build process takes several minutes to complete. If you use a larger model size than <code translate="no" dir="ltr">t5-small</code>, the build process might take <strong>significantly</strong> more time.</p>
+</li> <li>
+<p>Check that the image is in the repository:</p> 
+<pre>gcloud artifacts docker images list us-central1-docker.pkg.dev/PROJECT_ID/models
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p> <p>The output is similar to the following:</p> 
+<pre>IMAGE                                                     DIGEST         CREATE_TIME          UPDATE_TIME
+us-central1-docker.pkg.dev/PROJECT_ID/models/t5-small     sha256:0cd...  2023-06-14T12:06:38  2023-06-14T12:06:38
+</pre>
+</li> </ol> <h2 id="deploy-model">Deploy the packaged model to GKE</h2> <p>To deploy the image, this tutorial use Kubernetes Deployments. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster..</p> <p>Modify the Kubernetes manifest in the example repository to match your environment.</p> <ol> <li>
+<p>Review the manifest for the inference workload:</p> 
+<div class="github-docwidget-gitinclude-code"> 
+<pre># Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t5-inference
+  labels:
+    model: t5
+    version: v1.0
+    machine: gpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      model: t5
+      version: v1.0
+      machine: gpu
+  template:
+    metadata:
+      labels:
+        model: t5
+        version: v1.0
+        machine: gpu
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: inference
+          image: us-central1-docker.pkg.dev/PROJECT_ID/models/t5-small:1.0-gpu
+          imagePullPolicy: IfNotPresent
+          args: ["torchserve", "--start", "--foreground"]
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "3000m"
+              memory: 16Gi
+              ephemeral-storage: 10Gi
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "3000m"
+              memory: 16Gi
+              ephemeral-storage: 10Gi
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8081
+              name: management
+            - containerPort: 8082
+              name: metrics
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 120
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /models/t5-small
+              port: management
+            initialDelaySeconds: 150
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: t5-inference
+  labels:
+    model: t5
+    version: v1.0
+    machine: gpu
+spec:
+  type: ClusterIP
+  selector:
+    model: t5
+    version: v1.0
+    machine: gpu
+  ports:
+    - port: 8080
+      name: http
+      targetPort: http
+    - port: 8081
+      name: management
+      targetPort: management
+    - port: 8082
+      name: metrics
+      targetPort: metrics
+</pre> </div> </li> <li>
+<p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID:</p> 
+<pre>sed -i "s/PROJECT_ID/PROJECT_ID/g" "kubernetes/serving-gpu.yaml"
+</pre> <p>This ensures that the container image path in the Deployment specification matches the path to your T5 model image in Artifact Registry.</p>
+</li> <li>
+<p>Create the Kubernetes resources:</p> 
+<pre>kubectl create -f kubernetes/serving-gpu.yaml
+</pre>
+</li> </ol> <p>To verify that the model deployed successfully, do the following:</p> <ol> <li>
+<p>Get the status of the Deployment and the Service:</p> 
+<pre>kubectl get -f kubernetes/serving-gpu.yaml
+</pre> <p>Wait until the output shows ready Pods, similar to the following. Depending on the size of the image, the first image pull might take several minutes.</p> 
+<pre>NAME                            READY   UP-TO-DATE    AVAILABLE   AGE
+deployment.apps/t5-inference    1/1     1             0           66s
+
+NAME                    TYPE        CLUSTER-IP        EXTERNAL-IP   PORT(S)                       AGE
+service/t5-inference    ClusterIP   10.48.131.86    &lt;none&gt;        8080/TCP,8081/TCP,8082/TCP    66s
+</pre>
+</li> <li>
+<p>Open a local port for the <code translate="no" dir="ltr">t5-inference</code> Service:</p> 
+<pre>kubectl port-forward svc/t5-inference 8080
+</pre>
+</li> <li>
+<p>Open a new terminal window and send a test request to the Service:</p> 
+<pre>curl -v -X POST -H 'Content-Type: application/json' -d '{"text": "this is a test sentence", "from": "en", "to": "fr"}' "http://localhost:8080/predictions/t5-small/1.0"
+</pre> <p>If the test request fails and the Pod connection closes, check the logs:</p> 
+<pre>kubectl logs deployments/t5-inference
+</pre> <p>If the output is similar to the following, TorchServe failed to install some model dependencies:</p> 
+<pre>org.pytorch.serve.archive.model.ModelException: Custom pip package installation failed for t5-small
+</pre> <p>To resolve this issue, restart the Deployment:</p> 
+<pre>kubectl rollout restart deployment t5-inference
+</pre> <p>The Deployment controller creates a new Pod. Repeat the previous steps to open a port on the new Pod.</p>
+</li> </ol> <h2 id="access-model-web-app">Access the deployed model using the web application</h2> <p>To access the deployed model with the <a href="#about-tutorial-application">Fast Dash web application</a>, complete the following steps:</p> <ol> <li>
+<p>Build and push the Fast Dash web application as a container image in Artifact Registry:</p> 
+<pre>gcloud builds submit client-app/ \
+    --region=us-central1 \
+    --config=client-app/cloudbuild.yaml
+</pre>
+</li> <li>
+<p>Open <code translate="no" dir="ltr">kubernetes/application.yaml</code> in a text editor and replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> in the <code translate="no" dir="ltr">image:</code> field with your project ID. Alternatively, run the following command:</p> 
+<pre>sed -i "s/PROJECT_ID/PROJECT_ID/g" "kubernetes/application.yaml"
+</pre>
+</li> <li>
+<p>Create the Kubernetes resources:</p> 
+<pre>kubectl create -f kubernetes/application.yaml
+</pre> <p>The Deployment and Service might take some time to fully provision.</p>
+</li> <li>
+<p>To check the status, run the following command:</p> 
+<pre>kubectl get -f kubernetes/application.yaml
+</pre> <p>Wait until the output shows ready Pods, similar to the following:</p> 
+<pre>NAME                       READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/fastdash   1/1     1            0           1m
+
+NAME               TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
+service/fastdash   NodePort   203.0.113.12    &lt;none&gt;        8050/TCP         1m
+</pre>
+</li> <li>
+<p>The web application is now running, although it isn't exposed on an external IP address. To access the web application, open a local port:</p> 
+<pre>kubectl port-forward service/fastdash 8050
+</pre>
+</li> <li>
+<p>In a browser, open the web interface:</p> <ul> <li>If you're using a local shell, open a browser and go to http://127.0.0.1:8050.</li> <li>If you're using Cloud Shell, click <strong>Web preview</strong>, and then click <strong>Change port</strong>. Specify port <code translate="no" dir="ltr">8050</code>.</li> </ul>
+</li> <li><p>To send a request to the T5 model, specify values in the <strong>TEXT</strong>, <strong>FROM LANG</strong>, and <strong>TO LANG</strong> fields in the web interface and click <strong>Submit</strong>. For a list of available languages, see the <a href="https://huggingface.co/t5-small#model-details">T5 documentation</a>.</p></li> </ol> <h2 id="enable-autoscaling">Enable autoscaling for the model</h2> <p>This section shows you how to enable autoscaling for the model based on metrics from <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a> by doing the following:</p> <ol> <li>Install Custom Metrics Stackdriver Adapter</li> <li>Apply PodMonitoring and HorizontalPodAutoscaling configurations</li> </ol> <p>Google Cloud Managed Service for Prometheus is enabled by default in Autopilot clusters running version 1.25 and later.</p> <h3 id="install-adapter">Install Custom Metrics Stackdriver Adapter</h3> <p>This adapter lets your cluster use metrics from Prometheus to make Kubernetes autoscaling decisions.</p> <ol> <li>
+<p>Deploy the adapter:</p> 
+<pre>kubectl create -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre>
+</li> <li>
+<p>Grant the adapter's Kubernetes ServiceAccount the Monitoring Viewer role (<code translate="no" dir="ltr">roles/monitoring.viewer</code>) on the project:</p> 
+<pre>export PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter" \
+    --role="roles/monitoring.viewer" \
+    --condition=None
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p>
+</li> </ol> <h3 id="apply-podmonitoring-horizontal-scaling">Apply PodMonitoring and HorizontalPodAutoscaling configurations</h3> <p>PodMonitoring is a Google Cloud Managed Service for Prometheus custom resource that enables metrics ingestion and target scraping in a specific namespace.</p> <ol> <li>
+<p>Deploy the PodMonitoring resource in the same namespace as the TorchServe Deployment:</p> 
+<pre>kubectl apply -f kubernetes/pod-monitoring.yaml
+</pre>
+</li> <li>
+<p>Review the HorizontalPodAutoscaler manifest:</p> 
+<div class="github-docwidget-gitinclude-code"> 
+<pre># Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: t5-inference
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: t5-inference
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: prometheus.googleapis.com|ts_queue_latency_microseconds|counter
+      target:
+        type: AverageValue
+        averageValue: "30000"
+</pre> </div> <p>The HorizontalPodAutoscaler scales the T5 model Pod quantity based on the cumulative duration of the request queue. Autoscaling is based on the <code translate="no" dir="ltr">ts_queue_latency_microseconds</code> metric, which shows cumulative queue duration in microseconds.</p>
+</li> <li>
+<p>Create the HorizontalPodAutoscaler:</p> 
+<pre>kubectl apply -f kubernetes/hpa.yaml
+</pre>
+</li> </ol> <h2 id="verify-autoscaling">Verify autoscaling using a load generator</h2> <p>To test your autoscaling configuration, generate load for the serving application. This tutorial uses a Locust load generator to send requests to the prediction endpoint for the model.</p> <ol> <li>
+<p>Create the load generator:</p> 
+<pre>kubectl apply -f kubernetes/loadgenerator.yaml
+</pre> <p>Wait for the load generator Pods to become ready.</p>
+</li> <li>
+<p>Expose the load generator web interface locally:</p> 
+<pre>kubectl port-forward svc/loadgenerator 8080
+</pre> <p>If you see an error message, try again when the Pod is running.</p>
+</li> <li>
+<p>In a browser, open the load generator web interface:</p> <ul> <li>If you're using a local shell, open a browser and go to http://127.0.0.1:8080.</li> <li>If you're using Cloud Shell, click <strong>Web preview</strong>, and then click <strong>Change port</strong>. Enter port <code translate="no" dir="ltr">8080</code>.</li> </ul>
+</li> <li><p>Click the <strong>Charts</strong> tab to observe performance over time.</p></li> <li>
+<p>Open a new terminal window and watch the replica count of your horizontal Pod autoscalers:</p> 
+<pre>kubectl get hpa -w
+</pre> <p>The number of replicas increases as the load increases. The scaleup might take approximately ten minutes. As new replicas start, the number of successful requests in the Locust chart increases.</p> 
+<pre>NAME           REFERENCE                 TARGETS           MINPODS   MAXPODS   REPLICAS   AGE
+t5-inference   Deployment/t5-inference   71352001470m/7M   1         5        1           2m11s
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> The Locust framework reuses opened connections, so you can't see changes in a chart after a scale-up event. However, you can stop a current run of the load generator by clicking <strong>Stop</strong>, and then start a new load generation test to observe the increase in requests per second.</span></aside> <h2 id="recommendations">Recommendations</h2> <ul> <li>Build your model with the same version of the base Docker image that you'll use for serving.</li> <li>If your model has special package dependencies, or if the size of your dependencies is large, create a custom version of your base Docker image.</li> <li>Watch the tree version of your model dependency packages. Ensure that your package dependencies support each others' versions. For example, Panda version 2.0.3 supports NumPy version 1.20.3 and later.</li> <li>Run GPU-intensive models on GPU nodes and CPU-intensive models on CPU. This could improve the stability of model serving and ensures that you're efficiently consuming node resources.</li> </ul> <h2 id="observe-performance">Observe model performance</h2> <p>To observe the model performance, you can use the TorchServe dashboard integration in <a href="https://docs.cloud.google.com/monitoring/docs/monitoring-overview">Cloud Monitoring</a>. With this dashboard, you can view critical performance metrics like token throughput, request latency, and error rates.</p> <p>To use the TorchServe dashboard, you must enable <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a>, which collects the metrics from TorchServe, in your GKE cluster. TorchServe exposes metrics in Prometheus format by default; you do not need to install an additional exporter.</p> You can then view the metrics by using the TorchServe dashboard. For information about using Google Cloud Managed Service for Prometheus to collect metrics from your model, see the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/torchserve">TorchServe</a> observability guidance in the Cloud Monitoring documentation. </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <h3 id="delete_individual_resources">Delete individual resources</h3> <ol> <li>
+<p>Delete the Kubernetes resources:</p> 
+<pre>kubectl delete -f kubernetes/loadgenerator.yaml
+kubectl delete -f kubernetes/hpa.yaml
+kubectl delete -f kubernetes/pod-monitoring.yaml
+kubectl delete -f kubernetes/application.yaml
+kubectl delete -f kubernetes/serving-gpu.yaml
+kubectl delete -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre>
+</li> <li>
+<p>Delete the GKE cluster:</p> 
+<pre>gcloud container clusters delete "ml-cluster" \
+    --location="us-central1" --quiet
+</pre>
+</li> <li>
+<p>Remove the IAM policy binding:</p> 
+<pre>gcloud projects remove-iam-policy-binding PROJECT_ID \
+    --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter" \
+    --role="roles/monitoring.viewer" \
+    --condition=None
+</pre>
+</li> <li><p>Delete the images in Artifact Registry. Optionally, delete the entire repository. For instructions, see the Artifact Registry documentation about <a href="https://docs.cloud.google.com/artifact-registry/docs/docker/manage-images">Deleting images</a>.</p></li> </ol> <h2 id="components">Component overview</h2> <p>This section describes the components used in this tutorial, such as the model, the web application, the framework, and the cluster.</p> <h3 id="about-t5">About the T5 model</h3> <p>This tutorial uses a pre-trained multilingual <em>T5 model</em>. T5 is a text-to-text transformer that converts text from one language to another. In T5, inputs and outputs are always text strings, in contrast to BERT-style models that can only output either a class label or a span of the input. The T5 model can also be used for tasks such as summarization, Q&amp;A, or text classification. The model is trained on a large quantity of text from <a href="https://huggingface.co/datasets/c4" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Colossal Clean Crawled Corpus (C4)</a> and <a href="https://huggingface.co/datasets/wiki_dpr" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Wiki-DPR</a>.</p> <p>For more information, see <a href="https://huggingface.co/docs/transformers/model_doc/t5" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">the T5 model documentation</a>.</p> <p>Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu presented the T5 model in <a href="http://jmlr.org/papers/v21/20-074.html" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body"><em>Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer</em></a>, published in the <em>Journal of Machine Learning Research</em>.</p> <p>The T5 model supports various <em>model sizes</em>, with different levels of complexity that suit specific use cases. This tutorial uses the default size, <code translate="no" dir="ltr">t5-small</code>, but you can also choose a different size. The following T5 sizes are distributed under the Apache 2.0 license:</p> <ul> <li>
+<a href="https://huggingface.co/t5-small" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">t5-small</code></a>: 60 million parameters</li> <li>
+<a href="https://huggingface.co/t5-base" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">t5-base</code></a>: 220 million parameters</li> <li>
+<a href="https://huggingface.co/t5-large" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">t5-large</code></a>: 770 million parameters. 3GB download.</li> <li>
+<a href="https://huggingface.co/t5-3b" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">t5-3b</code></a>: 3 billion parameters. 11GB download.</li> <li>
+<a href="https://huggingface.co/t5-11b" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">t5-11b</code></a>: 11 billion parameters. 45GB download.</li> </ul> <p>For other available T5 models, see the <a href="https://huggingface.co/models" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Hugging Face repository</a>.</p> <h3 id="about-torchserve">About TorchServe</h3> <p>TorchServe is a flexible tool for serving PyTorch models. It provides out of the box support for all major deep learning frameworks, including PyTorch, TensorFlow, and ONNX. TorchServe can be used to deploy models in production, or for rapid prototyping and experimentation.</p> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="serve-multiple-gpu">Serve an LLM with multiple GPUs</a>.</li> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/scalable-ml-models-torchserve" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/scalable-ml-models-torchserve</a>
+  </p>
+</div>

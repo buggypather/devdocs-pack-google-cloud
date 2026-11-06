@@ -1,0 +1,478 @@
+<h1>Optimize storage with Filestore Multishares for GKE</h1> <p>This guide shows you how to use Filestore multishares for Google Kubernetes Engine with the GKE Filestore CSI driver.</p> <h2 id="before_you_begin">Before you begin</h2> <ol> <li><p>Before you begin, complete the <a href="https://docs.cloud.google.com/filestore/docs/install">setup steps</a> needed to use Filestore.</p></li> <li>
+<p>Enable the <a href="../how-to/persistent-volumes/filestore-csi-driver">GKE Filestore CSI driver</a>, version 1.23 or later:</p> <ul> <li><p>Driver versions 1.23 through 1.26 support up to 10 shares per instance.</p></li> <li><p>Driver versions 1.27 or later support up to 80 shares per instance.</p></li> </ul> <p>For the latest GKE Filestore CSI driver requirements, see <a href="https://docs.cloud.google.com/filestore/docs/csi-driver#requirements">Access Filestore instances with the Filestore CSI driver</a>.</p>
+</li> </ol> <h2 id="use_multishares_with_multiple_apps">Use Filestore multishares with multiple applications</h2> <p>This section shows you how to deploy two applications, one <a href="../concepts/deployment">Deployment</a> and one <a href="../concepts/statefulset">Statefulset</a>, each using a Filestore multishares <a href="https://kubernetes.io/docs/concepts/storage/storage-classes/">StorageClass</a>. You'll also see how GKE <a href="https://cloud.google.com/blog/products/containers-kubernetes/gke-best-practices-to-lessen-over-provisioning">bin packs</a> (a process to efficiently pack applications into your GKE nodes) all volumes in the same underlying Filestore enterprise instance.</p> <ol> <li>
+<p>Use the GKE-provided StorageClass, <code translate="no" dir="ltr">enterprise-multishare-rwx</code>, to create instances that support up to 10 shares.</p> <ul> <li>If you want to create instances that support up to 80 shares, you'll need to <a href="#create_a_custom_storageclass">create a custom StorageClass</a>. For the purpose of this guide, you will use a StorageClass with a ten-share-per-instance limit.</li> </ul> <p>After the GKE Filestore CSI driver is enabled, users can access the GKE-provided multishare StorageClass <code translate="no" dir="ltr">enterprise-multishare-rwx</code> with the following configuration. Referencing this StorageClass, the GKE Filestore CSI driver uses <a href="https://kubernetes.io/docs/concepts/storage/dynamic-provisioning/">dynamic volume provisioning</a> to automatically create Persistent Volumes (PVs) for new Persistent Volume Claims (PVCs) as GKE workload demand requires:</p> 
+<pre>kubectl describe sc enterprise-multishare-rwx
+Name:                  enterprise-multishare-rwx
+IsDefaultClass:        No
+Annotations:           components.gke.io/component-name=filestorecsi,components.gke.io/component-version=0.7.2,components.gke.io/layer=addon
+Provisioner:           filestore.csi.storage.gke.io
+Parameters:            instance-storageclass-label=enterprise-multishare-rwx,multishare=true,tier=enterprise
+AllowVolumeExpansion:  True
+MountOptions:          &lt;none&gt;
+ReclaimPolicy:         Delete
+VolumeBindingMode:     WaitForFirstConsumer
+Events:                &lt;none&gt;
+</pre>
+</li> </ol> <h3 id="create_a_custom_storageclass">Create a custom StorageClass</h3> <p>If you want to take advantage of the latest capacity limit of up to 80 shares per Filestore instance, create a custom StorageClass based on the following template:</p> 
+<pre>  apiVersion: storage.k8s.io/v1
+  kind: StorageClass
+  metadata:
+    name: csi-filestore-multishare-128
+  provisioner: filestore.csi.storage.gke.io
+  parameters:
+    tier: enterprise
+    multishare: "true"
+    max-volume-size: "128Gi"
+    network: default
+  allowVolumeExpansion: true
+</pre> <p>When renaming the StorageClass, consider the following requirements:</p> <ul> <li><p>The StorageClass name must be a valid <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names">DNS subdomain name</a>.</p></li> <li><p>The multishare StorageClass name is also used as an instance label and should follow <a href="https://docs.cloud.google.com/filestore/docs/managing-labels">label naming guidelines</a>.</p></li> <li>
+<p>If your application requires immediate volume provisioning, include the <code translate="no" dir="ltr">Immediate</code> volume binding mode:</p> <p><code translate="no" dir="ltr">volumeBindingMode: Immediate</code></p> <p>Use this specification, for example, if you don't want volume provisioning to be dependent upon pod creation in the GKE cluster.</p>
+</li> <li>
+<p>Beginning as of driver version 1.27, if you want to assign more than 10 shares per instance, include the <code translate="no" dir="ltr">max-volume-size</code> parameter and assign it one of the accepted values from the first column:</p> <table> <thead> <tr> <th>Maximum volume size (share size)</th> <th>Maximum number of shares per instance</th> </tr> </thead> <tbody> <tr> <td>128 GiB</td> <td>80</td> </tr> <tr> <td>256 GiB</td> <td>40</td> </tr> <tr> <td>512 GiB</td> <td>20</td> </tr> <tr> <td>1024 GiB</td> <td>10</td> </tr> </tbody> </table> <p>So for example, adding the key-value pair <code translate="no" dir="ltr">max-volume-size: "128Gi"</code> ensures the StorageClass maps up to 80 shares—each ranging from 10 GiB to 128 GiB in size—to a single 10 TiB enterprise-tier instance.</p> <ul> <li><p>This capability is backward compatibility with Filestore instances created by GKE Filestore CSI driver versions 1.23 through 1.26.</p></li> <li><p>Existing instances can create new PVCs, or shares, with the extended minimum share size of 10 GiB.</p></li> <li><p>GKE Filestore CSI driver version 1.27, or later, recognizes legacy enterprise instances and assigns them a default maximum share size of 1024 GiB (1 TiB). As a result, legacy instances are limited to a maximum share count of 10 shares per instance.</p></li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/filestore/docs/multishares">Filestore multishares for GKE</a>.</p>
+</li> </ul> <ol> <li>
+<p>Create a Deployment with multiple pod replicas using a single PVC.</p> <p>Create a YAML configuration file similar to the following:</p> 
+<pre>cat &lt;&lt;EOF | kubectl apply -f -
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server-multishare
+  labels:
+    app: nginx
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - mountPath: /usr/share/nginx/html
+          name: mypvc
+      volumes:
+      - name: mypvc
+        persistentVolumeClaim:
+          claimName: test-pvc-fs
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: test-pvc-fs
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: enterprise-multishare-rwx
+  resources:
+    requests:
+      storage: 100Gi
+
+EOF
+</pre>
+</li> <li>
+<p>Check pod replicas.</p> <p>a. From the command line, run the following command to check the PVC status:</p> 
+<pre>kubectl get pvc
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME          STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS               AGE
+test-pvc-fs   Bound    pvc-056d769d-a709-4bb2-b6d3-0361871b27a2   100Gi      RWX            enterprise-multishare-rwx  35m
+</pre> <p>b. From the command line, run the following command to check the pod status:</p> 
+<pre>kubectl get pod
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                                     READY   STATUS    RESTARTS   AGE
+web-server-multishare-76c9ffb4b5-2dhml   1/1     Running   0          35m
+web-server-multishare-76c9ffb4b5-7mtcb   1/1     Running   0          35m
+web-server-multishare-76c9ffb4b5-csdbd   1/1     Running   0          35m
+web-server-multishare-76c9ffb4b5-rgx82   1/1     Running   0          35m
+web-server-multishare-76c9ffb4b5-zjl27   1/1     Running   0          35m
+</pre>
+</li> <li>
+<p>Scale replicas.</p> <p>a. From the command line, run the following command to edit the Deployment:</p> 
+<pre>kubectl edit deployment web-server-multishare
+</pre> <p>b. The file will open in the command line. Find the <code translate="no" dir="ltr">spec.replicas</code> field and update the value to <code translate="no" dir="ltr">10</code>.</p> <p>c. From the command line, run the following command to see the applied change:</p> 
+<pre>kubectl get pod
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                                     READY   STATUS    RESTARTS   AGE
+web-server-multishare-76c9ffb4b5-2dhml   1/1     Running   0          36m
+web-server-multishare-76c9ffb4b5-5ctkf   1/1     Running   0          3s
+web-server-multishare-76c9ffb4b5-7mtcb   1/1     Running   0          36m
+web-server-multishare-76c9ffb4b5-8dwmw   1/1     Running   0          2s
+web-server-multishare-76c9ffb4b5-csdbd   1/1     Running   0          36m
+web-server-multishare-76c9ffb4b5-lndcq   1/1     Running   0          2s
+web-server-multishare-76c9ffb4b5-rgx82   1/1     Running   0          36m
+web-server-multishare-76c9ffb4b5-vtd6p   1/1     Running   0          3s
+web-server-multishare-76c9ffb4b5-xm49s   1/1     Running   0          3s
+web-server-multishare-76c9ffb4b5-zjl27   1/1     Running   0          36m
+</pre> <p>Notice 10 pods are running.</p> <p>d. From the command line, run the following command:</p> 
+<pre>kubectl get deployment
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+web-server-multishare   10/10   10           10          36m
+</pre> <p>e. From the command line, run the following command to check the PVC bound status:</p> 
+<pre>kubectl get pvc
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME          STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS               AGE
+test-pvc-fs   Bound    pvc-056d769d-a709-4bb2-b6d3-0361871b27a2   100Gi      RWX            enterprise-multishare-rwx  37m
+</pre> <p>f. From the command line, run the following command to edit the Deployment:</p> 
+<pre>kubectl edit deployment web-server-multishare
+</pre> <p>g. The file will open in the command line. Find the <code translate="no" dir="ltr">spec.replicas</code> field and update the value to <code translate="no" dir="ltr">2</code>.</p> <p>h. From the command line, run the following command to see the applied change:</p> 
+<pre>kubectl get pod
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                                     READY   STATUS    RESTARTS   AGE
+web-server-multishare-76c9ffb4b5-2dhml   1/1     Running   0          38m
+web-server-multishare-76c9ffb4b5-7mtcb   1/1     Running   0          38m
+</pre>
+</li> <li>
+<p>Deploy a Statefulset.</p> <p>Deploy a second application that shares the underlying Filestore instance.</p> <p>To do so, provision 200 GiB of space and validate that it uses the same underlying Filestore instance as the first application.</p> <p>You'll then scale the application to nine replicas using 900 GiB in total (9 replicas using 100 GiB each) and verify that GKE uses the same Filestore instance by sharing the instance.</p> <p>Create a YAML configuration file similar to the following:</p> 
+<pre>cat &lt;&lt;EOF | kubectl apply -f -
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: web
+spec:
+  serviceName: "nginx"
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: registry.k8s.io/nginx-slim:0.8
+        ports:
+        - containerPort: 80
+          name: web
+        volumeMounts:
+        - name: test-pvc-multishare
+          mountPath: /usr/share/nginx/html
+  volumeClaimTemplates:
+  - metadata:
+      name: test-pvc-multishare
+    spec:
+      accessModes: [ "ReadWriteMany" ]
+      storageClassName: enterprise-multishare-rwx
+      resources:
+        requests:
+          storage: 100Gi
+
+EOF
+
+</pre>
+</li> <li>
+<p>Check Statefulset replicas and volumes.</p> <p>From the command line, run the following command:</p> 
+<pre>kubectl get pod
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                                     READY   STATUS    RESTARTS   AGE
+web-0                                    1/1     Running   0          4m48s
+web-1                                    1/1     Running   0          3m32s
+web-server-multishare-76c9ffb4b5-2dhml   1/1     Running   0          57m
+web-server-multishare-76c9ffb4b5-7mtcb   1/1     Running   0          57m
+</pre> <p>Notice that the first two pods are associated with the Statefulset. The last two pods are associated with the Deployment.</p> <p>From the command line, run the following command:</p> 
+<pre>kubectl get statefulset
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME   READY   AGE
+web    2/2     2m8s
+</pre> <p>From the command line, run the following command:</p> 
+<pre>kubectl get pvc
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                        STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS               AGE
+test-pvc-fs                 Bound    pvc-056d769d-a709-4bb2-b6d3-0361871b27a2   100Gi      RWX            enterprise-multishare-rwx   54m
+test-pvc-multishare-web-0   Bound    pvc-7aa21b5a-5343-4547-b7d7-414c16af15a7   100Gi      RWX            enterprise-multishare-rwx   114s
+test-pvc-multishare-web-1   Bound    pvc-8b37cd6e-d764-4d38-80d7-d74228536cfe   100Gi      RWX            enterprise-multishare-rwx   38s
+</pre> <p>The PVC <code translate="no" dir="ltr">test-pvc-fs</code> is associated with the Deployment <code translate="no" dir="ltr">web-server-multishare</code>.</p> <p>The PVCs <code translate="no" dir="ltr">test-pvc-multishare-web-0</code> and <code translate="no" dir="ltr">test-pvc-multishare-web-1</code> are associated with the Statefulset.</p>
+</li> <li>
+<p>Scale the Statefulset replicas.</p> <p>Increase the replica count to nine. As the count increases, the corresponding PVCs are created.</p> <p>a. From the command line, run the following command:</p> 
+<pre>kubectl  edit statefulset web
+</pre> <p>b. The file will open in the command line. Find the <code translate="no" dir="ltr">spec.replicas</code> field and update the value to <code translate="no" dir="ltr">9</code>.</p> <p>c. From the command line, run the following command to see the applied change:</p> 
+<pre>kubectl get statefulset
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME   READY   AGE
+web    9/9     13m
+</pre> <p>d. From the command line, run the following command:</p> 
+<pre>kubectl get deployment
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+web-server-multishare   2/2     2            2           65m
+</pre> <p>e. From the command line, run the following command:</p> 
+<pre>kubectl get pvc
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                        STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS               AGE
+test-pvc-fs                 Bound    pvc-056d769d-a709-4bb2-b6d3-0361871b27a2   100Gi      RWX            enterprise-multishare-rwx   65m
+test-pvc-multishare-web-0   Bound    pvc-7aa21b5a-5343-4547-b7d7-414c16af15a7   100Gi      RWX            enterprise-multishare-rwx   13m
+test-pvc-multishare-web-1   Bound    pvc-8b37cd6e-d764-4d38-80d7-d74228536cfe   100Gi      RWX            enterprise-multishare-rwx   12m
+test-pvc-multishare-web-2   Bound    pvc-3fcbd132-939f-4364-807a-7c8ac6a3e64e   100Gi      RWX            enterprise-multishare-rwx   5m12s
+test-pvc-multishare-web-3   Bound    pvc-5894afa5-2502-4ee7-9d5c-b7378cb85479   100Gi      RWX            enterprise-multishare-rwx   4m57s
+test-pvc-multishare-web-4   Bound    pvc-ebbe452b-bc8f-4624-a830-a2094cce0d67   100Gi      RWX            enterprise-multishare-rwx   4m36s
+test-pvc-multishare-web-5   Bound    pvc-5a73a698-d174-44cb-a3a1-e767966c3417   100Gi      RWX            enterprise-multishare-rwx   4m20s
+test-pvc-multishare-web-6   Bound    pvc-102da6a9-2ca6-4f9e-9896-8fe14709db7a   100Gi      RWX            enterprise-multishare-rwx   3m55s
+test-pvc-multishare-web-7   Bound    pvc-160e81cd-c5bf-4ae6-966e-518e8249e02d   100Gi      RWX            enterprise-multishare-rwx   3m38s
+test-pvc-multishare-web-8   Bound    pvc-9b52d773-2e9a-40de-881c-dc06945ba3d7   100Gi      RWX            enterprise-multishare-rwx   118s
+</pre>
+</li> <li>
+<p>Verify the Filestore instance state.</p> <p>You now have a Deployment with two replica pods, and a Statefulset with nine replica pods, and a total of 10 PVCs, each 100 GiB in size. All of the volumes are packed onto a single Filestore multishare instance.</p> <p>a. From the command line, run the following <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/filestore/instances/list"><code translate="no" dir="ltr">instances list</code></a> command:</p> 
+<pre>gcloud beta filestore instances list --project=YOUR_PROJECT_ID --region=REGION
+</pre> <p>where:</p> <ul> <li><p><var translate="no">YOUR_PROJECT_ID</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/install">project</a> being used. For example, <code translate="no" dir="ltr">my-project</code>.</p></li> <li><p><var translate="no">REGION</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/regions">region</a> being used. For example, <code translate="no" dir="ltr">us-central1</code>.</p></li> </ul> <p>You should see something similar to the following response:</p> 
+<pre>INSTANCE_NAME                            LOCATION     TIER        CAPACITY_GB  FILE_SHARE_NAME  IP_ADDRESS   STATE  CREATE_TIME
+fs-a767cef8-738e-4c8e-b70b-09cbb872d016  us-central1  ENTERPRISE  1024         N/A              10.192.53.2  READY  2022-06-21T21:15:30
+</pre> <p>b. From the command line, run the following <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/filestore/instances/describe"><code translate="no" dir="ltr">instances describe</code></a> command:</p> 
+<pre>gcloud filestore instances describe fs-a767cef8-738e-4c8e-b70b-09cbb872d016 --project=YOUR_PROJECT_ID --region=REGION
+capacityGb: '1024'
+capacityStepSizeGb: '256'
+createTime: '2022-06-21T21:15:30.464237089Z'
+labels:
+  storage_gke_io_created-by: filestore_csi_storage_gke_io
+  storage_gke_io_storage-class-id: enterprise-multishare-rwx
+maxCapacityGb: '10240'
+maxShareCount: '10'
+multiShareEnabled: true
+name: projects/YOUR_PROJECT_ID/locations/REGION/instances/fs-a767cef8-738e-4c8e-b70b-09cbb872d016
+networks:
+- connectMode: DIRECT_PEERING
+  ipAddresses:
+  - 10.192.53.2
+  modes:
+  - MODE_IPV4
+  network: csi-filestore-test-network
+  reservedIpRange: 10.192.53.0/26
+state: READY
+tier: ENTERPRISE
+
+</pre> <p>where:</p> <ul> <li><p><var translate="no">YOUR_PROJECT_ID</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/install">project</a> being used. For example, <code translate="no" dir="ltr">my-project</code>.</p></li> <li><p><var translate="no">REGION</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/regions">region</a> being used. For example, <code translate="no" dir="ltr">us-central1</code>.</p></li> </ul>
+</li> </ol> <h2 id="expand_and_verify">Expand a PVC and verify the Filestore instance</h2> <p>This section shows you how to expand an existing PVC and verify the Filestore instance size.</p> <ol> <li>
+<p>Expand a PVC.</p> <p>PVCs—backed by shares in a Filestore multishare instance— can grow to the maximum size specified in the <a href="#create_a_custom_storageclass"><code translate="no" dir="ltr">max-volume-size</code></a> parameter. To verify this, expand one of the volumes associated with the Statefulset while the pod is using it.</p> <p>From the command line, run the following command to check the current PVC size of replica 0:</p> 
+<pre>kubectl get pvc test-pvc-multishare-web-0 -o json
+{
+    "apiVersion": "v1",
+    "kind": "PersistentVolumeClaim",
+    "metadata": {
+        "annotations": {
+            "pv.kubernetes.io/bind-completed": "yes",
+            "pv.kubernetes.io/bound-by-controller": "yes",
+            "volume.beta.kubernetes.io/storage-provisioner": "filestore.csi.storage.gke.io",
+            "volume.kubernetes.io/storage-provisioner": "filestore.csi.storage.gke.io"
+        },
+        "creationTimestamp": "2022-06-21T22:07:42Z",
+        "finalizers": [
+            "kubernetes.io/pvc-protection"
+        ],
+        "labels": {
+            "app": "nginx"
+        },
+        "name": "test-pvc-multishare-web-0",
+        "namespace": "default",
+        "resourceVersion": "48395",
+        "uid": "7aa21b5a-5343-4547-b7d7-414c16af15a7"
+    },
+    "spec": {
+        "accessModes": [
+            "ReadWriteMany"
+        ],
+        "resources": {
+            "requests": {
+                "storage": "100Gi"
+            }
+        },
+        "storageClassName": "enterprise-multishare-rwx",
+        "volumeMode": "Filesystem",
+        "volumeName": "pvc-7aa21b5a-5343-4547-b7d7-414c16af15a7"
+    },
+    "status": {
+        "accessModes": [
+            "ReadWriteMany"
+        ],
+        "capacity": {
+            "storage": "100Gi"
+        },
+        "phase": "Bound"
+    }
+}
+
+</pre>
+</li> <li>
+<p>From the command line, run the following command to increase the size to 500 GiB:</p> 
+<pre>kubectl edit pvc test-pvc-multishare-web-0
+</pre>
+</li> <li><p>The file will open in the command line. Find the <code translate="no" dir="ltr">spec.resources.requests.storage</code> field and update the value to <code translate="no" dir="ltr">500Gi</code>.</p></li> <li>
+<p>From the command line, run the following command to see the applied change:</p> 
+<pre>kubectl get pvc test-pvc-multishare-web-0
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>NAME                        STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS               AGE
+test-pvc-multishare-web-0   Bound    pvc-7aa21b5a-5343-4547-b7d7-414c16af15a7   500Gi      RWX            enterprise-multishare-rwx   28m
+</pre> <p>The Filestore CSI driver accepted the request, first expanding the underlying Filestore instance, and then expanding the share backing the PVC.</p> <p>Specifically, the Filestore CSI driver automatically expanded the instance to 1536 Gi to accommodate the new share size of 500Gi.</p>
+</li> <li>
+<p>From the command line, run the following <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/filestore/instances/describe"><code translate="no" dir="ltr">instances describe</code></a> command to verify the capacity of the Filestore instance:</p> 
+<pre>gcloud filestore instances describe fs-a767cef8-738e-4c8e-b70b-09cbb872d016 --project=YOUR_PROJECT_ID --region=REGION
+capacityGb: '1536'
+capacityStepSizeGb: '256'
+createTime: '2022-06-21T21:15:30.464237089Z'
+labels:
+  storage_gke_io_created-by: filestore_csi_storage_gke_io
+  storage_gke_io_storage-class-id: enterprise-multishare-rwx
+maxCapacityGb: '10240'
+maxShareCount: '10'
+multiShareEnabled: true
+name: projects/YOUR_PROJECT_ID/locations/us-central1/instances/fs-a767cef8-738e-4c8e-b70b-09cbb872d016
+networks:
+- connectMode: DIRECT_PEERING
+  ipAddresses:
+  - 10.192.53.2
+  modes:
+  - MODE_IPV4
+  network: csi-filestore-test-network
+  reservedIpRange: 10.192.53.0/26
+state: READY
+tier: ENTERPRISE
+</pre> <p>where:</p> <ul> <li><p><var translate="no">YOUR_PROJECT_ID</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/install">project</a> being used. For example, <code translate="no" dir="ltr">my-project</code>.</p></li> <li><p><var translate="no">REGION</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/regions">region</a> being used. For example, <code translate="no" dir="ltr">us-central1</code>.</p></li> </ul>
+</li> </ol> <h2 id="dynamic_provisioning_on_shared_vpc">Dynamic provisioning on a Shared VPC</h2> <p>Filestore CSI driver for GKE supports <a href="https://kubernetes.io/docs/concepts/storage/dynamic-provisioning/">dynamic provisioning</a> of volumes in a service project under a Shared VPC. The following section shows how to use the Filestore CSI driver to dynamically provision volumes on Filestore multishare instances in a service project under a Shared VPC network.</p> <ol> <li><p>Complete the <a href="../how-to/persistent-volumes/filestore-csi-xpn">setup steps</a> for a Shared VPC network and private service access.</p></li> <li>
+<p>Create a StorageClass to dynamically provision volumes backed by a Filestore multishares instance on a Shared VPC.</p> <p>Run the following command to deploy a <code translate="no" dir="ltr">StorageClass</code> resource:</p> 
+<pre>cat &lt;&lt;EOF | kubectl apply -f -
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-filestore-multishare-sharedvpc
+provisioner: filestore.csi.storage.gke.io
+parameters:
+  network: "projects/HOST_PROJECT_ID/global/networks/SHARED_VPC_NAME"
+  connect-mode: PRIVATE_SERVICE_ACCESS
+  tier: enterprise
+  multishare: "true"
+allowVolumeExpansion: true
+
+EOF
+</pre> <p>where:</p> <ul> <li><p><var translate="no">HOST_PROJECT_ID</var> is the ID or name of the host <a href="https://docs.cloud.google.com/filestore/docs/install">project</a> of the Shared VPC network. For example, <code translate="no" dir="ltr">my-host-project</code>.</p></li> <li><p><var translate="no">SHARED_VPC_NAME</var> the name of the <a href="https://docs.cloud.google.com/vpc/docs/shared-vpc">Shared VPC network</a>. For example, <code translate="no" dir="ltr">my-shared-vpc</code>.</p></li> </ul> <p>If you want to deploy your resource within a reserved IP address range, add the following line to the parameters used in the command:</p> 
+<pre>reserved-ip-range: RESERVED_NAME
+</pre> <p>Where <var translate="no">RESERVED_NAME</var> is the name of the reserved IP address range within which a Filestore instance can be provisioned. For example, <code translate="no" dir="ltr">filestore-reserved-ip-range</code>. If a reserved IP range is specified, it must be a named address range instead of a direct CIDR value.</p> <p>For more information, see <a href="https://docs.cloud.google.com/vpc/docs/configure-private-services-access#allocating-range">Allocate IP address ranges</a> or <a href="https://docs.cloud.google.com/filestore/docs/creating-instances#configuring_a_reserved_ip_address_range">Configuring a reserved IP address range</a>. To see an example of how to create a reserved name using the Google Cloud console, see <a href="https://docs.cloud.google.com/vpc/docs/configure-private-services-access#procedure">Create an IP allocation</a>.</p>
+</li> <li>
+<p>Create a Deployment.</p> <p>Run the following command to create a <code translate="no" dir="ltr">Deployment</code> resource:</p> 
+<pre>cat &lt;&lt;EOF | kubectl apply -f -
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server-multishare
+  labels:
+    app: nginx
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - mountPath: /usr/share/nginx/html
+          name: mypvc
+      volumes:
+      - name: mypvc
+        persistentVolumeClaim:
+          claimName: test-pvc-fs-sharedvpc
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: test-pvc-fs-sharedvpc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: csi-filestore-multishare-sharedvpc
+  resources:
+    requests:
+      storage: 100Gi
+
+EOF
+</pre>
+</li> </ol> <h2 id="cmek_enabled_instances">CMEK-enabled Filestore instances</h2> <p>You can create GKE volumes hosted on CMEK-enabled Filestore multishare instances. In this section, you'll see how to setup a <a href="https://docs.cloud.google.com/filestore/docs/cmek">customer-managed encryption key (CMEK) for your Filestore instance</a>.</p> <p>Customer-managed key details can be provided in the StorageClass. Any instance dynamically created by the Filestore CSI driver, which references this StorageClass, will have CMEK enabled.</p> <ol> <li>
+<p>Create a CMEK-enabled StorageClass.</p> <p>a. Run the following command:</p> 
+<pre>cat &lt;&lt;EOF | kubectl apply -f -
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-filestore-multishare-cmek
+provisioner: filestore.csi.storage.gke.io
+parameters:
+  tier: enterprise
+  multishare: "true"
+  instance-encryption-kms-key: projects/KEY_PROJECT_ID/locations/REGION/keyRings/RING_NAME/cryptoKeys/KEY_NAME
+
+allowVolumeExpansion: true
+
+EOF
+</pre> <p>where:</p> <ul> <li><p><var translate="no">KEY_PROJECT_ID</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/install">project</a> where the key is located. For example, <code translate="no" dir="ltr">my-key-project</code>.</p></li> <li><p><var translate="no">REGION</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/regions">region</a> being used. For example, <code translate="no" dir="ltr">us-central1</code>.</p></li> <li><p><var translate="no">RING_NAME</var> the key ring name. For example, <code translate="no" dir="ltr">my-key-ring-name</code>.</p></li> <li><p><var translate="no">KEY_NAME</var> the key name. For example, <code translate="no" dir="ltr">my-key-name</code>.</p></li> </ul>
+</li> <li>
+<p>Create a Deployment.</p> <p>b. Run the following command to create a <code translate="no" dir="ltr">Deployment</code> resource:</p> 
+<pre>cat &lt;&lt;EOF | kubectl apply -f -
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server-multishare
+  labels:
+    app: nginx
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - mountPath: /usr/share/nginx/html
+          name: mypvc
+      volumes:
+      - name: mypvc
+        persistentVolumeClaim:
+          claimName: test-pvc-fs-cmek
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: test-pvc-fs-cmek
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: csi-filestore-multishare-cmek
+  resources:
+    requests:
+      storage: 100Gi
+
+EOF
+</pre>
+</li> </ol> <h2 id="map_pvc_to_instance">Map PVCs to Filestore instances</h2> <aside class="note"><strong>Note:</strong><span> Filestore multishare instances are managed using CSI dynamic provisioning. Instance or share creation can take several minutes to complete. Once the Filestore resource is created, Kubernetes creates the associated PV. This means the volume is not visible until the create operation initiated by the CSI driver completes.</span></aside> <p>In this section, you'll see how to map your PVCs to your Filestore instances.</p> <p>With Filestore multishare instances, each PVC is hosted on a Filestore instance by the Filestore CSI driver. The details of the underlying Filestore instance hosting the volume and the share representing the Kubernetes volume, is captured in the <code translate="no" dir="ltr">volumeHandle</code> field of the Persistent Volumes specification. The volume handle format is as follows:</p> 
+<pre>modeMultishare/&lt;storageclass-prefix&gt;/&lt;project&gt;/&lt;region&gt;/&lt;filestore-instance-name&gt;/&lt;filestore-share-name&gt;
+</pre> <p>The following <code translate="no" dir="ltr">kubectl</code> command can be used to quickly determine the mappings between a PVC, PV, Filestore Instance, and a Filestore share.</p> <p>From the command line, run the following command:</p> 
+<pre>kubectl get pv -o jsonpath='{range .items[*]}{"pv="}{.metadata.name}{",pvc="}{.spec.claimRef.name}{",volumeHandle="}{.spec.csi.volumeHandle}{"\n"}{end}'
+</pre> <p>You should see something similar to the following response:</p> 
+<pre>pv=pvc-67ad9abd-f25e-4130-b7ca-64d28bd29525,pvc=test-pvc-multishare,volumeHandle=modeMultishare/csi-filestore-multishare-sharedvpc/YOUR_PROJECT_ID/us-central1/fs-2109f680-3f04-4ada-b4bc-2a1c7fc47b88/pvc_67ad9abd_f25e_4130_b7ca_64d28bd29525
+
+pv=pvc-c80f4de0-9916-4957-b8ae-b21206650ac0,pvc=test-pvc-fs-sharedvpc,volumeHandle=modeMultishare/csi-filestore-multishare-sharedvpc/YOUR_PROJECT_ID/us-central1/fs-2109f680-3f04-4ada-b4bc-2a1c7fc47b88/pvc_c80f4de0_9916_4957_b8ae_b21206650ac0
+</pre> <p>where:</p> <ul> <li>
+<var translate="no">YOUR_PROJECT_ID</var> is the name of the <a href="https://docs.cloud.google.com/filestore/docs/install">project</a> being used. For example, <code translate="no" dir="ltr">my-project</code>.</li> </ul> <p>Notice that two persistent volumes in the cluster are hosted on a single Filestore instance.</p> <h2 id="whats_next">What's next</h2> <ul> <li><a href="https://docs.cloud.google.com/filestore/docs/shared-vpc">Create an instance on a Shared VPC network in service projects.</a></li> <li><a href="https://docs.cloud.google.com/architecture/storage-advisor#review_the_storage_options">Compare the relative advantages of block, file, and object storage.</a></li> <li><a href="https://docs.cloud.google.com/architecture/parallel-file-systems-for-hpc#storage-options-for-hpc-workloads-in-google-cloud">Storage options for HPC workloads in Google Cloud.</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/optimize-multishares" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/optimize-multishares</a>
+  </p>
+</div>

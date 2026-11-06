@@ -1,0 +1,352 @@
+<h1 id="user-defined-functions">User-defined functions</h1> <p>User-defined functions (UDFs) in BigQuery let you encapsulate custom business logic using SQL expressions or JavaScript code. Defining your own temporary or persistent functions lets you extend BigQuery's capabilities and reuse complex calculations across multiple queries.</p> <p>You can define UDFs as either persistent or temporary. You can reuse persistent UDFs across multiple queries, while temporary UDFs expire as soon as the query finishes. The <code translate="no" dir="ltr">DROP FUNCTION</code> statement is only supported for temporary UDFs in <a href="multi-statement-queries">multi-statement queries</a> and <a href="procedures">procedures</a>.</p> <p>For information on UDFs in legacy SQL, see <a href="user-defined-functions-legacy">User-defined functions in legacy SQL</a>.</p> <h2 id="sql-udf-structure">SQL UDFs</h2> <p>The following example creates a temporary SQL UDF named <code translate="no" dir="ltr">AddFourAndDivide</code> and calls the UDF from within a <code translate="no" dir="ltr">SELECT</code> statement:</p> 
+<pre>CREATE TEMP FUNCTION AddFourAndDivide(x INT64, y INT64)
+RETURNS FLOAT64
+AS (
+  (x + 4) / y
+);
+
+SELECT
+  val, AddFourAndDivide(val, 2)
+FROM
+  UNNEST([2,3,5,8]) AS val;</pre> <p>This example produces the following output:</p> 
+<pre>+-----+-----+
+| val | f0_ |
++-----+-----+
+|   2 | 3.0 |
+|   3 | 3.5 |
+|   5 | 4.5 |
+|   8 | 6.0 |
++-----+-----+
+</pre> <p>The next example creates the same function as a persistent UDF:</p> 
+<pre>CREATE FUNCTION mydataset.AddFourAndDivide(x INT64, y INT64)
+RETURNS FLOAT64
+AS (
+  (x + 4) / y
+);</pre> <p>Because this UDF is persistent, you must specify a dataset for the function (<code translate="no" dir="ltr">mydataset</code> in this example). After you run the <code translate="no" dir="ltr">CREATE FUNCTION</code> statement, you can call the function from a query:</p> 
+<pre>SELECT
+  val, mydataset.AddFourAndDivide(val, 2)
+FROM
+  UNNEST([2,3,5,8,12]) AS val;</pre> <h3 id="templated-sql-udf-parameters">Templated SQL UDF parameters</h3> <p>A parameter with a type equal to <code translate="no" dir="ltr">ANY TYPE</code> can match more than one argument type when the function is called.</p> <ul> <li>If more than one parameter has type <code translate="no" dir="ltr">ANY TYPE</code>, then BigQuery doesn't enforce any type relationship between these arguments.</li> <li>The function return type cannot be <code translate="no" dir="ltr">ANY TYPE</code>. It must be either omitted, which means to be automatically determined based on <code translate="no" dir="ltr">sql_expression</code>, or an explicit type.</li> <li>Passing the function arguments of types that are incompatible with the function definition results in an error at call time.</li> </ul> <p>The following example shows a SQL UDF that uses a templated parameter.</p> 
+<pre>CREATE TEMP FUNCTION addFourAndDivideAny(x ANY TYPE, y ANY TYPE)
+AS (
+  (x + 4) / y
+);
+
+SELECT
+  addFourAndDivideAny(3, 4) AS integer_input,
+  addFourAndDivideAny(1.59, 3.14) AS floating_point_input;</pre> <p>This example produces the following output:</p> 
+<pre>+----------------+-----------------------+
+| integer_input  |  floating_point_input |
++----------------+-----------------------+
+| 1.75           | 1.7802547770700636    |
++----------------+-----------------------+
+</pre> <p>The next example uses a templated parameter to return the last element of an array of any type:</p> 
+<pre>CREATE TEMP FUNCTION lastArrayElement(arr ANY TYPE)
+AS (
+  arr[ORDINAL(ARRAY_LENGTH(arr))]
+);
+
+SELECT
+  lastArrayElement(x) AS last_element
+FROM (
+  SELECT [2,3,5,8,13] AS x
+);</pre> <p>This example produces the following output:</p> 
+<pre>+--------------+
+| last_element |
++--------------+
+| 13           |
++--------------+
+</pre> <h3 id="scalar_subqueries">Scalar subqueries</h3> <p>A SQL UDF can return the value of a <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/subqueries#scalar_subquery_concepts">scalar subquery</a>. A scalar subquery must select a single column.</p> <p>The following example shows a SQL UDF that uses a scalar subquery to count the number of users with a given age in a user table:</p> 
+<pre>CREATE TEMP TABLE users
+AS (
+  SELECT
+    1 AS id, 10 AS age
+  UNION ALL
+  SELECT
+    2 AS id, 30 AS age
+  UNION ALL
+  SELECT
+    3 AS id, 10 AS age
+);
+
+CREATE TEMP FUNCTION countUserByAge(userAge INT64)
+AS (
+  (SELECT COUNT(1) FROM users WHERE age = userAge)
+);
+
+SELECT
+  countUserByAge(10) AS count_user_age_10,
+  countUserByAge(20) AS count_user_age_20,
+  countUserByAge(30) AS count_user_age_30;</pre> <p>This example produces the following output:</p> 
+<pre>+-------------------+-------------------+-------------------+
+| count_user_age_10 | count_user_age_20 | count_user_age_30 |
++-------------------+-------------------+-------------------+
+|                 2 |                 0 |                 1 |
++-------------------+-------------------+-------------------+
+</pre> <h3 id="default_project_in_sql_expressions">Default project in SQL expressions</h3> <p>In the body of a SQL UDF, any references to BigQuery entities, such as tables or views, must include the project ID, unless the entity resides in the same project that contains the UDF.</p> <p>For example, consider the following statement:</p> 
+<pre>CREATE FUNCTION project1.mydataset.myfunction()
+AS (
+  (SELECT COUNT(*) FROM mydataset.mytable)
+);</pre> <p>If you run this statement from <code translate="no" dir="ltr">project1</code> and <code translate="no" dir="ltr">mydataset.mytable</code> exists in <code translate="no" dir="ltr">project1</code>, then the statement succeeds. However, if you run this statement from a different project, then the statement fails. To correct the error, include the project ID in the table reference:</p> 
+<pre>CREATE FUNCTION project1.mydataset.myfunction()
+AS (
+  (SELECT COUNT(*) FROM project1.mydataset.mytable)
+);</pre> <p>You can also reference an entity in a different project or dataset from the one where you create the function:</p> 
+<pre>CREATE FUNCTION project1.mydataset.myfunction()
+AS (
+  (SELECT COUNT(*) FROM project2.another_dataset.another_table)
+);</pre> <h3 id="system-variables">Use system variables with SQL UDFs</h3> <p>The <code translate="no" dir="ltr">@@session_id</code> and <code translate="no" dir="ltr">@@location</code> <a href="https://docs.cloud.google.com/bigquery/docs/reference/system-variables">system variables</a> are supported with SQL UDFs. You can include these system variables anywhere in your function creation statement to return the session ID or location of the current query. All other system variables aren't supported.</p> <h3 id="continuous-queries">Use SQL UDFs in continuous queries</h3> <p>You can call persistent or temporary SQL UDFs in <a href="continuous-queries-introduction">BigQuery continuous queries</a> to encapsulate and reuse custom real-time transformation logic. Only SQL UDFs are supported in continuous queries. JavaScript UDFs, <a href="user-defined-functions-python">Python UDFs</a>, <a href="remote-functions">remote functions</a>, and <a href="user-defined-aggregates">user-defined aggregate functions</a> aren't supported.</p> <p>When you use a SQL UDF in a continuous query, the UDF's SQL expression must adhere to all <a href="continuous-queries-introduction#limitations">continuous query limitations</a>. In addition, if you update or delete a persistent SQL UDF while a continuous query that references it is running, BigQuery terminates the continuous query job. For more information and examples, see <a href="continuous-queries#use-sql-udfs">Use SQL UDFs</a>.</p> <h2 id="javascript-udf-structure">JavaScript UDFs</h2> <p>A JavaScript UDF lets you call code written in JavaScript from a SQL query. JavaScript UDFs typically consume more slot resources as compared to standard SQL queries, decreasing job performance. If the function can be expressed in SQL, it is often more optimal to run the code as a standard SQL query job.</p> <p>The following example shows a JavaScript UDF. The JavaScript code is quoted within a <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/lexical#string_and_bytes_literals">raw string</a>.</p> 
+<pre>CREATE TEMP FUNCTION multiplyInputs(x FLOAT64, y FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS r"""
+  return x*y;
+""";
+
+WITH numbers AS
+  (SELECT 1 AS x, 5 as y
+  UNION ALL
+  SELECT 2 AS x, 10 as y
+  UNION ALL
+  SELECT 3 as x, 15 as y)
+SELECT x, y, multiplyInputs(x, y) AS product
+FROM numbers;</pre> <p>This example produces the following output:</p> 
+<pre>+-----+-----+--------------+
+| x   | y   | product      |
++-----+-----+--------------+
+| 1   | 5   | 5            |
+| 2   | 10  | 20           |
+| 3   | 15  | 45           |
++-----+-----+--------------+
+</pre> <p>The next example sums the values of all fields named <code translate="no" dir="ltr">foo</code> in the given JSON string.</p> 
+<pre>CREATE TEMP FUNCTION SumFieldsNamedFoo(json_row STRING)
+RETURNS FLOAT64
+LANGUAGE js
+AS r"""
+  function SumFoo(obj) {
+    var sum = 0;
+    for (var field in obj) {
+      if (obj.hasOwnProperty(field) &amp;&amp; obj[field] != null) {
+        if (typeof obj[field] == "object") {
+          sum += SumFoo(obj[field]);
+        } else if (field == "foo") {
+          sum += obj[field];
+        }
+      }
+    }
+    return sum;
+  }
+  var row = JSON.parse(json_row);
+  return SumFoo(row);
+""";
+
+WITH Input AS (
+  SELECT
+    STRUCT(1 AS foo, 2 AS bar, STRUCT('foo' AS x, 3.14 AS foo) AS baz) AS s,
+    10 AS foo
+  UNION ALL
+  SELECT
+    NULL,
+    4 AS foo
+  UNION ALL
+  SELECT
+    STRUCT(NULL, 2 AS bar, STRUCT('fizz' AS x, 1.59 AS foo) AS baz) AS s,
+    NULL AS foo
+)
+SELECT
+  TO_JSON_STRING(t) AS json_row,
+  SumFieldsNamedFoo(TO_JSON_STRING(t)) AS foo_sum
+FROM Input AS t;</pre> <p>The example produces the following output:</p> 
+<pre>+---------------------------------------------------------------------+---------+
+| json_row                                                            | foo_sum |
++---------------------------------------------------------------------+---------+
+| {"s":{"foo":1,"bar":2,"baz":{"x":"foo","foo":3.14}},"foo":10}       | 14.14   |
+| {"s":null,"foo":4}                                                  | 4       |
+| {"s":{"foo":null,"bar":2,"baz":{"x":"fizz","foo":1.59}},"foo":null} | 1.59    |
++---------------------------------------------------------------------+---------+
+</pre> <h3 id="supported-javascript-udf-data-types">Supported JavaScript UDF data types</h3> <p>Some SQL types have a direct mapping to JavaScript types, but others don't. BigQuery represents types in the following manner:</p> <table> <tr> <th>BigQuery data type</th> <th>JavaScript data type</th> </tr> <tr> <td>ARRAY</td> <td>ARRAY</td> </tr> <tr> <td>BOOL</td> <td>BOOLEAN</td> </tr> <tr> <td>BYTES</td> <td>base64-encoded STRING</td> </tr> <tr> <td>FLOAT64</td> <td>NUMBER</td> </tr> <tr> <td>NUMERIC, BIGNUMERIC</td> <td>If a NUMERIC or BIGNUMERIC value can be represented exactly as an <a href="https://en.wikipedia.org/wiki/Floating-point_arithmetic#IEEE_754:_floating_point_in_modern_computers">IEEE 754 floating-point</a> value and has no fractional part, the value is encoded as a Number. These values are in the range [-2<sup>53</sup>, 2<sup>53</sup>]. Otherwise, the value is encoded as a string.</td> </tr> <tr> <td>STRING</td> <td>STRING</td> </tr> <tr> <td>STRUCT</td> <td>OBJECT where each STRUCT field is a named field</td> </tr> <tr> <td>TIMESTAMP</td> <td>DATE with a microsecond field containing the <code translate="no" dir="ltr">microsecond</code> fraction of the timestamp</td> </tr> <tr> <td>DATE</td> <td>DATE</td> </tr> <tr> <td>JSON</td> <td> <p>JSON OBJECTS, ARRAYS, and VALUES are converted into equivalent JavaScript OBJECTS, ARRAYS, and VALUES. </p> <p>JavaScript does not support INT64 values. Only JSON numbers in the range [-2<sup>53</sup>, 2<sup>53</sup>] are converted exactly. Otherwise, the numeric value is rounded, which could result in a loss of precision.</p> </td> </tr> </table> <p>Because JavaScript does not support a 64-bit integer type, <code translate="no" dir="ltr">INT64</code> is unsupported as an input type for JavaScript UDFs. Instead, use <code translate="no" dir="ltr">FLOAT64</code> to represent integer values as a number, or <code translate="no" dir="ltr">STRING</code> to represent integer values as a string.</p> <p>BigQuery does support <code translate="no" dir="ltr">INT64</code> as a return type in JavaScript UDFs. In this case, the JavaScript function body can return either a JavaScript Number or a String. BigQuery then converts either of these types to <code translate="no" dir="ltr">INT64</code>.</p> <p>If the return value of the JavaScript UDF is a <a href="https://tc39.es/ecma262/#sec-promise-objects"><code translate="no" dir="ltr">
+Promise</code></a>, BigQuery waits for the <code translate="no" dir="ltr">Promise</code> until <code translate="no" dir="ltr">Promise</code> is settled. If the <code translate="no" dir="ltr">Promise</code> settles into a fulfilled state, BigQuery returns its result. If the <code translate="no" dir="ltr">Promise</code> settles into a rejected state, BigQuery returns an error.</p> <h3 id="quoting-rules">Quote rules</h3> <p>You must enclose JavaScript code in quotes. For one line code snippets, you can use a standard quoted string:</p> 
+<pre>CREATE TEMP FUNCTION plusOne(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS "return x+1;";
+
+SELECT val, plusOne(val) AS result
+FROM UNNEST([1, 2, 3, 4, 5]) AS val;</pre> <p>This example produces the following output:</p> 
+<pre>+-----------+-----------+
+| val       | result    |
++-----------+-----------+
+| 1         | 2.0       |
+| 2         | 3.0       |
+| 3         | 4.0       |
+| 4         | 5.0       |
+| 5         | 6.0       |
++-----------+-----------+
+</pre> <p>In cases where the snippet contains quotes, or consists of multiple lines, use triple-quoted blocks:</p> 
+<pre>CREATE TEMP FUNCTION customGreeting(a STRING)
+RETURNS STRING
+LANGUAGE js
+AS r"""
+  var d = new Date();
+  if (d.getHours() &lt; 12) {
+    return 'Good Morning, ' + a + '!';
+  } else {
+    return 'Good Evening, ' + a + '!';
+  }
+""";
+
+SELECT customGreeting(names) AS everyone
+FROM UNNEST(['Hannah', 'Max', 'Jakob']) AS names;</pre> <p>This example produces the following output:</p> 
+<pre>
++-----------------------+
+| everyone              |
++-----------------------+
+| Good Morning, Hannah! |
+| Good Morning, Max!    |
+| Good Morning, Jakob!  |
++-----------------------+
+</pre> <h3 id="including-javascript-libraries">Include JavaScript libraries</h3> <p>You can extend your JavaScript UDFs using the <code translate="no" dir="ltr">OPTIONS</code> section. This section lets you specify external code libraries for the UDF.</p> 
+<pre>CREATE TEMP FUNCTION myFunc(a FLOAT64, b STRING)
+RETURNS STRING
+LANGUAGE js
+  OPTIONS (
+    library=['gs://my-bucket/path/to/lib1.js', 'gs://my-bucket/path/to/lib2.js'])
+AS r"""
+  // Assumes 'doInterestingStuff' is defined in one of the library files.
+  return doInterestingStuff(a, b);
+""";
+
+SELECT myFunc(3.14, 'foo');</pre> <p>In the preceding example, code in <code translate="no" dir="ltr">lib1.js</code> and <code translate="no" dir="ltr">lib2.js</code> is available to any code in the <code translate="no" dir="ltr">[external_code]</code> section of the UDF.</p> <h3 id="best-practices-for-javascript-udfs">Best practices for JavaScript UDFs</h3> <p><strong>Prefilter your input</strong></p> <p>If your input can be filtered down before being passed to a JavaScript UDF, your query might be faster and cheaper.</p> <p><strong>Avoid persistent mutable state</strong></p> <p>Don't store or access mutable state across JavaScript UDF calls. For example, avoid the following pattern:</p> 
+<pre>-- Avoid this pattern
+CREATE FUNCTION temp.mutable()
+RETURNS INT64
+LANGUAGE js
+AS r"""
+  var i = 0; // Mutable state
+  function dontDoThis() {
+    return ++i;
+  }
+  return dontDoThis()
+""";</pre> <p><strong>Use memory efficiently</strong></p> <p>The JavaScript processing environment has limited memory available per query. JavaScript UDF queries that accumulate too much local state might fail due to memory exhaustion.</p> <h2 id="authorize_routines">Authorize routines</h2> <p>You can authorize UDFs as <em>routines</em>. Authorized routines let you share query results with specific users or groups without granting direct access to the underlying tables. For example, a routine can compute aggregations or look up a table value and use that value in a computation. For more information, see <a href="authorized-routines">Authorized routines</a>.</p> <h2 id="descriptions">Add descriptions to UDFs</h2> <p>To add a description to a UDF, follow these steps:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the BigQuery page in the Google Cloud console.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the left pane, click <span class="material-icons" aria-hidden="true" translate="no">explore</span> <strong>Explorer</strong>:</p> <p><img alt="Highlighted button for the Explorer pane." src="https://docs.cloud.google.com/static/bigquery/images/explorer-tab.png" class="screenshot" width="80%"></p> <p>If you don't see the left pane, click <span class="material-icons" aria-hidden="true" translate="no">last_page</span> <strong>Expand left pane</strong> to open the pane.</p>
+</li> <li><p>In the <strong>Explorer</strong> pane, expand your project and click <strong>Datasets</strong>.</p></li> <li><p>Click your dataset. You can also use the search feature or filters to find your dataset.</p></li> <li><p>Click the <strong>Routines</strong> tab, and then select the function.</p></li> <li><p>In the details pane, click <span class="material-icons" aria-hidden="true" translate="no">mode_edit</span> <strong>Edit Routine Details</strong> to edit the description text.</p></li> <li><p>In the dialog, enter a description in the box or edit the existing description. Click <strong>Save</strong> to save the new description text.</p></li> </ol></section> <section><p class="_code-tab"><strong>SQL</strong></p>
+<p>To update the description of a function, recreate your function using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_function_statement"><code translate="no" dir="ltr">CREATE FUNCTION</code> DDL statement</a> and set the <code translate="no" dir="ltr">description</code> field in the <code translate="no" dir="ltr">OPTIONS</code> list:</p>  <ol> <li>
+<p>In the Google Cloud console, go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the query editor, enter the following statement:</p> 
+<pre data-language="">CREATE OR REPLACE FUNCTION mydataset.my_function(...)
+AS (
+  ...
+) OPTIONS (
+  description = 'DESCRIPTION'
+);</pre> 
+</li> <li>
+<p>Click <span class="material-icons" aria-hidden="true" translate="no">play_circle</span> <strong>Run</strong>.</p> 
+</li> </ol> <p>For more information about how to run queries, see <a href="running-queries#queries">Run an interactive query</a>.</p></section> </div> <h2 id="custom-mask">Create custom masking routines</h2> <aside class="note"><strong>Note:</strong><span> This feature may not be available when using reservations that are created with certain BigQuery editions. For more information about which features are enabled in each edition, see <a href="editions-intro">Introduction to BigQuery editions</a>.</span></aside> <p>You can create UDFs for use with <a href="column-data-masking-intro#custom_mask">custom masking routines</a>. You should create dedicated datasets and set up proper IAM permissions for managing masking UDFs. Custom masking routines must meet the following requirements:</p> <ul> <li>The custom masking routine must be a SQL UDF.</li> <li>In the function <code translate="no" dir="ltr">OPTIONS</code>, the <code translate="no" dir="ltr">data_governance_type</code> option must be set to <code translate="no" dir="ltr">DATA_MASKING</code>.</li> <li>Custom masking routines support the following functions: <ul> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#aeaddecrypt_bytes"><code translate="no" dir="ltr">AEAD.DECRYPT_BYTES</code></a> AEAD encryption function with <code translate="no" dir="ltr">KEYS.KEYSET_CHAIN</code> (raw key usage not supported)</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#aeaddecrypt_string"><code translate="no" dir="ltr">AEAD.DECRYPT_STRING</code></a> AEAD encryption function with <code translate="no" dir="ltr">KEYS.KEYSET_CHAIN</code> (raw key usage not supported)</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#aeadencrypt"><code translate="no" dir="ltr">AEAD.ENCRYPT</code></a> AEAD encryption function with keyset_chain (raw key usage not supported)</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/conversion_functions#cast"><code translate="no" dir="ltr">CAST</code></a> conversion function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#concat"><code translate="no" dir="ltr">CONCAT</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/datetime_functions#current_datetime"><code translate="no" dir="ltr">CURRENT_DATETIME</code></a> datetime function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions#current_date"><code translate="no" dir="ltr">CURRENT_DATE</code></a> date function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#current_timestamp"><code translate="no" dir="ltr">CURRENT_TIMESTAMP</code></a> timestamp function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/time_functions#current_time"><code translate="no" dir="ltr">CURRENT_TIME</code></a> time function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#deterministic_decrypt_bytes"><code translate="no" dir="ltr">DETERMINISTIC_DECRYPT_BYTES</code></a> AEAD encryption function with <code translate="no" dir="ltr">KEYS.KEYSET_CHAIN</code> (raw key usage not supported)</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#deterministic_decrypt_string"><code translate="no" dir="ltr">DETERMINISTIC_DECRYPT_STRING</code></a> AEAD encryption function with <code translate="no" dir="ltr">KEYS.KEYSET_CHAIN</code> (raw key usage not supported)</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#deterministic_encrypt"><code translate="no" dir="ltr">DETERMINISTIC_ENCRYPT</code></a> AEAD encryption function with <code translate="no" dir="ltr">KEYS.KEYSET_CHAIN</code> (raw key usage not supported)</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions#farm_fingerprint"><code translate="no" dir="ltr">FARM_FINGERPRINT</code></a> hash function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#from_base32"><code translate="no" dir="ltr">FROM_BASE32</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#from_base64"><code translate="no" dir="ltr">FROM_BASE64</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#from_hex"><code translate="no" dir="ltr">FROM_HEX</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/utility-functions#generate_uuid"><code translate="no" dir="ltr">GENERATE_UUID</code></a> utility function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aead_encryption_functions#keyskeyset_chain"><code translate="no" dir="ltr">KEYS.KEYSET_CHAIN</code></a> AEAD encryption function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#length"><code translate="no" dir="ltr">LENGTH</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#lower"><code translate="no" dir="ltr">LOWER</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#lpad"><code translate="no" dir="ltr">LPAD</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#ltrim"><code translate="no" dir="ltr">LTRIM</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions#md5"><code translate="no" dir="ltr">MD5</code></a> hash function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#regexp_replace"><code translate="no" dir="ltr">REGEXP_REPLACE</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#regexp_extract"><code translate="no" dir="ltr">REGEXP_EXTRACT</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#replace"><code translate="no" dir="ltr">REPLACE</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#rpad"><code translate="no" dir="ltr">RPAD</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#rtrim"><code translate="no" dir="ltr">RTRIM</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/conversion_functions#safe_casting"><code translate="no" dir="ltr">SAFE_CAST</code></a> conversion function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions#sha1"><code translate="no" dir="ltr">SHA1</code></a> hash function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions#sha256"><code translate="no" dir="ltr">SHA256</code></a> hash function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions#sha512"><code translate="no" dir="ltr">SHA512</code></a> hash function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#starts_with"><code translate="no" dir="ltr">STARTS_WITH</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#substring"><code translate="no" dir="ltr">SUBSTRING</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#substr"><code translate="no" dir="ltr">SUBSTR</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#to_base32"><code translate="no" dir="ltr">TO_BASE32</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#to_base64"><code translate="no" dir="ltr">TO_BASE64</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#to_hex"><code translate="no" dir="ltr">TO_HEX</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#trim"><code translate="no" dir="ltr">TRIM</code></a> string function</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#upper"><code translate="no" dir="ltr">UPPER</code></a> string function </li> </ul>
+</li> <li>Custom masking routines can accept either no inputs or one input within <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types">BigQuery data types</a>, with the exception of <code translate="no" dir="ltr">GEOGRAPHY</code> and <code translate="no" dir="ltr">STRUCT</code>. <code translate="no" dir="ltr">GEOGRAPHY</code> and <code translate="no" dir="ltr">STRUCT</code> are not supported for custom masking routines.</li> <li>
+<a href="user-defined-functions#templated-sql-udf-parameters">Templated SQL UDF parameters</a> are not supported.</li> <li>When an input is provided, the input and output data types must be the same.</li> <li>An output type must be provided.</li> <li>No other UDFs, subqueries, tables, or views can be referenced in the definition body.</li> <li>After creating a masking routine, the routine cannot be changed to a standard function. This means that if the <code translate="no" dir="ltr">data_governance_type</code> option is set to <code translate="no" dir="ltr">DATA_MASKING</code>, then you cannot change <code translate="no" dir="ltr">data_governance_type</code> using DDL statements or API calls.</li> <li>Custom masking routines support <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/conditional_expressions#case">CASE</a> and <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/conditional_expressions#case_expr">CASE expr</a> statements. Following operators can be used with <code translate="no" dir="ltr">CASE</code> and <code translate="no" dir="ltr">CASE expr</code> statements: <ul> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/operators#comparison_operators"><code translate="no" dir="ltr">Comparison Operators</code></a> - <code translate="no" dir="ltr">&lt;</code>, <code translate="no" dir="ltr">&lt;=</code>, <code translate="no" dir="ltr">&gt;</code>, <code translate="no" dir="ltr">&gt;=</code>, <code translate="no" dir="ltr">=</code>, <code translate="no" dir="ltr">!=</code>, <code translate="no" dir="ltr">IN</code>
+</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/operators#logical_operators"><code translate="no" dir="ltr">Logical Operators</code></a> - <code translate="no" dir="ltr">AND</code>, <code translate="no" dir="ltr">OR</code>, <code translate="no" dir="ltr">NOT</code>
+</li> <li><a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/operators#is_operators"><code translate="no" dir="ltr">IS Operator</code></a></li> </ul>
+</li> </ul> <p>For example, a masking routine that replaces a user's social security number with <code translate="no" dir="ltr">XXX-XX-XXXX</code> might look as follows:</p> 
+
+<pre>  CREATE OR REPLACE FUNCTION SSN_Mask(ssn STRING) RETURNS STRING
+  OPTIONS (data_governance_type="DATA_MASKING") AS (
+  SAFE.REGEXP_REPLACE(ssn, '[0-9]', 'X') # 123-45-6789 -&gt; XXX-XX-XXXX
+  );</pre> <p>The following example hashes with user provided <a href="https://en.wikipedia.org/wiki/Salt_(cryptography)">salt</a>, using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions#sha256"><code translate="no" dir="ltr">SHA256</code></a> function:</p> 
+<pre>CREATE OR REPLACE FUNCTION `project.dataset.masking_routine1`(
+  ssn STRING)
+RETURNS STRING OPTIONS (data_governance_type = 'DATA_MASKING')
+AS (
+  CAST(SHA256(CONCAT(ssn, 'salt')) AS STRING format 'HEX')
+);</pre> <p>The following example masks a <code translate="no" dir="ltr">DATETIME</code> column with a constant value:</p> 
+<pre>CREATE OR REPLACE FUNCTION `project.dataset.masking_routine2`(
+  column DATETIME)
+RETURNS DATETIME OPTIONS (data_governance_type = 'DATA_MASKING')
+AS (
+  SAFE_CAST('2023-09-07' AS DATETIME)
+);</pre> <p><strong>As a best practice, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/functions-reference#safe_prefix"><code translate="no" dir="ltr">SAFE</code></a> prefix wherever possible to avoid exposing raw data through error messages. </strong></p> <p>After you create the custom masking routine, it's available as a masking rule in <a href="column-data-masking#create_data_policies">Create data policies</a>.</p> <h2 id="community-contributed_functions">Community-contributed functions</h2> <p>Community contributed UDFs are available in the <code translate="no" dir="ltr">bigquery-public-data.persistent_udfs</code> public dataset and the open source <a href="https://github.com/GoogleCloudPlatform/bigquery-utils"><code translate="no" dir="ltr">bigquery-utils</code> GitHub repository</a>. You can see all the <a href="https://github.com/GoogleCloudPlatform/bigquery-utils/tree/master/udfs/community">community UDFs</a> in the Google Cloud console by <a href="quickstarts/query-public-dataset-console#open_a_public_dataset">starring</a> the <code translate="no" dir="ltr">bigquery-public-data</code> project in the <strong>Explorer</strong> pane, and then expanding the nested <code translate="no" dir="ltr">persistent_udfs</code> dataset within that project.</p> <h3 id="vpc">Allow access to community-contributed functions within a VPC Service Controls perimeter</h3> <p>For projects where VPC Service Controls is enabled and BigQuery is a protected service, you must define an egress rule to the <code translate="no" dir="ltr">bigquery-public-data</code> project (Project ID: 1057666841514).</p> <p>This rule must enable the following operations:</p> <ul> <li>
+<code translate="no" dir="ltr">bigquery.routines.get</code> (for using routines)</li> <li>
+<code translate="no" dir="ltr">bigquery.tables.getData</code> (for querying BigQuery tables)</li> </ul> <p>The following code shows an example YAML config:</p> 
+<pre>  - egressFrom:
+      identityType: ANY_IDENTITY
+    egressTo:
+      operations:
+      - serviceName: 'bigquery.googleapis.com'
+        methodSelectors:
+        - permission: 'bigquery.routines.get'
+        - permission: 'bigquery.tables.getData'
+      resources:
+      - projects/1057666841514 # bigquery-public-data
+</pre> <p>If you want to contribute to the UDFs in this repository, see <a href="https://github.com/GoogleCloudPlatform/bigquery-utils/blob/master/udfs/CONTRIBUTING.md">Contributing UDFs</a> for instructions.</p> <h2 id="unified_access_to_routines_across_multiple_regions">Unified access to routines across multiple regions</h2> <p>To use UDFs in queries across multiple regions, the UDF must be available in every region where a query containing the UDF is run. Therefore, you should create and maintain UDFs in any region where you might use the UDF in a query. Even if your tables are identical, you must maintain two versions of the function. For example, if you store your sales data in both the <code translate="no" dir="ltr">EU</code> and <code translate="no" dir="ltr">US</code> multi-regions, then you should maintain a version of the function in each region. For example:</p> <p>A query in <code translate="no" dir="ltr">EU</code> multi-region: </p>
+
+<pre>  SELECT
+    id,
+    europe_dataset.my_function(value)
+  FROM
+    sales;</pre> <p>A query in <code translate="no" dir="ltr">US</code> multi-region: </p>
+
+<pre>  SELECT
+    id,
+    us_dataset.my_function(value)
+  FROM
+    sales;</pre> <p>Additionally, when the definition of the function changes, you must update it in all regions.</p> <p>To make your UDFs region-independent, you can use <a href="data-replication">cross-region dataset replication</a>:</p> <ol> <li>
+<a href="datasets">Create a new dedicated dataset</a>, for example <code translate="no" dir="ltr">my_utils</code>, to store all your necessary UDFs. Remember that any tables added to this dataset will be replicated, which will increase the cost. However, replicating UDFs and procedures does not incur any additional cost.</li> <li>Add all your UDF to the new dataset. This can also include community UDFs such as <code translate="no" dir="ltr">bqutil</code> copied from <a href="https://github.com/GoogleCloudPlatform/bigquery-utils/tree/master/udfs">GitHub</a>.</li> <li>
+<a href="data-replication#replicate_a_dataset">Enable dataset replication</a>. Configure this dataset to be replicated to all of the regions where you need to execute queries that call these UDFs. This will copy your functions to these regions and keep them synchronized.</li> </ol> <p>When you run a query, BigQuery automatically uses the local version of the UDF from the local dataset replica without your specifying the region where the function is defined, making your queries portable across different locations. For example:</p> 
+<pre>  SELECT
+    id,
+    my_utils.my_function(value)
+  FROM
+    sales;</pre> <h2 id="limitations">Limitations</h2> <p>The following limitations apply to temporary and persistent user-defined functions:</p> <ul> <li>The DOM objects <code translate="no" dir="ltr">Window</code>, <code translate="no" dir="ltr">Document</code>, and <code translate="no" dir="ltr">Node</code>, and functions that require them, are not supported.</li> <li>JavaScript functions operate within a sandboxed environment, and those functions that rely on underlying system code might fail due to restricted system calls.</li> <li>A JavaScript UDF can time out and prevent your query from completing. Timeouts can be as short as 5 minutes, but can vary depending on several factors, including how much user CPU time your function consumes and how large your inputs and outputs to the JavaScript function are.</li> <li>Bitwise operations in JavaScript handle only the most significant 32 bits.</li> <li>UDFs are subject to certain rate limits and quota limits. For more information, see <a href="https://docs.cloud.google.com/bigquery/quotas#udf_limits">UDF limits</a>.</li> <li>In <a href="continuous-queries-introduction">continuous queries</a>, only SQL UDFs are supported. JavaScript UDFs aren't supported in continuous queries. For more information, see <a href="continuous-queries#use-sql-udfs">Use SQL UDFs</a>.</li> </ul> <p>The following limitations apply to persistent user-defined functions:</p> <ul> <li>Each dataset can only contain one persistent UDF with the same name. However, you can create a UDF whose name is the same as the name of a table in the same dataset.</li> <li>When referencing a persistent UDF from another persistent UDF or a logical view, you must qualify the name with the dataset. For example:<br> <code translate="no" dir="ltr">CREATE FUNCTION mydataset.referringFunction()
+    AS (mydataset.referencedFunction());</code>
+</li> <li>Persistent UDFs are safe to call when shared between owners. UDFs cannot mutate data, talk to external systems, or send logs to Google Cloud Observability or similar applications.</li> </ul> <p>The following limitations apply to temporary user-defined functions. </p>
+<ul> <li>When creating a temporary UDF, <code translate="no" dir="ltr">function_name</code> cannot contain periods.</li> <li>Views and persistent UDFs cannot reference temporary UDFs.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/user-defined-functions" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/user-defined-functions</a>
+  </p>
+</div>

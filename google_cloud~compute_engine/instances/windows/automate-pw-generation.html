@@ -1,0 +1,839 @@
+<h1>Automating Windows password generation</h1>  <p>The <code translate="no" dir="ltr">gcloud compute reset-windows-password</code> command allows a user with write access to the Compute Engine project to securely retrieve passwords for accounts on Windows instances.</p> <p>The command does this by sending a username and an RSA public key to the instance. The agent running on the instance then does one of the following:</p> <ul> <li>Creates an account on the instance for that username and generates a random password.</li> <li>Resets the password to a random value if the account already exists.</li> </ul> <p>The agent running on the instance encrypts the password with the provided public key and sends it back to the client to be decrypted by the corresponding private key.</p> <p>This section describes how this process works and gives you some example scripts that replicate these steps programmatically. If you want to manually follow these steps, read the <a href="#manual_instructions">Manual instructions</a> section.</p> <h2 id="byb">Before you begin</h2> <ul> <li>Create a <a href="../windows">Windows instance</a>. </li>
+<li> If you haven't already, set up <a href="../../authentication">authentication</a>. Authentication verifies your identity for access to Google Cloud services and APIs. To run code or samples from a local development environment, you can authenticate to Compute Engine by selecting one of the following options: <p>Select the tab for how you plan to use the samples on this page:</p> <div class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Console</strong></p> <p> When you use the Google Cloud console to access Google Cloud services and APIs, you don't need to set up authentication. </p> </section> <section> <p class="_code-tab"><strong>gcloud</strong></p> <ol>
+<li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. After installation, <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the Google Cloud CLI by running the following command: </p> 
+<pre data-language="bash">gcloud init</pre> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li>
+<li>
+<a href="../../gcloud-compute#set_default_zone_and_region_in_your_local_client"> Set a default region and zone</a>.</li>
+</ol> </section> <section> <p class="_code-tab"><strong>REST</strong></p> <p> To use the REST API samples on this page in a local development environment, you use the credentials you provide to the gcloud CLI. </p> <ol> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </ol> <p> For more information, see <a href="https://docs.cloud.google.com/docs/authentication/rest">Authenticate for using REST</a> in the Google Cloud authentication documentation. </p> </section> </div> </li> </ul> <h2 id="automate_password_generation">Automate password generation</h2> <div class="ds-selector-tabs"> <section> <p class="_code-tab"><strong>Go</strong></p> <br> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">//  Copyright 2018 Google Inc. All Rights Reserved.
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	daisyCompute "github.com/GoogleCloudPlatform/compute-image-tools/daisy/compute"
+	"google.golang.org/api/compute/v1"
+)
+
+var (
+	instance = flag.String("instance", "", "instance to reset password on")
+	zone     = flag.String("zone", "", "zone instance is in")
+	project  = flag.String("project", "", "project instance is in")
+	user     = flag.String("user", "", "user to reset password for")
+)
+
+func getInstanceMetadata(client daisyCompute.Client, i, z, p string) (*compute.Metadata, error) {
+	ins, err := client.GetInstance(p, z, i)
+	if err != nil {
+		return nil, fmt.Errorf("error getting instance: %v", err)
+	}
+
+	return ins.Metadata, nil
+}
+
+type windowsKeyJSON struct {
+	ExpireOn string
+	Exponent string
+	Modulus  string
+	UserName string
+}
+
+func generateKey(priv *rsa.PublicKey, u string) (*windowsKeyJSON, error) {
+	bs := make([]byte, 4)
+	binary.BigEndian.PutUint32(bs, uint32(priv.E))
+
+	return &amp;windowsKeyJSON{
+		ExpireOn: time.Now().Add(5 * time.Minute).Format(time.RFC3339),
+		// This is different than what the other tools produce,
+		// AQAB vs AQABAA==, both are decoded as 65537.
+		Exponent: base64.StdEncoding.EncodeToString(bs),
+		Modulus:  base64.StdEncoding.EncodeToString(priv.N.Bytes()),
+		UserName: u,
+	}, nil
+}
+
+type credsJSON struct {
+	ErrorMessage      string `json:"errorMessage,omitempty"`
+	EncryptedPassword string `json:"encryptedPassword,omitempty"`
+	Modulus           string `json:"modulus,omitempty"`
+}
+
+func getEncryptedPassword(client daisyCompute.Client, i, z, p, mod string) (string, error) {
+	out, err := client.GetSerialPortOutput(p, z, i, 4, 0)
+	if err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(out.Contents, "\n") {
+		var creds credsJSON
+		if err := json.Unmarshal([]byte(line), &amp;creds); err != nil {
+			continue
+		}
+		if creds.Modulus == mod {
+			if creds.ErrorMessage != "" {
+				return "", fmt.Errorf("error from agent: %s", creds.ErrorMessage)
+			}
+			return creds.EncryptedPassword, nil
+		}
+	}
+	return "", errors.New("password not found in serial output")
+}
+
+func decryptPassword(priv *rsa.PrivateKey, ep string) (string, error) {
+	bp, err := base64.StdEncoding.DecodeString(ep)
+	if err != nil {
+		return "", fmt.Errorf("error decoding password: %v", err)
+	}
+	pwd, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, priv, bp, nil)
+	if err != nil {
+		return "", fmt.Errorf("error decrypting password: %v", err)
+	}
+	return string(pwd), nil
+}
+
+func resetPassword(client daisyCompute.Client, i, z, p, u string) (string, error) {
+	md, err := getInstanceMetadata(client, *instance, *zone, *project)
+	if err != nil {
+		return "", fmt.Errorf("error getting instance metadata: %v", err)
+	}
+
+	fmt.Println("Generating public/private key pair")
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", err
+	}
+
+	winKey, err := generateKey(&amp;key.PublicKey, u)
+	if err != nil {
+		return "", err
+	}
+
+	data, err := json.Marshal(winKey)
+	if err != nil {
+		return "", err
+	}
+
+	winKeys := string(data)
+	var found bool
+	for _, mdi := range md.Items {
+		if mdi.Key == "windows-keys" {
+			val := fmt.Sprintf("%s\n%s", *mdi.Value, winKeys)
+			mdi.Value = &amp;val
+			found = true
+			break
+		}
+	}
+	if !found {
+		md.Items = append(md.Items, &amp;compute.MetadataItems{Key: "windows-keys", Value: &amp;winKeys})
+	}
+
+	fmt.Println("Setting new 'windows-keys' metadata")
+	if err := client.SetInstanceMetadata(p, z, i, md); err != nil {
+		return "", err
+	}
+
+	fmt.Println("Fetching encrypted password")
+	var trys int
+	var ep string
+	for {
+		time.Sleep(1 * time.Second)
+		ep, err = getEncryptedPassword(client, i, z, p, winKey.Modulus)
+		if err == nil {
+			break
+		}
+		if trys &gt; 10 {
+			return "", err
+		}
+		trys++
+	}
+
+	fmt.Println("Decrypting password")
+	return decryptPassword(key, ep)
+}
+
+func main() {
+	flag.Parse()
+	if *instance == "" {
+		log.Fatal("-instance flag required")
+	}
+	if *zone == "" {
+		log.Fatal("-zone flag required")
+	}
+	if *project == "" {
+		log.Fatal("-project flag required")
+	}
+	if *user == "" {
+		log.Fatal("-user flag required")
+	}
+
+	ctx := context.Background()
+	client, err := daisyCompute.NewClient(ctx)
+	if err != nil {
+		log.Fatalf("Error creating compute service: %v", err)
+	}
+
+	fmt.Printf("Resetting password on instance %q for user %q\n", *instance, *user)
+	pw, err := resetPassword(client, *instance, *zone, *project, *user)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("- Username: %s\n- Password: %s\n", *user, pw)
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <br> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">#!/usr/bin/env python
+
+# Copyright 2015 Google Inc. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import base64
+import copy
+import datetime
+import json
+import time
+
+# PyCrypto library: https://pypi.python.org/pypi/pycrypto
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.PublicKey import RSA
+from Crypto.Util.number import long_to_bytes
+
+# Google API Client Library for Python:
+# https://developers.google.com/api-client-library/python/start/get_started
+from oauth2client.client import GoogleCredentials
+from googleapiclient.discovery import build
+
+
+def GetCompute():
+    """Get a compute object for communicating with the Compute Engine API."""
+    credentials = GoogleCredentials.get_application_default()
+    compute = build('compute', 'v1', credentials=credentials)
+    return compute
+
+
+def GetInstance(compute, instance, zone, project):
+    """Get the data for a Google Compute Engine instance."""
+    cmd = compute.instances().get(instance=instance, project=project,
+                                  zone=zone)
+    return cmd.execute()
+
+
+def GetKey():
+    """Get an RSA key for encryption."""
+    # This uses the PyCrypto library
+    key = RSA.generate(2048)
+    return key
+
+
+def GetModulusExponentInBase64(key):
+    """Return the public modulus and exponent for the key in bas64 encoding."""
+    mod = long_to_bytes(key.n)
+    exp = long_to_bytes(key.e)
+
+    modulus = base64.b64encode(mod)
+    exponent = base64.b64encode(exp)
+
+    return modulus, exponent
+
+
+def GetExpirationTimeString():
+    """Return an RFC3339 UTC timestamp for 5 minutes from now."""
+    utc_now = datetime.datetime.utcnow()
+    # These metadata entries are one-time-use, so the expiration time does
+    # not need to be very far in the future. In fact, one minute would
+    # generally be sufficient. Five minutes allows for minor variations
+    # between the time on the client and the time on the server.
+    expire_time = utc_now + datetime.timedelta(minutes=5)
+    return expire_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def GetJsonString(user, modulus, exponent, email):
+    """Return the JSON string object that represents the windows-keys entry."""
+    expire = GetExpirationTimeString()
+    data = {'userName': user,
+            'modulus': modulus,
+            'exponent': exponent,
+            'email': email,
+            'expireOn': expire}
+    return json.dumps(data)
+
+
+def UpdateWindowsKeys(old_metadata, metadata_entry):
+    """Return updated metadata contents with the new windows-keys entry."""
+    # Simply overwrites the "windows-keys" metadata entry. Production code may
+    # want to append new lines to the metadata value and remove any expired
+    # entries.
+    new_metadata = copy.deepcopy(old_metadata)
+    new_metadata['items'] = [{
+        'key': "windows-keys",
+        'value': metadata_entry
+    }]
+    return new_metadata
+
+
+def UpdateInstanceMetadata(compute, instance, zone, project, new_metadata):
+    """Update the instance metadata."""
+    cmd = compute.instances().setMetadata(instance=instance, project=project,
+                                          zone=zone, body=new_metadata)
+    return cmd.execute()
+
+
+def GetSerialPortFourOutput(compute, instance, zone, project):
+    """Get the output from serial port 4 from the instance."""
+    # Encrypted passwords are printed to COM4 on the windows server:
+    port = 4
+    cmd = compute.instances().getSerialPortOutput(instance=instance,
+                                                  project=project,
+                                                  zone=zone, port=port)
+    output = cmd.execute()
+    return output['contents']
+
+
+def GetEncryptedPasswordFromSerialPort(serial_port_output, modulus):
+    """Find and return the correct encrypted password, based on the modulus."""
+    # In production code, this may need to be run multiple times if the output
+    # does not yet contain the correct entry.
+    output = serial_port_output.split('\n')
+    for line in reversed(output):
+        try:
+            entry = json.loads(line)
+            if modulus == entry['modulus']:
+                return entry['encryptedPassword']
+        except ValueError:
+            pass
+
+
+def DecryptPassword(encrypted_password, key):
+    """Decrypt a base64 encoded encrypted password using the provided key."""
+    decoded_password = base64.b64decode(encrypted_password)
+    cipher = PKCS1_OAEP.new(key)
+    password = cipher.decrypt(decoded_password)
+    return password
+
+
+def main(instance, zone, project, user, email):
+    # Setup
+    compute = GetCompute()
+    key = GetKey()
+    modulus, exponent = GetModulusExponentInBase64(key)
+
+    # Get existing metadata
+    instance_ref = GetInstance(compute, instance, zone, project)
+    old_metadata = instance_ref['metadata']
+
+    # Create and set new metadata
+    metadata_entry = GetJsonString(user, modulus,
+                                   exponent, email)
+    new_metadata = UpdateWindowsKeys(old_metadata, metadata_entry)
+    result = UpdateInstanceMetadata(compute, instance, zone, project,
+                                    new_metadata)
+
+    # For this sample code, just sleep for 30 seconds instead of checking for
+    # responses. In production code, this should monitor the status of the
+    # metadata update operation.
+    time.sleep(30)
+
+    # Get and decrypt password from serial port output
+    serial_port_output = GetSerialPortFourOutput(compute, instance,
+                                                 zone, project)
+    enc_password = GetEncryptedPasswordFromSerialPort(serial_port_output,
+                                                      modulus)
+    password = DecryptPassword(enc_password, key)
+
+    # Display the username, password and IP address for the instance
+    print 'Username:   {0}'.format(user)
+    print 'Password:   {0}'.format(password)
+    ip = instance_ref['networkInterfaces'][0]['accessConfigs'][0]['natIP']
+    print 'IP Address: {0}'.format(ip)
+
+
+if __name__ == '__main__':
+    instance = 'my-instance'
+    zone = 'us-central1-a'
+    project = 'my-project'
+    user = 'example-user'
+    email = 'user@example.com'
+    main(instance, zone, project, user, email)
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <br> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">/**
+ * Copyright 2015 Google Inc. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * This package demonstrates how to reset Windows passwords in Java.
+ */
+
+package cloud.google.com.windows.example;
+
+
+import com.google.api.client.auth.oauth2.Credential;
+import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
+import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.json.JsonFactory;
+import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.repackaged.org.apache.commons.codec.binary.Base64;
+import com.google.api.services.compute.Compute;
+import com.google.api.services.compute.model.Instance;
+import com.google.api.services.compute.model.Metadata;
+import com.google.api.services.compute.model.Metadata.Items;
+import com.google.api.services.compute.model.SerialPortOutput;
+import com.google.common.io.BaseEncoding;
+
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+
+import java.math.BigInteger;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.NoSuchAlgorithmException;
+import java.security.Security;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.RSAPublicKeySpec;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.TimeZone;
+
+import javax.crypto.Cipher;
+
+public class ExampleCode {
+
+  public ExampleCode() {}
+
+  // Constants used to configure behavior.
+  private static final String ZONE_NAME = "us-central1-a";
+  private static final String PROJECT_NAME = "example-project-1234";
+  private static final String INSTANCE_NAME = "test-instance";
+  private static final String APPLICATION_NAME = "windows-pw-reset";
+
+  // Constants for configuring user name, email, and SSH key expiration.
+  private static final String USER_NAME = "example_user";
+  private static final String EMAIL = "example_user@test.com";
+
+  // Keys are one-time use, so the metadata doesn't need to stay around for long.
+  // 5 minutes chosen to allow for differences between time on the client
+  // and time on the server.
+  private static final long EXPIRE_TIME = 300000;
+
+  // HttpTransport and JsonFactory used to create the Compute object.
+  private static HttpTransport httpTransport;
+  private static final JsonFactory JSON_FACTORY = JacksonFactory.getDefaultInstance();
+
+
+
+  public static void main(String[] args) {
+    ExampleCode ec = new ExampleCode();
+    try {
+      // Initialize Transport object.
+      httpTransport = GoogleNetHttpTransport.newTrustedTransport();
+
+      // Reset the password.
+      ec.resetPassword();
+    } catch (Exception e) {
+      e.printStackTrace();
+      System.exit(1);
+    }
+  }
+
+  public void resetPassword() throws Exception {
+    // Get credentials to setup a connection with the Compute API.
+    Credential cred = GoogleCredential.getApplicationDefault();
+
+    // Create an instance of the Compute API.
+    Compute compute = new Compute.Builder(httpTransport, JSON_FACTORY, null)
+        .setApplicationName(APPLICATION_NAME).setHttpRequestInitializer(cred).build();
+
+    // Get the instance object to gain access to the instance's metadata.
+    Instance inst = compute.instances().get(PROJECT_NAME, ZONE_NAME, INSTANCE_NAME).execute();
+    Metadata metadata = inst.getMetadata();
+
+    // Generate the public/private key pair for encryption and decryption.
+    KeyPair keys = generateKeys();
+
+    // Update metadata from instance with new windows-keys entry.
+    replaceMetadata(metadata, buildKeyMetadata(keys));
+
+    // Tell Compute Engine to update the instance metadata with our changes.
+    compute.instances().setMetadata(PROJECT_NAME, ZONE_NAME, INSTANCE_NAME, metadata).execute();
+
+    System.out.println("Updating metadata...");
+
+    // Sleep while waiting for metadata to propagate - production code may
+    // want to monitor the status of the metadata update operation.
+    Thread.sleep(30000);
+
+    System.out.println("Getting serial output...");
+
+    // Request the output from serial port 4.
+    // In production code, this operation should be polled.
+    SerialPortOutput output = compute.instances()
+        .getSerialPortOutput(PROJECT_NAME, ZONE_NAME, INSTANCE_NAME).setPort(4).execute();
+
+    // Get the last line - this will be a JSON string corresponding to the
+    // most recent password reset attempt.
+    String[] entries = output.getContents().split("\n");
+    String outputEntry = entries[entries.length - 1];
+
+    // Parse output using the json-simple library.
+    JSONParser parser = new JSONParser();
+    JSONObject passwordDict = (JSONObject) parser.parse(outputEntry);
+
+    String encryptedPassword = passwordDict.get("encryptedPassword").toString();
+
+    // Output user name and decrypted password.
+    System.out.println("\nUser name: " + passwordDict.get("userName").toString());
+    System.out.println("Password: " + decryptPassword(encryptedPassword, keys));
+  }
+
+  private String decryptPassword(String message, KeyPair keys) {
+    try {
+      // Add the bouncycastle provider - the built-in providers don't support RSA
+      // with OAEPPadding.
+      Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+
+      // Get the appropriate cipher instance.
+      Cipher rsa = Cipher.getInstance("RSA/NONE/OAEPPadding", "BC");
+
+      // Add the private key for decryption.
+      rsa.init(Cipher.DECRYPT_MODE, keys.getPrivate());
+
+      // Decrypt the text.
+      byte[] rawMessage = Base64.decodeBase64(message);
+      byte[] decryptedText = rsa.doFinal(rawMessage);
+
+      // The password was encoded using UTF8. Transform into string.
+      return new String(decryptedText, "UTF8");
+    } catch (Exception e) {
+      e.printStackTrace();
+      System.exit(1);
+    }
+    return "";
+  }
+
+  private void replaceMetadata(Metadata input, JSONObject newMetadataItem) {
+    // Transform the JSON object into a string that the API can use.
+    String newItemString = newMetadataItem.toJSONString();
+
+    // Get the list containing all of the Metadata entries for this instance.
+    List&lt;Items&gt; items = input.getItems();
+
+    // If the instance has no metadata, items can be returned as null.
+    if (items == null)
+    {
+      items = new LinkedList&lt;Items&gt;();
+      input.setItems(items);
+    }
+
+    // Find the "windows-keys" entry and update it.
+    for (Items item : items) {
+      if (item.getKey().compareTo("windows-keys") == 0) {
+        // Replace item's value with the new entry.
+        // To prevent race conditions, production code may want to maintain a
+        // list where the oldest entries are removed once the 32KB limit is
+        // reached for the metadata entry.
+        item.setValue(newItemString);
+        return;
+      }
+    }
+
+    // "windows.keys" entry doesn't exist in the metadata - append it.
+    // This occurs when running password-reset for the first time on an instance.
+    items.add(new Items().setKey("windows-keys").setValue(newItemString));
+  }
+
+  private KeyPair generateKeys() throws NoSuchAlgorithmException {
+    KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
+
+    // Key moduli for encryption/decryption are 2048 bits long.
+    keyGen.initialize(2048);
+
+    return keyGen.genKeyPair();
+  }
+
+
+  @SuppressWarnings("unchecked")
+  private JSONObject buildKeyMetadata(KeyPair pair) throws NoSuchAlgorithmException,
+      InvalidKeySpecException {
+    // Object used for storing the metadata values.
+    JSONObject metadataValues = new JSONObject();
+
+    // Encode the public key into the required JSON format.
+    metadataValues.putAll(jsonEncode(pair));
+
+    // Add username and email.
+    metadataValues.put("userName", USER_NAME);
+    metadataValues.put("email", EMAIL);
+
+    // Create the date on which the new keys expire.
+    Date now = new Date();
+    Date expireDate = new Date(now.getTime() + EXPIRE_TIME);
+
+    // Format the date to match rfc3339.
+    SimpleDateFormat rfc3339Format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
+    rfc3339Format.setTimeZone(TimeZone.getTimeZone("UTC"));
+    String dateString = rfc3339Format.format(expireDate);
+
+    // Encode the expiration date for the returned JSON dictionary.
+    metadataValues.put("expireOn", dateString);
+
+    return metadataValues;
+  }
+
+  @SuppressWarnings("unchecked")
+  private JSONObject jsonEncode(KeyPair keys) throws NoSuchAlgorithmException,
+      InvalidKeySpecException {
+    KeyFactory factory = KeyFactory.getInstance("RSA");
+
+    // Get the RSA spec for key manipulation.
+    RSAPublicKeySpec pubSpec = factory.getKeySpec(keys.getPublic(), RSAPublicKeySpec.class);
+
+    // Extract required parts of the key.
+    BigInteger modulus = pubSpec.getModulus();
+    BigInteger exponent = pubSpec.getPublicExponent();
+
+    // Grab an encoder for the modulus and exponent to encode using RFC 3548;
+    // Java SE 7 requires an external library (Google's Guava used here)
+    // Java SE 8 has a built-in Base64 class that can be used instead. Apache also has an RFC 3548
+    // encoder.
+    BaseEncoding stringEncoder = BaseEncoding.base64();
+
+    // Strip out the leading 0 byte in the modulus.
+    byte[] arr = Arrays.copyOfRange(modulus.toByteArray(), 1, modulus.toByteArray().length);
+
+    JSONObject returnJson = new JSONObject();
+
+    // Encode the modulus, add to returned JSON object.
+    String modulusString = stringEncoder.encode(arr).replaceAll("\n", "");
+    returnJson.put("modulus", modulusString);
+
+    // Encode exponent, add to returned JSON object.
+    String exponentString = stringEncoder.encode(exponent.toByteArray()).replaceAll("\n", "");
+    returnJson.put("exponent", exponentString);
+
+    return returnJson;
+  }
+}
+</pre> </div> </section> </div> <h2 id="manual_instructions">Manual instructions</h2> <p>The steps in this manual guide use OpenSSL for the cryptographic functions and the Bash shell/Linux tools for some other functions, but many other implementations are possible.</p> <ol> <li>
+<p><strong>Generate a 2048-bit RSA key pair.</strong> In OpenSSL, generate this key pair by running:</p> 
+<pre>
+$ openssl genrsa -out private_key 2048
+</pre> <p>This creates a private key file named private_key with contents that look like the following:</p> 
+<pre>
+$ cat private_key
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAwgsquN4IBNPqIUnu+h/5Za1kujb2YRhX1vCQVQAkBwnWigcC
+qOBVfRa5JoZfx6KIvEXjWqa77jPvlsxM4WPqnDIM2qiK36up3SKkYwFjff6F2ni/
+ry8vrwXCX3sGZ1hbIHlK0O012HpA3ISeEswVZmX2X67naOvJXfY5v0hGPWqCADao
++xVxrmxsZD4IWnKl1UaZzI5lhAzr8fw6utHwx1EZ/MSgsEki6tujcZfN+GUDRnmJ
+GQSnPTXmsf7Q4DKreTZk49cuyB3prV91S0x3DYjCUpSXrkVy1Ha5XicGD/q+ystu
+FsJnrrhbNXJbpSjM6sjo/aduAkZJl4FmOt0R7QIDAQABAoIBAQCsT6hHc/tg9iIC
+H5pUiRI55Uj+R5JwVGKkXwl8Qdy8V1MpTOJivpuLsiMGf+sL51xO/CzRsiBOfdYz
+bgaTW9vZimR5w5NW3iTAV2Ps+y2zk9KfV/y3/0nzvUSG70OXgBGj+7GhaBQZwS5Z
+5HZOsOYMAV1QSIv8Uu2FQAK1xuOA4seJ/NK42iXgVB1XvYe2AxCWNqCBJylk9F5N
+8a213oJWw2mwQWCSfZhuvwYRO7w/V+mInKPkKlWvf3SLuMCWeDI8s0jLsJMQ0rbp
+jYXRzc2G+LF1aLxjatiGeLsqfVYerNohufGAajpNkSvcMciDXvD9aJhZqior+x2Q
+rCnMuNRNAoGBAPI6r32wIf8H9GmcvGrXk9OYLq0uJGqAtJDgGmJM5BSX4mlSz+Ni
+SYlQOfi24ykQDo3XbA59Lb6H0L64czi2a3OmpG8s6h4ymp+3cSd1k1AER1oZudwH
+9UScGfSgT/nMgufBwEGlQkCMp5x4Sl20clCHZ49p9eNiXML3wxpCZPIjAoGBAM0T
+NKt/rjqMs0qOWAJKemSPk0zV+1RSjCoOdKC6jmHRGr/MIoKiJLIkywV2m53yv8Wu
+BF3gVUDlwojoOKcVR8588tek5L0j9RshGovKj4Uxz9uPPhzeNnlSA+5PS284VtKz
+LX8xZ/b+MNCyor9jT0qoWylqym0w+M4aFL2tUQSvAoGABJvnQO38B51AIk5QK3xE
+nM8VfEgXe0tNpEAPYHV0FYw6S6S+veXd3lX/dGMOeXaLwFkr/i6Vkz2EVEywLJEU
+BFRUZqUlI0P1OzrDVWvgTLJ4JRe+OJiSKycJO2VdgDRK/Vvra5RYaWADxG9pgtTv
+I+cfqlPq0NPLTg5m0PYYc58CgYBpGt/SygTNA1Hc82mN+wgRxDhVmBJRHGG0KGaD
+/jl9TsOr638AfwPZvdvD+A83+7NoKJEaYCCxu1BiBMsMb263GPkJpvyJKAW2mtfV
+L8MxG9+Rgy/tccJvmaZkHIXoAfMV2DmISBUl1Q/F1thsyQRZmkHmz1Hidsf+MgXR
+VSQCBwKBgQCxwJtGZGPdQbDXcZZtL0yJJIbdt5Q/TrW0es17IPAoze+E6zFg9mo7
+ea9AuGxOGDQwO9n5DBn/3XcSjRnhvXaW60Taz6ZC60Zh/s6IilCmav+n9ewFHJ3o
+AglSJZRJ1Eer0m5m6s2FW5U0Yjthxwkm3WCWS61cOOTvb6xhQ5+WSw==
+-----END RSA PRIVATE KEY-----
+</pre>
+</li> <li>
+<p><strong>Generate a public key.</strong> To create the public key, run:</p> 
+<pre>
+$ openssl rsa -pubout -in private_key -out public_key
+</pre> <p>This creates a public_key file that looks like this:</p> 
+<pre>
+$ cat public_key
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwgsquN4IBNPqIUnu+h/5
+Za1kujb2YRhX1vCQVQAkBwnWigcCqOBVfRa5JoZfx6KIvEXjWqa77jPvlsxM4WPq
+nDIM2qiK36up3SKkYwFjff6F2ni/ry8vrwXCX3sGZ1hbIHlK0O012HpA3ISeEswV
+ZmX2X67naOvJXfY5v0hGPWqCADao+xVxrmxsZD4IWnKl1UaZzI5lhAzr8fw6utHw
+x1EZ/MSgsEki6tujcZfN+GUDRnmJGQSnPTXmsf7Q4DKreTZk49cuyB3prV91S0x3
+DYjCUpSXrkVy1Ha5XicGD/q+ystuFsJnrrhbNXJbpSjM6sjo/aduAkZJl4FmOt0R
+7QIDAQAB
+-----END PUBLIC KEY-----
+</pre>
+</li> <li>
+<p><strong>Extract the modulus and the exponent.</strong> A <a href="https://en.wikipedia.org/wiki/Modular_arithmetic" class="external">modulus</a> and an exponent make up the public and private keys. From the public key, extract the modulus and the exponent:</p> 
+<pre>
+$ openssl rsa -in public_key -pubin -text -noout
+Public-Key: (2048 bit)
+Modulus:
+    00:c2:0b:2a:b8:de:08:04:d3:ea:21:49:ee:fa:1f:
+    f9:65:ad:64:ba:36:f6:61:18:57:d6:f0:90:55:00:
+    24:07:09:d6:8a:07:02:a8:e0:55:7d:16:b9:26:86:
+    5f:c7:a2:88:bc:45:e3:5a:a6:bb:ee:33:ef:96:cc:
+    4c:e1:63:ea:9c:32:0c:da:a8:8a:df:ab:a9:dd:22:
+    a4:63:01:63:7d:fe:85:da:78:bf:af:2f:2f:af:05:
+    c2:5f:7b:06:67:58:5b:20:79:4a:d0:ed:35:d8:7a:
+    40:dc:84:9e:12:cc:15:66:65:f6:5f:ae:e7:68:eb:
+    c9:5d:f6:39:bf:48:46:3d:6a:82:00:36:a8:fb:15:
+    71:ae:6c:6c:64:3e:08:5a:72:a5:d5:46:99:cc:8e:
+    65:84:0c:eb:f1:fc:3a:ba:d1:f0:c7:51:19:fc:c4:
+    a0:b0:49:22:ea:db:a3:71:97:cd:f8:65:03:46:79:
+    89:19:04:a7:3d:35:e6:b1:fe:d0:e0:32:ab:79:36:
+    64:e3:d7:2e:c8:1d:e9:ad:5f:75:4b:4c:77:0d:88:
+    c2:52:94:97:ae:45:72:d4:76:b9:5e:27:06:0f:fa:
+    be:ca:cb:6e:16:c2:67:ae:b8:5b:35:72:5b:a5:28:
+    cc:ea:c8:e8:fd:a7:6e:02:46:49:97:81:66:3a:dd:
+    11:ed
+Exponent: 65537 (0x10001)
+</pre>
+</li> <li>
+<p><strong>Encode the modulus and exponent.</strong> You must extract and base64-encode the modulus and exponent. Before encoding the modulus, remove the leading zero byte from the modulus. By default, the public_key file is already a base64-encoded string of bytes containing the following information:</p> <ul> <li>32 bytes of header information</li> <li>1 byte with the leading zero of the modulus</li> <li>256 bytes of modulus</li> <li>2 bytes of exponent header</li> <li>3 bytes of exponent</li> </ul> <p>The modulus and exponent need to be extracted and encoded separately from the rest of the file's contents. Extract and encode the modulus and exponent using the following commands:</p> 
+<pre>
+$ cat public_key | grep -v -- ----- | base64 -d | dd bs=1 skip=33 count=256 2&gt;/dev/null | base64 -w 0; echo
+        wgsquN4IBNPqIUnu+h/5Za1kujb2YRhX1vCQVQAkBwnWigcCqOBVfRa5JoZfx6KIvEXjWqa77jPvlsx
+M4WPqnDIM2qiK36up3SKkYwFjff6F2ni/ry8vrwXCX3sGZ1hbIHlK0O012HpA3ISeEswVZmX2X67naO
+vJXfY5v0hGPWqCADao+xVxrmxsZD4IWnKl1UaZzI5lhAzr8fw6utHwx1EZ/MSgsEki6tujcZfN+GUDR
+nmJGQSnPTXmsf7Q4DKreTZk49cuyB3prV91S0x3DYjCUpSXrkVy1Ha5XicGD/q+ystuFsJnrrhbNXJb
+pSjM6sjo/aduAkZJl4FmOt0R7Q==
+</pre> 
+<pre>
+$ cat public_key | grep -v -- ----- | base64 -d | dd bs=1 skip=291 count=3 2&gt;/dev/null | base64
+AQAB
+</pre> <p>If you are running into problems encoding the modulus, make sure you have removed the leading zero byte from the modulus before attempting to encode it.</p>
+</li> <li>
+<p><strong>Create a JSON object with a username and public key information.</strong> Create a JSON object with the following data:</p> <ul> <li>
+<code translate="no" dir="ltr">userName</code>: The username to log into the instance.</li> <li>
+<code translate="no" dir="ltr">modulus</code>: The base64 encoded modulus of the public key.</li> <li>
+<code translate="no" dir="ltr">exponent</code>: The base64 encoded exponent of the public key</li> <li>
+<code translate="no" dir="ltr">email</code>: The email address of the user requesting the password. This should be the email address of the Google Account that is authenticated to the API.</li> <li>
+<code translate="no" dir="ltr">expireOn</code>: An <a href="https://tools.ietf.org/html/rfc3339" target="blank" class="external">RFC 3399</a> encoded timestamp of when the key should expire. This should be in UTC time, set approximately five minutes in the future. Since these keys are only used for generating the username and password, they are no longer necessary after the password is created. If a key has no expiration date or the expiration date has already passed, the agent <em>will not</em> use it and will skip over it completely.</li> </ul> <p>For example:</p> 
+<pre>{\"userName\": \"example-user\",  \"modulus\": \"wgsquN4IBNPqIUnu+h/5Za1kujb2YRhX1
+vCQVQAkBwnWigcCqOBVfRa5JoZfx6KIvEXjWqa77jPvlsxM4WPqnDIM2qiK36up3SKkYwFjff6F
+2ni/ry8vrwXCX3sGZ1hbIHlK0O012HpA3ISeEswVZmX2X67naOvJXfY5v0hGPWqCADao+xVxrmx
+sZD4IWnKl1UaZzI5lhAzr8fw6utHwx1EZ/MSgsEki6tujcZfN+GUDRnmJGQSnPTXmsf7Q4DKreT
+Zk49cuyB3prV91S0x3DYjCUpSXrkVy1Ha5XicGD/q+ystuFsJnrrhbNXJbpSjM6sjo/aduAkZJl
+4FmOt0R7Q==\", \"exponent\": \"AQAB\", \"email\": \"example.user@example.com\",
+\"expireOn\": \"2015-04-14T01:37:19Z\"}
+</pre> <p>Note that there should be no newlines in the JSON string.</p>
+</li> <li>
+<p><strong>Add the JSON object to the instance metadata.</strong> Set the instance metadata using the metadata key <code translate="no" dir="ltr">windows-keys</code> and the JSON object as the key value.</p> <p>In order to update instance metadata in the API, you must provide a fingerprint with your request. Get the current fingerprint of the instance by making a GET request to the instance:</p> 
+<pre>GET  https://compute.googleapis.com/compute/v1/projects/myproject/zones/us-central1-f/instances/test-windows-auth
+[..snip..]
+"metadata": {
+"kind": "compute#metadata",
+"fingerprint": "5sFotm8Ee0I=",
+"items": [
+ {
+ …
+ }
+[..snip]..
+</pre> <p>Next, make a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/latest/instances/setMetadata"><code translate="no" dir="ltr">setMetadata</code></a> method, providing the fingerprint and the JSON object you created:</p> 
+<pre>POST https://compute.googleapis.com/compute/v1/projects/myproject/zones/us-central1-f/instances/test-windows-auth/setMetadata
+
+{
+ "fingerprint": "5sFotm8Ee0I=",
+ "items": [
+  {
+   "value": "{\"userName\": \"example-user\",  \"modulus\": \"wgsquN4IBNPqIUnu+h/5Za1kujb2YRhX1vCQVQAkBwnWigcCqOBVfRa5JoZfx6KIvEXjWqa77jPvlsxM4WPqnDIM2qiK36up3SKkYwFjff6F2ni/ry8vrwXCX3sGZ1hbIHlK0O012HpA3ISeEswVZmX2X67naOvJXfY5v0hGPWqCADao+xVxrmxsZD4IWnKl1UaZzI5lhAzr8fw6utHwx1EZ/MSgsEki6tujcZfN+GUDRnmJGQSnPTXmsf7Q4DKreTZk49cuyB3prV91S0x3DYjCUpSXrkVy1Ha5XicGD/q+ystuFsJnrrhbNXJbpSjM6sjo/aduAkZJl4FmOt0R7Q==\", \"exponent\": \"AQAB\", \"email\": \"user@example.com\", \"expireOn': '2015\"04-14T01:37:19Z\"}\n",
+   "key": "windows-keys"
+  } ]
+}
+</pre> <p>The name of the key should be <code translate="no" dir="ltr">windows-keys</code> and the value should be set to one or more JSON strings like the one above. Multiple strings should be separated by newlines. When adding multiple entries, ensure that the metadata value does not exceed 32 KB.</p>
+</li> <li>
+<p><strong>Read the output from serial port number four.</strong> The agent on the instance will automatically take the value of <code translate="no" dir="ltr">windows-keys</code> and create an encrypted password. Read the encrypted password by querying serial port number four. In the API, make a <code translate="no" dir="ltr">GET</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/latest/instances/getSerialPortOutput"><code translate="no" dir="ltr">getSerialPortOutput</code></a> method, passing in <code translate="no" dir="ltr">port=4</code> as a query parameter:</p> 
+<pre>GET https://compute.googleapis.com/compute/v1/projects/myproject/zones/us-central1-f/instances/test-windows-auth/serialPort?port=4
+
+{
+ "kind": "compute#serialPortOutput",
+ "selfLink": "https://www.googleapis.com/compute/v1/projects/myproject/zones/_/instances/test-api-auth/serialPort",
+ "contents": "{\"ready\":true,\"version\":\"Microsoft Windows NT 6.1.7601 Service Pack 1\"}\n{\"encryptedPassword\":\"uiHDEhxyvj6lF5GalH
+ h9TsMZb4bG6Y9qGmFb9S3XI29yvVsDCLdp4IbUg21MncHcaxP0rFu0kyjxlEXDs8y4L1KOhy6iyB42Lh+vZ4XIMjmvU4rZrjsBZ5TxQo9hL0lBW7o3FRM\\/UIXCeRk39ObUl2A
+ jDmQ0mcw1byJI5v9KVJnNMaHdRCy\\/kvN6bx3qqjIhIMu0JExp4UVkAX2Mxb9b+c4o2DiZF5pY6ZfbuEmjSbvGRJXyswkOJ4jTZl+7e6+SZfEal8HJyRfZKiqTjrz+DLjYSlXr
+ fIRqlvKeAFGOJq6IRojNWiTOOh8Zorc0iHDTIkf+MY0scfbBUo5m30Bf4w==\",\"exponent\":\"AQAB\",\"modulus\":\"0tiKdO2JmBHss26jnrSAwb583KG\\/ZIw5Jw
+ wMPXrCVsFAPwY1OV3RlT1Hp4Xvpibr7rvJbOC+f\\/Gd0cBrK5pccQfccB+OHKpbBof473zEfRbdtFwPn10RfAFj\\/xikW0r\\/XxgG\\/c8tz9bmALBStGqmwOVOLRHxjwgtG
+ u4poeuwmFfG6TuwgCadxpllW74mviFd4LZVSuCSni5YJnBM2HSJ8NP6g1fqI17KDXt2XO\\/7kSItubmMk+HGEXdH4qiugHYewaIf1o4XSQROC8xlRl7t\\/RaD4U58hKYkVwg0
+ Ir7WzYzAVpG2UR4Co\\/GDG9Hct7HOYekDqVQ+sSZbwzajnVunkw==\",\"passwordFound\":true,\"userName\":\"example-user\"}\n"
+}
+</pre> <p>The serial port output may contain multiple responses, separated by newlines. To find the correct response, match the modulus that you passed in, to the output of the serial port. Each response is a JSON encoded string with the following fields:</p> <ul> <li>
+<code translate="no" dir="ltr">userName</code>: The username that was passed to the instance.</li> <li>
+<code translate="no" dir="ltr">passwordFound</code>: A Boolean value indicating whether the password generation was successful.</li> <li>
+<code translate="no" dir="ltr">encryptedPassword</code>: A base64 encoded, encrypted password.</li> <li>
+<code translate="no" dir="ltr">modulus</code>: The modulus that was previously passed in.</li> <li>
+<code translate="no" dir="ltr">exponent</code>: The exponent that was previously passed in.</li> </ul> <p>For information about serial port output retention, see <a href="../viewing-serial-port-output">Viewing serial port output</a>.</p>
+</li> <li>
+<p><strong>Decrypt the password.</strong> To get the password, use the previously created private key to decrypt the encrypted password. The password must be decrypted with Optimal Asymmetric Encryption Padding (OAEP). For OpenSSL, the command to decrypt input data is:</p> 
+<pre>
+$ openssl rsautl -decrypt -inkey private_key -oaep
+</pre> <p>To decrypt the password above, provide the <code translate="no" dir="ltr">encryptedPassword</code> value. Remember to remove the <code translate="no" dir="ltr">\\</code> escape characters from the string beforehand or the decryption will fail:</p> 
+<pre>
+$ echo 'uiHDEhxyvj6lF5GalHh9TsMZb4bG6Y9qGmFb9S3XI291MncHcaxP0rFu0kyjxlEXDs8y4L1KOhy6iyB42Lh+vZ4XIMjmvU4rZrjsBZ5Tx
+Qo9hL0lBW7o3FRM/UIXCeRk39ObUl2AjDmQ0mcw1byJI5v9KVJnNMaHdRCy/kvN6bx3qqjIhIMu0JExp4UVkAX2Mxb9b+c4o2DiZF5pY6ZfbuEmjS
+bvGRJXyswkOJ4jTZl+7e6+SZfEal8HJyRfZKiqTjrz+DLjYSlXrfIRqlvKeAFGOJq6IRojNWiTOOh8Zorc0iHDTIkf+MY0scfbBUo5m30Bf4w==' |
+base64 -d | openssl rsautl -decrypt -inkey private_key -oaep
+</pre> <p>The command prints out the decrypted password:</p> 
+<pre>dDkJ_3]*QYS-#&gt;X
+</pre> <p>The username and password for this account would be:</p> 
+<pre>username: example-user
+password: dDkJ_3]*QYS-#&gt;X
+</pre>
+</li> <li><p><strong>Throw away the keys.</strong> Unlike SSH Keys, the keys used for retrieving/resetting Windows passwords are meant to be ephemeral. Reusing public/private key pairs is not recommended and may not work as expected. If the key has been saved to disk, the files should be deleted at the end of the process. Better yet, if possible, keep the key in memory and discard it when the process has completed.</p></li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li><a href="../connecting-to-windows">Connecting to a Windows VM</a></li> <li><a href="creating-passwords-for-windows-instances">Creating Passwords for Windows Instances</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/instances/windows/automate-pw-generation" class="_attribution-link">https://docs.cloud.google.com/compute/docs/instances/windows/automate-pw-generation</a>
+  </p>
+</div>

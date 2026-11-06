@@ -1,0 +1,479 @@
+<h1>Set up multi-network support for Pods</h1>  <p>You can configure Google Kubernetes Engine (GKE) clusters with multi-network support for Pods to connect Pods and nodes to multiple distinct networks simultaneously. This capability helps you address specialized network requirements, such as isolating traffic or improving throughput for high performance computing (HPC) or network function virtualization (NFV) workloads.</p> <p>By default, Pods and nodes in GKE clusters use a single primary network interface for all traffic. Before you begin, ensure you understand general <a href="../concepts/network-overview">networking concepts</a>, the <a href="../concepts/about-multinetwork-support-for-pods#terminology-concepts">terminology and concepts</a> specific to GKE multi-network support, and its <a href="#requirements-and-limitations">requirements and limitations</a>.</p> <p>For more information, see <a href="../concepts/about-multinetwork-support-for-pods">About multi-network support for Pods</a>.</p> <h2 id="requirements-and-limitations">Requirements and limitations</h2> <p>Multi-network support for Pods has the following requirements and limitations:</p> <h3 id="requirements">Requirements</h3> <ul> <li>Multi-network support for Pods uses the same <a href="https://docs.cloud.google.com/vpc/docs/multiple-interfaces-concepts#specifications">VM-level specifications</a> as multi-NIC for Compute Engine.</li> <li>Multi-network support for Pods requires GKE Dataplane V2.</li> <li>Multi-network support for Pods is available for Container-Optimized OS. Ubuntu support is available on nodes that are running GKE version 1.32.3-gke.1785000 or later.</li> </ul> <h3 id="general-limitations">General limitations</h3> <ul> <li>Multi-network support for Pods doesn't work for clusters that are enabled for <a href="../concepts/alias-ips#dual_stack_network">dual-stack networking</a>. In <a href="single-stack-ipv6">single-stack IPv6 clusters</a> (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>), multi-network support for Pods is supported with secondary IPv4-only networks (Layer 3 VPC networks); secondary IPv6 Pod networks are not supported.</li> <li>
+<a href="multi-pod-cidr">Multi-Pod CIDR</a> is supported only for the default Pod network.</li> <li>Any Pod-networks in a single GKE cluster can't have overlapping CIDR ranges.</li> <li>When you enable multi-network support for Pods, you can't add or remove node-network interfaces or Pod-networks after creating a node pool. To change these settings, you must recreate the node pool.</li> <li>By default, internet access is not available on additional interfaces of Pod-networks inside the Pod. However, you can enable it manually using Cloud NAT.</li> <li>You can't change the default Gateway inside a Pod with multiple interfaces through the API. The default Gateway must be connected to the default Pod-network.</li> <li>The default Pod-network must always be included in Pods, even if you create additional Pod-networks or interfaces.</li> <li>You can't configure the multi-network feature when Managed Hubble has been configured.</li> <li>For Shared VPC deployments, all network interfaces (NICs) attached to nodes must belong to the same project as the host project.</li> <li>Name of device typed network objects can't exceed 41 characters. The full path of each UNIX domain socket is composed, including the corresponding network name. Linux has a limitation on socket path lengths (under <a href="https://linux.die.net/man/7/unix">107 bytes</a>). After accounting for the directory, filename prefix, and the <code translate="no" dir="ltr">.sock</code> extension, the network name is limited to a maximum of 41 characters.</li> <li>You can't mutate <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> objects. To update these objects, delete and recreate them.</li> </ul> <h3 id="device-and-dpdk-limitations">Device and Data Plane Development Kit (DPDK) limitations</h3> <ul> <li>A VM NIC passed into a Pod as a <code translate="no" dir="ltr">Device</code> type NIC is not available to other Pods on the same node.</li> <li>Pods that use DPDK mode must be run in privileged mode to access VFIO devices.</li> <li>Autopilot mode does not support DPDK.</li> <li>In DPDK mode, a device is treated as a node resource and is only attached to the first container (non-init) in the Pod. If you want to split multiple DPDK devices among containers in the same Pod, you need to run those containers in separate Pods.</li> <li>On Ubuntu nodes, <code translate="no" dir="ltr">DPDK-VFIO</code> networks are only supported with GKE version 1.33.1-gke.1959000 and later.</li> </ul> <h3 id="scaling-limitations">Scaling limitations</h3> <p>GKE provides a flexible network architecture that lets you scale your cluster. You can add additional node-networks and Pod-networks to your cluster. You can scale your cluster as follows:</p> <ul> <li>You can add up to 8 additional node-networks to each GKE node pool. This is the same scale limit for Compute Engine VMs.</li> <li>Each pod must have fewer than 8 additional networks attached.</li> <li>You can configure up to 35 Pod-networks across the 8 node-networks within a single node pool. You can break it down into different combinations, such as: <ul> <li>7 node-networks with 5 Pod-networks each</li> <li>5 node-networks with 7 Pod-networks each</li> <li>1 node-network with 30 Pod-networks. The limit for secondary ranges per subnet is 30.</li> </ul>
+</li> <li>You can configure up to 50 Pod-networks per cluster.</li> <li>You can configure up to a maximum of 32 multi-network Pods per node.</li> <li>You can have up to 5,000 nodes with multiple interfaces.</li> <li>You can have up to 100,000 additional interfaces across all Pods.</li> </ul> <h2 id="deploy-multi-network-pods">Deploy multi-network Pods</h2> <p>To deploy multi-network Pods, do the following:</p> <ol> <li>
+<a href="#prepare-an-additional-vpc">Prepare an additional VPC</a>, subnet (node-network), and secondary ranges (Pod-network).</li> <li>
+<a href="#create-a-gke-cluster">Create a multi-network enabled GKE cluster</a> using the Google Cloud CLI command.</li> <li>
+<a href="#create-gke-node-pool">Create a new GKE node pool</a> that is connected to the additional node-network and Pod-network using the Google Cloud CLI command.</li> <li>
+<a href="#create-pod-network">Create Pod network</a> and reference the correct VPC, subnet, and secondary ranges in multi-network objects using the Kubernetes API.</li> <li>In your workload configuration, <a href="#reference-the-prepared-network">reference the prepared Network</a> Kubernetes object using the Kubernetes API.</li> </ol> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Review the <a href="#requirements-and-limitations">requirements and limitations</a>.</li> </ul> <h2 id="prepare-an-additional-vpc">Prepare an additional VPC</h2> <p>Google Cloud creates a default Pod network during cluster creation associated with the GKE node pool used during the initial creation of the GKE cluster. The default Pod network is available on all cluster nodes and Pods. To facilitate multi-network capabilities within the node pool, you must prepare existing or new VPCs, which support <code translate="no" dir="ltr">Layer 3</code> and <code translate="no" dir="ltr">Device</code> type networks.</p> <p>For preparing additional VPC, consider the following requirements:</p> <ul> <li>
+<p><code translate="no" dir="ltr">Layer 3</code> and <code translate="no" dir="ltr">Netdevice</code> type network:</p> <ul> <li>Create a secondary range if you are using <code translate="no" dir="ltr">Layer 3</code> type networks.</li> <li>Ensure that the CIDR size for the secondary range is large enough to satisfy the number of nodes in the node pool and the number of Pods per node you want to have.</li> <li>Similar to the default Pod-network, the other Pod-networks use IP address overprovisioning. The secondary IP address range must have twice as many IP addresses per node as the number of Pods per node.</li> </ul>
+</li> <li><p><code translate="no" dir="ltr">Device</code> type network requirements: Create a regular subnet on a VPC. You don't require a secondary range.</p></li> </ul> <p>To enable multi-network capabilities in the node pool, you must prepare the VPCs to which you want to establish additional connections. You can use an existing VPC or <a href="https://docs.cloud.google.com/vpc/docs/create-modify-vpc-networks">Create a new VPC</a> specifically for the node pool.</p> <aside class="note"><strong>Note:</strong><span> After the node pool is created, you can't add a new VPC to connect to the existing node pool.</span></aside> <h3 id="vpc-layer3">Create a VPC network that supports <code translate="no" dir="ltr">Layer 3</code> type device</h3> <p>To create a VPC network that supports <code translate="no" dir="ltr">Layer 3</code> type device, do the following:</p> <ul> <li>Ensure that the CIDR size for the secondary range is large enough to satisfy the number of nodes in the node pool and the number of Pods per node you want to have.</li> <li><p>Similar to the default Pod-network, the other Pod-networks use IP address overprovisioning. The secondary IP address range must have twice as many IP addresses per node as the number of Pods per node.</p></li> </ul> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud compute networks subnets create SUBNET_NAME \
+    --project=PROJECT_ID \
+    --range=SUBNET_RANGE \
+    --network=NETWORK_NAME \
+    --region=REGION \
+    --secondary-range=SECONDARY_RANGE_NAME=&lt;SECONDARY_RANGE_RANGE&gt;
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: the name of the subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the ID of the project that contains the VPC network where the subnet is created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_RANGE</var></code>: the primary IPv4 address range for the new subnet, in CIDR notation.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the name of the VPC network that contains the new subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region in which the new subnet is created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SECONDARY_RANGE_NAME</var></code>: the name for the secondary range.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SECONDARY_IP_RANGE</var></code> the secondary IPv4 address range in CIDR notation.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li><p>In the Google Cloud console, go to the <strong>VPC networks</strong> page.</p></li> <li><p>Click <strong>Create VPC network</strong>.</p></li> <li><p>In the <strong>Name</strong> field, enter the name of the network. For example, <code translate="no" dir="ltr">l3-vpc</code>.</p></li> <li>
+<p>To configure the maximum transmission unit (MTU) of the network, do the following:</p> <ul> <li>To use the default value of <code translate="no" dir="ltr">1460</code>, keep the <strong>Set MTU automatically</strong> checkbox selected.</li> <li>To set a custom value, do the following: <ol> <li>Review the information in <a href="https://docs.cloud.google.com/vpc/docs/mtu">Maximum transmission unit</a>.</li> <li>Clear the <strong>Set MTU automatically</strong> checkbox.</li> <li>In the <strong>Maximum transmission unit (MTU)</strong> field, choose an MTU value.</li> </ol>
+</li> </ul>
+</li> <li><p>In the <strong>Subnet creation mode</strong> section, choose <strong>Custom</strong>.</p></li> <li id="layer3-subnet"><p>Click <strong>ADD SUBNET</strong>.</p></li> <li>
+<p>In the <strong>New subnet</strong> section, specify the following configuration parameters for a subnet:</p> <ol> <li><p>Provide a <strong>Name</strong>. For example, <code translate="no" dir="ltr">l3-subnet</code>.</p></li> <li><p>Select a <strong>Region</strong>.</p></li> <li>
+<p>Enter an <strong>IP address range</strong>. This is the <a href="https://docs.cloud.google.com/vpc/docs/vpc#vpc_networks_and_subnets">primary IPv4 range</a> for the subnet.</p> <p>If you select a range that is not an RFC 1918 address, confirm that the range doesn't conflict with an existing configuration. For more information, see <a href="https://docs.cloud.google.com/vpc/docs/subnets#manually_created_subnet_ip_ranges">IPv4 subnet ranges</a>.</p>
+</li> <li>
+<p>To define a secondary range for the subnet, click <strong>Create secondary IP address range</strong>.</p> <p>If you select a range that is not an RFC 1918 address, confirm that the range doesn't conflict with an existing configuration. For more information, see <a href="https://docs.cloud.google.com/vpc/docs/subnets#manually_created_subnet_ip_ranges">IPv4 subnet ranges</a>.</p>
+</li> <li><p><strong>Private Google access</strong>: You can enable <a href="https://docs.cloud.google.com/vpc/docs/private-access-options">Private Google Access</a> for the subnet when you create it or later by editing it.</p></li> <li><p><strong>Flow logs</strong>: You can enable <a href="https://docs.cloud.google.com/vpc/docs/using-flow-logs">VPC flow logs</a> for the subnet when you create it or later by editing it.</p></li> <li><p>Click <strong>Done</strong>.</p></li> </ol> <aside class="note"><strong>Note:</strong><span> To add more subnets, click <strong>Add subnet</strong>. You can also <a href="https://docs.cloud.google.com/vpc/docs/create-modify-vpc-networks#add-subnets">add more subnets</a> to the network after you have created the network.</span></aside>
+</li> <li>
+<p>In the <strong>Firewall rules</strong> section, under <strong>IPv4 firewall rules</strong>, select zero or more predefined <a href="https://docs.cloud.google.com/vpc/docs/firewalls">firewall rules</a>.</p> <p>The rules address common use cases for connectivity to instances. You can <a href="https://docs.cloud.google.com/vpc/docs/using-firewalls">create your own firewall rules</a> after you create the network. Each predefined rule name starts with the name of the VPC network that you are creating.</p>
+</li> <li>
+<p>Under <strong>IPv4 firewall rules</strong>, to edit the predefined ingress firewall rule named <code translate="no" dir="ltr">allow-custom</code>, click <strong>EDIT</strong>.</p> <p>You can edit subnets, add additional IPv4 ranges, and specify protocols and ports.</p> <p>The <code translate="no" dir="ltr">allow-custom</code> firewall rule is not automatically updated if you add additional subnets later. If you need firewall rules for the new subnets, to add the rules, you must update the firewall configuration.</p>
+</li> <li><p>In the <strong>Dynamic routing mode</strong> section, for the VPC network. For more information, see <a href="https://docs.cloud.google.com/vpc/docs/vpc#routing_for_hybrid_networks">dynamic routing mode</a>. You can <a href="https://docs.cloud.google.com/vpc/docs/create-modify-vpc-networks#switch-dynamic-routing">change the dynamic routing mode</a> later.</p></li> <li><p>Click <strong>Create</strong>.</p></li> </ol></section> </div> <h3 id="vpc-netdevice-dpdk">Create a VPC network that supports <code translate="no" dir="ltr">Netdevice</code> or <code translate="no" dir="ltr">DPDK</code> type devices</h3> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud compute networks subnets create SUBNET_NAME \
+    --project=PROJECT_ID \
+    --range=SUBNET_RANGE \
+    --network=NETWORK_NAME \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: the name of the subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the ID of the project that contains the VPC network where the subnet is created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_RANGE</var></code>: the primary IPv4 address range for the new subnet, in CIDR notation.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the name of the VPC network that contains the new subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region in which the new subnet is created.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li><p>In the Google Cloud console, go to the <strong>VPC networks</strong> page.</p></li> <li><p>Click <strong>Create VPC network</strong>.</p></li> <li><p>In the <strong>Name</strong> field, enter the name of the network. For example, <code translate="no" dir="ltr">netdevice-vpc</code> or <code translate="no" dir="ltr">dpdk-vpc</code>.</p></li> <li>
+<p>From the <strong>Maximum transmission unit (MTU)</strong> drop-down, choose appropriate MTU value.</p> <aside class="note"><strong>Note:</strong><span> Before setting the MTU to a value higher than <code translate="no" dir="ltr">1460</code>, review the <a href="https://docs.cloud.google.com/vpc/docs/mtu">Maximum transmission unit</a>.</span></aside>
+</li> <li><p>In the <strong>Subnet creation mode</strong> section, choose <strong>Custom</strong>.</p></li> <li>
+<p id="netdevice-dpdk-subnet">In the <strong>New subnet</strong> section, specify the following configuration parameters for a subnet: </p> <ol> <li><p>Provide a <strong>Name</strong>. For example, <code translate="no" dir="ltr">netdevice-subnet</code> or <code translate="no" dir="ltr">dpdk-vpc</code>.</p></li> <li><p>Select a <strong>Region</strong>.</p></li> <li>
+<p>Enter an <strong>IP address range</strong>. This is the <a href="https://docs.cloud.google.com/vpc/docs/vpc#vpc_networks_and_subnets">primary IPv4 range</a> for the subnet.</p> <p>If you select a range that is not an RFC 1918 address, confirm that the range doesn't conflict with an existing configuration. For more information, see <a href="https://docs.cloud.google.com/vpc/docs/subnets#manually_created_subnet_ip_ranges">IPv4 subnet ranges</a>.</p>
+</li> <li><p><strong>Private Google Access</strong>: Choose whether to enable <a href="https://docs.cloud.google.com/vpc/docs/private-access-options">Private Google Access</a> for the subnet when you create it or later by editing it.</p></li> <li><p><strong>Flow logs</strong>: You can enable <a href="https://docs.cloud.google.com/vpc/docs/using-flow-logs">VPC flow logs</a> for the subnet when you create it or later by editing it.</p></li> <li>
+<p>Click <strong>Done</strong>.</p> <aside class="note"><strong>Note:</strong><span> To add more subnets, click <strong>Add subnet</strong>. You can also <a href="https://docs.cloud.google.com/vpc/docs/create-modify-vpc-networks#add-subnets">add more subnets</a> to the network after you have created the network.</span></aside>
+</li> </ol>
+</li> <li>
+<p>In the <strong>Firewall rules</strong> section, under <strong>IPv4 firewall rules</strong>, select zero or more predefined <a href="https://docs.cloud.google.com/vpc/docs/firewalls">firewall rules</a>.</p> <p>The rules address common use cases for connectivity to instances. You can <a href="https://docs.cloud.google.com/vpc/docs/using-firewalls">create your own firewall rules</a> after you create the network. Each predefined rule name starts with the name of the VPC network that you are creating.</p>
+</li> <li>
+<p>Under <strong>IPv4 firewall rules</strong>, to edit the predefined ingress firewall rule named <code translate="no" dir="ltr">allow-custom</code>, click <strong>EDIT</strong>.</p> <p>You can edit subnets, add additional IPv4 ranges, and specify protocols and ports.</p> <p>The <code translate="no" dir="ltr">allow-custom</code> firewall rule is not automatically updated if you add additional subnets later. If you need firewall rules for the new subnets, to add the rules, you must update the firewall configuration.</p>
+</li> <li><p>In the <strong>Dynamic routing mode</strong> section, for the VPC network. For more information, see <a href="https://docs.cloud.google.com/vpc/docs/vpc#routing_for_hybrid_networks">dynamic routing mode</a>. You can <a href="https://docs.cloud.google.com/vpc/docs/create-modify-vpc-networks#switch-dynamic-routing">change the dynamic routing mode</a> later.</p></li> <li><p>Click <strong>Create</strong>.</p></li> </ol></section> </div> <h2 id="create-a-gke-cluster">Create a GKE cluster with multi-network capabilities</h2> <p>Enabling multi-networking for a cluster adds the necessary CustomResourceDefinitions (CRDs) to the API server for that cluster. It also deploys a network-controller-manager, which is responsible for reconciling and managing multi-network objects. You can't modify the cluster configuration after it is created.</p> <h3 id="create-a-gke-autopilot-cluster">Create a GKE Autopilot cluster with multi-network capabilities</h3> <p>Create a GKE Autopilot cluster with multi-network capabilities:</p> 
+<pre>gcloud container clusters create-auto CLUSTER_NAME \
+    --cluster-version=CLUSTER_VERSION \
+    --enable-multi-networking
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version of the cluster.</li> </ul> <p>The <code translate="no" dir="ltr">--enable-multi-networking</code> flag enables multi-networking Custom Resource Definitions (CRDs) in the API server for this cluster, and deploys a network-controller-manager which contains the reconciliation and lifecycle management for multi-network objects.</p> <h3 id="create-a-gke-standard-cluster">Create a GKE Standard cluster with multi-network capabilities</h3> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Create a GKE Standard cluster with multi-network capabilities:</p> 
+<pre data-language="bash">gcloud container clusters create CLUSTER_NAME \
+    --cluster-version=CLUSTER_VERSION \
+    --enable-dataplane-v2 \
+    --enable-ip-alias \
+    --enable-multi-networking
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version of the cluster.</li> </ul> <p>This command includes the following flags:</p> <ul> <li>
+<code translate="no" dir="ltr">--enable-multi-networking:</code> enables multi-networking Custom Resource Definitions (CRDs) in the API server for this cluster, and deploys a network-controller-manager which contains the reconciliation and lifecycle management for multi-network objects.</li> <li>
+<code translate="no" dir="ltr">--enable-dataplane-v2:</code> enables GKE Dataplane V2. This flag is required to enable multi-network.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li> In the Google Cloud console, go to the <b>Create a Kubernetes cluster</b> page. <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/add" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="kubernetes/add">Go to Create a Kubernetes cluster</a> </p> </li> <li>Configure your Standard cluster. For more information, see <a href="creating-a-zonal-cluster#creating-a-cluster">Create a zonal cluster</a> or <a href="creating-a-regional-cluster">Create a regional cluster</a>. While creating the cluster, select the appropriate Network and Node subnet.</li> <li>From the navigation pane, under <strong>Cluster</strong>, click <strong>Networking</strong>.</li> <li>Select the <strong>Enable Dataplane V2</strong> checkbox.</li> <li>Select <strong>Enable multi-networking</strong>.</li> <li>Click <strong>Create</strong>.</li> </ol></section> </div> <h4 id="create-gke-node-pool">Create a GKE Standard node pool connected to additional VPCs</h4> <p>Create a node pool that includes nodes connected to the node-network (VPC and subnet) and Pod-network (secondary range) created in <a href="#create-pod-network">Create Pod network</a>.</p> <p>To create the new node pool and associate it with the additional networks in the GKE cluster:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud container node-pools create POOL_NAME \
+  --cluster=CLUSTER_NAME \
+  --additional-node-network network=NETWORK_NAME,subnetwork=SUBNET_NAME \
+  --additional-pod-network subnetwork=subnet-dp,pod-ipv4-range=POD_IP_RANGE,max-pods-per-node=NUMBER_OF_PODS
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code> with the name of the new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code> with the name of the existing cluster to which you are adding the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code> with the name of the network to attach the node pool's nodes.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code> with the name of the subnet within the network to use for the nodes.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_IP_RANGE</var></code> the Pod IP address range within the subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUMBER_OF_PODS</var></code> maximum number of Pods per node.</li> </ul> <p>This command contains the following flags:</p> <ul> <li>
+<p><code translate="no" dir="ltr">--additional-node-network</code>: Defines details of the additional network interface, network, and subnetwork. This is used to specify the node-networks for connecting to the node pool nodes. Specify this parameter when you want to connect to another VPC. If you don't specify this parameter, the default VPC associated with the cluster is used. For <code translate="no" dir="ltr">Layer 3</code> type networks, specify the <code translate="no" dir="ltr">additional-pod-network</code> flag that defines the Pod-network, which is exposed inside the GKE cluster as the <code translate="no" dir="ltr">Network</code> object. When using the <code translate="no" dir="ltr">--additional-node-network</code> flag, you must provide a network and subnetwork as mandatory parameters. Make sure to separate the network and subnetwork values with a comma and avoid using spaces.</p> <p>Optionally, you can also specify the <code translate="no" dir="ltr">stack-type</code> parameter (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>) to configure the IP address stack type for the network interface (valid values are <code translate="no" dir="ltr">ipv4</code>, <code translate="no" dir="ltr">ipv4-ipv6</code>, or <code translate="no" dir="ltr">ipv6</code>). The final network interface configuration depends on both the value that you specified for the <code translate="no" dir="ltr">stack-type</code> field and the underlying subnet's configuration:</p> <ul> <li>For <code translate="no" dir="ltr">IPv4_ONLY</code> subnets, the valid value for the <code translate="no" dir="ltr">stack-type</code> field is <code translate="no" dir="ltr">ipv4</code>.</li> <li>For <code translate="no" dir="ltr">IPv4_IPv6</code> subnets, valid values for the <code translate="no" dir="ltr">stack-type</code> field are <code translate="no" dir="ltr">ipv4</code>, <code translate="no" dir="ltr">ipv4-ipv6</code>, and <code translate="no" dir="ltr">ipv6</code>.</li> <li>For <code translate="no" dir="ltr">IPv6_ONLY</code> subnets, the valid value for the <code translate="no" dir="ltr">stack-type</code> field is <code translate="no" dir="ltr">ipv6</code>.</li> </ul> <p>If you don't specify a value for the <code translate="no" dir="ltr">stack-type</code> field, the stack type defaults to IPv4 address on the NIC for IPv4-only or dual-stack subnets, and IPv6 address for IPv6-only subnets. Unless the value of the <code translate="no" dir="ltr">stack-type</code> field is explicitly changed for dual-stack subnets, the value defaults to <code translate="no" dir="ltr">ipv4</code> to maintain backward compatibility. For more information, see <a href="https://docs.cloud.google.com/vpc/docs/multiple-interfaces-concepts#stack-types">Stack types</a>.</p>
+</li> <li>
+<p><code translate="no" dir="ltr">--additional-pod-network</code>: Specifies the details of the secondary range to be used for the Pod-network. This parameter is not required if you use a <code translate="no" dir="ltr">Device</code> type network. This argument specifies the following key values: <code translate="no" dir="ltr">subnetwork</code>, <code translate="no" dir="ltr">pod-ipv4-range</code>, and <code translate="no" dir="ltr">max-pods-per-node</code>. When using the <code translate="no" dir="ltr">--additional-pod-network</code>, you must provide the <code translate="no" dir="ltr">pod-ipv4-range</code> and <code translate="no" dir="ltr">max-pods-per-node</code> values, separated by commas and without spaces.</p> <ul> <li>
+<code translate="no" dir="ltr">subnetwork</code>: links the node-network with Pod-network. The subnetwork is optional. If you don't specify it, the additional Pod-network is associated with the default subnetwork provided during cluster creation.</li> <li>
+<code translate="no" dir="ltr">--max-pods-per-node</code>: The <code translate="no" dir="ltr">max-pods-per-node</code> must be specified and has to be a power of 2. The minimum value is 4. The <code translate="no" dir="ltr">max-pods-per-node</code> must not be more than the <code translate="no" dir="ltr">max-pods-per-node</code> value on the node pool.</li> </ul>
+</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>From the navigation pane, click <strong>Clusters</strong>.</p></li> <li><p>In the <strong>Kubernetes clusters</strong> section, click the cluster you created.</p></li> <li><p>Click the <strong>Nodes</strong> tab.</p></li> <li><p>Click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Create user-managed node pool</strong>.</p></li> <li>
+<p>In the <strong>Node pool details</strong> section, complete the following:</p> <ol> <li>Enter a <strong>Name</strong> for the <a href="../concepts/node-pools">node pool</a>.</li> <li>Enter the <strong>Number of nodes</strong> to create in the node pool.</li> </ol>
+</li> <li>
+<p>From the navigation pane, under <strong>Node Pools</strong>, click <strong>Nodes</strong>.</p> <ol> <li>From the <strong>Image type</strong> drop-down list, select the <strong>Container-Optimized OS with containerd (cos_containerd)</strong> node image.</li> </ol>
+</li> <li><p>When you create a VM, you select a machine type from a <a href="https://docs.cloud.google.com/compute/docs/machine-types">machine family</a> that determines the resources available to that VM. For example, a machine type like <code translate="no" dir="ltr">e2-standard-4</code> contains 4 vCPUs, therefore can support up to 4 VPCs total. There are several machine families you can choose from and each machine family is further organized into machine series and predefined or custom machine types within each series. Each machine type is billed differently. For more information, refer to the <a href="https://cloud.google.com/compute/pricing#standard_machine_types">machine type price sheet</a>.</p></li> <li><p>From the navigation pane, select <strong>Networking</strong>.</p></li> <li><p>In the section <strong>Node Networking</strong>, specify the maximum number of Pods per node. The Node Networks section displays the VPC network utilized to create the cluster. It is necessary to designate extra Node Networks that correlate with previously established VPC Networks and Device types.</p></li> <li>
+<p>Create node pool association:</p> <ol> <li>For <code translate="no" dir="ltr">Layer 3</code> type device: <ol> <li>In the <strong>Node Networks</strong> section, click <strong>ADD A NODE NETWORK</strong>.</li> <li>From the network drop-down list select the <a href="#vpc-layer3">VPC that supports Layer 3 type device</a>.</li> <li>Select the <a href="#layer3-subnet">subnet</a> created for <code translate="no" dir="ltr">Layer 3</code> VPC.</li> <li>In the section <strong>Alias Pod IP address ranges</strong>, click <strong>Add Pod IP address range</strong>.</li> <li>Select the <strong>Secondary subnet</strong> and indicate the <strong>Max number of Pods per node</strong>.</li> <li>Select <strong>Done</strong>.</li> </ol>
+</li> <li>For <code translate="no" dir="ltr">Netdevice</code> and <code translate="no" dir="ltr">DPDK</code> type device: <ol> <li>In the <strong>Node Networks</strong> section, click <strong>ADD A NODE NETWORK</strong>.</li> <li>From the network drop-down list select the <a href="#vpc-netdevice-dpdk">VPC that supports <code translate="no" dir="ltr">Netdevice</code> or <code translate="no" dir="ltr">DPDK</code> type devices</a>.</li> <li>Select the <a href="#netdevice-dpdk-subnet">subnet</a> created for <code translate="no" dir="ltr">Netdevice</code> or <code translate="no" dir="ltr">DPDK</code> VPC.</li> <li>Select <strong>Done</strong>.</li> </ol>
+</li> </ol>
+</li> <li><p>Click <strong>Create</strong>.</p></li> </ol></section> </div> <p><strong>Notes:</strong></p> <ul> <li>When you enable an IPv6 address on additional NICs by setting <code translate="no" dir="ltr">stack-type</code>, ensure that your VPC firewall policies are correctly configured for IPv6 addresses. Unlike for IPv4 addresses, if Global Unicast Addresses (GUA) are used, the nodes could be exposed to the public internet if they are not properly restricted.</li> <li>If multiple additional Pod-networks are specified within the same node-network, they must be in the same subnet.</li> <li>You can't reference the same secondary range of a subnet multiple times.</li> </ul> <p><strong>Example</strong> The following example creates a node pool named pool-multi-net that attaches two additional networks to the nodes, dataplane (<code translate="no" dir="ltr">Layer 3</code> type network) and highperformance (netdevice type network). This example assumes that you already created a GKE cluster named <code translate="no" dir="ltr">cluster-1</code>:</p> 
+<pre>gcloud container node-pools create pool-multi-net \
+  --project my-project \
+  --cluster cluster-1 \
+  --location us-central1-c \
+  --additional-node-network network=dataplane,subnetwork=subnet-dp \
+  --additional-pod-network subnetwork=subnet-dp,pod-ipv4-range=sec-range-blue,max-pods-per-node=8 \
+  --additional-node-network network=highperformance,subnetwork=subnet-highperf
+</pre> <p>To specify additional node-network and Pod-network interfaces, define the <code translate="no" dir="ltr">--additional-node-network</code> and <code translate="no" dir="ltr">--additional-pod-network</code> parameters multiple times as shown in the following example:</p> 
+<pre>--additional-node-network network=dataplane,subnetwork=subnet-dp \
+--additional-pod-network subnetwork=subnet-dp,pod-ipv4-range=sec-range-blue,max-pods-per-node=8 \
+--additional-pod-network subnetwork=subnet-dp,pod-ipv4-range=sec-range-green,max-pods-per-node=8 \
+--additional-node-network network=managementdataplane,subnetwork=subnet-mp \
+--additional-pod-network subnetwork=subnet-mp,pod-ipv4-range=sec-range-red,max-pods-per-node=4
+</pre> <p>To specify additional Pod-networks directly on the primary VPC interface of the node pool, as shown in the following example:</p> 
+<pre>--additional-pod-network subnetwork=subnet-def,pod-ipv4-range=sec-range-multinet,max-pods-per-node=8
+</pre> <p>To add an IPv6-only secondary network interface, add the <code translate="no" dir="ltr">stack-type</code> parameter as shown in the following example:</p> 
+<pre>--additional-node-network network=highperformance,subnetwork=ipv6-only-subnet,stack-type=ipv6
+</pre> <p>To add a dual-stack secondary network interface for both IPv4 and IPv6 address connectivity, add the <code translate="no" dir="ltr">stack-type</code> parameter as shown in the following example:</p> 
+<pre>--additional-node-network network=service-net,subnetwork=dual-stack-subnet,stack-type=ipv4-ipv6
+</pre> <h2 id="create-pod-network">Create Pod network</h2> <p>Define the Pod networks that the Pods will access by defining Kubernetes objects and linking them to the corresponding Compute Engine resources, such as VPCs, subnets, and secondary ranges.</p> <p>To create Pod network, you must define the Network CRD objects in the cluster.</p> <h3 id="configure-layer3-vpc">Configure <code translate="no" dir="ltr">Layer 3</code> VPC network</h3> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+<p>For the <code translate="no" dir="ltr">Layer 3</code> VPC, create <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> objects:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">blue-network.yaml</code>:</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: Network
+metadata:
+  name: blue-network
+spec:
+  type: "L3"
+  parametersRef:
+    group: networking.gke.io
+    kind: GKENetworkParamSet
+    name: "l3-vpc"
+</pre> <p>The manifest defines a <code translate="no" dir="ltr">Network</code> resource named <code translate="no" dir="ltr">blue-network</code> of the type <code translate="no" dir="ltr">Layer 3</code>. The <code translate="no" dir="ltr">Network</code> object references the <code translate="no" dir="ltr">GKENetworkParamSet</code> object called <code translate="no" dir="ltr">l3-vpc</code>, which associates a network with Compute Engine resources.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f blue-network.yaml
+</pre>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">l3-vpc.yaml</code> :</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: GKENetworkParamSet
+metadata:
+  name: "l3-vpc"
+spec:
+  vpc: "l3-vpc"
+  vpcSubnet: "subnet-dp"
+  podIPv4Ranges:
+    rangeNames:
+    - "sec-range-blue"
+</pre> <p>This manifest defines the <code translate="no" dir="ltr">GKENetworkParamSet</code> object named <code translate="no" dir="ltr">l3-vpc</code> by setting the VPC name as <code translate="no" dir="ltr">l3-vpc</code>, the subnet name as <code translate="no" dir="ltr">subnet-dp</code>, and the secondary IPv4 address range for Pods as <code translate="no" dir="ltr">sec-range-blue</code>.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f l3-vpc.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>From the navigation pane, click <strong>Network Function Optimizer</strong>.</p></li> <li><p>At the top of the page, click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Create</strong> to create your Pod network.</p></li> <li><p>In the <strong>Before you begin</strong> section, verify the details.</p></li> <li><p>Click <strong>NEXT: POD NETWORK LOCATION</strong>.</p></li> <li><p>In the <strong>Pod network location</strong> section, from the <strong>Cluster</strong> drop-down, select the GKE cluster that has multi-networking and GKE Dataplane V2 enabled.</p></li> <li><p>Click <strong>NEXT: VPC NETWORK REFERENCE</strong>.</p></li> <li><p>In the <strong>VPC network reference</strong> section, from the <strong>VPC network reference</strong> drop-down, select the VPC network used for <code translate="no" dir="ltr">Layer 3</code> multinic Pods.</p></li> <li><p>Click <strong>NEXT: POD NETWORK TYPE</strong>.</p></li> <li><p>In the <strong>Pod network type</strong> section, select <strong>L3</strong> and enter the <strong>Pod network name</strong>.</p></li> <li><p>Click <strong>NEXT: POD NETWORK SECONDARY RANGE</strong>.</p></li> <li><p>In the <strong>Pod network secondary range</strong> section, enter the <strong>Secondary range</strong>.</p></li> <li><p>Click <strong>NEXT: POD NETWORK ROUTES</strong>.</p></li> <li><p>In the <strong>Pod network routes</strong> section, to define <strong>Custom routes</strong>, select <strong>ADD ROUTE</strong>.</p></li> <li><p>Click <strong>CREATE POD NETWORK</strong>.</p></li> </ol></section> </div> <h3 id="configure-dpdk-network">Configure DPDK network</h3> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+<p>For DPDK VPC, create <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> objects.</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">dpdk-network.yaml</code>:</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: Network
+metadata:
+  name: dpdk-network
+spec:
+  type: "Device"
+  parametersRef:
+    group: networking.gke.io
+    kind: GKENetworkParamSet
+    name: "dpdk"
+</pre> <p>This manifest defines a <code translate="no" dir="ltr">Network</code> resource named <code translate="no" dir="ltr">dpdk-network</code> with a type of <code translate="no" dir="ltr">Device</code>. The <code translate="no" dir="ltr">Network</code> resource references a <code translate="no" dir="ltr">GKENetworkParamSet</code> object called <code translate="no" dir="ltr">dpdk</code> for its configuration.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f dpdk-network.yaml
+</pre>
+</li> <li>
+<p>For the <code translate="no" dir="ltr">GKENetworkParamSet</code> object, save the following manifest as <code translate="no" dir="ltr">dpdk.yaml</code>:</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: GKENetworkParamSet
+metadata:
+  name: "dpdk"
+spec:
+  vpc: "dpdk"
+  vpcSubnet: "subnet-dpdk"
+  deviceMode: "DPDK-VFIO"
+</pre> <p>This manifest defines the <code translate="no" dir="ltr">GKENetworkParamSet</code> object named <code translate="no" dir="ltr">dpdk</code>, sets the VPC name as <code translate="no" dir="ltr">dpdk</code>, subnet name as <code translate="no" dir="ltr">subnet-dpdk</code>, and deviceMode name as <code translate="no" dir="ltr">DPDK-VFIO</code>.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f dpdk.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>From the navigation pane, click <strong>Network Function Optimizer</strong>.</p></li> <li><p>At the top of the page, click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Create</strong> to create your Pod network.</p></li> <li><p>In the <strong>Before you begin</strong> section, verify the details.</p></li> <li><p>Click <strong>NEXT: POD NETWORK LOCATION</strong>.</p></li> <li><p>In the <strong>Pod network location</strong> section, from the <strong>Cluster</strong> drop-down, select the GKE cluster that has multi-networking and GKE Dataplane V2 enabled.</p></li> <li><p>Click <strong>NEXT: VPC NETWORK REFERENCE</strong>.</p></li> <li><p>In the <strong>VPC network reference</strong> section, from the <strong>VPC network reference</strong> drop-down, select the VPC network used for dpdk multinic Pods.</p></li> <li><p>Click <strong>NEXT: POD NETWORK TYPE</strong>.</p></li> <li><p>In the <strong>Pod network type</strong> section, select <strong>DPDK-VFIO (Device)</strong> and enter the <strong>Pod network name</strong>.</p></li> <li><p>Click <strong>NEXT: POD NETWORK SECONDARY RANGE</strong>. The Pod network secondary range section will be unavailable</p></li> <li><p>Click <strong>NEXT: POD NETWORK ROUTES</strong>. In the Pod network routes section, select ADD ROUTE to define custom routes</p></li> <li><p>Click <strong>CREATE POD NETWORK</strong>.</p></li> </ol></section> </div>
+<aside class="note"><strong>Note:</strong><span> For <code translate="no" dir="ltr">DPDK</code> network, the NIC is bound to the VFIO driver which won't show up as a normal kernel network device seen in the <code translate="no" dir="ltr">ip link</code>.</span></aside> <h3 id="configure-netdevice-network">Configure netdevice network</h3> <p>For the <code translate="no" dir="ltr">netdevice</code> VPC, create <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> objects.</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">netdevice-network.yaml</code>:</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: Network
+metadata:
+    name: netdevice-network
+spec:
+    type: "Device"
+    parametersRef:
+      group: networking.gke.io
+      kind: GKENetworkParamSet
+      name: "netdevice"
+</pre> <p>This manifest defines a <code translate="no" dir="ltr">Network</code> resource named <code translate="no" dir="ltr">netdevice-network</code> with a type of <code translate="no" dir="ltr">Device</code>. It references the <code translate="no" dir="ltr">GKENetworkParamSet</code> object named <code translate="no" dir="ltr">netdevice</code>.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f netdevice-network.yaml
+</pre>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">netdevice.yaml</code> :</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: GKENetworkParamSet
+metadata:
+  name: netdevice
+spec:
+  vpc: "netdevice"
+  vpcSubnet: "subnet-netdevice"
+  deviceMode: "NetDevice"
+</pre> <p>This manifest defines a <code translate="no" dir="ltr">GKENetworkParamSet</code> resource named <code translate="no" dir="ltr">netdevice</code>, sets the VPC name as <code translate="no" dir="ltr">netdevice</code>, the subnet name as <code translate="no" dir="ltr">subnet-netdevice</code>, and specifies the device mode as <code translate="no" dir="ltr">NetDevice</code>.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f netdevice.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>From the navigation pane, click <strong>Network Function Optimizer</strong>.</p></li> <li><p>At the top of the page, click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Create</strong> to create your Pod network.</p></li> <li><p>In the <strong>Before you begin</strong> section, verify the details.</p></li> <li><p>Click <strong>NEXT: POD NETWORK LOCATION</strong>.</p></li> <li><p>In the <strong>Pod network location</strong> section, from the <strong>Cluster</strong> drop-down, select the GKE cluster that has multi-networking and GKE Dataplane V2 enabled.</p></li> <li><p>Click <strong>NEXT: VPC NETWORK REFERENCE</strong>.</p></li> <li><p>In the <strong>VPC network reference</strong> section, from the <strong>VPC network reference</strong> drop-down, select the VPC network used for netdevice multinic Pods.</p></li> <li><p>Click <strong>NEXT: POD NETWORK TYPE</strong>.</p></li> <li><p>In the <strong>Pod network type</strong> section, select <strong>NetDevice (Device)</strong> and enter the <strong>Pod network name</strong>.</p></li> <li><p>Click <strong>NEXT: POD NETWORK SECONDARY RANGE</strong>. The Pod network secondary range section will be unavailable</p></li> <li><p>Click <strong>NEXT: POD NETWORK ROUTES</strong>. In the Pod network routes section, to define custom routes, select <strong>ADD ROUTE</strong>.</p></li> <li><p>Click <strong>CREATE POD NETWORK</strong>.</p></li> </ol></section> </div> <h3 id="configuring-network-routes">Configuring network routes</h3> <p>Configuring network route lets you define custom routes for a specific network, which are setup on the Pods to direct traffic to the corresponding interface within the Pod.</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">red-network.yaml</code>:</p> 
+<pre data-language="">apiVersion: networking.gke.io/v1
+kind: Network
+metadata:
+  name: red-network
+spec:
+  type: "L3"
+  parametersRef:
+    group: networking.gke.io
+    kind: GKENetworkParamSet
+    name: "management"
+  routes:
+  -   to: "10.0.2.0/28"
+</pre> <p>This manifest defines a Network resource named <code translate="no" dir="ltr">red-network</code> with a type of <code translate="no" dir="ltr">Layer 3</code> and custom route "10.0.2.0/28" through that Network interface.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f red-network.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the Network Function Optimizer page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/nfo" target="console" track-name="consoleLink" track-type="tasks">Go to Network Function Optimizer</a></p>
+</li> <li><p>Click <strong>Create</strong>.</p></li> <li><p>Select a cluster that has multi-networking enabled.</p></li> <li><p>Configure the network preferences.</p></li> <li><p>Click <strong>Create Pod network</strong>.</p></li> </ol></section> </div> <h2 id="reference-the-prepared-network">Reference the prepared <code translate="no" dir="ltr">Network</code>
+</h2> <p>In your workload configuration, reference the prepared <code translate="no" dir="ltr">Network</code> Kubernetes object using the Kubernetes API.</p> <h3 id="connect-pod-to-specific-networks">Connect Pod to specific networks</h3> <p>To connect Pods to the specified networks, you must include the names of the <code translate="no" dir="ltr">Network</code> objects as annotations inside the Pod configuration. Make sure to include both the <code translate="no" dir="ltr">default</code> <code translate="no" dir="ltr">Network</code> and the selected additional networks in the annotations to establish the connections.</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">sample-l3-pod.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: sample-l3-pod
+  annotations:
+    networking.gke.io/default-interface: 'eth0'
+    networking.gke.io/interfaces: |
+      [
+        {"interfaceName":"eth0","network":"default"},
+        {"interfaceName":"eth1","network":"blue-network"}
+      ]
+spec:
+  containers:
+  - name: sample-l3-pod
+    image: busybox
+    command: ["sleep", "10m"]
+    ports:
+    - containerPort: 80
+  restartPolicy: Always
+</pre> <p>This manifest creates a Pod named <code translate="no" dir="ltr">sample-l3-pod</code> with two network interfaces, <code translate="no" dir="ltr">eth0</code> and <code translate="no" dir="ltr">eth1</code>, associated with the <code translate="no" dir="ltr">default</code> and <code translate="no" dir="ltr">blue-network</code> networks, respectively.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f sample-l3-pod.yaml
+</pre>
+</li> </ol> <h3 id="connect-pod-with-multiple-networks">Connect Pod with multiple networks</h3> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">sample-l3-netdevice-pod.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: sample-l3-netdevice-pod
+  annotations:
+    networking.gke.io/default-interface: 'eth0'
+    networking.gke.io/interfaces: |
+      [
+        {"interfaceName":"eth0","network":"default"},
+        {"interfaceName":"eth1","network":"blue-network"},
+        {"interfaceName":"eth2","network":"netdevice-network"}
+      ]
+spec:
+  containers:
+  - name: sample-l3-netdevice-pod
+    image: busybox
+    command: ["sleep", "10m"]
+    ports:
+    - containerPort: 80
+  restartPolicy: Always
+</pre> <p>This manifest creates a Pod named <code translate="no" dir="ltr">sample-l3-netdevice-pod</code> with three network interfaces, <code translate="no" dir="ltr">eth0</code>, <code translate="no" dir="ltr">eth1</code> and <code translate="no" dir="ltr">eth2</code> associated with the <code translate="no" dir="ltr">default</code>, <code translate="no" dir="ltr">blue-network</code>, and <code translate="no" dir="ltr">netdevice</code> networks, respectively.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f sample-l3-netdevice-pod.yaml
+</pre>
+</li> </ol> <p>You can use the same annotation in any ReplicaSet (Deployment or DaemonSet) in the template's annotation section.</p> <p>Sample configuration of a Pod with multiple interfaces:</p> 
+<pre>1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+      valid_lft forever preferred_lft forever
+2: eth0@if9: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1460 qdisc noqueue state UP group default
+    link/ether 2a:92:4a:e5:da:35 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet 10.60.45.4/24 brd 10.60.45.255 scope global eth0
+      valid_lft forever preferred_lft forever
+10: eth1@if11: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1460 qdisc noqueue state UP group default qlen 1000
+    link/ether ba:f0:4d:eb:e8:02 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet 172.16.1.2/32 scope global eth1
+      valid_lft forever preferred_lft forever
+</pre> <h2 id="verification">Verification</h2> <ul> <li>Ensure that you create clusters with <code translate="no" dir="ltr">--enable-multi-networking</code> only if <code translate="no" dir="ltr">--enable-dataplane-v2</code> is enabled.</li> <li>Verify that all node pools in the cluster are running Container-Optimized OS images at the time of cluster and node pool creation.</li> <li>Verify that node pools are created with <code translate="no" dir="ltr">--additional-node-network</code> or <code translate="no" dir="ltr">--additional-pod-network</code> only if multi-networking is enabled on the cluster.</li> <li>Ensure that the same subnet is not specified twice as <code translate="no" dir="ltr">--additional-node-network</code> argument to a node pool.</li> <li>Verify that the same secondary range is not specified as the <code translate="no" dir="ltr">--additional-pod-network</code> argument to a node pool.</li> <li>Follow the scale limits specified for network objects, considering the maximum number of nodes, Pods, and IP addresses allowed.</li> <li>Verify that there is only one <code translate="no" dir="ltr">GKENetworkParamSet</code> object which refers to a particular subnet and secondary range.</li> <li>Verify that each network object refers to a different <code translate="no" dir="ltr">GKENetworkParamSet</code> object.</li> <li>Verify that the network object if it is created with a specific subnet with <code translate="no" dir="ltr">Device</code> network, is not being used on the same node with another network with a secondary range. You can only validate this at runtime.</li> <li>Verify that the various secondary ranges assigned to the node pools don't have overlapping IP addresses.</li> </ul> <h2 id="troubleshoot-multi-networking-parameters-in-gke">Troubleshoot multi-networking parameters in GKE</h2> <p>To help ensure a correct network setup, Google Cloud validates multi-networking parameters when you create clusters and node pools.</p> <aside class="note"><strong>Note:</strong><span> When troubleshooting issues with <code translate="no" dir="ltr">Device</code> type networks, ensure that the <code translate="no" dir="ltr">high-perf-device-plugin</code> and <code translate="no" dir="ltr">anetd</code> are installed on the nodes. Also, verify that the node label <code translate="no" dir="ltr">google.cloud.com/run-high-perf-daemons: "true"</code> is present on the nodes. This label specifically controls the <code translate="no" dir="ltr">high-perf-device-plugin</code>.</span></aside> <p>Starting from GKE version 1.32 and later, the <code translate="no" dir="ltr">high-perf-config-daemon</code> is only required when a <code translate="no" dir="ltr">DPDK-VFIO</code> network is present on the node. To check the <code translate="no" dir="ltr">high-perf-config-daemon</code>, verify that the node label <code translate="no" dir="ltr">cloud.google.com/run-high-perf-config-daemons: "true"</code> is present. The absence of the required plugins or node labels for the specific network type may indicate an incomplete or incorrect setup.</p> <h3 id="invalid-stack-type-error">Invalid stack type error</h3> <p>When creating a node pool with an additional network interface, you might see the following error:</p> 
+<pre>Google Compute Engine: Invalid value for field 'resource.properties.networkInterfaces[1].stackType': 'UNSPECIFIED_STACK_TYPE'.
+</pre> <p>This error typically occurs when you use an IPv6-only subnet without explicitly setting the value of the <code translate="no" dir="ltr">stack-type</code> field in earlier GKE versions or configurations. To resolve the issue, ensure you update the gcloud CLI components, use a newer GKE version, and explicitly include the <code translate="no" dir="ltr">stack-type=ipv6</code> parameter in your command.</p> <p>If you fail to create multi-network workloads, you can check the Pod status and events for more information:</p> 
+<pre>kubectl describe pods samplepod
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         samplepod
+Namespace:    default
+Status:       Running
+IP:           192.168.6.130
+IPs:
+  IP:  192.168.6.130
+...
+Events:
+  Type     Reason                  Age   From               Message
+  ----     ------                  ----  ----               -------
+  Normal   NotTriggerScaleUp  9s               cluster-autoscaler  pod didn't trigger scale-up:
+  Warning  FailedScheduling   8s (x2 over 9s)  default-scheduler   0/1 nodes are available: 1 Insufficient networking.gke.io.networks/my-net.IP. preemption: 0/1 nodes are available: 1 No preemption victims found for incoming pod
+</pre> <p>The following are general reasons for Pod creation failure:</p> <ul> <li>Failed to schedule Pod due to multi-networking resource requirements not met</li> <li>Failed to identify specified networks</li> </ul> <h3 id="troubleshoot-kubernetes-networks">Troubleshoot creation of Kubernetes networks</h3> <p>After you successfully create a network, nodes that should have access to the configured network are annotated with a network-status annotation.</p> <p>To observe annotations, run the following command:</p> 
+<pre>kubectl describe node NODE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node.</p> <p>The output is similar to the following:</p> 
+<pre>networking.gke.io/network-status: [{"name":"default"},{"name":"dp-network"}]
+</pre> <p>The output lists each network available on the node. If the expected network status is not seen on the node, do the following:</p> <h4 id="node-can-access-the-network">Check if the node can access the network</h4> <p>If the network is not showing up in the node's network-status annotation:</p> <ol> <li>Verify that the node is part of a pool configured for multi-networking.</li> <li>Check the node's interfaces to see if it has an interface for the network you're configuring.</li> <li>If a node is missing network-status and has only one network interface, you must still create a pool of nodes with multi-networking enabled.</li> <li>If your node contains the interface for the network you're configuring but it is not seen in the network status annotation, check the <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> (GNP) resources.</li> </ol> <h4 id="gnp-resources">Check the <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> resources</h4> <p>The status of both <code translate="no" dir="ltr">Network</code> and <code translate="no" dir="ltr">GKENetworkParamSet</code> (GNP) resources includes a conditions field for reporting configuration errors. We recommended checking GNP first, as it does not rely on another resource to be valid.</p> <p>To inspect the conditions field, run the following command:</p> 
+<pre>kubectl get gkenetworkparamsets GNP_NAME -o yaml
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GNP_NAME</var></code> with the name of the <code translate="no" dir="ltr">GKENetworkParamSet</code> resource.</p> <p>When the <code translate="no" dir="ltr">Ready</code> condition is equal to true, the configuration is valid and the output is similar to the following:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GKENetworkParamSet
+...
+spec:
+  podIPv4Ranges:
+    rangeNames:
+    -   sec-range-blue
+  vpc: dataplane
+  vpcSubnet: subnet-dp
+status:
+  conditions:
+  -   lastTransitionTime: "2023-06-26T17:38:04Z"
+    message: ""
+    reason: GNPReady
+    status: "True"
+    type: Ready
+  networkName: dp-network
+  podCIDRs:
+    cidrBlocks:
+    -   172.16.1.0/24
+</pre> <p>When the <code translate="no" dir="ltr">Ready</code> condition is equal to false, the output displays the reason and is similar to the following:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GKENetworkParamSet
+...
+spec:
+  podIPv4Ranges:
+    rangeNames:
+    -   sec-range-blue
+  vpc: dataplane
+  vpcSubnet: subnet-nonexist
+status:
+  conditions:
+  -   lastTransitionTime: "2023-06-26T17:37:57Z"
+    message: 'subnet: subnet-nonexist not found in VPC: dataplane'
+    reason: SubnetNotFound
+    status: "False"
+    type: Ready
+  networkName: ""
+</pre> <p>If you encounter a similar message, ensure your GNP was configured correctly. If it already is, ensure your Google Cloud network configuration is correct. After updating Google Cloud network configuration, you may need to recreate the GNP resource to manually trigger a resync. This is to avoid infinite polling of the Google Cloud API.</p> <p>Once the GNP is ready, check the <code translate="no" dir="ltr">Network</code> resource.</p> 
+<pre>kubectl get networks NETWORK_NAME -o yaml
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code> with the name of the <code translate="no" dir="ltr">Network</code> resource.</p> <p>The output of a valid configuration is similar to the following:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: Network
+...
+spec:
+  parametersRef:
+    group: networking.gke.io
+    kind: GKENetworkParamSet
+    name: dp-gnp
+  type: L3
+status:
+  conditions:
+  -   lastTransitionTime: "2023-06-07T19:31:42Z"
+    message: ""
+    reason: GNPParamsReady
+    status: "True"
+    type: ParamsReady
+  -   lastTransitionTime: "2023-06-07T19:31:51Z"
+    message: ""
+    reason: NetworkReady
+    status: "True"
+    type: Ready
+</pre> <ul> <li>
+<code translate="no" dir="ltr">reason: NetworkReady</code> indicates that the Network resource is configured correctly. <code translate="no" dir="ltr">reason: NetworkReady</code> does not imply that the Network resource is necessarily available on a specific node or actively being used.</li> <li>If there is a misconfiguration or error, the <code translate="no" dir="ltr">reason</code> field in the condition specifies the exact reason for the issue. In such cases, adjust the configuration accordingly.</li> <li>GKE populates the ParamsReady field, if the parametersRef field is set to an <code translate="no" dir="ltr">GKENetworkParamSet</code> resource that exists in the cluster. If you've specified a <code translate="no" dir="ltr">GKENetworkParamSet</code> type parametersRef and the condition isn't appearing, make sure the name, kind, and group match the GNP resource that exists within your cluster.</li> </ul> <h2 id="single-stack-ipv6">Set up multi-network support on single-stack IPv6 clusters</h2> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This product or feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA products and features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>In <a href="single-stack-ipv6">single-stack IPv6 clusters</a>, you can configure multi-network support for Pods to attach secondary IPv4-only Pod networks backed by a VPC network and subnetwork pair to workloads whose primary interface uses IPv6 networking. This configuration enables hybrid IPv4/IPv6 communication with IPv4 resources in secondary VPC subnetworks.</p> <h3 id="key_considerations_and_limitations_for_ipv6_clusters">Key considerations and limitations for IPv6 clusters</h3> <p>Before you configure multi-network support on a single-stack IPv6 cluster, review the following considerations and limitations:</p> <ul> <li>
+<strong>Primary interface:</strong> the default Pod network interface (<code translate="no" dir="ltr">eth0</code>) runs on single-stack IPv6 networking.</li> <li>
+<strong>Secondary interfaces:</strong> secondary Pod networks must be IPv4-only (<code translate="no" dir="ltr">IPV4</code> stack type) and use Layer 3 VPC networks. Single-stack IPv6 clusters don't support secondary IPv6 Pod networks.</li> <li>
+<strong>Default interface routing:</strong> the <code translate="no" dir="ltr">networking.gke.io/default-interface</code> annotation configures the default gateway interface only for IPv4 traffic. No default interface is configured for IPv6 traffic.</li> </ul> <h3 id="configure_secondary_ipv4_networks_on_single-stack_ipv6_clusters">Configure secondary IPv4 networks on single-stack IPv6 clusters</h3> <p>To configure secondary IPv4 networks on a single-stack IPv6 cluster, complete the following steps:</p> <ol> <li>
+<p><strong>Create the cluster:</strong> when creating your single-stack IPv6 cluster, append the <code translate="no" dir="ltr">--enable-multi-networking</code> flag:</p> <ul> <li>
+<p>For Autopilot clusters:</p> 
+<pre>gcloud container clusters create-auto CLUSTER_NAME \
+    --enable-dataplane-v2 \
+    --cluster-dns=clouddns \
+    --enable-multi-networking \
+    --network=NETWORK_NAME \
+    --subnetwork=NODE_SUBNET_NAME \
+    --private-endpoint-subnetwork=PSC_SUBNET_NAME \
+    --location=COMPUTE_LOCATION
+</pre>
+</li> <li>
+<p>For Standard clusters:</p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --enable-dataplane-v2 \
+    --cluster-dns=clouddns \
+    --stack-type=ipv6 \
+    --enable-multi-networking \
+    --network=NETWORK_NAME \
+    --subnetwork=NODE_SUBNET_NAME \
+    --private-endpoint-subnetwork=PSC_SUBNET_NAME \
+    --location=COMPUTE_LOCATION
+</pre>
+</li> </ul>
+</li> <li><p><strong>Create the Network and GKENetworkParamSet resources:</strong> define the GKENetworkParamSet and Network resources referencing your secondary IPv4 VPC and subnetwork as described in <a href="#configure-layer3-vpc">Configure <code translate="no" dir="ltr">Layer 3</code> VPC network</a>.</p></li> <li>
+<p><strong>Provision node pools:</strong></p> <ul> <li>In Autopilot and Standard clusters with managed nodes, GKE automatically provisions node pools with the required secondary interfaces when a Pod referencing the network is scheduled.</li> <li>
+<p>In Standard clusters with standard node pools, create a node pool with the <code translate="no" dir="ltr">--additional-pod-network</code> flag referencing your secondary network:</p> 
+<pre>gcloud container node-pools create POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --additional-pod-network=subnetwork=SECONDARY_SUBNET_NAME \
+    --location=COMPUTE_LOCATION
+</pre>
+</li> </ul>
+</li> <li>
+<p><strong>Deploy Pods with network annotations:</strong> reference both the primary IPv6 network (<code translate="no" dir="ltr">default</code>) and your secondary IPv4 network in your Pod manifest:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: ipv6-ipv4-multinetwork-pod
+  annotations:
+    networking.gke.io/default-interface: 'eth1'
+    networking.gke.io/interfaces: |
+      [
+        {"interfaceName":"eth0","network":"default"},
+        {"interfaceName":"eth1","network":"secondary-ipv4-net"}
+      ]
+spec:
+  containers:
+  - name: workload
+    image: busybox
+    command: ["sleep", "3600"]
+</pre> <p>In this configuration, the <code translate="no" dir="ltr">eth0</code> interface receives an IPv6 address from the cluster's default IPv6 Pod CIDR range, while the <code translate="no" dir="ltr">eth1</code> interface receives an IPv4 address from the <code translate="no" dir="ltr">secondary-ipv4-net</code> network. The <code translate="no" dir="ltr">networking.gke.io/default-interface: 'eth1'</code> annotation designates the <code translate="no" dir="ltr">eth1</code> interface as the default interface for IPv4 egress traffic.</p>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li><a href="alias-ips">Learn how to create VPC-native clusters</a></li> <li><a href="single-stack-ipv6">Create and manage single-stack IPv6 clusters</a></li> <li><a href="https://codelabs.developers.google.com/codelabs/gke-multinic-l3netdevice">Codelabs</a></li> <li><a href="https://youtu.be/cLL2IvZXbIc">Demo video</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/setup-multinetwork-support-for-pods" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/setup-multinetwork-support-for-pods</a>
+  </p>
+</div>

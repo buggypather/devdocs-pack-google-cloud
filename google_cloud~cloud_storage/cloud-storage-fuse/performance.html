@@ -1,0 +1,302 @@
+<h1>Performance tuning best practices</h1> <meta name="Keywords_public" value="gcsfuse, cloud storage fuse, gcsfuse performance, gcsfuse tuning, gcsfuse best practices, improve gcsfuse performance, gcsfuse ai/ml, gcsfuse training, gcsfuse serving, gcsfuse checkpointing, gcsfuse hierarchical namespace, gcsfuse metadata cache, gcsfuse file caching, gcsfuse parallel downloads, gcsfuse streaming writes, gcsfuse kernel read-ahead, gcsfuse JAX cache, gcsfuse GKE, gcsfuse GPU, gcsfuse TPU"> <meta name="description" content="Detailed guide on tuning best practices for optimal cloud storage fuse performance."> <p>Tuning key Cloud Storage FUSE features and configurations helps you maximize throughput and performance, especially for artificial intelligence and machine learning (AI/ML) workloads such as training, serving, and checkpointing. This document describes best practices for tuning Cloud Storage FUSE performance.</p> <h2 id="considerations">Considerations</h2> <p>Before you apply the configurations we recommend in this page, consider the following:</p> <ul> <li>
+<p>You can apply the recommended configurations in this page using the following methods:</p> <ul> <li><p>Cloud Storage FUSE <a href="config-file#profile"><code translate="no" dir="ltr">profile</code> field</a> or <a href="cli-options#profile"><code translate="no" dir="ltr">--profile</code> option</a>, which configures settings for AI/ML training, checkpointing, or serving workloads automatically when used.</p></li> <li><p><a href="config-file">Cloud Storage FUSE configuration file</a></p></li> <li><p><a href="cli-options">Cloud Storage FUSE CLI</a></p></li> <li><p>For Google Kubernetes Engine only: <a href="sample-yaml-files">sample Google Kubernetes Engine YAML files</a></p></li> </ul>
+</li> <li><p>Make sure you're running the latest version of Cloud Storage FUSE. The recommended configurations should only be applied to Cloud Storage FUSE version 3.0 or later and the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/cloud-storage-fuse-csi-driver">Cloud Storage FUSE CSI driver for Google Kubernetes Engine</a> that runs on GKE clusters version 1.32.2-gke.1297001 or later.</p></li> <li>
+<p>The recommended configurations cache Cloud Storage metadata for the length of the job and aren't checked after the initial mount of the file system. Therefore, we recommend that the file system is read-only or file system semantics are <em>write-to-new</em> applications, meaning applications always write to new files, for optimal performance. The following AI/ML workloads are write-to-new:</p> <ul> <li><p>Checkpointing</p></li> <li><p>Training</p></li> <li><p>Serving</p></li> <li><p><a href="https://docs.jax.dev/en/latest/jit-compilation.html"><code translate="no" dir="ltr">jax.jit()</code></a> caching</p></li> </ul>
+</li> <li>
+<p>The recommended configurations in this page have been validated for Cloud GPUs and Cloud TPU large machine types at scale where there is a large amount of memory and a high bandwidth network interface. Cloud GPUs and Cloud TPU machine types can differ in terms of the number of available resources such as CPU, memory, and local storage within their host node configuration. This can directly impact performance for configurations such as the following:</p> <ul> <li><p><a href="https://docs.cloud.google.com/compute/docs/gpus#h200-gpus">A3 Ultra</a></p></li> <li><p><a href="https://docs.cloud.google.com/compute/docs/gpus#h100-gpus">A3 Mega</a> - 1.8 TiB memory, with 6 TiB LSSD</p></li> <li><p><a href="https://docs.cloud.google.com/tpu/docs/v5e">Cloud TPU v5e</a> - 188 GiB memory, with no LSSD</p></li> <li><p><a href="https://docs.cloud.google.com/tpu/docs/v5p">Cloud TPU v5p</a> - 448 GiB memory, with no LSSD</p></li> <li><p><a href="https://docs.cloud.google.com/tpu/docs/v6e">Cloud TPU v6e</a> (Trillium) - 1.5 TiB memory, with no LSSD</p></li> <li><p><a href="https://docs.cloud.google.com/tpu/docs/tpu7x">Cloud TPU 7x</a> (Ironwood) - 1.1 TiB memory, with no LSSD</p></li> </ul>
+</li> </ul> <h2 id="rapid-bucket">Rapid Bucket support</h2> <p>Starting with version 3.7.1, Cloud Storage FUSE supports Rapid Bucket with optimized read path.</p> <p>The optimized read path significantly improves performance by using the Linux kernel's read-ahead algorithm by default. To use this optimized read path, specific machine-level configuration changes are required for the <code translate="no" dir="ltr">read_ahead_kb</code>, <code translate="no" dir="ltr">max_background</code>, and <code translate="no" dir="ltr">congestion_threshold</code> parameters. In Google Kubernetes Engine (GKE) environments using the Cloud Storage FUSE CSI driver, these configurations are fully managed and applied automatically. For Compute Engine VMs and other non-GKE environments, Cloud Storage FUSE requires <code translate="no" dir="ltr">sudo</code> permissions to apply these changes automatically, or you must configure these parameters <a href="https://github.com/GoogleCloudPlatform/gcsfuse/releases/tag/v3.7.1">manually</a>.</p> <p>When using the optimized read path for Rapid Bucket, keep the following behaviors and limitations in mind:</p> <ul> <li>
+<strong>File cache and buffered reader compatibility:</strong> Because the optimized read path relies on the kernel's read-ahead algorithm, it is incompatible with the Cloud Storage FUSE file cache and buffered reader. By default, these features are inactive (no-op) for Rapid Bucket. If your workload requires the file cache or buffered reader, you must explicitly disable the kernel reader by setting <code translate="no" dir="ltr">enable-kernel-reader: false</code> during mounting. This will cause Cloud Storage FUSE to use the standard read path, which is compatible with file caching and buffered reads.</li> <li>
+<strong>Mounting requirements:</strong> The new read path is supported only for static mounts. It isn't supported when using dynamic mounting.</li> </ul> <h2 id="hierarchical-namespace">Use buckets with hierarchical namespace enabled</h2> <p>Always use buckets with <a href="../hns-overview">hierarchical namespace</a> enabled. Hierarchical namespace organizes your data into a hierarchical file system structure, which makes operations within the bucket more efficient, resulting in quicker response times and fewer overall list calls for every operation.</p> <p>The benefits of hierarchical namespace include the following:</p> <ul> <li><p>Buckets with hierarchical namespace provide up to eight times higher initial queries per second (QPS) compared to flat buckets. Hierarchical namespace supports 40,000 initial object read requests per second and 8,000 initial object write requests, which is significantly higher than typical Cloud Storage FUSE flat buckets, which offer only 5,000 object read requests per second initially and 1,000 initial object write requests.</p></li> <li><p>Hierarchical namespace provides atomic directory renames, which are required for checkpointing with Cloud Storage FUSE to ensure atomicity. Using buckets with hierarchical namespace enabled is especially beneficial when checkpointing at scale because ML frameworks use directory renames to finalize checkpoints, which is a fast, atomic command, and is only supported in buckets with hierarchical namespace enabled. If you choose not to use a bucket with hierarchical namespace enabled, see <a href="#rename-dir-limit">Increase rename limit for non-HNS buckets</a>.</p></li> </ul> <p>To learn how to create a bucket with hierarchical namespace enabled, see <a href="../create-hns-bucket">Create buckets with hierarchical namespace enabled</a>. To learn how to mount a hierarchical namespace-enabled bucket, see <a href="mount-bucket#hns-folders">Mount buckets with hierarchical namespace enabled</a>. Hierarchical namespace is supported on Google Kubernetes Engine versions 1.31.1-gke.2008000 or later.</p> <h2 id="directory-mount">Perform a directory-specific mount</h2> <p>If you want to access a specific directory within a bucket, you can mount only the specific directory using the <a href="config-file#only-dir"><code translate="no" dir="ltr">only-dir</code></a> mount option instead of mounting the entire bucket. Performing a directory-specific mount accelerates list calls and reduces the overall number of list and stat calls by limiting the number of directories to traverse when resolving a filename, because <code translate="no" dir="ltr">LookUpInode</code> calls and bucket or directory access requests automatically generate list and stat calls for each file or directory in the path.</p> <p>To mount a specific directory, use one of the following methods:</p> <div> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+<p>For persistent volumes, use the following mount configuration with the Cloud Storage FUSE CSI driver for Google Kubernetes Engine:</p> 
+<pre data-language="">
+mountOptions:
+    - only-dir:DIRECTORY_NAME
+</pre> <p>For ephemeral volumes, append the mount configuration to the <code translate="no" dir="ltr">volumeAttributes.mountOptions</code>, with flags separated by commas:</p> 
+<pre data-language="">
+mountOptions: "OTHER_OPTIONS,only-dir:DIRECTORY_NAME"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DIRECTORY_NAME</var></code> with the name of the directory you want to mount.</p></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+<p>Run the <code translate="no" dir="ltr">gcsfuse --only-dir</code> command to mount a specific directory on a Compute Engine virtual machine:</p> 
+<pre data-language="">
+gcsfuse --only-dir DIRECTORY_NAME BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of the bucket you want to mount the directory in.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">DIRECTORY_NAME</var></code> is the name of the directory you want to mount.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <p>For more information on how to perform a directory mount, see <a href="mount-bucket#directory-mount">Mount a directory within a bucket</a>.</p> <h2 id="increase-metadata-cache-values">Increase metadata cache values</h2> <p>To improve performance for repeat reads, you can configure Cloud Storage FUSE to cache a large amount of metadata and bypass metadata expiration, which avoids repeated metadata requests to Cloud Storage and significantly improves performance.</p> <p>Increasing metadata cache values is beneficial for workloads with repeat reads to avoid repetitive Cloud Storage calls and for read-only volumes where an infinite TTL can be set.</p> <p>Consider the following before you increase metadata cache values:</p> <ul> <li><p>An infinite time to live (TTL) should only be set for volumes that are either read-only or write-to-new only.</p></li> <li><p>The metadata cache should only be enabled to grow significantly in size on nodes with large memory configurations because it caches all metadata for the specified mount point in each node and eliminates the need for additional access to Cloud Storage.</p></li> <li><p>The configurations in this section cache all accessed metadata with an infinite TTL, which can affect consistency guarantees when changes are made on the same Cloud Storage bucket by any other client, for example, overwrites on a file or deletions of a file.</p></li> <li><p>To verify memory consumption isn't impacted, validate that the amount of memory consumed by the metadata cache is acceptable to you, which can grow to be in gigabytes and depends on the number of files in the mounted buckets and how many mount points are being used. For example, each file's metadata takes roughly 1.5 KiB of memory, and relatively, the metadata of one million files takes approximately 1.5 GiB of memory. For more information, see <a href="caching">Overview of caching</a>.</p></li> </ul> <p>Use the following instructions to configure Cloud Storage FUSE to cache a large amount of metadata and to bypass metadata expiration:</p> <div> <section><p class="_code-tab"><strong>gcsfuse options</strong></p>
+
+<pre data-language="">
+gcsfuse --metadata-cache-ttl-secs=-1 \
+      --stat-cache-max-size-mb=-1 \
+      BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">metadata-cache:
+stat-cache-max-size-mb: -1
+ttl-secs: -1</pre></section> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+
+<pre data-language="">
+  mountOptions:
+      - metadata-cache:ttl-secs:-1
+      - metadata-cache:stat-cache-max-size-mb:-1
+</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+gcsfuse --metadata-cache-ttl-secs=-1 \
+      --stat-cache-max-size-mb=-1 \
+      BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <h2 id="pre-populate-the-metadata-cache">Pre-populate the metadata cache</h2> <p>Before you run a workload, we recommend that you pre-populate the metadata cache, which significantly improves performance and substantially reduces the number of metadata calls to Cloud Storage, particularly if the <a href="config-file#implicit-dirs"><code translate="no" dir="ltr">implicit-dirs</code> field</a> or <a href="cli-options#implicit-dirs"><code translate="no" dir="ltr">--implicit-dirs</code> option</a> is used. The Cloud Storage FUSE CSI driver for GKE provides an API that handles pre-populating the metadata cache, see <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-perf#metadata-prefetch">Use metadata prefetch to pre-populate the metadata cache</a>.</p> <aside class="note"><strong>Note:</strong><span> Running the <code translate="no" dir="ltr">ls -R</code> command can pre-populate the metadata cache if the application doesn't do this itself. If the application accesses the entire directory structure from the current location to where <code translate="no" dir="ltr">ls -R</code> is run from, this can quickly populate the entire metadata cache and list cache, if enabled.</span></aside> <p>To pre-populate the metadata cache, use one of the following methods:</p> <div> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+<p>Set the <code translate="no" dir="ltr">gcsfuseMetadataPrefetchOnMount</code> CSI volume attribute flag to <code translate="no" dir="ltr">true</code>:</p> <p>On Google Kubernetes Engine versions 1.32.1-gke.1357001 or later, you can enable metadata prefetch for a given volume using the <code translate="no" dir="ltr">gcsfuseMetadataPrefetchOnMount</code> configuration option in the <code translate="no" dir="ltr">volumeAttributes</code> field of your <code translate="no" dir="ltr">PersistentVolume</code> definition. The <code translate="no" dir="ltr">initContainer</code> method isn't needed when you use the <code translate="no" dir="ltr">gcsfuseMetadataPrefetchOnMount</code> configuration option.</p> 
+
+<pre data-language="">
+  apiVersion: v1
+  kind: PersistentVolume
+  metadata:
+    name: training-bucket-pv
+  spec:
+    ...
+    csi:
+      volumeHandle: BUCKET_NAME
+      volumeAttributes:
+        ...
+        gcsfuseMetadataPrefetchOnMount: "true"
+  </pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul> <p>Init container resources may vary depending on bucket contents and hierarchical layout, so consider <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-sidecar#configure-sidecar-resources">setting custom metadata prefetch sidecar resources</a> for higher limits.</p></section> <section><p class="_code-tab"><strong>Linux</strong></p>
+<p>Manually run the <code translate="no" dir="ltr">ls -R</code> command on the Cloud Storage FUSE mount point to recursively list all files and pre-populate the metadata cache:</p> 
+<pre data-language="">ls -R MOUNT_POINT &gt; /dev/null</pre> <p>Replace the following:</p> <p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code>: the path to your Cloud Storage FUSE mount point.</p></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+<p>Manually run the <code translate="no" dir="ltr">ls -R</code> command on the Cloud Storage FUSE mount point to recursively list all files and pre-populate the metadata cache:</p> 
+<pre data-language="">ls -R MOUNT_POINT &gt; /dev/null</pre> <p>Replace the following:</p> <p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code>: the path to your Cloud Storage FUSE mount point.</p></section> </div> <h2 id="enable-file-caching-and-parallel-downloads">Enable file caching and parallel downloads</h2> <p>File caching lets you store frequently accessed file data locally on your machine, speeding up repeat reads and reducing Cloud Storage costs. When you enable file caching, parallel downloads are automatically enabled as well. Parallel downloads utilize multiple workers to download a file in parallel using the file cache directory as a prefetch buffer, resulting in nine times faster model load time.</p> <p>To learn how to enable and configure file caching and parallel downloads, see <a href="file-caching#configure">Enable and configure file caching behavior</a>. To use a sample configuration, see <a href="#sample-config-file-caching-parallel-downloads">Sample configuration for enabling file caching and parallel downloads</a>.</p> <h3 id="considerations-for-file-caching-and-parallel-downloads">Cloud GPUs and Cloud TPU considerations for using file caching and parallel downloads</h3> <p>The file cache can be hosted on Local SSDs, RAM, Persistent Disk, or Google Cloud Hyperdisk with the following guidance. In all cases, the data, or individual large file, must fit within the file cache directory's available capacity which is controlled using the <a href="config-file#max-size-mb"><code translate="no" dir="ltr">max-size-mb</code> field</a> or the <a href="cli-options#file-cache-max-size-mb"><code translate="no" dir="ltr">--file-cache-max-size-mb</code> option</a>.</p> <h4 id="file-caching-parallel-downloads-gpu-considerations">Cloud GPUs considerations</h4> <p>Local SSDs are ideal for training data and checkpoint downloads. Cloud GPUs machine types include SSD capacity which can be used, such as A4 machine types that include 12 TiBs of SSD.</p> <ul> <li><p>A RAM disk provides the best performance for loading model weights because of their small size compared to the unused amount of RAM on the system.</p></li> <li><p>Persistent Disk or Google Cloud Hyperdisk can both be used as a cache.</p></li> </ul> <h4 id="file-caching-parallel-downloads-tpu-considerations">Cloud TPU considerations</h4> <p>Cloud TPU don't support Local SSDs. If you use file caching on Cloud TPU without modification, the default location used is the boot volume, which isn't recommended and results in poor performance.</p> <p>Instead of the boot volume, we recommend using a RAM disk, which is preferred for its performance and no incremental cost. However, a RAM disk is often constrained in size and most useful for serving model weights or checkpoint downloads depending on the size of the checkpoint and the available RAM. Additionally, we recommend using Persistent Disk and Google Cloud Hyperdisk for caching purposes.</p> <h3 id="sample-config-file-caching-parallel-downloads">Sample configuration for enabling file caching and parallel downloads</h3> <p>By default, the file cache uses a Local SSD if the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create#--ephemeral-storage-local-ssd"><code translate="no" dir="ltr">ephemeral-storage-local-ssd</code> mode</a> is enabled for the Google Kubernetes Engine node. If no Local SSD is available, for example, on Cloud TPU machines, the file cache uses the Google Kubernetes Engine node's boot disk, which is not recommended. In this case, you can use a RAM disk as the cache directory, but consider the amount of RAM available for file caching versus what is needed by the pod.</p> <div> <section><p class="_code-tab"><strong>gcsfuse options</strong></p>
+
+<pre data-language="">
+gcsfuse --file-cache-max-size-mb=-1 \
+      --file-cache-cache-file-for-range-read=true \
+      --file-cache-enable-parallel-downloads=true \
+      BUCKET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">file-cache:
+  max-size-mb: -1
+  cache-file-for-range-read: true
+  enable-parallel-downloads: true</pre></section> <section><p class="_code-tab"><strong>Cloud GPUs</strong></p>
+
+<pre data-language="">
+mountOptions:
+    - file-cache:max-size-mb:-1
+    - file-cache:cache-file-for-range-read:true
+    - file-cache:enable-parallel-downloads:true
+
+# RAM disk file cache if LSSD not available. Uncomment to use
+# volumes:
+#   - name: gke-gcsfuse-cache
+#     emptyDir:
+#       medium: Memory
+</pre></section> <section><p class="_code-tab"><strong>Cloud TPU</strong></p>
+
+<pre data-language="">
+mountOptions:
+    - file-cache:max-size-mb:-1
+    - file-cache:cache-file-for-range-read:true
+    - file-cache:enable-parallel-downloads:true
+
+volumes:
+    - name: gke-gcsfuse-cache
+      emptyDir:
+        medium: Memory
+</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+gcsfuse --file-cache-max-size-mb=-1 \
+      --file-cache-cache-file-for-range-read=true \
+      --file-cache-enable-parallel-downloads=true \
+      BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <h2 id="disable-negative-stat-cache">Disable negative stat cache entries</h2> <p>By default, Cloud Storage FUSE caches negative stat entries, meaning entries for files that don't exist, with a TTL of five seconds. In workloads where files are frequently created or deleted, such as distributed checkpointing, these cached entries can become stale quickly, which leads to performance issues. To avoid this, we recommend that you disable the negative stat cache for training, serving, and checkpointing workloads using the <a href="config-file#negative-ttl-secs"><code translate="no" dir="ltr">negative-ttl-secs</code> field</a> or the <a href="cli-options#metadata-cache-negative-ttl-secs"><code translate="no" dir="ltr">--metadata-cache-negative-ttl-secs</code> option</a>.</p> <aside class="note"><strong>Note:</strong><span> Disabling the negative stat cache requires Cloud Storage FUSE version 2.8, available on Google Kubernetes Engine versions 1.32.1-gke.1200000 or later.</span></aside> <p>Use the following instructions to disable the negative stat cache:</p> <div> <section><p class="_code-tab"><strong>gcsfuse option</strong></p>
+
+<pre data-language="">
+gcsfuse --metadata-cache-negative-ttl-secs=0 \
+  BUCKET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">metadata-cache:
+ negative-ttl-secs: 0</pre></section> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+
+<pre data-language="">
+mountOptions:
+    - metadata-cache:negative-ttl-secs:0
+</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+gcsfuse --metadata-cache-negative-ttl-secs=0 \
+  BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <h2 id="enable-streaming-writes">Enable streaming writes</h2> <p>Streaming writes upload data directly to Cloud Storage as it's written, which reduces latency and disk space usage. This is particularly beneficial for large, sequential writes such as checkpoints. Streaming writes are enabled by default on Cloud Storage FUSE version 3.0 and later.</p> <aside class="note"><strong>Note:</strong><span> Streaming writes are designed for sequential writes to a new, single file only. If you modify existing files, or perform out-of-order writes, it can cause Cloud Storage FUSE to automatically revert to the existing behavior of staging writes to a temporary file on disk.</span></aside> <p>If streaming writes aren't enabled by default, use the following instructions to enable them. Enabling streaming writes requires Cloud Storage FUSE version 3.0 which is available on Google Kubernetes Engine versions 1.32.1-gke.1729000 or later.</p> <div> <section><p class="_code-tab"><strong>gcsfuse option</strong></p>
+
+<pre data-language="">
+gcsfuse --enable-streaming-writes=true \
+  BUCKET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">write:
+ enable-streaming-writes: true</pre></section> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+
+<pre data-language="">
+mountOptions:
+    - write:enable-streaming-writes:true
+</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+gcsfuse --enable-streaming-writes=true \
+  BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <h2 id="enable-buffered-reads">Enable buffered reads</h2> <p>Buffered reads can improve sequential read performance for large files by two to five times by asynchronously prefetching parts of a Cloud Storage object into an in-memory buffer. This allows subsequent reads to be served from the buffer instead of requiring network calls.</p> <p>Consider the following before you enable buffered reads:</p> <ul> <li><p>Buffered reads are incompatible with file caching. If both buffered reads and file caching are enabled, file caching takes precedence and buffered reads are ignored.</p></li> <li><p>Buffered reads can take up significant memory and compute resources.</p></li> </ul> <p>To enable buffered reads, use the following instructions:</p> <div> <section><p class="_code-tab"><strong>CLI options</strong></p>
+
+<pre data-language="">
+gcsfuse --enable-buffered-read=true \
+  BUCKET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">read:
+ enable-buffered-read: true</pre></section> </div>
+<aside class="note"><strong>Note:</strong><span> We recommend using the <a href="cli-options#read-global-max-blocks"><code translate="no" dir="ltr">--read-global-max-blocks</code> option</a> or <a href="config-file#read:global-max-blocks"><code translate="no" dir="ltr">read:global-max-blocks</code> field</a> to specify the maximum number of blocks available for buffered reads across all file handles.</span></aside> <h2 id="increase-read-ahead-size">Increase kernel read-ahead size</h2> <p>For workloads that primarily involve sequential reads of large files such as serving and checkpoint restores, increasing the read-ahead size can significantly enhance performance. This can be done using the <a href="https://www.kernel.org/doc/html/v5.4/block/queue-sysfs.html#read-ahead-kb-rw"><code translate="no" dir="ltr">read_ahead_kb</code> Linux kernel parameter</a> on your local machine. We recommend that you increase the <code translate="no" dir="ltr">read_ahead_kb</code> kernel parameter to 1 MB instead of using the default amount of 128 KB that's set on most Linux distributions. For Compute Engine instances, either <code translate="no" dir="ltr">sudo</code> or <code translate="no" dir="ltr">root</code> permissions are required to successfully increase the kernel parameter.</p> <aside class="note"><strong>Note:</strong><span> Increasing the read-ahead size requires GKE versions 1.32.1-gke.1200000 or later.</span></aside> <p>To increase the <code translate="no" dir="ltr">read_ahead_kb</code> kernel parameter to 1 MB for a specific Cloud Storage FUSE mounted directory, use the following instructions. Your bucket must be mounted to Cloud Storage FUSE before you run the command, otherwise, the kernel parameter doesn't increase.</p> <p>For zonal buckets, Cloud Storage FUSE automatically manages the <code translate="no" dir="ltr">read_ahead_kb</code> kernel parameter in Google Kubernetes Engine version1.35.0-gke.3047001 or later, and in Compute Engine environments using Cloud Storage FUSE version 3.7.0 or later. Because this is handled automatically, the <code translate="no" dir="ltr">read_ahead_kb</code> mount option is no longer applicable; any value you provide will be ignored. Note that in Compute Engine environments, Cloud Storage FUSE requires root or passwordless sudo permissions to automatically manage this parameter.</p> <div> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+
+<pre data-language="">mountOptions:
+    - read_ahead_kb=1024</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+export MOUNT_POINT=/path/to/mount/point
+echo 1024 | sudo tee /sys/class/bdi/0:$(stat -c "%d" $MOUNT_POINT)/read_ahead_kb
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">/path/to/mount/point</var></code>: the path on your local file system where the Cloud Storage bucket is mounted.</li> </ul></section> </div> <h2 id="security-token-service">Disable Security Token Service to avoid redundant checks</h2> <p>The Cloud Storage FUSE CSI driver for Google Kubernetes Engine has access checks to ensure pod recoverability due to user misconfiguration of workload identity bindings between the bucket and GKE service account, which can hit default Security Token Service API quotas at scale. This can be disabled by setting the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/cloud-storage-fuse-csi-driver/volume-attr"><code translate="no" dir="ltr">skipCSIBucketAccessCheck</code></a> volume attribute of the Persistent Volume CSI driver. We recommend that you make sure the GKE service account has the right access to the target Cloud Storage bucket to avoid mount failures for the pod.</p> <p>Additionally, the Security Token Service quota must be increased beyond the default value of <code translate="no" dir="ltr">6000</code> if a Google Kubernetes Engine cluster consists of more than 6,000 nodes, which can result in <code translate="no" dir="ltr">429</code> errors if not increased in large scale deployments. The Security Token Service quota must be increased through the <a href="https://docs.cloud.google.com/storage/quotas">Quotas and limits page</a>. We recommend that you keep the quota equal to the number of mounts, for example, if there are 10,000 mounts in the cluster, the quota should be increased to <code translate="no" dir="ltr">10000</code>.</p> <p>To set the <code translate="no" dir="ltr">skipCSIBucketAccessCheck</code> volume attribute, see the following sample configuration:</p> 
+
+<pre>
+  volumeAttributes:
+      - skipCSIBucketAccessCheck: "true"
+   </pre> <h2 id="ocdbt-orbax">Optimize performance for OCDBT Orbax checkpoints</h2> <p>For workloads that use OCDBT-formatted Orbax checkpoints, you can improve serving and checkpoint restore performance by using the following guidance:</p> <ul> <li>
+<p><strong>Set transparent huge pages to <code translate="no" dir="ltr">always</code></strong>: setting transparent huge pages to <code translate="no" dir="ltr">always</code> improves performance by reducing memory fragmentation and system calls. This setting is most effective when large chunks of memory are allocated, which is common in these workloads. This setting is configured by default on Cloud TPU machines and only needs to be set on other machine types. To enable transparent huge pages on your local machine, run the following command with <code translate="no" dir="ltr">root</code> permissions.</p> 
+<pre>
+echo always | tee /sys/kernel/mm/transparent_hugepage/enabled
+</pre> <p>In a GKE environment, you can create a privileged Pod to do the same thing.</p>
+</li> <li><p><strong>Increase kernel read-ahead size</strong>: increasing kernel read-ahead size to 1024 KB improves sequential read performance. For more information, see <a href="#increase-read-ahead-size">Increase kernel read-ahead size</a>.</p></li> <li><p><strong>Set <code translate="no" dir="ltr">ocdbt_target_data_file_size</code> to 200 MiB</strong>: set the <code translate="no" dir="ltr">ocdbt_target_data_file_size</code> to 200 MiB, which is optimal for read performance with Cloud Storage FUSE.</p></li> <li><p><strong>Use DNS caching</strong>: DNS caching reduces latency by caching DNS lookups locally. In GKE, you can enable <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-perf#use-nodelocal-dnscache-in-gke">NodeLocal DNSCache</a> to cache DNS lookups. Alternatively, use Cloud Storage FUSE version 3.5 or later on Compute Engine, or GKE version 1.34.1-gke.3899000 or later in a GKE environment.</p></li> </ul> <h2 id="other-considerations">Other performance considerations</h2> <p>Beyond the primary optimizations discussed, several other factors can significantly impact the overall performance of Cloud Storage FUSE. The following sections describe additional performance considerations we recommend considering when you use Cloud Storage FUSE.</p> <h3 id="rename-dir-limit">Increase the rename limit for non-HNS buckets</h3> <p>Checkpointing workloads should always be done with a bucket that has hierarchical namespace enabled because of atomic and faster renames and higher QPS for reads and writes. However, if you accept the risk of directory renames not being atomic and taking longer, you can use the <a href="config-file#rename-dir-limit"><code translate="no" dir="ltr">rename-dir-limit</code> field</a> or the <a href="cli-options#rename-dir-limit"><code translate="no" dir="ltr">--rename-dir-limit</code> option</a> if you're performing checkpointing using buckets without hierarchical namespace to specify a limit on the number of files or operations involved in a directory rename operation at any given time.</p> <p>We recommend specifying this setting to a high value to prevent checkpointing failures. Because Cloud Storage FUSE uses a flat namespace and objects are immutable, a directory rename operation involves renaming and deleting all individual files within the directory. You can control the number of files affected by a rename operation by setting the <code translate="no" dir="ltr">rename-dir-limit</code> <code translate="no" dir="ltr">gcsfuse</code> option.</p> <p>Use the following instructions to set the <code translate="no" dir="ltr">rename-dir-limit</code> configuration option:</p> <div> <section><p class="_code-tab"><strong>gcsfuse option</strong></p>
+
+<pre data-language="">
+gcsfuse --rename-dir-limit=200000 \
+  BUCKET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">file-system:
+ rename-dir-limit: 200000</pre></section> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+
+<pre data-language="">
+mountOptions:
+    - rename-dir-limit=200000
+</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+gcsfuse --rename-dir-limit=200000 \
+  BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <h3 id="kernel-list-caching">Kernel list caching</h3> <p>The list cache is a cache for directory and file list, or <code translate="no" dir="ltr">ls</code>, responses that improves the speed of list operations. Unlike the stat cache, which are managed by Cloud Storage FUSE, the list cache is kept in the kernel's page cache and is controlled by the kernel based on memory availability.</p> <p>Enabling kernel list caching is most beneficial for the following use cases:</p> <ul> <li><p><strong>Workloads with repeated directory listings</strong>: this configuration is especially useful for workloads that perform frequent full directory listings, such as AI/ML training runs. This can benefit both serving and training workloads.</p></li> <li><p><strong>Read-only mounts</strong>: list caching is recommended with read-only mounts to avoid consistency issues.</p></li> </ul> <p>Enabling kernel list caching should be done with caution and should be used only if the file system is truly read-only with no expected directory content changes during the execution of a job. This is because with this flag, the local application never sees updates, especially if the TTL is set to <code translate="no" dir="ltr">-1</code>.</p> <p>For example, <em>Client 1</em> lists <code translate="no" dir="ltr">directoryA</code>, which causes <code translate="no" dir="ltr">directoryA</code> to be a resident in the kernel list cache. <em>Client 2</em> creates <code translate="no" dir="ltr">fileB</code> under <code translate="no" dir="ltr">directoryA</code> in the Cloud Storage bucket. <em>Client 1</em> continuously checks for <code translate="no" dir="ltr">fileB</code> in <code translate="no" dir="ltr">directoryA</code>, which is essentially checking the kernel list cache entry and never goes over the network. <em>Client 1</em> doesn't see that a new file is in the directory because the list of files is continuously served from the local kernel list cache. <em>Client 1</em> then times out and the program is broken.</p> <p>Use the following instruction to enable list caching:</p> <div> <section><p class="_code-tab"><strong>gcsfuse option</strong></p>
+
+<pre data-language="">
+gcsfuse --kernel-list-cache-ttl-secs=-1 \
+  BUCKET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</li> </ul></section> <section><p class="_code-tab"><strong>Configuration file</strong></p>
+
+<pre data-language="">file-system:
+ kernel-list-cache-ttl-secs: -1</pre></section> <section><p class="_code-tab"><strong>Google Kubernetes Engine</strong></p>
+
+<pre data-language="">
+mountOptions:
+    - file-system:kernel-list-cache-ttl-secs:-1
+</pre></section> <section><p class="_code-tab"><strong>Compute Engine</strong></p>
+
+<pre data-language="">
+gcsfuse --kernel-list-cache-ttl-secs=-1 \
+  BUCKET_NAME MOUNT_POINT
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code> is the name of your bucket.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MOUNT_POINT</var></code> is the local directory where your bucket will be mounted. For example, <code translate="no" dir="ltr">/path/to/mount/point</code>.</p></li> </ul></section> </div> <p>When you use the <a href="config-file#kernel-list-cache-ttl-secs"><code translate="no" dir="ltr">file-system:kernel-list-cache-ttl-secs</code></a> mount option, the values mean the following:</p> <ul> <li><p>A positive value represents the TTL in seconds to keep the directory list response in the kernel's page cache.</p></li> <li><p>A value of <code translate="no" dir="ltr">-1</code> bypasses entry expiration and returns the list response from the cache when it's available.</p></li> </ul> <h3 id="jit-cache">Use JAX persistent compilation (JIT) cache with Cloud Storage FUSE</h3> <p>JAX supports <a href="https://docs.jax.dev/en/latest/jit-compilation.html">Just-In-Time (JIT) cache</a>, an optional persistent compilation cache that stores compiled function artifacts. When you use this cache, you can significantly speed up subsequent script executions by avoiding redundant compilation steps.</p> <p>To enable JIT caching, you must meet the following requirements:</p> <ul> <li><p><strong>Use the latest version of JAX</strong>: use JAX versions 0.5.1 or later for the latest cache features and optimizations.</p></li> <li>
+<p><strong>Maximize cache capacity</strong>: to prevent performance degradation due to cache eviction, consider setting an unlimited cache size, particularly if you want to override default settings. You can achieve this by setting the environment variable:</p> 
+<pre>
+export JAX_COMPILATION_CACHE_MAX_SIZE=-1
+</pre>
+</li> <li><p><strong>Ensure checkpoint pod YAML</strong>: use the checkpoint configuration for the mountpoint for the JAX JIT cache.</p></li> </ul> <h2 id="rps-rfs">Configure Receive Flow Steering (RFS) for A4X and A4X Max</h2> <p>On Compute Engine instances, <a href="https://www.kernel.org/doc/html/latest/networking/scaling.html#receive-packet-steering-rps">Receive Packet Steering (RPS)</a> and <a href="https://www.kernel.org/doc/html/latest/networking/scaling.html#receive-flow-steering-rfs">Receive Flow Steering (RFS)</a> work together to improve network performance by intelligently distributing the processing of network packets across multiple CPUs. We recommend these settings for high-rate network traffic on machine types such as <a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#a4x-series">A4X and A4X Max</a>.</p> <ul> <li><p>RPS distributes incoming network packets across different CPUs for processing. This helps to balance the load and prevent a single CPU from becoming a bottleneck, which is especially useful for high-rate network traffic and can contribute to lower latency.</p></li> <li><p>RFS builds upon RPS to further reduce network latency by improving CPU cache efficiency. It steers packets to the specific CPU core where the application that will consume the packets is running, which increases the CPU's data cache hit rate and leads to lower network latency.</p></li> </ul> <p><strong>Performance Benefits</strong></p> <p>RFS significantly improves performance across various workloads, increasing throughput by up to 40%.</p> <p><strong>Considerations</strong></p> <p>While effective under load, these settings may not be useful in all scenarios:</p> <ul> <li><p><strong>Single-threaded or single-flow workloads:</strong> A single-flow workload occurs when all network traffic uses a single network connection (for example, a single massive file transfer over one TCP connection). These applications often see little benefit and may even experience a minor throughput decrease (e.g., ~7.7% in specific nginx tests). Single-flow applications are generally rare in high-performance contexts.</p></li> <li><p><strong>Frequent thread migration:</strong> If application threads frequently move between CPUs, RFS constantly updates CPU mappings(for example, applications using large dynamic worker thread pools where requests are frequently handed off between different cores), which can lead to excessive cross-CPU traffic and packet reordering.</p></li> </ul> <h3 id="configuration_script">Configuration script</h3> <p>Run the following script on the guest operating system of your Compute Engine instance. The script requires <code translate="no" dir="ltr">sudo</code> or <code translate="no" dir="ltr">root</code> permissions to modify kernel parameters.</p> <p>The script enables RPS, maps network queues to available CPUs in a round-robin fashion, and sets the per-queue flow table size to 65536.</p> 
+<pre>
+#!/bin/bash
+set -e
+
+# Note: This script uses 'apt' and is intended for Debian-based systems.
+# If 'iproute2' is not found, you may need to run 'sudo apt update' first.
+sudo apt install -y iproute2
+
+# This script enables and configures RPS (Receive Packet Steering) and RFS
+# (Receive Flow Steering) for the primary network interface.
+# It creates a 1:1 mapping of CPUs to receive queues and sets a specific
+# flow count for each queue.
+
+# --- Configuration ---
+# The desired number of flow entries per receive queue.
+RPS_FLOW_CNT_PER_QUEUE=65536
+
+# --- Script Body ---
+
+# 1. Auto-detect the primary network interface.
+INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n 1)
+
+if [ -z "$INTERFACE" ]; then
+  echo "Error: Could not determine the primary network interface."
+  exit 1
+fi
+echo "Primary network interface detected: $INTERFACE"
+
+echo "Starting RPS/RFS configuration for interface: $INTERFACE"
+
+# 2. Determine the number of receive queues for the interface.
+NUM_QUEUES=$(ls -d /sys/class/net/$INTERFACE/queues/rx-* 2&gt;/dev/null | wc -l)
+if [ "$NUM_QUEUES" -eq 0 ]; then
+  echo "Error: No receive queues found for interface $INTERFACE."
+  echo "Please check if the network driver supports multi-queue."
+  exit 1
+fi
+echo "Found $NUM_QUEUES receive queues for interface $INTERFACE."
+
+# 3. Determine the number of CPUs.
+NUM_CPUS=$(nproc)
+if [ -z "$NUM_CPUS" ] || [ "$NUM_CPUS" -eq 0 ]; then
+  echo "Error: Could not determine the number of CPUs."
+  exit 1
+fi
+echo "Found $NUM_CPUS CPUs."
+
+# 4. Calculate and set the total socket flow entries.
+# This is the total number of entries in the global socket flow table.
+RPS_SOCK_FLOW_ENTRIES=$((NUM_QUEUES * RPS_FLOW_CNT_PER_QUEUE))
+echo "Setting the total RPS socket flow entries to $RPS_SOCK_FLOW_ENTRIES..."
+if ! echo "$RPS_SOCK_FLOW_ENTRIES" | sudo tee /proc/sys/net/core/rps_sock_flow_entries &gt; /dev/null; then
+  echo "Error: Failed to set rps_sock_flow_entries. Please run with sufficient privileges."
+  exit 1
+fi
+
+# 5. Configure each receive queue.
+for i in $(seq 0 $((NUM_QUEUES - 1))); do
+  RX_QUEUE="/sys/class/net/$INTERFACE/queues/rx-$i"
+
+  # a) Assign a CPU to this queue (round-robin).
+  CPU_INDEX=$((i % NUM_CPUS))
+  CPU_BITMAP_HEX=$(printf '%x' $((1 &lt;&lt; CPU_INDEX)))
+  echo "Assigning CPU $CPU_INDEX (bitmap: $CPU_BITMAP_HEX) to queue rx-$i"
+  if ! echo "$CPU_BITMAP_HEX" | sudo tee "$RX_QUEUE/rps_cpus" &gt; /dev/null; then
+    echo "Error writing bitmap to $RX_QUEUE/rps_cpus"
+    exit 1
+  fi
+
+  # b) Set the flow count for this queue.
+  echo "Setting flow count for $RX_QUEUE to $RPS_FLOW_CNT_PER_QUEUE"
+  if ! echo "$RPS_FLOW_CNT_PER_QUEUE" | sudo tee "$RX_QUEUE/rps_flow_cnt" &gt; /dev/null; then
+    echo "Error writing to $RX_QUEUE/rps_flow_cnt"
+    exit 1
+  fi
+done
+
+echo "RPS and RFS configuration updated successfully for $INTERFACE."
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li><p>Use a <a href="sample-yaml-files">sample Google Kubernetes Engine YAML file</a> to configure tuning best practices.</p></li> <li><p>Learn about <a href="profile-based-configurations">profile-based configurations for AI/ML workloads</a>.</p></li> <li><p>Learn how to <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-perf">optimize the performance of the Cloud Storage FUSE CSI driver on Google Kubernetes Engine</a>.</p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/performance" class="_attribution-link">https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/performance</a>
+  </p>
+</div>

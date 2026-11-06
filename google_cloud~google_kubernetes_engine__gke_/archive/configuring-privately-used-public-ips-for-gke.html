@@ -1,0 +1,278 @@
+<h1>Configuring privately used public IPs for GKE</h1> <div class="last-reviewed">Last reviewed 2022-12-19 UTC</div> <div class="tutorial tutorial-lesson">  <section id="overview"> <aside class="warning"><strong>Warning:</strong><span> This page is <strong>archived</strong> and is not actively maintained. The commands on this page might not work and could cause disruptions to your cluster.</span></aside> <p>This tutorial shows how to apply privately used public IP (PUPI) addresses to Google Kubernetes Engine (GKE) Pod address blocks. Service consumer organizations that are IPv4-address constrained can use PUPI addresses in service producer virtual private clouds (VPCs) as an address-management option.</p> <p>This document is intended for network architects and GKE system administrators whose companies offer managed services over a GKE infrastructure on Google Cloud.</p> <h2 id="introduction">Introduction</h2> <p>Some companies want to deliver managed services to their customers over Kubernetes or GKE clusters on Google Cloud. However, Kubernetes can require many IP addresses for its various components. For some organizations, meeting this requirement is difficult or impossible because they're unable to assign appropriately sized <code translate="no" dir="ltr">10.0.0.0/8</code>, <code translate="no" dir="ltr">172.16.0.0/12</code>, and <code translate="no" dir="ltr">192.168.0.0/16</code> (RFC 1918) <a href="https://tools.ietf.org/html/rfc4632" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body" class="external">Classless Inter-domain Routing (CIDR) blocks</a>.</p> <p>One way to mitigate address exhaustion is to use privately used public IP (PUPI) addresses for the GKE Pod CIDR block. PUPIs are any public IP addresses not owned by Google that a customer can use privately on Google Cloud. The customer doesn't necessarily own these addresses.</p> <p>The following diagram shows a company (producer) that offers a managed service to a customer (consumer).</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/configuring-privately-used-public-ips-for-GKE-pupi-addresses.svg" alt="PUPI addresses for the GKE Pod CIDR block."></p> <p>This setup involves the following considerations:</p> <ul> <li>
+<strong>Primary CIDR block:</strong> A non-PUPI CIDR block that is used for nodes and ILB and must be non-overlapping across VPCs.</li> <li>
+<strong>Producer secondary CIDR block:</strong> A PUPI CIDR block that is used for Pods (for example, <code translate="no" dir="ltr">45.45.0.0/16</code>).</li> <li>
+<strong>Consumer secondary CIDR block:</strong> Any other PUPI CIDR block on the customer side (for example, <code translate="no" dir="ltr">5.5/16</code>).</li> </ul> <p>The company's managed service is in the producer VPC (<code translate="no" dir="ltr">vpc-producer</code>) and is built on a GKE deployment. The company's GKE cluster uses the PUPI <code translate="no" dir="ltr">45.0.0.0/8</code> CIDR block for Pod addresses. The customer's applications are located in the consumer VPC (<code translate="no" dir="ltr">vpc-consumer</code>). The customer also has a GKE installation. The GKE cluster in the consumer VPC uses the PUPI <code translate="no" dir="ltr">5.0.0.0/8</code> CIDR block for Pod addresses. The two VPCs are peered with one another. Both VPCs use the RFC 1918 address space for node, service, and load balancing addresses.</p> <p>By default, the consumer VPC (<code translate="no" dir="ltr">vpc-consumer</code>) exports all RFC 1918 to the producer VPC (<code translate="no" dir="ltr">vpc-producer</code>). Unlike RFC 1918 private addresses and extended private addresses (CGN, Class E), PUPIs aren't automatically advertised to VPC peers by default. If the <code translate="no" dir="ltr">vpc-consumer</code> Pods must communicate with <code translate="no" dir="ltr">vpc-producer</code>, the consumer must enable the VPC peering connection to export PUPI addresses. Likewise, the producer must configure the producer VPC to import PUPI routes over the VPC peering connection.</p> <p>The <code translate="no" dir="ltr">vpc-consumer</code> address space that is exported into <code translate="no" dir="ltr">vpc-producer</code> must not overlap with any RFC 1918 or PUPI address used in <code translate="no" dir="ltr">vpc-producer</code>. The producer must inform the consumer what PUPI CIDR blocks the managed service uses and ensure that the consumer isn't using these blocks. The producer and consumer must also agree and assign non-overlapping address space for internal load balancing (ILB) and node addresses in <code translate="no" dir="ltr">vpc-producer</code>.</p> <aside class="note"><strong>Note:</strong><span> PUPIs don't support service networking.</span></aside> <p>In most cases, resources in <code translate="no" dir="ltr">vpc-consumer</code> communicate with services in <code translate="no" dir="ltr">vpc-producer</code> through ILB addresses in the producer cluster. If the producer Pods are required to initiate communication directly with resources in <code translate="no" dir="ltr">vpc-consumer</code>, and PUPI addressing doesn't overlap, then the producer must configure the producer VPC to export the PUPI routes over the VPC peering connection. Likewise, the consumer must configure the VPC peering connection to import routes into <code translate="no" dir="ltr">vpc-consumer</code>. If the consumer VPC already uses the PUPI address, then the producer should instead configure the IP masquerade feature and hide the Pod IP addresses behind the producer node IP addresses.</p> <p>The following table shows the default import and export settings for each VPC. You can modify default VPC peering settings by using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/networks/peerings/update" track-type="solution" track-name="internalLink" track-metadata-position="body"><code translate="no" dir="ltr">gcloud compute networks peerings update</code></a> Google Cloud CLI command.</p> <table> <thead> <tr> <th>PUPI flag</th> <th>Import</th> <th>Export</th> </tr> </thead> <tbody> <tr> <td>Producer side (flags controlled through service networking)</td> <td>
+<p>To turn on: <code translate="no" dir="ltr">--import-subnet-routes-with-public-ip</code> (through peering)</p> <p>Default behavior: Turned off</p>
+</td> <td>
+<p>To turn off: <code translate="no" dir="ltr">--no-export-subnet-routes-with-public-ip</code> (through peering)</p> <p>Default behavior: Turned on</p>
+</td> </tr> <tr> <td>Consumer side (owned by customer, not required to be modified through service networking)</td> <td>Turned off (default)</td> <td>Turned on (default)</td> </tr> </tbody> </table> <p>These settings result in the following:</p> <ul> <li>The producer VPC sees all the customer routes.</li> <li>The consumer VPC doesn't see the PUPI routes configured on the Pod subnet in the producer VPC.</li> <li>Traffic originating from the producer Pods to the <code translate="no" dir="ltr">vpc-consumer</code> network must be translated behind the node addresses in the producer cluster.</li> </ul> <h2 id="qualifications">Qualifications</h2> <ul> <li>The address range that you select for a PUPI can't be reachable through the internet or be an address that Google owns.</li> <li>The Node IPs and primary range need to be non-overlapping between the two VPCs.</li> <li>If direct Pod-to-Pod communication is required between the customer VPC and the managed service, then the producer Pod IP addresses must be translated behind their corresponding Node IPs.</li> </ul> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Configure two VPC networks.</li> <li>Configure one subnet inside each VPC network.</li> <li>Configure a PUPI address range on a secondary address range in each subnet.</li> <li>Establish a VPC peering relationship between the two VPC networks with proper import and export settings.</li> <li>Inspect the routes within each VPC.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li>
+<a href="https://cloud.google.com/kubernetes-engine/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE</a> </li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <li> <p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> <p>You complete most of this tutorial from the Cloud Shell terminal using HashiCorp's Terraform and the gcloud CLI.</p>
+</li> <li>
+<p>Clone the GitHub repository and change to the local working directory:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/terraform-vpc-pupi $HOME/pupi
+</pre> <p>The repository contains all the files that you need to complete this tutorial. For a complete description of each file, see the <code translate="no" dir="ltr">README.md</code> file in the repository.</p>
+</li> <li>
+<p>Make all shell scripts executable:</p> 
+<pre>sudo chmod 755 $HOME/pupi/*.sh
+</pre>
+</li> </ol> <h2 id="preparing_your_environment">Preparing your environment</h2> <p>In this section, you install and set up Terraform, and then you set environment variables.</p> <h3 id="set_up_terraform">Set up Terraform</h3> <ol> <li>Install Terraform by following the <a href="https://learn.hashicorp.com/terraform/getting-started/install.html" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body" class="external">steps in the HashiCorp documentation</a>.</li> <li>
+<p>In Cloud Shell, initialize Terraform:</p> 
+<pre>cd $HOME/pupi
+terraform init
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+Initializing provider plugins...
+The following providers do not have any version constraints in
+configuration, so the latest version was installed.
+...
+Terraform has been successfully initialized!
+...
+</pre> <p>As Terraform initializes, it logs progress messages. At the end of the message output, you see a message that Terraform initialized successfully.</p>
+</li> </ol> <h3 id="set_environment_variables">Set environment variables</h3> <ol> <li>
+<p>In Cloud Shell, set the <code translate="no" dir="ltr">TF_VAR_org_id</code> variable:</p> 
+<pre>export TF_VAR_org_id=$(gcloud organizations list | \
+    awk '/YOUR_ORGANIZATION_NAME/ {print $2}')</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_ORGANIZATION_NAME</var></code>: the Google Cloud organization name that you want to use for this tutorial</li> </ul>
+</li> <li>
+<p>Verify that you set the environment variable correctly:</p> 
+<pre>echo $TF_VAR_org_id
+</pre> <p>The output lists your numeric organization ID and looks similar to the following:</p> 
+<pre>
+...
+123123123123
+...
+</pre>
+</li> <li>
+<p>Set the remaining environment variables:</p> 
+<pre>source $HOME/pupi/set_variables.sh
+</pre> <p>This shell script sets basic parameters such as the Google Cloud region, organization ID, and project ID as variables in the shell environment. Terraform uses these variables to configure your Google Cloud resources. You can adjust or change the parameters in the shell script to fit your environment. For a full list of variables, review the <code translate="no" dir="ltr">set_variables</code> shell script.</p>
+</li> <li>
+<p>Verify that you set the environment variables correctly:</p> 
+<pre>env | grep TF_
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+TF_VAR_billing_account=QQQQQQ-XAAAAA-E8769
+TF_VAR_org_id=406999999999
+TF_VAR_region1=us-west1
+TF_VAR_region2=us-west2
+TF_VAR_consumer_ilb_ip=10.129.0.200
+TF_VAR_user_account=user@example
+TF_VAR_pid=pupi-pid--999999999
+TF_VAR_zone2=us-west2-b
+TF_VAR_zone1=us-west1-b
+...
+</pre>
+</li> <li>
+<p>Create an environment variable file:</p> 
+<pre>$HOME/pupi/saveVars.sh
+</pre> <p>This command redirects the environment variables that you created into a file named <code translate="no" dir="ltr">TF_ENV_VARS</code>. Each variable is prepended with the <code translate="no" dir="ltr">export</code> command. If your Cloud Shell session is terminated, you can use this file to reset the variables. These variables are used by the Terraform scripts, Cloud Shell scripts, and the Google Cloud CLI.</p> <p>If you need to reinitialize the variables later, run the following command:</p> 
+<pre>source $HOME/pupi/TF_ENV_VARS
+</pre>
+</li> </ol> <h3 id="deploy_supporting_infrastructure">Deploy supporting infrastructure</h3> <ol> <li>
+<p>In Cloud Shell, deploy the Terraform supporting infrastructure:</p> 
+<pre>terraform apply
+</pre> <p>When prompted, enter <code translate="no" dir="ltr">yes</code> to apply either configuration. Terraform can take several minutes to deploy the resources.</p> <p>The <code translate="no" dir="ltr">terraform apply</code> command instructs Terraform to deploy all the solution's components. To understand how the infrastructure is declaratively defined, see the Terraform manifests (files with a <code translate="no" dir="ltr">.tf</code> extension).</p>
+</li> <li>
+<p>Establish the VPC peering relationship. Because the feature is in alpha and not supported by Terraform, you use <code translate="no" dir="ltr">gcloud</code> commands to set up peering.</p> 
+<pre>gcloud alpha compute networks peerings create consumer \
+    --project="$TF_VAR_pid" \
+    --network=consumer \
+    --peer-network=producer
+
+gcloud alpha compute networks peerings create producer \
+    --project="$TF_VAR_pid" \
+    --network=producer \
+    --peer-network=consumer \
+    --no-export-subnet-routes-with-public-ip \
+    --import-subnet-routes-with-public-ip
+</pre> <p>By default, the consumer VPC exports the PUPI addresses. When you create the producer VPC, you use the following arguments to configure the VPC to import PUPI addresses but not export them:</p> 
+<pre>--no-export-subnet-routes-with-public-ip
+--import-subnet-routes-with-public-ip
+</pre>
+</li> </ol> </section> <div id="tutorial-content"> <h2 id="inspecting_the_supporting_infrastructure">Inspecting the supporting infrastructure</h2> <p>You now verify that Terraform successfully created the resources by checking whether the resources respond after you send a command.</p> <h3 id="verify_the_projects">Verify the projects</h3> <ol> <li>
+<p>In Cloud Shell, list the project:</p> 
+<pre>gcloud projects list | grep pupi-pid
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+pupi-pid--1234567899            pupi-test             777999333555
+...
+</pre> <p>In this output, <code translate="no" dir="ltr">pupi-test</code> is the project name, and <code translate="no" dir="ltr">pupi-pid-</code> is the prefix to your project ID.</p>
+</li> <li>
+<p>List the API status:</p> 
+<pre>gcloud services list --project=$TF_VAR_pid \
+    | grep -E "compute|container"
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+compute.googleapis.com            Compute Engine API
+container.googleapis.com          Kubernetes Engine API
+containerregistry.googleapis.com  Container Registry API
+...
+</pre> <p>This output shows that the Compute Engine, GKE, and Container Registry APIs are enabled.</p>
+</li> </ol> <h3 id="verify_the_networks_and_subnetworks">Verify the networks and subnetworks</h3> <ol> <li>
+<p>In Cloud Shell, verify the producer network and subnetwork:</p> 
+<pre>gcloud compute networks describe producer \
+    --project=$TF_VAR_pid
+
+gcloud compute networks subnets describe producer-nodes \
+    --project=$TF_VAR_pid \
+    --region=$TF_VAR_region1
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+kind: compute#network
+name: producer
+...
+ipCidrRange: 10.128.0.0/24
+kind: compute#isubnetwork
+name: producer-nodes
+...
+secondaryIpRanges:
+- ipCidrRange: 45.45.45.0/24
+  rangeName: producer-pods
+- ipCidrRange: 172.16.45.0/24
+  rangeName: producer-cluster
+...
+</pre> <p>This output shows the following:</p> <ul> <li>The network was created with the <code translate="no" dir="ltr">10.128.0.0/24</code> CIDR block.</li> <li>The two subnets were created with the <code translate="no" dir="ltr">45.45.45.0/24</code> and <code translate="no" dir="ltr">172.16.45.0/24</code> CIDR blocks.</li> </ul>
+</li> <li>
+<p>Verify the consumer network and subnetwork:</p> 
+<pre>gcloud compute networks describe consumer \
+    --project=$TF_VAR_pid
+
+gcloud compute networks subnets describe consumer-nodes \
+    --project=$TF_VAR_pid \
+    --region=$TF_VAR_region2
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+kind: compute#network
+name: consumer
+...
+ipCidrRange: 10.129.0.0/24
+kind: compute#isubnetwork
+name: consumer-nodes
+...
+secondaryIpRanges:
+- ipCidrRange: 5.5.5.0/24
+  rangeName: producer-pods
+- ipCidrRange: 172.16.5.0/24
+  rangeName: consumer-cluster
+...
+</pre> <p>This output shows the following:</p> <ul> <li>The network was created using the <code translate="no" dir="ltr">10.129.0.0/24</code> CIDR block.</li> <li>The two subnets were created using the <code translate="no" dir="ltr">5.5.5.0/24</code> and <code translate="no" dir="ltr">172.16.5.0/24</code> CIDR blocks.</li> </ul>
+</li> </ol> <h3 id="verify_the_gke_cluster_and_its_resources">Verify the GKE cluster and its resources</h3> <ol> <li>
+<p>In Cloud Shell, get the cluster credentials:</p> 
+<pre>gcloud container clusters get-credentials consumer-cluster \
+    --project=$TF_VAR_pid \
+    --zone=$TF_VAR_zone2
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+Fetching cluster endpoint and auth data.
+kubeconfig entry generated for consumer-cluster.
+...
+</pre>
+</li> <li>
+<p>Verify the cluster:</p> 
+<pre>gcloud container clusters list \
+    --project=$TF_VAR_pid \
+    --zone=$TF_VAR_zone2
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+NAME              LOCATION    MASTER_VERSION  MASTER_IP      MACHINE_TYPE   NODE_VERSION    NUM_NODES  STATUS
+consumer-cluster  us-west2-b  1.14.10-gke.17  35.236.104.74  n1-standard-1  1.14.10-gke.17  3          RUNNING
+</pre> <p>This output shows a cluster that is named <code translate="no" dir="ltr">consumer-cluster</code>.</p>
+</li> <li>
+<p>Verify the Hello World app:</p> 
+<pre>kubectl get deployment my-app
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+...
+NAME     DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+my-app   3         3         3            3           118m
+...
+</pre> <p>This output shows a deployment that is named <code translate="no" dir="ltr">my-app</code>.</p>
+</li> <li>
+<p>Verify the internal load balancer service:</p> 
+<pre>kubectl get service hello-server
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+NAME           TYPE           CLUSTER-IP    EXTERNAL-IP    PORT(S)          AGE
+hello-server   LoadBalancer   172.16.5.99   10.129.0.200   8080:31673/TCP   4d23h
+</pre> <p>This output shows a service that is named <code translate="no" dir="ltr">hello-server</code>.</p>
+</li> </ol> <h2 id="verifying_the_solution">Verifying the solution</h2> <ol> <li>
+<p>In Cloud Shell, validate that you successfully created VPC peering:</p> 
+<pre>gcloud alpha compute networks peerings list
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+NAME      NETWORK   PEER_PROJECT          PEER_NETWORK  IMPORT_CUSTOM_ROUTES  EXPORT_CUSTOM_ROUTES  STATE   STATE_DETAILS
+consumer  consumer  pupi-pid--1324732197  producer      False                 False                 ACTIVE  [2020-02-26T11:33:16.886-08:00]: Connected.
+producer  producer  pupi-pid--1324732197  consumer      False                 False                 ACTIVE  [2020-02-26T11:33:16.886-08:00]: Connected.
+</pre> <p>This output shows peerings that are named <code translate="no" dir="ltr">consumer</code> and <code translate="no" dir="ltr">producer</code>.</p>
+</li> <li>
+<p>Validate that the consumer VPC exports PUPI routes:</p> 
+<pre>gcloud alpha compute networks peerings list-routes consumer \
+    --direction=OUTGOING \
+    --network=consumer \
+    --region="$TF_VAR_region2"
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+DEST_RANGE     TYPE                  NEXT_HOP_REGION  PRIORITY  STATUS
+10.129.0.0/24  SUBNET_PEERING_ROUTE  us-west2         1000      accepted by peer
+172.16.5.0/24  SUBNET_PEERING_ROUTE  us-west2         1000      accepted by peer
+5.5.5.0/24     SUBNET_PEERING_ROUTE  us-west2         1000      accepted by peer
+</pre> <p>This output shows all three consumer CIDR blocks.</p>
+</li> <li>
+<p>Validate the PUPI routes that the producer VCP imported:</p> 
+<pre>gcloud alpha compute networks peerings list-routes producer \
+    --direction=INCOMING \
+    --network=producer \
+    --region="$TF_VAR_region1"
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+DEST_RANGE     TYPE                  NEXT_HOP_REGION  PRIORITY  STATUS
+10.129.0.0/24  SUBNET_PEERING_ROUTE  us-west2         1000      accepted
+172.16.5.0/24  SUBNET_PEERING_ROUTE  us-west2         1000      accepted
+5.5.5.0/24     SUBNET_PEERING_ROUTE  us-west2         1000      accepted
+</pre> <p>This output shows all three consumer CIDR blocks.</p>
+</li> <li>
+<p>Validate that the GKE Pods have a PUPI address:</p> 
+<pre>kubectl get pod -o wide
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+NAME                      READY   STATUS    RESTARTS   AGE     IP         NODE                                              NOMINATED NODE   READINESS GATES
+my-app-594b56d7bc-642d8   1/1     Running   0          4d23h   5.5.5.21   gke-consumer-cluster-default-pool-cd302b68-tccf   &lt;none&gt;           &lt;none&gt;
+my-app-594b56d7bc-chnw8   1/1     Running   0          4d23h   5.5.5.38   gke-consumer-cluster-default-pool-cd302b68-h8v9   &lt;none&gt;           &lt;none&gt;
+my-app-594b56d7bc-fjvbz   1/1     Running   0          4d23h   5.5.5.20   gke-consumer-cluster-default-pool-cd302b68-tccf   &lt;none&gt;           &lt;none&gt;
+</pre> <p>The IP addresses of the Pods fall within the <code translate="no" dir="ltr">5.5.5/24</code> range.</p>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used in this tutorial:</p> <h3 id="destroy_the_infrastructure">Destroy the infrastructure</h3> <ol> <li>
+<p>In Cloud Shell, destroy all of the tutorial's components:</p> 
+<pre>terraform destroy
+</pre> <p>When prompted, enter <code translate="no" dir="ltr">yes</code> to destroy the configuration.</p> <p>You might see the following Terraform error:</p> 
+<pre>
+...
+∗ google_compute_network.ivpc (destroy): 1 error(s) occurred:
+∗ google_compute_network.ivpc: Error waiting for Deleting Network: The network resource 'projects/pupi-pid--1324732197/global/networks/consumer-cluster' is already being used by 'projects/pupi-pid--1324732197/global/firewalls/k8s-05693142c93de80e-node-hc'
+...
+</pre> <p>This error occurs when the command attempts to destroy the VPC network before destroying the GKE firewall rules. If you receive this error, do the following:</p> <ol> <li>
+<p>Remove the non-default firewall rules from the VPC:</p> 
+<pre>$HOME/pupi/k8-fwr.sh
+</pre> <p>The output shows you the firewall rules to be removed. Review the rules and, when prompted, enter <code translate="no" dir="ltr">yes</code>.</p>
+</li> <li>
+<p>Re-issue the following command:</p> 
+<pre>cd $HOME/pupi
+terraform destroy
+</pre>
+</li> </ol> <p>When prompted, enter <code translate="no" dir="ltr">yes</code> to destroy the configuration.</p>
+</li> <li>
+<p>Remove the Git repository:</p> 
+<pre>rm -rf $HOME/pupi
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Read the <a href="https://docs.cloud.google.com/vpc/docs/configure-private-services-access" track-type="solution" track-name="internalLink" track-metadata-position="body">Configuring private service access</a> guide.</li> <li>Read the <a href="https://docs.cloud.google.com/service-infrastructure/docs/service-networking/getting-started" track-type="solution" track-name="internalLink" track-metadata-position="body">Getting started with the Service Networking API</a> guide.</li> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/archive/configuring-privately-used-public-ips-for-GKE" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/archive/configuring-privately-used-public-ips-for-GKE</a>
+  </p>
+</div>

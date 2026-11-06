@@ -1,0 +1,195 @@
+<h1>Operating system upgrade best practices</h1>  <p>This document describes best practices and strategies for upgrading operating systems on Compute Engine instances. Learn how to upgrade major OS versions by using immutable infrastructure, re-creation of instances, or in-place workflows, and how to automate routine security patching.</p> <p>When an operating system version approaches its end of support (EOS) or end of life (EOL), you must upgrade to a supported OS version to maintain security updates, software compatibility, and Google Cloud platform integration. For more information about support phases, see <a href="os-image-lifecycle">Operating systems lifecycle</a>.</p> <h2 id="risks-in-place-upgrades">Risks of in-place major OS version upgrades</h2> <p>If you perform a major in-place upgrade of the operating system—such as upgrading Debian 12 to 13, RHEL 9 to 10, or Ubuntu 24.04 to 26.04 on a running compute instance—then you introduce significant operational risks in cloud environments. Unlike on-premises physical servers, your compute instances depend on specialized packages for the guest environment to communicate with the hypervisor and Compute Engine metadata server.</p> <p>When you upgrade an operating system in place, you risk the following failure modes:</p> <ul> <li>
+<strong>Loss of SSH and RDP connectivity:</strong> Configuration formats for network services, guest-level firewall rules, such as ufw or firewalld, or SSH daemon settings can change between OS versions, cutting off remote administrative access.</li> <li>
+<strong>Disruption of the guest environment:</strong> The <a href="guest-agent"><code translate="no" dir="ltr">google-guest-agent</code></a> and <a href="../oslogin"><code translate="no" dir="ltr">google-oslogin</code></a> packages manage SSH keys, user accounts, network interfaces, and synchronization with metadata. If package repositories or dependencies break during a distribution upgrade, the guest agent might stop running, preventing further sign-ins or network configuration.</li> <li>
+<strong>Incompatibilities with storage and kernel drivers:</strong> Changes to the kernel, <code translate="no" dir="ltr">initramfs</code>, or drivers for disk controllers (such as virtio-scsi or NVMe) can cause boot failures or prevent the compute instance from recognizing attached Persistent Disk volumes.</li> <li>
+<strong>Inconsistent configurations for repositories:</strong> Operating system vendors often deprecate or replace legacy package repositories and signing keys, which can cause package managers to fail mid-upgrade and leave the operating system in an unrecoverable, half-installed state.</li> </ul> <p>To avoid these risks, use an immutable infrastructure model rather than upgrading major OS versions in place on your production compute instances.</p> <h2 id="choose-upgrade-strategy">Choose the right upgrade strategy</h2> <p>Depending on whether your workloads are stateless or stateful, choose one of the following strategies:</p> <table> <thead> <tr> <th>Strategy</th> <th>Recommended for</th> <th>Downtime risk</th> <th>Rollback mechanism</th> </tr> </thead> <tbody> <tr> <td><a href="#immutable-infrastructure">Immutable infrastructure</a></td> <td>Stateless workloads, managed instance groups (MIGs), microservices, container hosts</td> <td>Zero downtime with rolling replacement</td> <td>Revert the instance template to an earlier image</td> </tr> <tr> <td><a href="#recreate-vm-persistent-disks">Re-create compute instances with Persistent Disk</a></td> <td>Stateful standalone compute instances, databases with attached secondary storage, legacy application hosts</td> <td>Minimal with a planned maintenance window</td> <td>Reattach disks to the original compute instance or restore snapshots</td> </tr> <tr> <td><a href="#in-place-upgrades">In-place upgrade of the OS</a></td> <td>Standalone compute instances where you cannot automate or extract local configurations</td> <td>High, requiring downtime and manual recovery planning</td> <td>Restore from a Persistent Disk snapshot</td> </tr> </tbody> </table> <h2 id="immutable-infrastructure">Immutable infrastructure</h2> <p>The safest and most reliable way to upgrade your operating systems is by using the immutable infrastructure model. Instead of modifying running compute instances, you build new compute instances from updated public or custom OS images and replace your legacy instances.</p> <p>If your workloads run in <a href="../instance-groups">managed instance groups</a> (MIGs), then you can automate this rollout with zero service downtime.</p> <h3 id="create_an_updated_image">Create an updated image</h3> <ol> <li>Select the latest public OS image from the supported <a href="os-details">Operating system details</a> list, or create a custom base image using <a href="image-builder/overview">Image Builder</a> or automated tools such as Packer or Ansible.</li> <li>Verify that your application and dependencies install and run successfully on the new OS version in a non-production test environment.</li> <li>Create a custom OS image or reference the new public image family. For more information, see <a href="image-families-best-practices">Image families best practices</a>.</li> </ol> <h3 id="create_an_updated_instance_template">Create an updated instance template</h3> <p>Create a new instance template that references the updated OS image:</p> 
+<pre>
+gcloud compute instance-templates create NEW_TEMPLATE_NAME \
+    --image-family=IMAGE_FAMILY \
+    --image-project=IMAGE_PROJECT \
+    --machine-type=MACHINE_TYPE \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NEW_TEMPLATE_NAME</var></code>: the name for the new instance template.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_FAMILY</var></code>: the image family of the target OS, such as <code translate="no" dir="ltr">debian-12</code> or <code translate="no" dir="ltr">ubuntu-2404-lts</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_PROJECT</var></code>: the project hosting the image, such as <code translate="no" dir="ltr">debian-cloud</code> or <code translate="no" dir="ltr">ubuntu-os-cloud</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type for your instances.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Compute Engine region where you create the template.</li> </ul> <h3 id="perform_a_rolling_replacement_in_the_mig">Perform a rolling replacement in the MIG</h3> <p>Apply the updated template to your managed instance group and initiate a rolling replacement:</p> 
+<pre>
+gcloud compute instance-groups managed rolling-action replace MIG_NAME \
+    --max-surge=20% \
+    --max-unavailable=0 \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MIG_NAME</var></code>: the name of your managed instance group.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region where your MIG is located. For zonal MIGs, replace <code translate="no" dir="ltr">--region=<var translate="no">REGION</var></code> with <code translate="no" dir="ltr">--zone=<var translate="no">ZONE</var></code>.</li> </ul> <aside class="note"><strong>Note:</strong><span> Setting <code translate="no" dir="ltr">--max-unavailable=0</code> ensures that Compute Engine creates and verifies new instances before terminating older instances, maintaining continuous application availability.</span></aside> <h2 id="recreate-vm-persistent-disks">Re-create compute instances with Persistent Disk</h2> <p>If you run stateful standalone compute instances where applications store configuration and data on Persistent Disk volumes, then you can upgrade your operating system by re-creating the compute instance with a fresh boot disk while preserving your data disks.</p> <h3 id="back_up_all_disks">Back up all disks</h3> <p>Before modifying infrastructure, create standard or regional snapshots of the boot disk and all attached Persistent Disk volumes:</p> 
+<pre>
+gcloud compute disks snapshot BOOT_DISK_NAME \
+    --snapshot-names=SNAPSHOT_NAME \
+    --zone=ZONE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BOOT_DISK_NAME</var></code>: the name of the boot disk to back up.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SNAPSHOT_NAME</var></code>: the name for the new Persistent Disk snapshot.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the disk is located.</li> </ul> <p>For more information, see <a href="../disks/create-snapshots">Create and manage snapshots</a>.</p> <h3 id="separate_application_data_from_the_boot_disk">Separate application data from the boot disk</h3> <p>Make sure that application data, database files, and transaction logs reside on secondary Persistent Disk volumes or external services, such as Cloud Storage or Cloud SQL, rather than on the boot disk.</p> <h3 id="create_the_replacement_compute_instance">Create the replacement compute instance</h3> <ol> <li>
+<p>Stop the legacy compute instance to make sure that data remains consistent:</p> 
+<pre>
+gcloud compute instances stop LEGACY_INSTANCE_NAME --zone=ZONE
+</pre>
+</li> <li>
+<p>Detach the secondary data disks from the legacy compute instance:</p> 
+<pre>
+gcloud compute instances detach-disk LEGACY_INSTANCE_NAME \
+    --disk=DATA_DISK_NAME \
+    --zone=ZONE
+</pre>
+</li> <li>
+<p>Create a new compute instance with the target OS version:</p> 
+<pre>
+gcloud compute instances create NEW_INSTANCE_NAME \
+    --image-family=IMAGE_FAMILY \
+    --image-project=IMAGE_PROJECT \
+    --zone=ZONE \
+    --machine-type=MACHINE_TYPE
+</pre>
+</li> <li>
+<p>Attach the existing secondary data disks to the new compute instance:</p> 
+<pre>
+gcloud compute instances attach-disk NEW_INSTANCE_NAME \
+    --disk=DATA_DISK_NAME \
+    --zone=ZONE
+</pre>
+</li> <li><p>Connect to the new compute instance, mount the filesystems on the data disks, and start your application services.</p></li> <li><p>If necessary, reassign any static external IP addresses or DNS records to point to the new compute instance.</p></li> </ol> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">LEGACY_INSTANCE_NAME</var></code>: the name of the existing compute instance you are upgrading.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATA_DISK_NAME</var></code>: the name of the secondary Persistent Disk volume to detach and reattach.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NEW_INSTANCE_NAME</var></code>: the name for the new replacement compute instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_FAMILY</var></code>: the image family for the target OS version, such as <code translate="no" dir="ltr">debian-13</code> or <code translate="no" dir="ltr">ubuntu-2604-lts</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_PROJECT</var></code>: the project that provides the image, such as <code translate="no" dir="ltr">debian-cloud</code> or <code translate="no" dir="ltr">ubuntu-os-cloud</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type for the new compute instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where your compute instances are located.</li> </ul> <h2 id="in-place-upgrades">In-place OS upgrades</h2> <p>If you cannot re-create your compute instance because of complex manual configurations, and you must perform an in-place upgrade, then complete these pre-upgrade checks and follow the distribution-specific instructions carefully.</p> <h3 id="pre-upgrade-checklist">Pre-upgrade checklist</h3> <p>Complete every step in this checklist before starting an in-place upgrade:</p> <ol> <li>Take a snapshot of the boot disk before running any upgrade commands. This is your primary recovery mechanism if the upgrade fails.</li> <li>
+<p>Update all current packages and the guest environment for Google Cloud to the latest versions available for your current OS release:</p> <ul> <li>For Debian and Ubuntu: <code translate="no" dir="ltr">sudo apt update &amp;&amp; sudo apt dist-upgrade -y</code>
+</li> <li>For RHEL, CentOS, and Rocky Linux: <code translate="no" dir="ltr">sudo dnf upgrade -y</code>
+</li> <li>For SLES: <code translate="no" dir="ltr">sudo zypper update</code>
+</li> </ul> <p>Make sure that the <code translate="no" dir="ltr">google-guest-agent</code> and <code translate="no" dir="ltr">google-oslogin</code> packages are active:</p> 
+<pre>
+sudo systemctl status google-guest-agent
+</pre>
+</li> <li>
+<p>Enable the interactive serial console on your compute instance so you can troubleshoot and sign in if SSH or networking stops working during the upgrade:</p> 
+<pre>
+gcloud compute instances add-metadata INSTANCE_NAME \
+    --metadata=serial-port-enable=TRUE \
+    --zone=ZONE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code>: the name of your compute instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where your compute instance is located.</li> </ul> <p>For more information, see <a href="../troubleshooting/troubleshooting-using-serial-console">Interacting with the serial console</a>.</p>
+</li> <li><p>If you use OS Login or SSH keys managed by the guest agent, then set a password for a local user account with administrative privileges, such as with <code translate="no" dir="ltr">sudo passwd <var translate="no">USERNAME</var></code>, so you can sign in through the serial console if OS Login is temporarily unavailable during the upgrade. Replace <code translate="no" dir="ltr"><var translate="no">USERNAME</var></code> with the name of your local user account.</p></li> <li>
+<p>Make sure that the root partition <code translate="no" dir="ltr">/</code> and boot partition <code translate="no" dir="ltr">/boot</code> have sufficient free space, with at least 5 GB recommended, to download and unpack new packages:</p> 
+<pre>
+df -h / /boot
+</pre>
+</li> <li><p>Verify that third-party agents for security, backup, or monitoring (including the Google Cloud Ops Agent) support the target version of the operating system.</p></li> </ol> <h3 id="in-place-upgrade-procedures">In-place upgrade procedures</h3> <p>The following sections provide high-level workflows for common operating systems. Always consult the official upgrade documentation for your operating system before upgrading.</p> <div> <section><p class="_code-tab"><strong>Debian</strong></p>
+<p>You can upgrade Debian between consecutive major releases. Don't skip major versions—for example, upgrade Debian 11 to 12 first, and then upgrade Debian 12 to 13.</p> <ol> <li>
+<p>Update the existing Debian package repositories:</p> 
+<pre data-language="">
+sudo apt update &amp;&amp; sudo apt upgrade -y &amp;&amp; sudo apt dist-upgrade -y
+</pre>
+</li> <li><p>Update package sources in <code translate="no" dir="ltr">/etc/apt/sources.list</code> and <code translate="no" dir="ltr">/etc/apt/sources.list.d/</code> by replacing the current release codename, such as <code translate="no" dir="ltr">bullseye</code>, with the target release codename, such as <code translate="no" dir="ltr">bookworm</code>. Make sure that the Google Cloud package repository URLs match the new release.</p></li> <li>
+<p>Perform a minimal upgrade to update core packaging tools:</p> 
+<pre data-language="">
+sudo apt update
+sudo apt upgrade --without-new-pkgs -y
+</pre>
+</li> <li>
+<p>Run the full distribution upgrade:</p> 
+<pre data-language="">
+sudo apt full-upgrade -y
+</pre>
+</li> <li>
+<p>Verify that <code translate="no" dir="ltr">google-guest-agent</code> is active and enabled:</p> 
+<pre data-language="">
+sudo systemctl enable --now google-guest-agent
+</pre>
+</li> <li>
+<p>Reboot the compute instance:</p> 
+<pre data-language="">
+sudo systemctl reboot
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Ubuntu</strong></p>
+<p>To manage LTS-to-LTS upgrades on Ubuntu, use the <code translate="no" dir="ltr">do-release-upgrade</code> tool.</p> <ol> <li>
+<p>Update all current packages:</p> 
+<pre data-language="">
+sudo apt update &amp;&amp; sudo apt dist-upgrade -y
+</pre>
+</li> <li>
+<p>Install the core package for the update manager:</p> 
+<pre data-language="">
+sudo apt install update-manager-core -y
+</pre>
+</li> <li>
+<p>Start the tool for release upgrades:</p> 
+<pre data-language="">
+sudo do-release-upgrade
+</pre>
+</li> <li><p>Follow the interactive prompts to confirm repository updates and package replacements. If prompted about modified configuration files, review the differences carefully before overwriting.</p></li> <li><p>Reboot the compute instance when prompted.</p></li> </ol></section> <section><p class="_code-tab"><strong>RHEL</strong></p>
+<p>To upgrade between major RHEL versions, use the supported Red Hat <code translate="no" dir="ltr">leapp</code> utility.</p> <ol> <li>Verify your Red Hat subscription status and make sure that the compute instance connects to the Compute Engine Red Hat Update Infrastructure (RHUI).</li> <li>Install the Leapp utility and the packages that contain migration data.</li> <li>
+<p>Run the pre-upgrade assessment:</p> 
+<pre data-language="">
+sudo leapp preupgrade
+</pre>
+</li> <li><p>Review the report in <code translate="no" dir="ltr">/var/log/leapp/leapp-report.txt</code> and resolve all inhibitor issues that Leapp identifies.</p></li> <li>
+<p>Execute the upgrade:</p> 
+<pre data-language="">
+sudo leapp upgrade
+</pre>
+</li> <li>
+<p>Reboot the instance to let Leapp perform the OS upgrade in an isolated environment:</p> 
+<pre data-language="">
+sudo reboot
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>SLES</strong></p>
+<p>To perform major version service pack migrations and distribution upgrades on SLES, use <code translate="no" dir="ltr">zypper</code>:</p> <ol> <li>
+<p>Update the existing system:</p> 
+<pre data-language="">
+sudo zypper patch
+</pre>
+</li> <li><p>Run <code translate="no" dir="ltr">zypper migration</code> to perform an online migration, or follow the distribution upgrade workflow, using <code translate="no" dir="ltr">zypper dup</code>, specified in the <a href="https://documentation.suse.com/">SLES upgrade documentation</a>.</p></li> </ol></section> <section><p class="_code-tab"><strong>Windows</strong></p>
+<p>For Windows Server compute instances, you can use installation media with Compute Engine volume licensing and PowerShell scripts to automate upgrades without manual intervention.</p> <p>To perform an in-place upgrade on Windows Server, follow the tutorial to <a href="../tutorials/performing-in-place-upgrade-windows-server">perform an in-place upgrade of Windows Server</a>.</p></section> </div> <h2 id="automated-patch-management">Automate patch management for minor updates</h2> <p>Distinguish major OS version upgrades from routine minor updates and security patches. For regular maintenance of software, package updates, and patching of CVEs, use <a href="https://docs.cloud.google.com/compute/vm-manager/docs/patch">VM Manager Patch</a> to automate the deployment of patches across your fleet of compute instances.</p> <p>Follow these best practices to manage patches automatically:</p> <ul> <li>
+<strong>Organize instances with labels:</strong> Assign labels with metadata, such as <code translate="no" dir="ltr">env:dev</code>, <code translate="no" dir="ltr">env:prod</code>, and <code translate="no" dir="ltr">tier:frontend</code>, to target specific groups of compute instances for patches.</li> <li>
+<strong>Deploy zone by zone:</strong> Stagger patch jobs across zones and regions. Never apply patch jobs to all zones simultaneously in production environments.</li> <li>
+<strong>Use pre-patch and post-patch scripts:</strong> Configure pre-patch scripts to safely drain connections or pause services, and configure post-patch scripts to run health checks before returning instances to service.</li> <li>
+<strong>Monitor patch compliance:</strong> Use the dashboard for VM Manager in the Google Cloud console to track compliance with patches and the status of vulnerabilities across your fleet of compute instances.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/compute/vm-manager/docs/patch/create-patch-job">Create patch jobs</a>.</p> <h2 id="verification-troubleshooting">Post-upgrade verification and troubleshooting</h2> <p>After completing an upgrade, perform the following verification steps:</p> <ol> <li>Confirm that SSH or RDP connects normally.</li> <li>
+<p>Make sure that the guest agent and the service for OS Login are active and reporting healthy status:</p> 
+<pre>
+sudo systemctl status google-guest-agent
+sudo systemctl status google-oslogin-cache
+</pre>
+</li> <li>
+<p>Verify that the compute instance can query the instance metadata server:</p> 
+<pre>
+curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/id
+</pre>
+</li> <li><p>Confirm that your application services started and that health checks from load balancers report healthy instances.</p></li> </ol> <h3 id="troubleshoot-connection-loss">Troubleshoot connection loss</h3> <p>If you lose SSH or RDP access to the compute instance after an in-place upgrade, then complete the following troubleshooting steps:</p> <ol> <li>
+<p>Check the console log for kernel panics, errors during service startup, or failures during network initialization:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output INSTANCE_NAME \
+    --zone=ZONE
+</pre>
+</li> <li>
+<p>If you enabled the interactive serial console before the upgrade, then connect directly to the terminal:</p> 
+<pre>
+gcloud compute connect-to-serial-port INSTANCE_NAME \
+    --zone=ZONE
+</pre> <p>Sign in using your local user credentials, inspect system logs with <code translate="no" dir="ltr">journalctl -xe</code>, and restart networking or the <code translate="no" dir="ltr">google-guest-agent</code> service.</p> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code>: the name of the compute instance you are troubleshooting.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the compute instance is located.</li> </ul>
+</li> <li><p>If the operating system cannot boot or recover, then create a new Persistent Disk volume from the snapshot that you took before the upgrade and attach it as the boot disk of the compute instance. For detailed recovery steps, see <a href="../disks/restore-snapshot">Restore a snapshot into a new disk</a>.</p></li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="os-image-lifecycle">Learn about operating system lifecycle stages and deprecation policies</a>.</li> <li>
+<a href="image-management-best-practices">Review image management best practices</a>.</li> <li>
+<a href="guest-environment">Understand the guest environment components and daemons</a>.</li> <li>
+<a href="https://docs.cloud.google.com/compute/vm-manager/docs/patch/create-patch-job">Set up automated patch jobs by using VM Manager</a>.</li> <li>
+<a href="../tutorials/performing-in-place-upgrade-windows-server">Perform an in-place upgrade of Windows Server</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/images/os-upgrade-best-practices" class="_attribution-link">https://docs.cloud.google.com/compute/docs/images/os-upgrade-best-practices</a>
+  </p>
+</div>

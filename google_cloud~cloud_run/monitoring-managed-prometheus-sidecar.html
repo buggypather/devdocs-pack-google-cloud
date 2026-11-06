@@ -1,0 +1,353 @@
+<h1>Write Prometheus metrics by using the Prometheus sidecar</h1>  <p>The Managed Service for Prometheus sidecar for Cloud Run is the Google-recommended way to get <a href="https://prometheus.io/docs/introduction/overview/">Prometheus-style monitoring</a> for Cloud Run services. If your Cloud Run service writes <a href="https://opentelemetry.io/docs/concepts/signals/metrics/">OTLP metrics</a>, then you can use the <a href="tutorials/custom-metrics-opentelemetry-sidecar">OpenTelemetry sidecar</a>. But for services that write <a href="https://prometheus.io/docs/concepts/metric_types/">Prometheus metrics</a>, use the Managed Service for Prometheus sidecar described in this document.</p> <p>This document describes how to do the following:</p> <ul> <li>
+<a href="#sidecar-intro">Add the Managed Service for Prometheus sidecar</a> to an existing Cloud Run service.</li> <li>
+<a href="#run-sample">Build a sample app</a> with the sidecar. You can use the sample app to see how the sidecar works if you don't have an existing Cloud Run service.</li> </ul> <p>The sidecar uses <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a> on the server side and a distribution of the OpenTelemetry Collector, custom-built for serverless workloads, on the client side. This custom distribution includes some changes to support Cloud Run. The collector performs a start-up scrape after 10 seconds and performs a shut-down scrape, no matter how short-lived the instance is. For maximum reliability, we recommend that Cloud Run services running the sidecar also use the instance-based billing setting; for more information, see <a href="configuring/billing-settings">Billing settings (services)</a>. Some scrape attempts might fail if the CPU allocation is throttled due to a low number of queries per second (QPS). An always-allocated CPU remains available.</p> <p>The sidecar relies on the Cloud Run multi-container (sidecar) feature to run the collector as a sidecar container alongside your workload container. For more information about sidecars in Cloud Run, see <a href="deploying#sidecars">Deploying multiple containers to a service (sidecars)</a>.</p> <p>The Managed Service for Prometheus sidecar for Cloud Run introduces a new configuration, <code translate="no" dir="ltr">RunMonitoring</code>, a subset of the Kubernetes <a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#podmonitoring"><code translate="no" dir="ltr">PodMonitoring</code></a> custom resource. Most users can use the default <code translate="no" dir="ltr">RunMonitoring</code> configuration, but you can also create custom configurations. For more information about the default and custom <code translate="no" dir="ltr">RunMonitoring</code> configurations, see <a href="#sidecar-intro">Add the sidecar to a Cloud Run service</a>.</p> <h2 id="byb">Before you begin</h2> <p>This section describes the setup necessary to use this document.</p> <h3 id="gcloud-setup">Install and configure the gcloud CLI</h3> <p>Many of the steps described in this document use the Google Cloud CLI. For information about installing the gcloud CLI, see <a href="https://docs.cloud.google.com/sdk/docs/components">Managing Google Cloud CLI components</a>.</p> <p>When invoking <code translate="no" dir="ltr">gcloud</code> commands, you must specify the identifier for your Google Cloud project. You can set a default project for the Google Cloud CLI and eliminate the need to enter it with every command. To set your project as the default, enter the following command:</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>You can also set a default region for your Cloud Run service. To set a default region, enter the following command:</p> 
+<pre>
+gcloud config set run/region REGION
+</pre> <h3 id="enable-apis">Enable APIs</h3> <p>You must enable the following APIs in your Google Cloud project:</p> <ul> <li>Cloud Run Admin API: <code translate="no" dir="ltr">run.googleapis.com</code>
+</li> <li>Artifact Registry API: <code translate="no" dir="ltr">artifactregistry.googleapis.com</code>
+</li> <li>Cloud Monitoring API: <code translate="no" dir="ltr">monitoring.googleapis.com</code>
+</li> <li>Cloud Logging API: <code translate="no" dir="ltr">logging.googleapis.com</code>
+</li> <li>(Optional) If you create a <a href="#choose-default-or-custom">custom <code translate="no" dir="ltr">RunMonitoring</code> config</a>, then you must enable the Secret Manager API: <code translate="no" dir="ltr">secretmanager.googleapis.com</code>
+</li> <li>(Optional) If you choose to run the sample app by using Cloud Build, then you must also enable the following APIs: <ul> <li>Cloud Build API: <code translate="no" dir="ltr">cloudbuild.googleapis.com</code>.</li> <li>Identity and Access Management API: <code translate="no" dir="ltr">iam.googleapis.com</code>. For more information, see <a href="#build-n-run">Build and run the sample app</a>.</li> </ul>
+</li> </ul> <p>To see the APIs enabled in your project, run the following command:</p> 
+<pre>
+gcloud services list
+</pre> <p>To enable an API that isn't enabled, run one of following commands:</p> 
+<pre>
+gcloud services enable run.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
+gcloud services enable secretmanager.googleapis.com
+gcloud services enable monitoring.googleapis.com
+gcloud services enable logging.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable iam.googleapis.com
+</pre> <h3 id="run-svc-acct">Service account for Cloud Run</h3> <p>By default, Cloud Run jobs and services use the <a href="https://docs.cloud.google.com/compute/docs/access/service-accounts#default_service_account">Compute Engine default service account</a>, <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var>-compute@developer.gserviceaccount.com</code>. This service account usually has the Identity and Access Management (IAM) roles necessary to write the metrics and logs described in this document:</p> <ul> <li><code translate="no" dir="ltr">roles/monitoring.metricWriter</code></li> <li><code translate="no" dir="ltr">roles/logging.logWriter</code></li> </ul> <p>If you create a <a href="#choose-default-or-custom">custom <code translate="no" dir="ltr">RunMonitoring</code> config</a>, then your service account must also have the following roles:</p> <ul> <li><code translate="no" dir="ltr">roles/secretmanager.admin</code></li> <li><code translate="no" dir="ltr">roles/secretmanager.secretAccessor</code></li> </ul> <p>You can also configure a user-managed service account for Cloud Run. A user-managed service account must also have these roles. For more information about service accounts for Cloud Run, see <a href="securing/service-identity">Configuring Service Identity</a>.</p> <h2 id="sidecar-intro">Configure and add the sidecar to a Cloud Run service</h2> <p>The Managed Service for Prometheus sidecar for Cloud Run introduces a new configuration, <code translate="no" dir="ltr">RunMonitoring</code>, which is a subset of the Kubernetes <a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#podmonitoring"><code translate="no" dir="ltr">PodMonitoring</code></a> custom resource. The <code translate="no" dir="ltr">RunMonitoring</code> configuration uses existing <code translate="no" dir="ltr">PodMonitoring</code> options to support Cloud Run while eliminating some options that are specific to Kubernetes.</p> <p>You can use the default <code translate="no" dir="ltr">RunMonitoring</code> configuration, or you can create a custom configuration. The following sections describe both approaches. You don't need to do both. For more information about using default or custom configurations, select the corresponding tab.</p>  <div> <section><p class="_code-tab"><strong>Default configuration</strong></p>
+
+<h3 id="default-runmonitoring">Use the default RunMonitoring configuration</h3> <p>If you don't create a custom <code translate="no" dir="ltr">RunMonitoring</code> configuration, then the sidecar collector synthesizes the following default configuration to scrape metrics from port 8080 at metrics path <code translate="no" dir="ltr">/metrics</code> every 30 seconds:</p> 
+<pre data-language="">
+apiVersion: monitoring.googleapis.com/v1beta
+kind: RunMonitoring
+metadata:
+  name: run-gmp-sidecar
+spec:
+  endpoints:
+  - port: 8080
+    path: /metrics
+    interval: 30s
+</pre> <p>Using the default configuration requires no additional setup beyond <a href="#add-sidecar">adding the sidecar to your Cloud Run service</a>.</p> <h3 id="add-sidecar">Add the sidecar to a Cloud Run service</h3> <p>To use the sidecar with the default <code translate="no" dir="ltr">RunMonitoring</code> configuration, you need to modify your existing Cloud Run configuration to add the sidecar. To add the sidecar, do the following:</p> <ul> <li>Add a container-dependency annotation that specifies the startup and shutdown order of the containers. In the following example, the sidecar container, named "collector", starts after and shuts down before the application container, named "app" in the example.</li> <li>Create a container for the collector, named "collector" in the following example.</li> </ul> <p>For example, add the lines preceded by the <code translate="no" dir="ltr">+</code> (plus) character to your Cloud Run configuration, and then redeploy your service:</p> 
+<pre data-language="">
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  annotations:
+    run.googleapis.com/launch-stage: ALPHA
+    run.googleapis.com/cpu-throttling: 'false'
+  name: my-cloud-run-service
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
++       run.googleapis.com/container-dependencies: '{"collector":["app"]}'
+    spec:
+      containers:
+      - image: "REGION-docker.pkg.dev/PROJECT_ID/run-gmp/sample-app"
+        name: app
+        startupProbe:
+          httpGet:
+            path: /startup
+            port: 8000
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 8000
+        ports:
+        - containerPort: 8000
++     - image: "us-docker.pkg.dev/cloud-ops-agents-artifacts/cloud-run-gmp-sidecar/cloud-run-gmp-sidecar:1.2.0"
++       name: collector
+</pre> <p>To redeploy the Cloud Run service with the configuration file <code translate="no" dir="ltr"><var translate="no">run-service.yaml</var></code>, run the following command:</p> 
+<pre data-language="">
+gcloud run services replace run-service.yaml --region=REGION
+</pre> <aside class="note"><strong>Note:</strong><span> If you're <a href="https://docs.cloud.google.com/artifact-registry/docs/securing-with-vpc-sc#ar-vpc">using Artifact Registry with VPC Service Controls</a>, then you must also configure your egress rule to allow egress to the <code translate="no" dir="ltr">cloud-ops-agents-artifacts</code> project. To do so, add <code translate="no" dir="ltr">projects/1042947621568</code> as a resource in your egress rule.</span></aside> </section> <section><p class="_code-tab"><strong>Custom configuration</strong></p>
+
+<h3 id="custom-runmonitoring">Create a custom RunMonitoring configuration</h3> <p>You can create a <code translate="no" dir="ltr">RunMonitoring</code> configuration for a Cloud Run service if the default configuration is not sufficient. For example, you might create a configuration like the following:</p> 
+
+<pre data-language="">
+apiVersion: monitoring.googleapis.com/v1beta
+kind: RunMonitoring
+metadata:
+  name: my-custom-cloud-run-job
+spec:
+  endpoints:
+  - port: 8080
+    path: /metrics
+    interval: 10s
+    metricRelabeling:
+    - action: replace
+      sourceLabels:
+      - __address__
+      targetLabel: label_key
+      replacement: label_value
+  targetLabels:
+    metadata:
+    - service
+    - revision
+</pre> <p>This configuration does the following:</p> 
+<ul> <li>Scrapes metrics from the port 8080 and uses the default metrics path <code translate="no" dir="ltr">/metrics</code>.</li> <li>Uses a 10-second scrape interval.</li> <li>Uses relabelling to add the label <code translate="no" dir="ltr">label_key</code> with the value <code translate="no" dir="ltr">label_value</code> to every metric scraped.</li> <li>Adds the <code translate="no" dir="ltr">service</code> and <code translate="no" dir="ltr">revision</code> metadata labels to every metric scraped.</li> </ul> <p>For information on the available configuration options, see <a href="#run-monitoring-spec">RunMonitoring spec: configuration options</a>.</p> <p>When you use a custom <code translate="no" dir="ltr">RunMonitoring</code> configuration, you must perform the following additional configuration:</p> <ul> <li>Enable the Secret Manager API and grant your Cloud Run service account Secret Manager roles. For more information, see <a href="#byb">Before you begin</a>.</li> <li>
+<a href="#write-secret">Store the custom configuration as a secret</a>.</li> <li>
+<a href="#custom-add-sidecar">Add the sidecar to a Cloud Run service </a>.</li> </ul> <h4 id="write-secret">Store the configuration by using Secret Manager</h4> <p>To provide a custom <code translate="no" dir="ltr">RunMonitoring</code> configuration, do the following:</p> <ul> <li>Create a file that contains the custom configuration.</li> <li>Create a Secret Manager secret that contains the custom configuration.</li> </ul> <p>The following command creates a secret named <var translate="no">mysecret</var> from the <code translate="no" dir="ltr"><var translate="no">custom-config.yaml</var></code> file:</p> 
+<pre data-language="">
+gcloud secrets create mysecret --data-file=custom-config.yaml
+</pre> <p>To pick up a change to the configuration after you modify the <code translate="no" dir="ltr"><var translate="no">custom-config.yaml</var></code> file, you must delete and recreate the secret, and then redeploy the Cloud Run service.</p> <h4 id="update-secret">Updating the configuration in Secret Manager</h4> <p>If you want to update the custom <code translate="no" dir="ltr">RunMonitoring</code> configuration at any time, you can add a new version of the existing secret to Secret Manager.</p> <p>For example, to update <var translate="no">mysecret</var> with a new config stored in file <code translate="no" dir="ltr"><var translate="no">custom-config-updated.yaml</var></code>, you can run:</p> 
+<pre data-language="">
+gcloud secrets versions add mysecret --data-file=custom-config-updated.yaml
+</pre> <p>The sidecar automatically reloads and applies the changes to its configuration.</p> <h3 id="custom-add-sidecar">Add the sidecar to a Cloud Run service</h3> <p>After you have created a Secret Manager secret for your <code translate="no" dir="ltr">RunMonitoring</code> configuration, you must modify your Cloud Run configuration to do the following:</p> <ul> <li>Add the Managed Service for Prometheus sidecar <ul> <li>Add a container-dependency annotation that specifies the startup and shutdown order of the containers. In the following example, the sidecar container, named "collector", starts after and shuts down before the application container, named "app" in the example.</li> <li>Create a container for the collector, named "collector" in the following example.</li> </ul>
+</li> <li>Add the secret by mounting the secret at the location <code translate="no" dir="ltr">/etc/rungmp/config.yaml</code>: <ul> <li>Add a secrets annotation that points to the secret holding your custom <code translate="no" dir="ltr">RunMonitoring</code> configuration.</li> <li>Create a volume, named "config" in the following example, for the secret that points to the file <code translate="no" dir="ltr">config.yaml</code>.</li> <li>Mount the volume as part of the collector image at the mount path <code translate="no" dir="ltr">/etc/rungmp</code>.</li> </ul>
+</li> </ul> <p>For example, add the lines preceded by the <code translate="no" dir="ltr">+</code> (plus) character to your Cloud Run configuration, and then redeploy your service:</p> 
+<pre data-language="">
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  annotations:
+    run.googleapis.com/launch-stage: ALPHA
+    run.googleapis.com/cpu-throttling: 'false'
+  name: my-cloud-run-service
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
++       run.googleapis.com/container-dependencies: '{"collector":["app"]}'
++       run.googleapis.com/secrets: 'mysecret:projects/PROJECT_ID/secrets/mysecret'
+    spec:
+      containers:
+      - image: "REGION-docker.pkg.dev/PROJECT_ID/run-gmp/sample-app"
+        name: app
+        startupProbe:
+          httpGet:
+            path: /startup
+            port: 8000
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 8000
+        ports:
+        - containerPort: 8000
++     - image: "us-docker.pkg.dev/cloud-ops-agents-artifacts/cloud-run-gmp-sidecar/cloud-run-gmp-sidecar:1.2.0"
++       name: collector
++       volumeMounts:
++       - mountPath: /etc/rungmp/
++         name: config
++     volumes:
++     - name: config
++       secret:
++         items:
++         - key: latest
++           path: config.yaml
++         secretName: 'mysecret'
+</pre> <p>To redeploy the Cloud Run service with the configuration file <code translate="no" dir="ltr"><var translate="no">run-service.yaml</var></code>, run the following command:</p> 
+<pre data-language="">
+gcloud run services replace run-service.yaml --region=REGION
+</pre> <h3 id="run-monitoring-spec">RunMonitoring spec: configuration options</h3> <p>This section describes <code translate="no" dir="ltr">RunMonitoring</code> configuration spec for the Managed Service for Prometheus sidecar. The following shows an example custom configuration:</p> 
+
+<pre data-language="">
+apiVersion: monitoring.googleapis.com/v1beta
+kind: RunMonitoring
+metadata:
+  name: my-custom-cloud-run-job
+spec:
+  endpoints:
+  - port: 8080
+    path: /metrics
+    interval: 10s
+    metricRelabeling:
+    - action: replace
+      sourceLabels:
+      - __address__
+      targetLabel: label_key
+      replacement: label_value
+  targetLabels:
+    metadata:
+    - service
+    - revision
+</pre> <h5 id="ref-run-monitoring">RunMonitoring</h5> <p>The <code translate="no" dir="ltr">RunMonitoring</code> configuration monitors a Cloud Run service.</p> <table> <col style="width:15%"> <col style="width:50%"> <col style="width:25%"> <col style="width:10%"> <thead> <tr> <th>Field</th> <th>Description</th> <th>Scheme</th> <th>Required</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">metadata</code></td> <td>Metadata that all persisted resources must have.</td> <td><code translate="no" dir="ltr"><a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#objectmeta-v1-meta">
+           metav1.ObjectMeta</a></code></td> <td>false</td> </tr> <tr> <td><code translate="no" dir="ltr">spec</code></td> <td>Specification of the Cloud Run deployment selected for target discovery by Prometheus.</td> <td><code translate="no" dir="ltr"><a href="#ref-run-monitoring-spec">RunMonitoringSpec</a></code></td> <td>true</td> </tr> </tbody> </table> <h5 id="ref-run-monitoring-spec">RunMonitoringSpec</h5> <p>This spec describes how the <code translate="no" dir="ltr">RunMonitoring</code> configuration monitors a Cloud Run service.</p> <table> <col style="width:15%"> <col style="width:50%"> <col style="width:25%"> <col style="width:10%"> <thead> <tr> <th>Field</th> <th>Description</th> <th>Scheme</th> <th>Required</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">endpoints</code></td> <td>Endpoints to scrape on the selected pods.</td> <td><code translate="no" dir="ltr">[]<a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#scrapeendpoint">ScrapeEndpoint</a></code></td> <td>true</td> </tr> <tr> <td><code translate="no" dir="ltr">targetLabels</code></td> <td>Labels to add to the Prometheus target for discovered endpoints. The <code translate="no" dir="ltr">instance</code> label is always set to the Cloud Run instance ID.</td> <td><code translate="no" dir="ltr"><a href="#ref-run-target-labels">RunTargetLabels</a></code></td> <td>false</td> </tr> <tr> <td><code translate="no" dir="ltr">limits</code></td> <td>Limits to apply at scrape time.</td> <td><code translate="no" dir="ltr">*<a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#scrapelimits">ScrapeLimits</a></code></td> <td>false</td> </tr> </tbody> </table> <h5 id="ref-run-target-labels">RunTargetLabels</h5> <p>The <code translate="no" dir="ltr">RunTargetLabels</code> configuration lets you include Cloud Run labels from the discovered Prometheus targets.</p> <table> <col style="width:15%"> <col style="width:50%"> <col style="width:25%"> <col style="width:10%"> <thead> <tr> <th>Field</th> <th>Description</th> <th>Scheme</th> <th>Required</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">metadata</code></td> <td>Cloud Run metadata labels that are set on all scraped targets.<br><br> Permitted keys are <code translate="no" dir="ltr">instance</code>, <code translate="no" dir="ltr">revision</code>, <code translate="no" dir="ltr">service</code>, and <code translate="no" dir="ltr">configuration</code>.<br><br> If permitted keys are set, then the sidecar adds the corresponding value from the Cloud Run instance as metric labels to every metric: <code translate="no" dir="ltr">instanceID</code>, <code translate="no" dir="ltr">revision_name</code>, <code translate="no" dir="ltr">service_name</code>, and <code translate="no" dir="ltr">configuration_name</code>.<br><br> Defaults to all permitted keys being set.</td> <td><code translate="no" dir="ltr">*[]string</code></td> <td>false</td> </tr> </tbody> </table> </section> </div> <h2 id="run-sample">Build and run a sample app</h2> <p>This section describes how to run the Managed Service for Prometheus sidecar with a sample app. This section is optional. If you already have a Cloud Run service and want to deploy the sidecar with it, then see <a href="#sidecar-intro">Add the Managed Service for Prometheus sidecar to a Cloud Run service</a>.</p> <h3 id="app-clone-repo">Clone the <code translate="no" dir="ltr">run-gmp-sidecar</code> repository</h3> 
+<p>To get the sample app and its configuration files, clone the <code translate="no" dir="ltr">run-gmp-sidecar</code> repository by running the following command:</p> 
+<pre>
+git clone https://github.com/GoogleCloudPlatform/run-gmp-sidecar/
+</pre> <p>After cloning the repository, change to the <code translate="no" dir="ltr">run-gmp-sidecar</code> directory:</p> 
+<pre>
+cd run-gmp-sidecar
+</pre> <h3 id="build-n-run">Build and run the sample app</h3> <p>The sample app requires Docker or a similar container build system for Linux. You can build and run the sample app in either of the following ways:</p> <ul> <li>Use Cloud Build to run without local Docker support. If you use Cloud Build, then you must also enable the Cloud Build API.</li> <li>Build and run the sample app manually.</li> </ul> <p>The following sections describe both approaches. You don't need to do both. For more information, select the tab for one of the approaches.</p>  <div> <section><p class="_code-tab"><strong>Use Cloud Build</strong></p>
+
+<h2 id="use-cloud-build">Use Cloud Build</h2> <p>The <code translate="no" dir="ltr">run-gmp-sidecar</code> repository includes configuration files for Cloud Build. These files bundle together the steps needed to build and deploy the sample app.</p> <p>You can also manually perform the steps handled by Cloud Build. For more information, see <a href="#use-manual-steps">Build and run manually</a>.</p> <h3 id="cb-setup">Set up for Cloud Build</h3> <p>These configuration files require a Cloud Build service account and an Artifact Registry repository. The <code translate="no" dir="ltr">run-gmp-sidecar</code> repository also includes a script, <code translate="no" dir="ltr">create-sa-and-ar.sh</code> that does the following:</p> <ul> <li>Creates a service account, <code translate="no" dir="ltr">run-gmp-sa@<var translate="no">PROJECT_ID</var>.iam.gserviceaccount.com</code>.</li> <li>Grants the following roles to the service account: <ul> <li><code translate="no" dir="ltr">roles/iam.serviceAccountUser</code></li> <li><code translate="no" dir="ltr">roles/storage.objectViewer</code></li> <li><code translate="no" dir="ltr">roles/logging.logWriter</code></li> <li><code translate="no" dir="ltr">roles/artifactregistry.createOnPushWriter</code></li> <li><code translate="no" dir="ltr">roles/secretmanager.admin</code></li> <li><code translate="no" dir="ltr">roles/secretmanager.secretAccessor</code></li> <li><code translate="no" dir="ltr">roles/run.admin</code></li> </ul>
+</li> <li>Creates an Artifact Registry repository, <code translate="no" dir="ltr">run-gmp</code>, for your container images.</li> </ul> <p>To create the <code translate="no" dir="ltr">run-gmp-sa</code> service account and <code translate="no" dir="ltr">run-gmp</code> repository, run the following command:</p> 
+<pre data-language="">
+./create-sa-and-ar.sh
+</pre> <p>It takes some time for the permissions to propagate, so we recommend waiting about 30 seconds before proceeding to the next step. Otherwise, you might see authorization errors.</p> <h3 id="cb-submit">Submit Cloud Build request</h3> <p>After you've set up the <code translate="no" dir="ltr">run-gmp-sa</code> service account and <code translate="no" dir="ltr">run-gmp</code> repository, you can start a Cloud Build job by submitting the Cloud Build configuration file. You can use the following <code translate="no" dir="ltr">gcloud builds submit</code> command:</p> 
+<pre data-language="">
+gcloud builds submit . --config=cloudbuild-simple.yaml --region=REGION
+</pre> <p>This command takes several minutes to run, but it almost immediately indicates you where you can find the Cloud Build build details. The message looks like the following:</p> 
+<pre data-language="">
+Logs are available at [
+https://console.cloud.google.com/cloud-build/builds/637860fb-7a14-46f2-861e-09c1dc4cea6b?project=PROJECT_NUMBER].
+</pre> <p>To watch the build progress, navigate to the returned URL in your browser. You can also <a href="#view-sidecar-logs">view the sidecar logs in Cloud Logging</a>.</p> <h3 id="cb-service-url">Check the service URL</h3> <p>After the Cloud Build job ends, check the Cloud Run service endpoint URL by running the following command:</p> 
+<pre data-language="">
+gcloud run services describe my-cloud-run-service --region=REGION --format="value(status.url)"
+</pre> <p>This command returns the service URL, which looks like the following:</p> 
+<pre data-language="">
+https://my-cloud-run-service-abcdefghij-ue.a.run.app
+</pre> </section> <section><p class="_code-tab"><strong>Build and run manually</strong></p>
+
+<h2 id="use-manual-steps">Build and run manually</h2> <p>You can manually perform the steps handled by Cloud Build, described in <a href="#use-cloud-build">Use Cloud Build</a>. The following sections describe how to manually perform the same tasks.</p> <h3 id="manual-setenv">Set variables used by later steps</h3> <p>Several of the later steps use environment variables for common values. Set up these variables by using the following commands:</p> 
+<pre data-language="">
+export GCP_PROJECT=PROJECT_ID
+export REGION=REGION
+</pre> <h3 id="manual-ar-repository">Create a container image repository</h3> 
+<p>Create an Artifact Registry repository for the container image by running the following command:</p> 
+<pre data-language="">
+gcloud artifacts repositories create run-gmp \
+    --repository-format=docker \
+    --location=${REGION}
+</pre> <h3 id="manual-build-app">Build and push the sample app</h3> <p>This example uses Docker on Linux to build the sample app and push it to an Artifact Registry repository. You might need to adapt these commands if you are working in a Windows or macOS environment.</p> <aside class="note"><strong>Note:</strong> If you need <code translate="no" dir="ltr">sudo</code> to execute <code translate="no" dir="ltr">docker</code> commands, then you also need to authenticate by using <code translate="no" dir="ltr">sudo</code> as well. Failure to do so results in the wrong system user being configured, and requests to Cloud Run are not authenticated. 
+<pre data-language="">
+sudo gcloud auth login --no-launch-browser
+sudo gcloud auth configure-docker
+</pre> </aside> <p>To build the sample app and push it to Artifact Registry, do the following:</p> <ol> <li>
+<p>Authenticate your Docker client with the Google Cloud CLI:</p> 
+<pre data-language="">
+gcloud auth configure-docker ${REGION}-docker.pkg.dev
+</pre>
+</li> <li>
+<p>Go to the <code translate="no" dir="ltr">simple-app</code> directory in the <code translate="no" dir="ltr">run-gmp-sidecar</code> repository: </p>
+
+<pre data-language="">
+pushd sample-apps/simple-app
+</pre>
+</li> <li>
+<p>Build the <code translate="no" dir="ltr">simple-app</code> app by running the following command:</p> 
+<pre data-language="">
+docker build -t ${REGION}-docker.pkg.dev/${GCP_PROJECT}/run-gmp/sample-app .
+</pre>
+</li> <li>
+<p>Push the image for the built app by running the following command: </p>
+
+<pre data-language="">
+docker push ${REGION}-docker.pkg.dev/${GCP_PROJECT}/run-gmp/sample-app
+</pre>
+</li> <li>
+<p>Return to the <code translate="no" dir="ltr">run-gmp-sidecar</code> directory:</p> 
+<pre data-language="">
+popd
+</pre>
+</li> </ol> <h3 id="manual-config-run-svc">Configure the Cloud Run service</h3> <p>The <code translate="no" dir="ltr">run-service-simple.yaml</code> file in the <code translate="no" dir="ltr">run-gmp-sidecar</code> repository defines a multi-container Cloud Run service that uses the sample app and collector images that you built in previous steps. The <code translate="no" dir="ltr">run-service-simple.yaml</code> file contains the following Service specification:</p> 
+<pre data-language="">
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  annotations:
+    run.googleapis.com/launch-stage: ALPHA
+    run.googleapis.com/cpu-throttling: 'false'
+  name: my-cloud-run-service
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/container-dependencies: '{"collector":["app"]}'
+    spec:
+      containers:
+      - image: "%SAMPLE_APP_IMAGE%"
+        name: app
+        startupProbe:
+          httpGet:
+            path: /startup
+            port: 8000
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 8000
+        ports:
+        - containerPort: 8000
+      - image: "us-docker.pkg.dev/cloud-ops-agents-artifacts/cloud-run-gmp-sidecar/cloud-run-gmp-sidecar:1.2.0"
+        name: collector
+</pre> <p>This file contains a placeholder value for the images you've built in previous steps, so you must update the placeholders with the actual values for your Google Cloud project.</p> <p>Replace the <code translate="no" dir="ltr">%SAMPLE_APP_IMAGE%</code> placeholder by running the following command:</p> 
+<pre data-language="">
+sed -i s@%SAMPLE_APP_IMAGE%@REGION-docker.pkg.dev/${GCP_PROJECT}/run-gmp/sample-app@g run-service-simple.yaml
+</pre> <h3 id="manual-deploy-containers">Deploy the Cloud Run service</h3> <p>After you've updated the <code translate="no" dir="ltr">run-service-simple.yaml</code> file with your values, you can create and deploy the Cloud Run service by running the following command:</p> 
+
+<pre data-language="">
+gcloud run services replace run-service-simple.yaml --region=REGION
+   </pre> <p>This command returns the service URL, which looks like the following:</p> 
+<pre data-language="">
+https://my-cloud-run-service-abcdefghij-ue.a.run.app
+</pre> <h3 id="manual-allow-unauthn">Allow unauthenticated HTTP access</h3> <p>Before you can make a request to the service URL, you need to change the Cloud Run service policy to accept unauthenticated HTTP access. The <code translate="no" dir="ltr">policy.yaml</code> file in the <code translate="no" dir="ltr">run-gmp-sidecar</code> repository contains the necessary change.</p> <p>To change the service policy, run the following command:</p> 
+<pre data-language="">
+gcloud run services set-iam-policy my-cloud-run-service policy.yaml --region=REGION
+</pre> </section> </div> <h3 id="verify">Verify that your app is running</h3> <p>To verify that the Cloud Run service has correctly run the sample app, use the <code translate="no" dir="ltr">curl</code> utility to access the service's <code translate="no" dir="ltr">metrics</code> endpoint.</p> <ol> <li>
+<p>Run the following command to obtain your service URL:</p> 
+<pre>
+SERVICE_URL=$(gcloud run services describe my-cloud-run-service --region=REGION --format 'value(status.url)')
+</pre> <p>Replace <var translate="no">REGION</var> with the Cloud Run region of your service.</p>
+</li> <li>
+<p>Send a request to the service URL by running the following command:</p> 
+<pre>
+curl $SERVICE_URL
+</pre>
+</li> </ol> <p>If your app was successfully started, you see the following response:</p> 
+<pre>
+User request received!
+</pre> <h3 id="view-app-metrics">View app metrics in Metrics Explorer</h3> <p>The sample <code translate="no" dir="ltr">app</code> container writes the following metrics:</p> <ul> <li>
+<code translate="no" dir="ltr">foo_metric</code>: The current time as a floating-point value (gauge).</li> <li>
+<code translate="no" dir="ltr">bar_metric</code>: The current time as a floating-point value (counter).</li> </ul> <p>To view these metrics in Metrics Explorer, do the following:</p> <ol> <li> <p>In the Google Cloud console, go to the <i class="material-icons" aria-hidden="true" translate="no">leaderboard</i> <b>Metrics explorer</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/metrics-explorer" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="monitoring/metrics-explorer">Go to <b>Metrics explorer</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Monitoring</b>.</p>
+</li> <li><p>In the toolbar of the query-builder pane, select the button whose name is <i class="material-icons" aria-hidden="true" translate="no">code</i> <b>PromQL</b>.</p></li> <li>
+<p>Enter the following query into the editor pane:</p> 
+<pre>
+foo_metric
+</pre>
+</li> <li><p>Click <b>Add query</b>.</p></li> <li><p>In the toolbar of the query-builder pane, select the button whose name is <i class="material-icons" aria-hidden="true" translate="no">code</i> <b>PromQL</b>.</p></li> <li>
+<p>Enter the following query into the second editor pane:</p> 
+<pre>
+bar_metric
+</pre>
+</li> <li><p>Click <b>Run query</b>.</p></li> <li><p>To see details about the metrics, in the toggle labeled <b>Chart Table Both</b>, select <b>Both</b>.</p></li> </ol> <h3 id="clean-up">Clean up</h3> <p>When you are finished experimenting with the sample app, you can use the <code translate="no" dir="ltr">clean-up-cloud-run.sh</code> script in the <code translate="no" dir="ltr">run-gmp-sidecar</code> repository to delete the following resources you might have created for the sample:</p> <ul> <li>The Cloud Run service.</li> <li>The Artifact Registry repository.</li> <li>The service account created for Cloud Build.</li> </ul> <p>Deleting these resources ensures that you don't incur costs after running the sample.</p> <p>To clean up the sample app, run the <code translate="no" dir="ltr">clean-up-cloud-run.sh</code> script:</p> 
+<pre>
+./clean-up-cloud-run.sh
+</pre> <h2 id="view-sidecar-metrics">View self metrics in Metrics Explorer</h2> <p>The Managed Service for Prometheus sidecar reports the following metrics about itself to Cloud Monitoring:</p> <ul> <li>
+<code translate="no" dir="ltr">agent_uptime</code>: The uptime of the sidecar collector (counter).</li> <li>
+<code translate="no" dir="ltr">agent_memory_usage</code>: The memory being consumed by the sidecar collector (gauge).</li> <li>
+<code translate="no" dir="ltr">agent_api_request_count</code>: The number of API requests from the sidecar collector (counter).</li> <li>
+<code translate="no" dir="ltr">agent_monitoring_point_count</code>: The number of metric points written to Cloud Monitoring by the sidecar collector (counter).</li> </ul> <p>To view the sidecar's self metrics in Metrics Explorer, do the following:</p> <ol> <li> <p>In the Google Cloud console, go to the <i class="material-icons" aria-hidden="true" translate="no">leaderboard</i> <b>Metrics explorer</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/metrics-explorer" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="monitoring/metrics-explorer">Go to <b>Metrics explorer</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Monitoring</b>.</p>
+</li> <li><p>In the toolbar of the query-builder pane, select the button whose name is <i class="material-icons" aria-hidden="true" translate="no">code</i> <b>PromQL</b>.</p></li> <li>
+<p>Enter the name of the metric you want to query into the editor pane, for example:</p> 
+<pre>
+agent_api_request_count
+</pre>
+</li> <li><p>Click <b>Run query</b>.</p></li> <li><p>To see details about the metrics, in the toggle labeled <b>Chart Table Both</b>, select <b>Both</b>.</p></li> </ol> <h2 id="view-sidecar-logs">View self logs in Logs Explorer</h2> <p>The Managed Service for Prometheus sidecar writes logs to Cloud Logging. The sidecar writes logs against the Logging monitored resource type <a href="https://docs.cloud.google.com/logging/docs/api/v2/resource-list#tag_could_run_revision"><code translate="no" dir="ltr">cloud_run_revision</code></a>.</p> <p>To view the sidecar's logs in Logs Explorer, do the following:</p> <ol> <li> <p>In the Google Cloud console, go to the <span class="material-symbols-outlined" aria-hidden="true" style="vertical-align: middle;">segment</span> <b>Logs Explorer</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/query" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/query">Go to <b>Logs Explorer</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Logging</b>.</p>
+</li> <li>
+<p>Select the <b>Cloud Run Revision</b> resource type, or enter the following query and click <b>Run query</b>:</p> 
+<pre>
+resource.type="cloud_run_revision"
+</pre>
+</li> </ol> <h2 id="sidecar-metric-details">About the collected metrics</h2> <p>When the metrics emitted by the sidecar are ingested into Cloud Monitoring, the metrics are written against the Cloud Monitoring <a href="https://docs.cloud.google.com/monitoring/api/resources#tag_prometheus_target"><code translate="no" dir="ltr">prometheus_target</code></a> monitored resource type. This resource type is used for both application metrics and the sidecar's self metrics.</p> <p>When writing the metrics, the sidecar sets the resource labels as follows:</p> <ul> <li>
+<code translate="no" dir="ltr">project_id</code>: The ID of the Google Cloud project in which the container is running.</li> <li>
+<code translate="no" dir="ltr">location</code>: The Google Cloud region in which the container is running.</li> <li>
+<code translate="no" dir="ltr">cluster</code>: The value <code translate="no" dir="ltr">__run__</code>.</li> <li>
+<code translate="no" dir="ltr">namespace</code>: The name of the Cloud Run service being run; comes from the <code translate="no" dir="ltr">K_SERVICE</code> environment variable.</li> <li>
+<code translate="no" dir="ltr">job</code>: Name from the <code translate="no" dir="ltr">RunMonitoring</code> configuration; defaults to <code translate="no" dir="ltr">run-gmp-sidecar</code>.</li> <li>
+<code translate="no" dir="ltr">instance</code>: The value <code translate="no" dir="ltr"><var translate="no">faas.ID</var>:<var translate="no">PORT</var></code> of the local workload from which the container is configured to pull metrics. The <var translate="no">faas.ID</var> value is the instance ID of the Cloud Run instance.</li> </ul> <p>The sidecar also adds the following metric labels:</p> <ul> <li>
+<code translate="no" dir="ltr">instanceId</code>: The ID of the Cloud Run instance.</li> <li>
+<code translate="no" dir="ltr">service_name</code>: The name of the Cloud Run service being run.</li> <li>
+<code translate="no" dir="ltr">revision_name</code>: The name of the Cloud Run revision being run.</li> <li>
+<code translate="no" dir="ltr">configuration_name</code>: The name of the Cloud Run configuration being run.</li> </ul> <p>These metric labels are all added by default. If you use a <a href="#choose-default-or-custom">custom <code translate="no" dir="ltr">RunMonitoring</code> configuration</a>, you can omit the <code translate="no" dir="ltr">service_name</code>, <code translate="no" dir="ltr">revision_name</code>, and <code translate="no" dir="ltr">configuration_name</code> labels by using the <code translate="no" dir="ltr">targetLabels</code> option in the <code translate="no" dir="ltr">RunMonitoring</code> spec. You can also use a custom configuration to relabel the values of the <code translate="no" dir="ltr">service_name</code>, <code translate="no" dir="ltr">revision_name</code>, and <code translate="no" dir="ltr">configuration_name</code> labels.</p> <p>All other labels that appear with ingested metrics come from your metric. If a user-defined label conflicts with one of the system-provided labels, the user-defined label is prefixed with the string <code translate="no" dir="ltr">exported_</code>. For example, a user-specified label <code translate="no" dir="ltr">namespace="playground"</code> conflicts with the system-defined <code translate="no" dir="ltr">namespace</code> label, so the user label appears as <code translate="no" dir="ltr">exported_namespace="playground"</code>.</p> <h3 id="gcm-metric-type">Metric type</h3> <p>When the metrics emitted by the sidecar are ingested into Cloud Monitoring, the metrics are written as <code translate="no" dir="ltr">prometheus.googleapis.com</code> metrics, and the type of the Prometheus metric is appended to the end of the name. For example, the sample app emits a Prometheus gauge metric named <code translate="no" dir="ltr">foo_metric</code>. In Cloud Monitoring, the metric is stored as the metric type <code translate="no" dir="ltr">prometheus.googleapis.com/foo_metric/gauge</code>.</p> <p>When querying the metric with PromQL, you can use the Prometheus name, as illustrated in <a href="#view-app-metrics">View app metrics in Metrics Explorer</a> and <a href="#view-sidecar-metrics">View self metrics in Metrics Explorer</a>. When using tools like the query builder or Monitoring Query Language (MQL) in Metrics Explorer, the Cloud Monitoring metric type is relevant.</p> <h3 id="gcm-metric-pricing">Billing</h3> <p>Metrics emitted by the sidecar are ingested into Cloud Monitoring with the prefix <code translate="no" dir="ltr">prometheus.googleapis.com</code>. Metrics with this prefix are charged by the number of samples ingested. For more information about billing and Managed Service for Prometheus, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus#gmp-billing">Billing</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/monitoring-managed-prometheus-sidecar" class="_attribution-link">https://docs.cloud.google.com/run/docs/monitoring-managed-prometheus-sidecar</a>
+  </p>
+</div>

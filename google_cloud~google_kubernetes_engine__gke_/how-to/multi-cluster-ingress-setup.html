@@ -1,0 +1,126 @@
+<h1>Setting up Multi Cluster Ingress</h1>  <aside class="note"><strong>Note:</strong><span> This guide is for the previous Multi-cluster Ingress API (which relies on MultiClusterIngress and MultiClusterService resources). If you are deploying load balancers that use the newer Kubernetes Gateway API (Gateway and HTTPRoute resources), <em>do not follow this guide</em>. You must follow <a href="prepare-environment-multi-cluster-gateways">Prepare your environment for multi-cluster Gateways</a> instead, because Gateway API requires distinct prerequisites and strict cluster initialization sequencing.</span></aside> <p>This page shows you how to route traffic across multiple Google Kubernetes Engine (GKE) clusters in different regions using <a href="../concepts/multi-cluster-ingress">Multi Cluster Ingress</a>, with an example using two clusters.</p> <p>For a detailed comparison between Multi Cluster Ingress (MCI), Multi-cluster Gateway (MCG), and load balancer with Standalone Network Endpoint Groups (LB and Standalone NEGs), see <a href="../concepts/choose-mc-lb-api">Choose your multi-cluster load balancing API for GKE</a>.</p> <p>To learn more about deploying Multi Cluster Ingress, see <a href="multi-cluster-ingress">Deploying Ingress across clusters</a>.</p> <p>These steps require elevated permissions and should be performed by a GKE administrator.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h3 id="requirements_and_limitations">Requirements and limitations</h3> <p>Multi Cluster Ingress has the following requirements.</p> <ul> <li>
+<p>Google Cloud CLI version requirements:</p> <p>Multi Cluster Ingress is supported with Google Cloud CLI version 290.0.0 and later. However, <a href="multi-cluster-ingress-setup#fleet-registration">registering your clusters to a fleet</a> requires Google Cloud CLI version 450.0.0 or higher. Hence ensure that your Google Cloud CLI version is upgraded to 450.0.0 or higher before registering your clusters to a fleet. For more information, see <a href="https://docs.cloud.google.com/sdk/docs/install-sdk">Install the Google Cloud CLI</a>.</p>
+</li> </ul> <p>If you use Standard mode clusters, ensure that you meet the following requirements. Autopilot clusters already meet these requirements.</p> <ul> <li>Clusters must have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled. This add-on is enabled by default. You must not disable it because this add-on manages the Ingress controller, which is necessary for Multi Cluster Ingress to function.</li> <li>Clusters must be <a href="../concepts/alias-ips">VPC-native</a>.</li> <li>Clusters must have <a href="workload-identity">Workload Identity Federation for GKE</a> enabled.</li> </ul> <p>Multi Cluster Ingress has the following limitations:</p> <ul> <li>Only supported with an <a href="https://docs.cloud.google.com/load-balancing/docs/https">external Application Load Balancer</a>.</li> <li>Don't create Compute Engine load balancers in the same project with the prefix <code translate="no" dir="ltr">mci-</code> that are not managed by Multi Cluster Ingress or they will be deleted. Google Cloud uses the prefix <code translate="no" dir="ltr">mci-[6 char hash]</code> to manage the Compute Engine resources that Multi Cluster Ingress deploys.</li> <li>Configuration of HTTPS requires a pre-allocated static IP address. HTTPS is not supported with ephemeral IP addresses.</li> </ul> <h2 id="overview">Overview</h2> <p>In this exercise, you perform the following steps:</p> <ol> <li>Select the pricing you want to use.</li> <li>Deploy clusters.</li> <li>Configure cluster credentials.</li> <li>Register the clusters to a <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs">fleet</a>.</li> <li>Specify a config cluster. This cluster can be a dedicated control plane, or it can run other workloads.</li> </ol> <p>The following diagram shows what your environment will look like after you complete the exercise:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/mci-topology.svg" alt="Cluster topology showing the relationships between regions, fleet, and project."></p> <p>In the diagram, there are two GKE clusters named <code translate="no" dir="ltr">gke-us</code> and <code translate="no" dir="ltr">gke-eu</code> in the regions <code translate="no" dir="ltr">europe-west1</code> and <code translate="no" dir="ltr">us-central1</code>. The clusters are registered to a fleet so that the Multi Cluster Ingress controller can recognize them. A fleet lets you logically group and normalize your GKE clusters, making administration of infrastructure easier and enabling the use of multi-cluster features such as Multi Cluster Ingress. You can learn more about the benefits of fleets and how to create them in the <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs">fleet management documentation</a>.</p> <h2 id="enablement">Enable APIs</h2> <p>Enable the required APIs in your project:</p> 
+<pre>gcloud services enable \
+    multiclusteringress.googleapis.com \
+    gkehub.googleapis.com \
+    container.googleapis.com \
+    multiclusterservicediscovery.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+<aside class="note"><strong>Note:</strong><span> Your project is billed according to the number of backend Multi Cluster Ingress pods in your project.</span></aside> <h2 id="deploy-clusters">Deploy clusters</h2> <p>Create two GKE clusters named <code translate="no" dir="ltr">gke-us</code> and <code translate="no" dir="ltr">gke-eu</code> in the <code translate="no" dir="ltr">europe-west1</code>and <code translate="no" dir="ltr">us-central1</code> regions.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ol> <li>
+<p>Create the <code translate="no" dir="ltr">gke-us</code> cluster in the <code translate="no" dir="ltr">us-central1</code> region:</p> 
+<pre data-language="">gcloud container clusters create-auto gke-us \
+    --location=us-central1 \
+    --release-channel=stable \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p>
+</li> <li>
+<p>Create the <code translate="no" dir="ltr">gke-eu</code> cluster in the <code translate="no" dir="ltr">europe-west1</code> region:</p> 
+<pre data-language="">gcloud container clusters create-auto gke-eu \
+    --location=europe-west1 \
+    --release-channel=stable \
+    --project=PROJECT_ID
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>Create the two clusters with <a href="workload-identity">Workload Identity Federation for GKE</a> enabled.</p> <ol> <li>
+<p>Create the <code translate="no" dir="ltr">gke-us</code> cluster in the <code translate="no" dir="ltr">us-central1</code> region:</p> 
+<pre data-language="">gcloud container clusters create gke-us \
+    --location=us-central1 \
+    --enable-ip-alias \
+    --workload-pool=PROJECT_ID.svc.id.goog \
+    --release-channel=stable \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p>
+</li> <li>
+<p>Create the <code translate="no" dir="ltr">gke-eu</code> cluster in the <code translate="no" dir="ltr">europe-west1</code> region:</p> 
+<pre data-language="">gcloud container clusters create gke-eu \
+    --location=europe-west1 \
+    --enable-ip-alias \
+    --workload-pool=PROJECT_ID.svc.id.goog \
+    --release-channel=stable \
+    --project=PROJECT_ID
+</pre>
+</li> </ol></section> </div> <h2 id="cluster-credentials">Configure cluster credentials</h2> <p>Configure credentials for your clusters and rename the cluster contexts to make it easier to switch between clusters when deploying resources.</p> <ol> <li>
+<p>Retrieve the credentials for your clusters:</p> 
+<pre>gcloud container clusters get-credentials gke-us \
+    --location=us-central1 \
+    --project=PROJECT_ID
+
+gcloud container clusters get-credentials gke-eu \
+    --location=europe-west1 \
+    --project=PROJECT_ID
+</pre> <p>The credentials are stored locally so that you can use your kubectl client to access the cluster API servers. By default, an auto-generated name is created for the credentials.</p>
+</li> <li>
+<p>Rename the cluster contexts:</p> 
+<pre>kubectl config rename-context gke_PROJECT_ID_us-central1_gke-us gke-us
+kubectl config rename-context gke_PROJECT_ID_europe-west1_gke-eu gke-eu
+</pre>
+</li> </ol> <h2 id="fleet-registration">Register clusters to a fleet</h2> <p>Register your clusters to your project's fleet as follows.</p> <aside class="note"><strong>Note:</strong><span> You can also register clusters from the Google Cloud console. Learn more in <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke#console">Register a GKE cluster to your fleet</a>.</span></aside> <ol> <li>
+<p>Register your clusters:</p> 
+<pre>gcloud container fleet memberships register gke-us \
+    --gke-cluster us-central1/gke-us \
+    --enable-workload-identity \
+    --project=PROJECT_ID
+
+gcloud container fleet memberships register gke-eu \
+    --gke-cluster europe-west1/gke-eu \
+    --enable-workload-identity \
+    --project=PROJECT_ID
+</pre>
+</li> <li>
+<p>Confirm that your clusters have successfully been registered to the fleet:</p> 
+<pre>gcloud container fleet memberships list --project=PROJECT_ID
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                  EXTERNAL_ID
+gke-us                                0375c958-38af-11ea-abe9-42010a800191
+gke-eu                                d3278b78-38ad-11ea-a846-42010a840114
+</pre>
+</li> </ol> <p>After you register your clusters, GKE deploys the <code translate="no" dir="ltr">gke-mcs-importer</code> Pod to your cluster.</p> <p>You can learn more about registering clusters in <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke">Register a GKE cluster to your fleet</a>.</p> <h2 id="specifying_a_config_cluster">Specify a config cluster</h2> <p>The config cluster is a GKE cluster you choose to be the central point of control for Ingress across the member clusters. This cluster must already be registered to the fleet. For more information, see <a href="../concepts/multi-cluster-ingress#config_cluster_design">Config cluster design</a>.</p> <aside class="note"><strong>Note:</strong><span> Even if you have zonal GKE clusters, Multi Cluster Ingress controller is only available in a region. To enable Multi Cluster Ingress, you must specify the region instead of the zone when you use the <code translate="no" dir="ltr">--location</code> parameter.</span></aside> <p>Enable Multi Cluster Ingress and select <code translate="no" dir="ltr">gke-us</code> as the config cluster:</p> 
+<pre>gcloud container fleet ingress enable \
+    --config-membership=gke-us \
+    --location=us-central1 \
+    --project=PROJECT_ID
+</pre> <p>The config cluster takes up to 15 minutes to register. Successful output is similar to the following:</p> 
+<pre>Waiting for Feature to be created...done.
+Waiting for controller to start...done.
+</pre> <p>The unsuccessful output is similar to the following:</p> 
+<pre>Waiting for controller to start...failed.
+ERROR: (gcloud.container.fleet.ingress.enable) Controller did not start in 2 minutes. Please use the `describe` command to check Feature state for debugging information.
+</pre> <p>If a failure occurred in the previous step, then check the feature state:</p> 
+<pre>gcloud container fleet ingress describe \
+    --project=PROJECT_ID
+</pre> <p>The successful output is similar to the following:</p> 
+<pre>createTime: '2021-02-04T14:10:25.102919191Z'
+membershipStates:
+ projects/PROJECT_ID/locations/global/memberships/CLUSTER_NAME:
+ state:
+   code: ERROR
+   description: '...is not a VPC-native GKE Cluster.'
+   updateTime: '2021-08-10T13:58:50.298191306Z'
+ projects/PROJECT_ID/locations/global/memberships/CLUSTER_NAME:
+ state:
+   code: OK
+   updateTime: '2021-08-10T13:58:08.499505813Z'
+</pre> <p>To learn more about troubleshooting errors with Multi Cluster Ingress, see <a href="troubleshooting-and-ops">Troubleshooting and operations</a>.</p> <h3 id="impact_on_live_clusters">Impact on live clusters</h3> <p>You can safely enable Multi Cluster Ingress using <code translate="no" dir="ltr">gcloud container fleet ingress enable</code> on a live cluster, as it does not result in any downtime or impact to traffic on the cluster.</p> <h2 id="shared_vpc_deployment">Shared VPC</h2> <p>You can deploy a <code translate="no" dir="ltr">MultiClusterIngress</code> resource for clusters in a Shared VPC network, but all the participating backend GKE clusters must be in the same project. Having GKE clusters in different projects using the same Cloud Load Balancing VIP is not supported.</p> <p>In non-Shared VPC networks, the Multi Cluster Ingress controller manages firewall rules to allow health checks to pass from the load balancer to container workloads.</p> <p>In a Shared VPC network, a host project administrator must manually create the firewall rules for load balancer traffic on behalf of the Multi Cluster Ingress controller.</p> <p>The following command shows the firewall rule that you must create if your clusters are on a Shared VPC network. The source ranges are the ranges that load balancer uses to send traffic to backends. This rule must exist for the operational lifetime of a <code translate="no" dir="ltr">MultiClusterIngress</code> resource.</p> <p>If your clusters are on a Shared VPC network, create the firewall rule:</p> 
+<pre>gcloud compute firewall-rules create FIREWALL_RULE_NAME \
+    --project=HOST_PROJECT \
+    --network=SHARED_VPC \
+    --direction=INGRESS \
+    --allow=tcp:0-65535 \
+    --source-ranges=130.211.0.0/22,35.191.0.0/16
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">FIREWALL_RULE_NAME</var></code>: the name of the new firewall rule that you choose.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">HOST_PROJECT</var></code>: the ID of the Shared VPC host project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SHARED_VPC</var></code>: the name of the Shared VPC network.</li> </ul> <h2 id="known_issues">Known issues</h2> <p>This section describes known issues for the Multi Cluster Ingress</p> <h3 id="config_membership">InvalidValueError for field config_membership</h3> <p>A known issue prevents the Google Cloud CLI from interacting with Multi Cluster Ingress. This issue was introduced in version 346.0.0 and was fixed in version 348.0.0. We don't recommend using the gcloud CLI versions 346.0.0 and 347.0.0 with Multi Cluster Ingress.</p> <h3 id="cloud_armor">Invalid value for field 'resource'</h3> <p>Google Cloud Armor cannot communicate with Multi Cluster Ingress <a href="../concepts/multi-cluster-ingress#architecture">config clusters</a> running on the following GKE versions:</p> <ul> <li>1.18.19-gke.1400 and later</li> <li>1.19.10-gke.700 and later</li> <li>1.20.6-gke.700 and later</li> </ul> <p>When you <a href="https://docs.cloud.google.com/armor/docs/configure-security-policies">configure a Google Cloud Armor security policy</a>, the following message appears:</p> 
+<pre>Invalid value for field 'resource': '{"securityPolicy": "global/securityPolicies/"}': The given policy does not exist
+</pre> <p>To avoid this issue, upgrade your <a href="#specifying_a_config_cluster">config cluster</a> to version 1.21 or later, or use the following command to update the BackendConfig <code translate="no" dir="ltr">CustomResourceDefinition</code>:</p> 
+<pre>kubectl patch crd backendconfigs.cloud.google.com --type='json' -p='[{"op": "replace", "path": "/spec/versions/1/schema/openAPIV3Schema/properties/spec/properties/securityPolicy", "value":{"properties": {"name": {"type": "string"}}, "required": ["name" ],"type": "object"}}]'
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="multi-cluster-ingress">deploy Ingress across clusters</a>.</li> <li>Learn more about <a href="../concepts/multi-cluster-ingress">Multi Cluster Ingress</a>.</li> <li>Learn how to <a href="../concepts/choose-mc-lb-api">choose your multi-cluster load balancing API for GKE</a>.</li> <li>Learn more about <a href="../concepts/multi-cluster-gateways">multi-cluster Gateways</a>.  </li>
+</ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/multi-cluster-ingress-setup" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/multi-cluster-ingress-setup</a>
+  </p>
+</div>

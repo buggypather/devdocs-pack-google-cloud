@@ -1,0 +1,149 @@
+<h1>Best practices for GKE network observability</h1>  <p>Managing network connectivity and security policies in dynamic Kubernetes environments presents significant operational challenges. GKE Dataplane V2 observability provides platform administrators with kernel-level visibility into cluster network traffic, which can help enable rapid troubleshooting, continuous compliance auditing, and proactive path validation.</p> <p>This document outlines conceptual architecture and best practices for Google Kubernetes Engine (GKE) network observability, including the telemetry stack, a mental model for triage, proactive alerting rules, Terraform automation, and cost optimization techniques.</p> <p>For step-by-step troubleshooting instructions and diagnostic procedures, see <a href="../troubleshooting/network-observability">Troubleshoot network observability</a>.</p> <h2 id="benefits">GKE network observability benefits</h2> <p>Implementing an observability strategy in GKE provides the following key advantages:</p> <ul> <li>
+<strong>Accelerated Mean Time to Resolution (MTTR):</strong> by leveraging eBPF-powered metrics and Hubble flow logs, you can immediately isolate network anomalies. This visibility lets you distinguish between application-level failures, Kubernetes NetworkPolicy blocks, and VPC firewall drops, reducing debugging cycles from hours to minutes.</li> <li>
+<strong>Kernel-level instrumentation without sidecars:</strong> GKE Dataplane V2 executes observability logic directly within the host Linux kernel using eBPF. This eliminates the need for resource-intensive sidecar proxies or application-level code modifications, ensuring minimal overhead and preserving application performance.</li> <li>
+<strong>Continuous security compliance auditing:</strong> NetworkPolicy logging generates detailed audit logs for every connection attempt (verdicts of <code translate="no" dir="ltr">ALLOW</code> or <code translate="no" dir="ltr">DENY</code>). These logs provide a tamper-proof record of cluster traffic, essential for satisfying regulatory compliance frameworks (such as PCI-DSS, SOC 2, and HIPAA).</li> <li>
+<strong>Proactive path validation:</strong> integration with Connectivity Tests lets you simulate network paths and evaluate GKE NetworkPolicies statically before workloads are deployed, preventing configuration drift and deployment-phase connectivity issues.</li> <li>
+<strong>Resource and cost optimization:</strong> detailed flow tracking exposes inefficiencies such as excessive Cloud NAT port utilization, inter-zone data transfer spikes, and un-cached DNS resolution patterns, enabling informed capacity planning and cost management.</li> </ul> <h2 id="architecture">GKE network observability architecture</h2> <p>GKE Dataplane V2 offers a multi-layered observability stack designed for different operational phases. The following table outlines the core components and their recommended use cases:</p> <table> <thead> <tr> <th>Observability component</th> <th>Primary use case</th> <th>Availability</th> <th>Data retention</th> <th>Performance overhead</th> <th>Key telemetry signals</th> </tr> </thead> <tbody> <tr> <td>GKE Dataplane V2 metrics</td> <td>System-wide health monitoring, trend analysis, and alerting.</td> <td>GKE Dataplane V2 only</td> <td>Historical telemetry retention (Cloud Monitoring and Google Cloud Managed Service for Prometheus stores 30 or more days of metrics and logs)</td> <td>Negligible (kernel-level aggregation)</td> <td>Packet and byte counters, TCP reset counts, and connection drop rates (<code translate="no" dir="ltr">pod_flow_drop_count</code>).</td> </tr> <tr> <td>NetworkPolicy logs</td> <td>Security policy auditing, historical connection analysis, and compliance.</td> <td>GKE Dataplane V2 only (for <code translate="no" dir="ltr">NetworkLogging</code> custom resource configuration)</td> <td>Configurable (Cloud Logging)</td> <td>Low (buffered log export)</td> <td>Connection metadata (source and destination labels, IP addresses, ports) and policy verdicts (<code translate="no" dir="ltr">ALLOW</code> or <code translate="no" dir="ltr">DENY</code>).</td> </tr> <tr> <td>Hubble CLI and UI</td> <td>Live, interactive traffic analysis and real-time packet-level debugging.</td> <td>GKE Dataplane V2 only</td> <td>Ephemeral (node-local ring buffer)</td> <td>Low (enable dynamically)</td> <td>Real-time flow traces, detailed drop reasons (such as policy denied or conntrack table saturation).</td> </tr> <tr> <td>GKE DNS metrics</td> <td>Monitoring DNS resolution performance, cache efficiency, and upstream latency.</td> <td>All clusters</td> <td>Long-term (Cloud Monitoring)</td> <td>Negligible</td> <td>DNS request count, cache hit and miss ratio, upstream forwarding latency, and concurrent limit rejections.</td> </tr> <tr> <td>Connectivity Tests</td> <td>Pre-deployment path validation and static configuration auditing.</td> <td>All clusters</td> <td>Not applicable (on-demand simulation)</td> <td>None (statically simulated)</td> <td>Simulated packet routing path, including simulated NetworkPolicy evaluation.</td> </tr> <tr> <td>VPC Flow Logs</td> <td>Inter-node and external traffic auditing, security forensics, and cost analysis.</td> <td>All clusters</td> <td>Configurable (Cloud Logging or BigQuery)</td> <td>None (configurable sampling rate)</td> <td>5-tuple connection details, bytes and packets sent, GKE metadata (namespace, workload, service), and RTT (for TCP).</td> </tr> <tr> <td>Flow Analyzer</td> <td>Visual analysis of VPC traffic, identifying top talkers, and analyzing cross-zone costs without writing SQL queries.</td> <td>All clusters</td> <td>Depends on Observability Analytics bucket retention</td> <td>None (analytical UI)</td> <td>Aggregated traffic volume and latency grouped by GKE workload or service.</td> </tr> </tbody> </table> <p>In the preceding table, a performance overhead of <em>Negligible</em> means that components remain strictly within a minimal resource footprint (typically &lt;0.1 vCPU and minimal memory) regardless of traffic volume or system scale. <em>Low</em> components maintain a minimal footprint under standard conditions but scale dynamically with traffic density. Under high-throughput scenarios, resource usage can scale up to 2 vCPU and several hundred megabytes of memory.</p> <h2 id="mental-model-triage-loop">GKE observability mental model and triage loop</h2> <p>To troubleshoot network anomalies effectively, you need to select the appropriate telemetry signal for your operational scope and follow a consistent triage methodology.</p> <h3 id="choose-telemetry-source">Choose the right telemetry source</h3> <p>With multiple telemetry sources available, choose the tool that fits your current operational task:</p> <table> <thead> <tr> <th>Telemetry source</th> <th>Answers</th> <th>Ideal for</th> <th>Google Cloud destination</th> </tr> </thead> <tbody> <tr> <td>GKE Dataplane V2 metrics</td> <td>What is happening and at what scale?</td> <td>Dashboards, alerting, and capacity planning.</td> <td>Cloud Monitoring (<code translate="no" dir="ltr">prometheus.googleapis.com</code>)</td> </tr> <tr> <td>NetworkPolicy logs</td> <td>Why was a connection blocked inside GKE?</td> <td>Security audits and security policy root-cause analysis.</td> <td>Cloud Logging (<code translate="no" dir="ltr">policy-action</code> log)</td> </tr> <tr> <td>VPC Flow Logs</td> <td>What happened to this traffic after leaving the Pod?</td> <td>Historical traffic analysis between workloads, inter-zone data transfer costs, and VPC-level drop attribution.</td> <td>Cloud Logging and Observability Analytics (<code translate="no" dir="ltr">vpc_flows</code> log)</td> </tr> <tr> <td>Hubble CLI and UI</td> <td>What is passing through the node right now?</td> <td>Live debugging, tcpdump alternative, and active incidents.</td> <td>Ephemeral ring buffer (Hubble CLI)</td> </tr> <tr> <td>Connectivity Tests</td> <td>Can traffic travel successfully?</td> <td>Active dataplane probing and path analysis: verify reachability and identify exact drop points across VPC firewalls, routes, and GKE nodes.</td> <td>Network Intelligence Center (simulation)</td> </tr> </tbody> </table> <h3 id="troubleshooting-loop">Standardized troubleshooting loop</h3> <p>Use this repeatable workflow to triage any GKE networking incident:</p> <ol> <li>
+<strong>Detect anomaly:</strong> identify the issue through Cloud Monitoring alerts (for example, spikes in TCP resets, DNS concurrent limit rejections, or packet drops).</li> <li>
+<strong>Isolate the tier:</strong> run the GCE VM baseline test (see <a href="../troubleshooting/network-observability#triage-node-latency">Triage for node-level latency and CNI bottlenecks</a>) to determine whether the block is inside the GKE cluster (CNI, NetworkPolicy, IP masquerade) or outside in the VPC (firewall rules, routing, Cloud NAT).</li> <li>
+<strong>Investigate root cause:</strong> perform a detailed analysis of the flow: <ul> <li>For live incidents: use Hubble CLI (<code translate="no" dir="ltr">hubble observe</code>) to stream real-time flows and identify drop reasons.</li> <li>For historical or intermittent issues: query NetworkPolicy logs or VPC Flow Logs in Cloud Logging.</li> </ul>
+</li> <li>
+<strong>Validate remediation:</strong> run a simulated <a href="../troubleshooting/network-observability#diagnose-connectivity-tests">Connectivity Tests test</a> to verify that the path is statically allowed, and then check the metrics dashboard to confirm that the drop rate has returned to zero.</li> </ol> <h2 id="monitoring-and-alerting">Proactive network monitoring and alerting</h2> <p>To maintain high availability, platform administrators should establish alerting policies in Cloud Monitoring to identify network degradation before it impacts workloads.</p> <h3 id="alert-packet-drop-spikes">Alert on packet drop spikes</h3> <p>An anomalous increase in dropped network flows typically indicates a misconfigured security policy or node-level connection tracking (conntrack) exhaustion.</p> <ul> <li>
+<p><strong>Prometheus Query (PromQL):</strong></p> 
+<pre>sum(rate(pod_flow_egress_flows_count{verdict="DROPPED"}[5m])) by (source) &gt; 10
+</pre>
+</li> <li><p><strong>Recommended action:</strong> refer to <a href="../troubleshooting/network-observability#diagnose-packet-drops">Diagnose packet drops and NetworkPolicy blocks</a> to isolate the specific GKE NetworkPolicy or eBPF drop reason causing packet loss.</p></li> </ul> <h3 id="alert-dns-saturation">Alert on DNS saturation</h3> <p>When CoreDNS or NodeLocal DNSCache reaches its concurrent query limit, subsequent DNS lookups are rejected, leading to intermittent application timeouts.</p> <ul> <li>
+<p><strong>Prometheus Query (PromQL):</strong></p> 
+<pre>sum by (cluster_name) (rate(kubernetes_io_networking_dns_kubedns_max_concurrent_rejected_request_count[5m])) &gt; 0
+</pre>
+</li> <li><p><strong>Recommended action:</strong> scale the <code translate="no" dir="ltr">kube-dns</code> replica count or implement NodeLocal DNSCache to distribute the resolution load. For detailed steps, see <a href="../troubleshooting/network-observability#diagnose-dns-failures">Diagnose DNS resolution failures</a>.</p></li> </ul> <h3 id="alert-tcp-reset-spikes">Alert on TCP reset spikes</h3> <p>A spike in TCP reset packets often indicates that a backend service is rejecting connections, potentially due to application crash loops or socket queue saturation.</p> <aside class="note"> <p><strong>Note:</strong> This alert requires the Hubble metrics scraping configuration (<code translate="no" dir="ltr">PodMonitoring</code>) described in <a href="../troubleshooting/network-observability#diagnose-packet-drops">Diagnose packet drops and NetworkPolicy blocks</a> to be active.</p> </aside> <ul> <li>
+<p><strong>Monitoring Query Language (MQL):</strong></p> 
+<pre>fetch prometheus_target
+| metric 'prometheus.googleapis.com/hubble_tcp_flags_total/counter'
+| filter (metric.flag == 'RST')
+| align rate(1m)
+| every 1m
+| group_by [metric.source, metric.destination], sum(val())
+| condition val() &gt; 50
+</pre>
+</li> <li><p><strong>Recommended action:</strong> refer to <a href="../troubleshooting/network-observability#diagnose-traffic-imbalance">Diagnose traffic imbalance and TCP resets</a> to investigate connection stickiness or application queue saturation.</p></li> </ul> <h3 id="automated-path-validation">Automated path validation in CI/CD</h3> <p>Integrate Connectivity Tests into deployment pipelines to validate network paths statically before routing production traffic. Use the gcloud CLI to verify that newly deployed workloads can reach external dependencies (such as databases and APIs) without policy blockages.</p> <ul> <li>
+<p><strong>Example command:</strong></p> 
+<pre>gcloud network-management connectivity-tests create test-prod-db-egress \
+    --source-gke-pod=projects/PROJECT_ID/locations/LOCATION/clusters/CLUSTER_NAME/k8s/namespaces/prod/pods/my-app-pod \
+    --destination-ip-address=10.240.0.100 \
+    --protocol=TCP \
+    --destination-port=5432 \
+    --round-trip
+</pre>
+</li> </ul> <h3 id="enable-log-analytics">Enable Observability Analytics for visual flow analysis</h3> <p>To enable visual, SQL-free analysis of VPC traffic flows, upgrade the GKE log bucket (typically the <code translate="no" dir="ltr">_Default</code> bucket) to use Observability Analytics. This lets platform administrators leverage Flow Analyzer to investigate traffic distribution and data transfer costs. For more information, see <a href="../troubleshooting/network-observability#analyze-traffic-costs">Analyze cluster traffic costs and performance using Flow Analyzer</a>.</p> <h2 id="terraform-automation">Terraform automation: Observability-as-Code</h2> <p>To implement this observability architecture consistently and avoid manual setup errors, deploy the telemetry pipeline using the following Terraform configuration (requires the <code translate="no" dir="ltr">google-beta</code> provider):</p> 
+<pre># Configure the VPC Subnet with VPC Flow Logs enabled and all metadata included
+resource "google_compute_subnetwork" "gke_subnet" {
+  name          = "gke-subnet"
+  ip_cidr_range = "10.0.0.0/20"
+  region        = "us-central1"
+  network       = google_compute_network.custom.id
+
+  # Enable VPC Flow Logs. flow_sampling is the secondary sampling rate, which
+  # applies to flow log entries after they are generated. The primary packet
+  # sampling rate is dynamic and isn't configurable.
+  log_config {
+    aggregation_interval = "INTERVAL_5_SEC"
+    flow_sampling        = 0.5 # Default rate; satisfies the LIGHT org policy tier
+    metadata             = "INCLUDE_ALL_METADATA"
+  }
+}
+
+# Configure GKE Cluster with Dataplane V2, Intranode Visibility, and Hubble
+resource "google_container_cluster" "primary" {
+  provider   = google-beta
+  name       = "gke-observability-cluster"
+  location   = "us-central1"
+  network    = google_compute_network.custom.id
+  subnetwork = google_compute_subnetwork.gke_subnet.id
+
+  # Enable Dataplane V2 (Required for all advanced telemetry)
+  datapath_provider = "ADVANCED_DATAPATH"
+
+  # Enable Intranode Visibility (ensures local node pod-to-pod traffic hits the VPC)
+  enable_intranode_visibility = true
+
+  # Enable Managed Service for Prometheus (GMP)
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+    managed_prometheus {
+      enabled = true
+    }
+
+    # Enable Dataplane V2 Flow Observability (Hubble Relay and metric exposure)
+    advanced_datapath_observability_config {
+      enable_metrics = true
+      enable_relay   = true
+    }
+  }
+}
+
+# Upgrade the Default log bucket to use Log Analytics (required for Flow Analyzer)
+resource "google_logging_project_bucket_config" "default_analytics" {
+  project          = var.project_id
+  location         = "global"
+  bucket_id        = "_Default"
+  enable_analytics = true
+}
+
+# Define a baseline static path validation test (Pod to external internet gateway)
+resource "google_network_management_connectivity_test" "pod_to_internet" {
+  name = "pod-to-internet-egress"
+  source {
+    gke_pod = "projects/${var.project_id}/locations/us-central1/clusters/${google_container_cluster.primary.name}/k8s/namespaces/prod/pods/my-app-pod"
+  }
+  destination {
+    ip_address = "8.8.8.8"
+    port       = 443
+  }
+  protocol = "TCP"
+}
+</pre> <h2 id="cost-optimization">Cost optimization and noise reduction</h2> <p>Network telemetry (metrics and logs) can generate substantial data volumes, leading to high ingestion and storage costs. Use the following strategies to optimize telemetry collection without losing visibility into critical traffic:</p> <h3 id="disable-allowed-connection-logs">Disable allowed connection logs</h3> <p>By default, NetworkPolicy logging captures both allowed and denied connections. Allowed connections dominate log volume (often 99% or more of traffic). You can update the cluster's <code translate="no" dir="ltr">NetworkLogging</code> configuration to capture only denied connections (drops), which dramatically reduces logging costs:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">network-logging-config.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1alpha1
+kind: NetworkLogging
+metadata:
+  name: default
+spec:
+  cluster:
+    allow:
+      log: false # Disable logging for allowed traffic
+      delegate: false
+    deny:
+      log: true  # Keep logging for blocked traffic (critical for security/triage)
+      delegate: false
+</pre>
+</li> <li>
+<p>Apply the configuration:</p> 
+<pre>kubectl apply -f network-logging-config.yaml
+</pre>
+</li> </ol> <h3 id="delegate-logging-annotations">Delegate logging through annotations</h3> <p>For fine-grained cost control, delegate logging to annotations by setting <code translate="no" dir="ltr">delegate: true</code> in the <code translate="no" dir="ltr">NetworkLogging</code> custom resource. This configuration ensures the following:</p> <ul> <li>Allowed traffic is logged only if the matching NetworkPolicy has the annotation <code translate="no" dir="ltr">policy.network.gke.io/enable-logging: "true"</code>.</li> <li>Denied traffic is logged only for Pod objects in namespaces annotated with <code translate="no" dir="ltr">policy.network.gke.io/enable-deny-logging: "true"</code>.</li> </ul> <p>This configuration lets you enable logging only for highly critical workloads (such as payment gateways) while ignoring noisy, low-risk services.</p> <h3 id="tune-vpc-flow-logs-sampling-rate">Tune VPC Flow Logs sampling rate</h3> <aside class="caution"> <p><strong>Caution:</strong> VPC Flow Logs on high-traffic clusters can incur significant Cloud Logging ingestion charges. To reduce volume, filter logs and metadata before lowering the secondary sampling rate. Keep the default <code translate="no" dir="ltr">0.5</code> rate—which satisfies the <code translate="no" dir="ltr">LIGHT</code> tier of the <code translate="no" dir="ltr">constraints/compute.requireVpcFlowLogs</code> organization policy—on subnets backing clusters that you actively troubleshoot. Because Pods are short-lived, lower rates frequently miss critical flows.</p> </aside> <p>In your Terraform configuration (or Google Cloud console), lower the secondary sampling rate only on subnets where you need traffic volume and cost aggregates rather than individual flow records. Because VPC Flow Logs estimates total traffic from sampled packets, byte and packet counts remain usable for cost analysis at lower rates. Don't set the <code translate="no" dir="ltr">flow_sampling</code> rate lower than <code translate="no" dir="ltr">0.1</code>, the minimum rate that satisfies the <code translate="no" dir="ltr">ESSENTIAL</code> tier of the <code translate="no" dir="ltr">constraints/compute.requireVpcFlowLogs</code> organization policy:</p> 
+<pre>resource "google_compute_subnetwork" "gke_subnet" {
+  # ... other subnet configs ...
+  log_config {
+    aggregation_interval = "INTERVAL_5_SEC"
+    flow_sampling        = 0.1 # ESSENTIAL tier: volume and cost analysis, not per-flow troubleshooting
+    metadata             = "INCLUDE_ALL_METADATA"
+  }
+}
+</pre> <p>The following table summarizes the secondary sampling rates and the corresponding tiers of the <code translate="no" dir="ltr">constraints/compute.requireVpcFlowLogs</code> organization policy:</p> <table> <thead> <tr> <th>Secondary sampling rate</th> <th>Organization policy tier</th> <th>When to use it</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">1.0</code></td> <td><code translate="no" dir="ltr">COMPREHENSIVE</code></td> <td>Clusters with a standing requirement for per-flow forensics or security auditing. Choose this rate when you configure the subnet, because raising the rate after an incident doesn't recover flows that were never captured.</td> </tr> <tr> <td>
+<code translate="no" dir="ltr">0.5</code> (default)</td> <td><code translate="no" dir="ltr">LIGHT</code></td> <td>Subnets that back clusters you troubleshoot. This is the default rate and the recommended baseline.</td> </tr> <tr> <td><code translate="no" dir="ltr">0.1</code></td> <td><code translate="no" dir="ltr">ESSENTIAL</code></td> <td>Subnets where you need traffic volume and cost aggregates rather than individual flows.</td> </tr> </tbody> </table> <h3 id="apply-logging-exclusions">Apply Cloud Logging exclusions</h3> <p>Exclude noisy or irrelevant logs (such as <code translate="no" dir="ltr">kube-system</code> internal traffic) directly at the Cloud Logging sink level. Add an exclusion filter to your <code translate="no" dir="ltr">_Default</code> sink to drop internal metadata or system Pod logs:</p> 
+<pre>resource.type="gce_subnetwork" AND
+log_name:"projects/PROJECT_ID/logs/compute.googleapis.com%2Fvpc_flows" AND
+jsonPayload.src_gke_details.pod.pod_namespace="kube-system"
+</pre> <h2 id="operational-tips">Best practices and operational tips</h2> <p>Consider the following operational guidelines when deploying and maintaining your cluster telemetry pipeline:</p> <ul> <li>
+<p><strong>Enable GKE Dataplane V2 flow observability on demand:</strong> flow observability (<code translate="no" dir="ltr">hubble-relay</code>) can introduce slight overhead. For production clusters, you can enable it during debugging sessions and <a href="../how-to/configure-dpv2-observability#disable-observability">disable</a> it afterwards to minimize resource consumption on nodes:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --enable-dataplane-v2-flow-observability \
+    --location=LOCATION
+</pre>
+</li> <li><p><strong>Enable Intranode Visibility:</strong> by default, traffic between two Pod objects on the same node doesn't leave the node, making it invisible to VPC Flow Logs. Intranode Visibility is enabled by default in Autopilot clusters and disabled by default on Standard clusters, including Standard clusters that use GKE Dataplane V2. <a href="../how-to/intranode-visibility">Enabling Intranode Visibility</a> hairpins this traffic through the VPC, and helps ensure that VPC firewall rules and flow logs apply consistently.</p></li> <li><p><strong>Understand Service VIP resolution behavior:</strong> after a Kubernetes Service Virtual IP (VIP) is resolved to a backend Pod IP address, transport-layer (OSI Layer 4) metrics count it as pod-to-pod traffic. To trace which Service VIP was originally targeted, rely on Hubble CLI live flows during the connection handshake.</p></li> <li><p><strong>Align metric and log timestamps:</strong> when investigating an incident, correlate the spike in Cloud Monitoring metrics with the exact time window when querying logs in Cloud Logging or Hubble CLI to ensure that you are analyzing the same event.</p></li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li><a href="../troubleshooting/network-observability">Troubleshoot network observability</a></li> <li><a href="networking">Best practices for GKE networking</a></li> <li><a href="../concepts/about-dpv2-observability">About GKE Dataplane V2 observability</a></li> <li><a href="../how-to/observe-your-traffic">Observe your traffic using GKE Dataplane V2 observability</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/network-observability" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/network-observability</a>
+  </p>
+</div>

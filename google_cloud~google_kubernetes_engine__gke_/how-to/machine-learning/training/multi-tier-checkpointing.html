@@ -1,0 +1,226 @@
+<h1>Train large-scale machine learning models on GKE with Multi-Tier Checkpointing</h1>  <p>This page shows you how to use Multi-Tier Checkpointing to reliably store and manage checkpoints during your machine learning model training on GKE. Checkpoint storage and management is crucial for <em>large-scale</em> training jobs, defined as those utilizing over thousands of nodes. Interruptions to these large-scale jobs are frequent (potentially hourly) and recovery from them can be slow.</p> <h2 id="benefits">Benefits</h2> <p>Using Multi-Tier Checkpointing provides the following benefits:</p> <ul> <li>Fully orchestrated checkpoint data management, including backups, replication, and automatic restoration for the following workloads: <ul> <li>
+<a href="https://cloud.google.com/blog/products/compute/unlock-faster-workload-start-time-using-orbax-on-jax">JAX training runs using Orbax for state management</a> running on TPUs.</li> <li>PyTorch workloads on GPUs.</li> </ul>
+</li> <li>Quick recovery of training jobs from a checkpoint stored in the local node. You can also recover using checkpoints stored in another node in the training cluster.</li> <li>Quick restoration of training jobs from a checkpoint stored on a Cloud Storage backup in worst-case scenarios, where there are no in-cluster checkpoints.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<a href="https://docs.cloud.google.com/storage/docs/creating-buckets">Create a Cloud Storage bucket</a>, if you don't have one for your project. Make sure you enable <a href="https://docs.cloud.google.com/storage/docs/hns-overview">hierarchical namespace</a>, otherwise backups will fail.</li> </ul> <h3 id="requirements">Requirements</h3> <p>Multi-Tier Checkpointing requires GKE cluster version 1.32.4-gke.1415000 or later.</p> <h3 id="limitations">Limitations</h3> <ul> <li>Autopilot clusters aren't supported.</li> </ul> <h2 id="configure-cluster">Configure GKE nodes for using Multi-Tier Checkpointing</h2> <p>This sections covers how to configure GKE nodes on new and existing clusters.</p> <h3 id="new-cluster">Configure nodes on a new cluster</h3> <ol> <li>
+<p>Create a cluster with Multi-Tier Checkpointing, the <a href="../../../concepts/cloud-storage-fuse-csi-driver">Cloud Storage FUSE CSI driver</a>, and <a href="../../workload-identity">Workload Identity Federation for GKE</a> enabled. If you use TPU slices for your machine learning workload, you'll need to <a href="../../tpu-multislice#prepare-standard-node-pool">adjust the cluster creation command</a> to include the configuration for a TPU slice node pool.</p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --addons=HighScaleCheckpointing,GcsFuseCsiDriver  \
+    --node-locations=NODE_LOCATION \
+    --workload-pool=PROJECT_ID.svc.id.goog \
+    --cluster-version=CLUSTER_VERSION
+    --location=CLUSTER_LOCATION \
+    --machine-type=MACHINE_TYPE \
+    --num-nodes=NUM_NODES
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_LOCATION</var></code>: the zone for your cluster nodes. This is where your TPU capacity lives.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version of your cluster. 1.32.4-gke.1415000 is the minimum supported version.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_LOCATION</var></code>: the region that you want to create your cluster in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type used for nodes that run components like the JobSet controller and the multi-tier checkpointing controller. For large-scale training, we recommend using at least <code translate="no" dir="ltr">e2-standard-4</code> machines. You won't use this machine type for model training; instead, you'll create separate node pools for that purpose, often utilizing accelerator-optimized VM families.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: the number of nodes to be created in each of the cluster's zones.</li> </ul>
+</li> </ol> <h3 id="existing-cluster">Configure nodes on an existing cluster</h3> <p>To use Multi-Tier Checkpointing with an existing cluster, enable it together with the <a href="../../../concepts/cloud-storage-fuse-csi-driver">Cloud Storage FUSE CSI driver</a>, and <a href="../../workload-identity">Workload Identity Federation for GKE</a> with the following commands. Your existing cluster version needs to be later than 1.32.3-gke.1170000.</p> <ol> <li>
+<p>Enable Workload Identity Federation for GKE:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --workload-pool=PROJECT_ID.svc.id.goog \
+    --location=CLUSTER_LOCATION
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_LOCATION</var></code>: the region of the cluster.</li> </ul>
+</li> <li>
+<p>Enable Multi-Tier Checkpointing and the Cloud Storage FUSE CSI driver:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --update-addons=HighScaleCheckpointing=ENABLED,GcsFuseCsiDriver=ENABLED \
+    --location=CLUSTER_LOCATION
+</pre>
+</li> </ol> <h2 id="config-permissioms">Configure permissions to use Multi-Tier Checkpointing</h2> <p>This section covers how to configure permissions to use Multi-Tier Checkpointing.</p> <h3 id="setup_storage_bucket">Grant access to Cloud Storage buckets</h3> <p>The ephemeral volumes used by the Multi-Tier Checkpointing CSI driver must use existing Cloud Storage buckets.</p> <p>To store checkpoints in a Cloud Storage bucket, Multi-Tier Checkpointing needs access to the bucket. Grant the Storage Object User (<code translate="no" dir="ltr">roles/storage.objectUser</code>) IAM role on the bucket to the <a href="https://kubernetes.io/docs/concepts/security/service-accounts/">Kubernetes service account</a> for Multi-Tier Checkpointing.</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://GCS_BUCKET \
+    --member "principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node" \
+    --role "roles/storage.objectUser"
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GCS_BUCKET</var></code>: the name of the <a href="https://docs.cloud.google.com/storage/docs/buckets">Cloud Storage bucket</a> that you'll transfer data from.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: an automatically generated unique identifier for your project. To find this value, refer to <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">Creating and managing projects</a>.</li> </ul> <h3 id="setup_compute_service_account">(Optional) Grant Compute Engine default service account access</h3> <p>If your Compute Engine instances need read access to the Cloud Storage bucket, grant the Storage Object Viewer (<code translate="no" dir="ltr">roles/storage.objectViewer</code>) IAM role to the <a href="https://docs.cloud.google.com/compute/docs/access/service-accounts#default_service_account">Compute Engine default service account</a>.</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://GCS_BUCKET \
+    --member serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+    --role roles/storage.objectViewer
+</pre> <h2 id="jobset">Deploy the JobSet controller</h2> <p>The <a href="https://jobset.sigs.k8s.io/docs/overview/">JobSet controller</a> is responsible for managing the batch jobs that run your model training on GKE, and its resource allocation is adjusted to handle the workload efficiently. Make sure that your training job launcher deploys and uses JobSet.</p> <p>To increase the memory request to 1 Gi, the memory limit to 2 Gi, and the CPU request to 1 for the manager container in your JobSet deployment, run the following patch command:</p> 
+<pre>kubectl patch -n jobset-system deploy jobset-controller-manager --type json \
+    --patch '[{"op": "add", "path": "/spec/template/spec/containers/0/resources", "value": {"limits": {"memory": "2Gi"}, "requests": {"cpu": "1", "memory": "1Gi"}}}]'
+</pre> <h2 id="initialize-csi">Initialize the Multi-Tier Checkpointing CSI driver</h2> <p>This section describes how to initialize the Multi-Tier Checkpointing CSI driver on nodes where your workloads will run. The CSI driver is responsible for handling the storage and management of checkpoints during your model training process.</p> <h3 id="checkpointconfiguration">Create a CheckpointConfiguration</h3> <p>A CheckpointConfiguration is a Kubernetes <a href="https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/">custom resource</a> that specifies properties for deploying the Multi-Tier Checkpointing CSI driver. This resource is cluster-scoped.</p> <ol> <li>
+<p>Create the following <code translate="no" dir="ltr">checkpoint.yaml</code> manifest.</p> 
+<pre>apiVersion: checkpointing.gke.io/v1
+kind: CheckpointConfiguration
+metadata:
+  name: MTC_CONFIG_NAME-configuration
+spec:
+    cloudStorageBucketName: GCS_BUCKET
+    nodeSelector:
+        node.kubernetes.io/instance-type: MACHINE_TYPE
+    tolerations:
+    - key: TOLERATION_KEY
+        operator: Exists
+        effect: NoSchedule
+    inMemoryVolumeSize: IN_MEMORY_VOLUME_SIZE
+    gcsFuseMountOptions:
+    - implicit-dirs
+    - metadata-cache:negative-ttl-secs:0
+    - metadata-cache:ttl-secs:-1
+    - metadata-cache:stat-cache-max-size-mb:-1
+    - metadata-cache:type-cache-max-size-mb:-1
+    - file-system:kernel-list-cache-ttl-secs:0
+    - read_ahead_kb=1024
+    - write:enable-streaming-writes:true
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">MTC_CONFIG_NAME</var>: the name of your CheckpointConfiguration. This name is global for the cluster and is not job-specific.</li> <li>
+<var translate="no">GCS_BUCKET</var>: the name of the Cloud Storage bucket where you'll store checkpoint data. Use the bucket that you set up in the <a href="#setup_storage_bucket">Set up a Cloud Storage bucket with permissions</a> step.</li> <li>
+<p><var translate="no">MACHINE_TYPE</var>: the machine type for the corresponding accelerators. The value can be one of the following:</p> <ul> <li>
+<a href="https://docs.cloud.google.com/tpu/docs/v5p">TPU v5p</a>: <code translate="no" dir="ltr">ct5p-hightpu-4t</code>
+</li> <li>
+<a href="https://docs.cloud.google.com/tpu/docs/v5e#v5e-types-for-serving">TPU v5e</a>: <code translate="no" dir="ltr">ct5e-hightpu-4t</code>
+</li> <li>
+<a href="https://docs.cloud.google.com/tpu/docs/v6e#configurations">TPU v6e</a>: <code translate="no" dir="ltr">ct6e-standard-4t</code>
+</li> <li>Ironwood (TPU7x): <code translate="no" dir="ltr">tpu7x-standard-4t</code>
+</li> <li>NVIDIA H100 80GB GPUs (A3 series): <ul> <li>
+<a href="https://docs.cloud.google.com/compute/docs/gpus#a3-high">A3 High</a>: <code translate="no" dir="ltr">a3-highgpu-8g</code>
+</li> <li>
+<a href="https://docs.cloud.google.com/compute/docs/gpus#a3-mega">A3 Mega</a>: <code translate="no" dir="ltr">a3-megagpu-8g</code>
+</li> <li>
+<a href="https://docs.cloud.google.com/compute/docs/gpus#h200-gpus">A3 Ultra</a>: <code translate="no" dir="ltr">a3-ultragpu-8g</code>
+</li> </ul>
+</li> </ul> <p>For more information on running distributed workloads on GPUs with GKE, see <a href="../../gpus-multi">Running multi-instance GPUs</a>. For TPUs, see <a href="../../tpu-multislice#create_node_pool">Create the TPU slice node pool</a>.</p>
+</li> <li>
+<p><var translate="no">TOLERATION_KEY</var>: this field allows the CSI driver to be scheduled on nodes with matching <a href="https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/">taints</a>. For more information about how taints work on different accelerator types, see these pages:</p> <ul> <li><a href="../../../concepts/tpus#how_tpus_work">TPUs</a></li> <li><a href="../../gpus#taint">GPUs</a></li> </ul>
+</li> <li>
+<p><var translate="no">IN_MEMORY_VOLUME_SIZE</var>: the size for the in-memory checkpointing cache. Specify the quantity and unit (for example, 200 Gi).This value should be:</p> <ul> <li>The local checkpoint size for TPUs multiplied by 2.2</li> <li>The local checkpoint size for GPUs with a single peer multiplied by 6.6.</li> </ul>
+</li> </ul>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f checkpoint.yaml
+</pre>
+</li> <li>
+<p>Check that the CSI driver is running:</p> 
+<pre>kubectl get pod -n gke-managed-checkpointing
+</pre> <p>The output should be similar to the following. There will be multiple entries, one per accelerated node.</p> 
+<pre>NAME                                                          READY   STATUS    RESTARTS   AGE
+multitier-driver-e2b033a7-a4e7-496a-87a3-ffd7fcc2e57b-2d4fz   5/5     Running   0          114s
+</pre>
+</li> </ol> <h3 id="uninstall-csi">Uninstall the Multi-Tier Checkpointing CSI driver</h3> <p>If you want to undeploy the Multi-Tier Checkpointing CSI driver, delete the <code translate="no" dir="ltr">CheckpointConfiguration</code> resource. The Multi-Tier Checkpointing controller removes the CSI driver from the nodes. This removes the RAM disks and frees up memory for other workloads. For example:</p> 
+<pre>kubectl delete -f checkpoint.yaml
+</pre> <h2 id="retain-backups">Manage data retention and garbage collection for Cloud Storage backups</h2> <p>You're responsible for implementing retention policies for the Cloud Storage backups of checkpoints. Multi-Tier Checkpointing only writes checkpoint backups to Cloud Storage and never modifies or deletes them.</p> <p>Many open source tools can handle retention and garbage collection, including the following:</p> <ul> <li><a href="https://github.com/charles-001/backup-warden"><code translate="no" dir="ltr">backup-warden</code></a></li> <li><a href="https://linux.die.net/man/8/logrotate"><code translate="no" dir="ltr">logrotate</code></a></li> </ul> <p>The following example uses <code translate="no" dir="ltr">backup-warden</code> where the <code translate="no" dir="ltr">backup</code> directory is mounted to a backup location that uses Cloud Storage FUSE:</p> 
+<pre># Add --delete option to actually delete the backups, as is it only shows what would be deleted (dry-run)
+backup-warden -p backup \
+    --hourly 24 \
+    --daily 7 \
+    --weekly 5 \
+    --monthly always \
+    --yearly always \
+    --prefer-recent
+</pre> <h3 id="update-jobset">Update the workload JobSet manifest</h3> <p>Update the JobSet manifest for your job to include the large-scale checkpoint volume. The details depend on your workload.</p> <p>For example, to extend the sample JobSet from <a href="../../tpu-multislice#run_workload">Deploy TPU Multislices in GKE</a>, do the following steps:</p> <ol> <li>
+<p>Add the following lines to the <code translate="no" dir="ltr">jax-tpu</code> container.</p> 
+<pre>volumeMounts:
+- name: checkpoint
+  mountPath: CHECKPOINT_DIR
+</pre> <p>Replace <var translate="no">CHECKPOINT_DIR</var> with the path to your checkpoint directory. This is the location where the <code translate="no" dir="ltr">replicator.yaml</code> is generated and Multi-Tier Checkpointing performs the checkpoint save operation. For more information, see <a href="#integrate">Integrate Multi-Tier Checkpointing in your application</a>.</p>
+</li> <li>
+<p>Add the following lines to the <code translate="no" dir="ltr">spec.template.spec</code> field of the Job specification.</p> 
+<pre>volumes:
+- name: checkpoint
+  csi:
+    driver: multitier-checkpoint.csi.storage.gke.io
+</pre>
+</li> </ol> <h2 id="integrate">Integrate Multi-Tier Checkpointing in your application</h2> <p>To share information about checkpoint locations and replication readiness, modify your application to use the following protocol to communicate with Multi-Tier Checkpointing.</p> <p>The following frameworks and libraries already implement this integration:</p> <ol> <li>
+<strong><a href="https://github.com/AI-Hypercomputer/maxtext">MaxText</a> (using <a href="https://github.com/google/orbax">Orbax</a>)</strong>: MaxText has built-in support for Multi-Tier Checkpointing (MTC). For more information, see the <a href="https://maxtext.readthedocs.io/en/latest/guides/checkpointing_solutions/multi_tier_checkpointing.html">MaxText MTC documentation</a>.</li> <li>
+<strong><a href="https://github.com/google/orbax">Any model using Orbax</a></strong>: The integration consists of two main components: the <strong><a href="https://github.com/google/orbax/blob/28854db47c6d004061e2a8235c48e93f51a0bbd9/checkpoint/orbax/checkpoint/experimental/emergency/multi_tier_checkpointing/initialization.py#L73">MTC initialization module</a></strong> for initial setup (for an example, see <a href="https://github.com/AI-Hypercomputer/maxtext/blob/a6a5f32f63045ae1b09a65e7feee1d35dd4fbc36/src/MaxText/max_utils.py#L188">MaxText</a>), and the <strong><a href="https://github.com/google/orbax/blob/28854db47c6d004061e2a8235c48e93f51a0bbd9/checkpoint/orbax/checkpoint/experimental/emergency/replicator_checkpoint_manager.py#L114">Replicator Checkpoint Manager</a></strong> for saving and restoring checkpoints from a local RAM disk (for an example, see <a href="https://github.com/AI-Hypercomputer/maxtext/blob/a6a5f32f63045ae1b09a65e7feee1d35dd4fbc36/src/MaxText/train_utils.py#L39">MaxText</a>).</li> <li>
+<strong><a href="https://github.com/AI-Hypercomputer/gpu-recipes/tree/main/training/a3mega/llama3-1-70b/nemo-pretraining-gke-resiliency">PyTorch reference example</a></strong>: This example is available for workloads using NeMo with PyTorch.</li> </ol> <h3 id="startup">Startup</h3> <p>This section describes the initial steps the application needs to interact with Multi-Tier Checkpointing.</p> <p>The <em>Replicator</em> is a core component of Multi-Tier Checkpointing, running on every node as part of the CSI driver. The Replicator manages checkpoint replication across storage tiers, from the local RAM disk to peer nodes and to external storage like Cloud Storage.</p> <p>The <code translate="no" dir="ltr">replicator.yaml</code> file acts as a dynamic control plane between your ML training job (framework code) and the Replicator component. Your ML application programmatically generates this file on the local volume (RAMDisk), which is accessible by both the training job and the Replicator service. This manifest allows the ML framework to provide runtime configuration and lifecycle management instructions to the Replicator, distinct from static infrastructure parameters ( for example, Cloud Storage upload frequency) defined during backend setup.</p> <p>For a concrete example of this interaction, see:</p> <ul> <li>The <a href="https://github.com/AI-Hypercomputer/maxtext">MaxText project</a>, which utilizes this architecture for JAX on Cloud TPU.</li> <li>The <a href="https://github.com/AI-Hypercomputer/gpu-recipes/tree/main/training/a3mega/llama3-1-70b/nemo-pretraining-gke-resiliency">PyTorch reference example</a>, which utilizes this architecture with PyTorch and NVIDIA NeMO on GPUs.</li> </ul> <p>Your application should do the following steps during startup:</p> <ol> <li>
+<p>Wait until the <code translate="no" dir="ltr">replicator.yaml</code> file is absent, which indicates that the Replicator is ready to be configured by your application. The <code translate="no" dir="ltr">replicator.yaml</code> file is generated in the <var translate="no">CHECKPOINT_DIR</var> location you configured in the <a href="#update-jobset">Update the workload JobSet manifest</a> section.</p> <p>When the model training job is first created, the <code translate="no" dir="ltr">replicator.yaml</code> file won't exist and your application can proceed immediately. However, if the job was restarted (for example, due to a failure or manual intervention), the system might still be processing the previous job instance, and the <code translate="no" dir="ltr">replicator.yaml</code> from that instance might still be present on the local volume.</p>
+</li> <li>
+<p>You application or ML job creates the <code translate="no" dir="ltr">replicator.yaml</code> file with the configuration similar to the following.</p> <div> <section><p class="_code-tab"><strong>Orbax</strong></p>
+
+<pre data-language="">job-name: orbax
+framework: orbax
+assume-data-parallelism: 3
+node-rank: 0
+nodes: 32
+peer-ranks: [1, 16] or peers-per-node: 2
+backup-interval-minutes: 30
+</pre></section> <section><p class="_code-tab"><strong>PyTorch</strong></p>
+
+<pre data-language="">job-name: nemo
+framework: pytorch.distributed
+node-rank: 0
+nodes: 32
+peer-ranks: [1, 16] or peers-per-node: 2
+backup-interval-minutes: 30
+</pre></section> </div> <p>This example configuration has the following fields:</p> <ul> <li>
+<code translate="no" dir="ltr">name</code>: the name of the training job.</li> <li>
+<code translate="no" dir="ltr">framework</code>: the ML framework being used by the training job.</li> <li>
+<code translate="no" dir="ltr">node-rank</code>: the unique identifier of the current node within the distributed training job. This represents the node rank of the node creating this file. Each node participating in the run will have its own rank.</li> <li>
+<code translate="no" dir="ltr">nodes</code>: the total number of nodes participating in the distributed training job. This value comes from the Pod's metadata. The ML training job can also view this value.</li> <li>
+<code translate="no" dir="ltr">peer-ranks</code> or <code translate="no" dir="ltr">peers-per-node</code>: two alternative ways to specify the replication topology. Only one of these two parameters should be present. <ul> <li>
+<code translate="no" dir="ltr">peer-ranks</code>: explicit ranks of peer nodes to which the current node's checkpoint data should be replicated. This gives fine-grained control over which specific nodes serve as replication partners.</li> <li>
+<code translate="no" dir="ltr">peers-per-node</code>: the number of peer nodes per node that the Replicator should automatically select for replication.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">backup-interval-minutes</code>: the frequency, in minutes, at which checkpoints are backed up to Cloud Storage. We recommend that you set this value to 30 minutes or more.</li> </ul>
+</li> <li><p>Wait until the new <code translate="no" dir="ltr">replicator.yaml</code> file is deleted by the system. This signals that the replicator has re-started and performed cleanup. This step lets you avoid any stale or temporary files on the local volume when your application performs the steps in the next section.</p></li> </ol> <h3 id="lkg">Restore from the last known good (LKG) checkpoint</h3> <ol> <li>
+<p>After the replicator is initialized, Multi-Tier Checkpointing creates one symbolic link per TPU or GPU worker. These symbolic links are created in the same mounted local volume as <code translate="no" dir="ltr">replicator.yaml</code> file, where the job saves checkpoints.</p> <p>The symbolic links have the form <code translate="no" dir="ltr">&lt;job-name&gt;-s{step}-n&lt;node-rank&gt;-w&lt;worker-index&gt;.restore</code>.</p>
+</li> <li><p>Restore each worker from the corresponding <code translate="no" dir="ltr">.restore</code> file. For an example, see the Orbax replicated checkpoint manager example in the next section.</p></li> </ol> <p>By default, the LKG checkpoint is the most recent complete checkpoint that Multi-Tier Checkpointing can find. In-cluster checkpoints (on the local RAM disk and on peer nodes) are preferred, and Cloud Storage backups are used only when no complete in-cluster checkpoint exists. To override this selection, see <a href="#restore-backup">Restore from a specific backup</a>.</p> <h3 id="restore-backup">Restore from a specific backup</h3> <p>You can restore a job from a specific Cloud Storage backup instead of the LKG checkpoint—for example, to roll back training to an earlier state. Before the job starts, do the following steps:</p> <ol> <li>
+<p>Find the backup to restore from. Multi-Tier Checkpointing writes backups to the bucket that you configured in the <a href="#checkpointconfiguration">CheckpointConfiguration</a>, in a directory named after the job. Each backup is a subdirectory named after the UTC time when the backup was taken, in the format <code translate="no" dir="ltr">YYYY-MM-DD_HH-MM</code>:</p> 
+<pre>gcloud storage ls gs://GCS_PATH/JOB_NAME/
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">GCS_PATH</var>: the Cloud Storage path where Multi-Tier Checkpointing writes backups. This value is the bucket that you specified in the <code translate="no" dir="ltr">cloudStorageBucketName</code> field of the CheckpointConfiguration, including any directory within the bucket.</li> <li>
+<var translate="no">JOB_NAME</var>: the name of the training job, as specified in the <code translate="no" dir="ltr">job-name</code> field of the <code translate="no" dir="ltr">replicator.yaml</code> file.</li> </ul>
+</li> <li>
+<p>In the job directory in the bucket, create a file named <code translate="no" dir="ltr">restore.version</code>. The file must contain only the name of the backup directory, for example:</p> 
+<pre>echo "BACKUP_NAME" | gcloud storage cp - gs://GCS_PATH/JOB_NAME/restore.version
+</pre> <p>Replace <var translate="no">BACKUP_NAME</var> with the name of the backup directory— for example, <code translate="no" dir="ltr">2025-06-30_14-30</code>.</p>
+</li> <li><p>Start the job.</p></li> </ol> <p>When the <code translate="no" dir="ltr">restore.version</code> file is present, Multi-Tier Checkpointing behaves as follows:</p> <ul> <li>All nodes restore from the specified backup. In-cluster checkpoints are ignored, even if they are more recent than the backup.</li> <li>The <code translate="no" dir="ltr">restore.version</code> file is deleted automatically after the job saves its first checkpoint after the restore. The override applies only once: if the job restarts later, it restores from the LKG checkpoint as usual.</li> <li>If the specified backup doesn't exist or is incomplete, the job starts without a checkpoint. Multi-Tier Checkpointing doesn't fall back to in-cluster checkpoints or to other backups.</li> </ul> <h3 id="save">Save the checkpoint</h3> <p>Your application performs these steps multiple times while the training job progresses. The save operations happen in the <var translate="no">CHECKPOINT_DIR</var> location you configured in the <a href="#update-jobset">Update the workload JobSet manifest</a>.</p> <div> <section><p class="_code-tab"><strong>Orbax</strong></p>
+<p><a href="https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html">Create Orbax checkpoints</a>. The directory is named with the step number. The replicator detects the newly created checkpoint diretcory, performs replication or backup as needed, and cleans up automatically.</p> <p>For more information about how to use the Orbax replicator checkpoint manager, see the <a href="https://github.com/AI-Hypercomputer/maxtext/blob/8706c206f30bb77d62fc97d4c991e57cc74842cc/MaxText/checkpointing.py#L116-L135">MaxText <code translate="no" dir="ltr">checkpointing</code> file</a>. For an example of replicator service interaction, see the <a href="https://github.com/AI-Hypercomputer/maxtext/blob/0fb6b666b77199fe86bc5fc4829d443d3bb2fc22/MaxText/max_utils.py#L326-L365">MaxText <code translate="no" dir="ltr">max_utils</code> file</a>.</p></section> <section><p class="_code-tab"><strong>PyTorch</strong></p>
+<p>Use <code translate="no" dir="ltr">InClusterLocalCheckpointIO</code> as a custom <code translate="no" dir="ltr">pytorch_lightning.CheckpointIO</code> to enable correct distributed checkpointing with local storage. The following example command enables multi-tier checkpointing using a reference implementation built on the NVIDIA NeMo framework:</p> 
+<pre data-language="">torchrun train.py &lt;other_train_flags&gt; \
+    --local-ckpt-dir=CHECKPOINT_DIR \
+    --local-ckpt-interval=20 \
+    --job-name=JOB_NAME \
+    --enable-high-scale-ckpt
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CHECKPOINT_DIR</var></code>: the path to your checkpoint directory.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">JOB_NAME</var></code>: the name of your training job workload.</li> </ul></section> </div> <h2 id="cluster_upgrades">Cluster upgrades</h2> <p>For cluster upgrades, you can delete and re-create your <code translate="no" dir="ltr">CheckpointConfiguration</code> object either before or after the upgrade. This action is required because the node checkpointing driver daemonset, deployed dynamically by this object, won't upgrade automatically.</p> <p>If you specifically want to keep the daemonset specification the same, you don't need to do anything.</p> <h2 id="troubleshoot">Troubleshoot</h2> <p>This section provides troubleshooting guidance to resolve issues with Multi-Tier Checkpointing. For general storage troubleshooting, see <a href="../../../troubleshooting/storage">Troubleshooting Cloud Storage in GKE</a>.</p> <h3 id="not-enabled">Multi-Tier Checkpointing not enabled</h3> <p>The following error indicates that Multi-Tier Checkpointing is not enabled on your cluster:</p> 
+<pre>error: unable to recognize "checkpoint.yaml": no matches for kind "CheckpointConfiguration" in version "checkpointing.gke.io/v1"
+</pre> <p>You might encounter this error after running <code translate="no" dir="ltr">kubectl apply -f checkpoint.yaml</code> in the <a href="#checkpointconfiguration">Create a CheckpointConfiguration</a> step.</p> <p>To resolve this issue, check if you have enabled Multi-Tier Checkpointing on your cluster with the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --project PROJECT_ID
+    --location CLUSTER_LOCATION
+</pre> <p>If Multi-Tier Checkpointing enabled, the output should be similar to the following:</p> 
+<pre>addonsConfig:
+  gcePersistentDiskCsiDriverConfig:
+    enabled: true
+  gcsFuseCsiDriverConfig:
+    enabled: true
+  highScaleCheckpointingConfig:
+    enabled: true
+  kubernetesDashboard:
+    disabled: true
+  networkPolicyConfig:
+    disabled: true
+</pre> <p>If Multi-Tier Checkpointing is not enabled, <a href="multi-tier-checkpointing#existing-cluster">update your cluster to enable Multi-Tier Checkpointing</a>.</p> <h3 id="no-mount">Multi-Tier Checkpointing CSI driver unable to mount volumes</h3> <p>You might encounter this issue if the CSI driver is unable to mount the Cloud Storage volume. There might be multiple lines similar to this.</p> 
+<pre>kubectl get pod -n gke-managed-checkpointing
+NAME                                                          READY   STATUS     RESTARTS   AGE
+multitier-driver-14694e4d-774f-4104-8bba-f0bd82fd7557-5vxr9   0/5     Init:0/1   0          6m32s
+</pre> <p>To resolve this issue, check the CSI driver Pod events, as shown in the following example:</p> 
+<pre>kubectl describe pod multitier-driver-14694e4d-774f-4104-8bba-f0bd82fd7557-5vxr9 -n gke-managed-checkpointing
+
+Events:
+  Type     Reason       Age                 From               Message
+  ----     ------       ----                ----               -------
+  Normal   Scheduled    17m                 default-scheduler  Successfully assigned gke-managed-checkpointing/multitier-driver-14694e4d-774f-4104-8bba-f0bd82fd7557-5vxr9 to gke-my-cluster-default-pool-353c773f-6d8q
+  Warning  FailedMount  82s (x16 over 17m)  kubelet            MountVolume.SetUp failed for volume "gcs" : rpc error: code = PermissionDenied desc = failed to get GCS bucket "checkpointing-test-bucket": googleapi: Error 403: Caller does not have storage.objects.list access to the Google Cloud Storage bucket. Permission 'storage.objects.list' denied on resource (or it may not exist)., forbidden
+</pre> <p>If the issue occurs because of Cloud Storage bucket <code translate="no" dir="ltr">PermissionDenied</code> error, as shown in the example, you can resolve the problem by <a href="#setup_storage_bucket">correctly setting up permissions</a>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="../../tpu-multislice">Learn more about deploying TPU Multislice on Google Kubernetes Engine</a>.</li> <li>
+<a href="../../cloud-storage-fuse-csi-driver-perf">Learn how to optimize the Cloud Storage FUSE CSI Driver for Google Kubernetes Engine for performance</a>.</li> <li>
+<a href="https://orbax.readthedocs.io/en/latest/api_reference/checkpoint.options.html">Explore Orbax checkpointing options</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing</a>
+  </p>
+</div>

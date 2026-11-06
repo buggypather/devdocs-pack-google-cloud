@@ -1,0 +1,150 @@
+<h1>Configure autoscaling for LLM workloads on GPUs with Google Kubernetes Engine (GKE)</h1>  <p>You can configure autoscaling for large language model (LLM) workloads running on GPUs within Google Kubernetes Engine (GKE). Autoscaling automatically adjusts resources to manage fluctuating demand, optimize performance, and reduce operational costs. This process involves deploying the Gemma LLM and using the GKE <a href="../../../concepts/horizontalpodautoscaler">Horizontal Pod Autoscaler</a> (HPA) to automatically scale pods. The deployment also integrates the <a href="https://huggingface.co/docs/text-generation-inference/en/index">Hugging Face Text Generation Interface</a> (TGI) serving framework for efficient inference.</p> <p>To learn more about selecting metrics for autoscaling, see <a href="../../../best-practices/machine-learning/inference/autoscaling">Best practices for autoscaling LLM workloads with GPUs on GKE</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Familiarize yourself with the workflow in <a href="../../../tutorials/serve-gemma-gpu-tgi#deploy-tgi">Serve Gemma open models using GPUs on GKE with Hugging Face TGI</a>.</li> </ul> <h2 id="server-metrics">Autoscale using server metrics</h2> <p>You can use the workload-specific performance metrics that are emitted by the TGI inference server to direct autoscaling for your Pods. To learn more about these metrics, see <a href="../../../best-practices/machine-learning/inference/autoscaling#server-metrics">Server metrics</a>.</p> <p>To set up custom-metric autoscaling with server metrics, follow these steps:</p> <ol> <li>
+<p><strong>Export the metrics from the TGI server to Cloud Monitoring</strong>. You use <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed">Google Cloud Managed Service for Prometheus</a>, which simplifies deploying and configuring your Prometheus collector. Google Cloud Managed Service for Prometheus is enabled by default in your GKE cluster; you can also <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#enable-mgdcoll-gke">enable it manually</a>.</p> <p>The following example manifest shows how to set up your <a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#podmonitoring">PodMonitoring</a> resource definition to direct Google Cloud Managed Service for Prometheus to scrape metrics from your Pods at recurring intervals of 15 seconds:</p> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: gemma-pod-monitoring
+spec:
+  selector:
+    matchLabels:
+      app: gemma-server
+  endpoints:
+  - port: 8000
+    interval: 15s
+</pre>
+</li> <li>
+<p><strong>Install the Custom Metrics Stackdriver Adapter.</strong> This adapter makes the custom metric that you exported to Monitoring visible to the HPA controller. For more details, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/hpa">Horizontal pod autoscaling</a> in the Google Cloud Managed Service for Prometheus documentation.</p> <p>The following example command shows how to install the adapter:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre>
+</li> <li>
+<p><strong>Set up the custom metric-based HPA resource.</strong> Deploy an HPA resource that is based on your preferred custom metric. For more details, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/hpa">Horizontal pod autoscaling</a> in the Google Cloud Managed Service for Prometheus documentation.</p> <p>Select one of these tabs to see examples of how to configure the <a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.30/#horizontalpodautoscaler-v2-autoscaling">HorizontalPodAutoscaler</a> resource in your manifest:</p> <div> <section><p class="_code-tab"><strong>Queue size</strong></p>
+<p>This example uses the <code translate="no" dir="ltr">tgi_queue_size</code> TGI server metrics, which represents the number of requests in the queue.</p> <p>To determine the right queue size threshold for HPA, see <a href="../../../best-practices/machine-learning/inference/autoscaling#queue-threshold">Best practices for autoscaling LLM inference workloads with GPUs</a>.</p> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gemma-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tgi-gemma-deployment
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: prometheus.googleapis.com|tgi_queue_size|gauge
+      target:
+        type: AverageValue
+        averageValue:  $HPA_AVERAGEVALUE_TARGET
+</pre></section> <section><p class="_code-tab"><strong>Batch size</strong></p>
+<p>This example uses the <code translate="no" dir="ltr">tgi_batch_size</code> TGI server metric, which represents the number of requests in the current batch.</p> <p>To determine the right batch size threshold for HPA, see <a href="../../../best-practices/machine-learning/inference/autoscaling#batch-threshold">Best practices for autoscaling LLM inference workloads with GPUs</a>.</p> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gemma-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tgi-gemma-deployment
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: prometheus.googleapis.com|tgi_batch_current_size|gauge
+      target:
+        type: AverageValue
+        averageValue:  $HPA_AVERAGEVALUE_TARGET
+</pre></section> </div>
+</li> </ol> <h2 id="gpu-metrics">Autoscale using GPU metrics</h2> <p>You can use the usage and performance metrics emitted by the GPU to direct autoscaling for your Pods. To learn more about these metrics, see <a href="../../../best-practices/machine-learning/inference/autoscaling#gpu-metrics">GPU metrics</a>.</p> <p>To set up custom-metric autoscaling with GPU metrics, follow these steps:</p> <ol> <li>
+<p><strong>Export the GPU metrics to Cloud Monitoring</strong>. If your GKE cluster has <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/managing-metrics#system-metrics">system metrics</a> enabled, it automatically sends the GPU utilization metric to Cloud Monitoring through the <code translate="no" dir="ltr">container/accelerator/duty_cycle</code> system metric, every 60 seconds.</p> <ul> <li>To learn how to enable GKE system metrics, see <a href="../../configure-metrics#enable-system-metrics">Configure metrics collection</a>.</li> <li>To set up managed collection, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#enable-mgdcoll-gke">Get started with managed collection</a> in the Google Cloud Managed Service for Prometheus documentation.</li> <li>For additional techniques to monitor your GPU workload performance in GKE, see the <a href="../../gpus#monitoring">Run GPUs in GKE Standard node pools</a>.</li> </ul> <p>The following example manifest shows how to set up your <a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#podmonitoring">PodMonitoring</a> resource definition to ingest metrics from the <a href="../../dcgm-metrics">NVIDIA DCGM workload</a>:</p> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: nvidia-dcgm-exporter-for-hpa
+  namespace: gke-managed-system
+  labels:
+    app.kubernetes.io/name: nvidia-dcgm-exporter
+    app.kubernetes.io/part-of: google-cloud-managed-prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gke-managed-dcgm-exporter
+  endpoints:
+    - port: metrics
+      interval: 15s
+      metricRelabeling:
+        - action: keep
+          sourceLabels: [__name__]
+        - action: replace
+          sourceLabels: [__name__]
+          targetLabel: __name__
+          regex: DCGM_FI_DEV_GPU_UTIL
+          replacement: dcgm_fi_dev_gpu_util
+</pre> <p>In the code, make sure to change the DCGM metric name to use in HPA to lowercase. This is because there's a <a href="https://github.com/kubernetes/kubernetes/issues/72996">known issue</a> where HPA doesn't work with uppercase external metric names. For clusters not utilizing a managed DCGM exporter, ensure the HPA's <code translate="no" dir="ltr">metadata.namespace</code> and <code translate="no" dir="ltr">spec.selector.matchLabels</code> identically match the DCGM exporter's configuration.This precise alignment is critical for successful custom metric discovery and querying by the HPA.</p>
+</li> <li>
+<p><strong>Install the Custom Metrics Stackdriver Adapter.</strong> This adapter makes the custom metric you exported to Monitoring visible to the HPA controller. For more details, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/hpa">Horizontal pod autoscaling</a> in the Google Cloud Managed Service for Prometheus documentation.</p> <p>The following example command shows how to execute this installation:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre>
+</li> <li>
+<p><strong>Set up the custom metric-based HPA resource.</strong> Deploy a HPA resource based on your preferred custom metric. For more details, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/hpa">Horizontal pod autoscaling</a> in the Google Cloud Managed Service for Prometheus documentation.</p> <ul> <li>Identify an average value target for HPA to trigger autoscaling. You can do this experimentally; for example, generate increasing load on your server and observe where your GPU utilization peaks. Be mindful of the <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details">HPA tolerance</a>, which defaults to a 0.1 no-action range around the target value to dampen oscillation.</li> <li>We recommend using the <a href="https://github.com/GoogleCloudPlatform/ai-on-gke/tree/main/benchmarks/benchmark/tools/locust-load-inference">locust-load-inference tool</a> for testing. You can also create a Cloud Monitoring <a href="https://docs.cloud.google.com/monitoring/charts/dashboards">custom dashboard</a> to visualize the metric behavior.</li> </ul> <p>Select one of these tabs to see an example of how to configure the <a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.30/#horizontalpodautoscaler-v2-autoscaling">HorizontalPodAutoscaler</a> resource in your manifest:</p> <div> <section><p class="_code-tab"><strong>Duty cycle (GKE system)</strong></p>
+
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gemma-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tgi-gemma-deployment
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: kubernetes.io|container|accelerator|duty_cycle
+        selector:
+          matchLabels:
+            resource.labels.container_name: inference-server
+            resource.labels.namespace_name: default
+      target:
+        type: AverageValue
+        averageValue:  $HPA_AVERAGEVALUE_TARGET
+</pre></section> <section><p class="_code-tab"><strong>Duty cycle (DCGM)</strong></p>
+
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gemma-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tgi-gemma-deployment
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: prometheus.googleapis.com|dcgm_fi_dev_gpu_util|unknown
+        selector:
+          matchLabels:
+            metric.labels.exported_container: inference-server
+            metric.labels.exported_namespace: default
+      target:
+        type: AverageValue
+        averageValue:  $HPA_AVERAGEVALUE_TARGET
+</pre></section> </div>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="../../autoscale-using-metrics">autoscale based on custom or external metrics</a>.</li> <li>Learn more about <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/">Horizontal Pod Autoscaling</a> from the open source Kubernetes documentation.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/inference/autoscaling" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/inference/autoscaling</a>
+  </p>
+</div>

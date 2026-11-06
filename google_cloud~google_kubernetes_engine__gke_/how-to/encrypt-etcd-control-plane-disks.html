@@ -1,0 +1,183 @@
+<h1>Encrypt etcd and control plane boot disks</h1>  <aside class="note"><b>Note:</b> This document uses a <a href="https://cloud.google.com/products#product-launch-stages">general availability</a> feature named <i>GKE control plane authority</i> that's only available for eligible Google Cloud customers. To request access to this feature, contact your Google Cloud account team.</aside> <p>This document shows you how to encrypt data that's stored in your Google Kubernetes Engine (GKE) control plane using keys that you manage in Cloud Key Management Service (Cloud KMS). You should already be familiar with concepts like <a href="https://kubernetes.io/docs/concepts/overview/components/#etcd">etcd</a>, the <a href="../concepts/cluster-architecture">GKE cluster architecture</a>, and <a href="https://docs.cloud.google.com/kms/docs/key-management-service">Cloud KMS</a>.</p> <p>This page describes one part of a set of optional control plane features in GKE that lets you perform tasks like verifying your control plane security posture or configuring encryption and credential signing in the control plane using keys that you manage. For details, see <a href="../concepts/about-control-plane-authority">About GKE control plane authority</a>.</p> <p>By default, Google Cloud applies various security measures to the managed control plane. This page describes <em>optional</em> capabilities that give you more visibility or control over the GKE control plane.</p> <h2 id="about-disk-etcd-encryption">About control plane boot disk and etcd encryption</h2> <p>By default, GKE encrypts the boot disk of a control plane node, the disk that stores data in etcd, and the Google Cloud internal operational backup of etcd by using encryption keys that Google Cloud manages. For details about this default encryption, see <a href="https://docs.cloud.google.com/docs/security/encryption/default-encryption" track-type="article" track-name="internalLink" track-metadata-position="body">Default encryption at rest</a>. You can <em>optionally</em> use your own encryption keys that you manage using Cloud KMS to encrypt these resources. To learn more, see <a href="../concepts/about-control-plane-authority#control-plane-disk-encryption">Control plane boot disk and etcd encryption</a>.</p> <p>You create keys in Cloud KMS that GKE uses to encrypt your control plane resources. Consider the following when you create these resources:</p> <ul> <li>You can use one key ring for all of the keys in a cluster, regardless of the purpose of each key. If you have an existing key ring that you used for a different purpose, like <a href="../tutorials/run-your-own-cas-keys">setting up your own certificate authorities</a>, you can use that key ring for this guide.</li> <li>You should create the keys in the same Google Cloud location as your cluster for better latency.</li> <li>For most use cases, you can use the <em>software</em> Cloud KMS key protection level. You can also use hardware keys with Cloud HSM.</li> <li>You must specify the <code translate="no" dir="ltr">--purpose</code> flag with the <code translate="no" dir="ltr">encryption</code> value because these keys are used for symmetric encryption.</li> <li>You shouldn't modify the <a href="https://docs.cloud.google.com/kms/docs/create-key#soft_delete">default duration for key destruction</a>.</li> </ul> <h2 id="usage-with-other-features">Usage with other GKE control plane authority features</h2> <p>GKE control plane authority provides the following features related to self-managed keys that you must enable at the same time when you create a cluster:</p> <ul> <li>Encrypt control plane components (this document)</li> <li><a href="../tutorials/run-your-own-cas-keys">Run your own certificate authorities (CAs) and keys</a></li> </ul> <p>You can only enable these features when you create a new GKE cluster. You can't update existing clusters to use these features. To use both of these features in the same cluster, perform all of the key and CA configuration procedures in <strong>both guides</strong>, and then run the cluster creation command that enables both sets of features as described in the <a href="#create-a-cluster">Create a cluster</a> section.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure that your key project has a Cloud KMS key ring for your cluster. You can use any existing key ring in your cluster location. To create a new key ring, see <a href="https://docs.cloud.google.com/kms/docs/create-key-ring">Create a key ring</a>. </li>
+<li>
+<p> Enable the Cloud Key Management Service API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </ul> <h3 id="identify-projects">Identify projects</h3> <p>We recommend that you use separate Google Cloud projects as follows:</p> <ul> <li>
+<strong>Key project</strong>: contains all keys.</li> <li>
+<strong>Cluster project</strong>: contains your GKE clusters.</li> </ul> <p>You can optionally use the same project for your keys and GKE clusters, but we recommend that you use separate projects so that the teams that manage your keys and cryptographic operations are separate from the teams that manage your clusters.</p> <h3 id="required-roles">Required roles and permissions</h3> <p> To get the permissions that you need to run your own encryption keys, ask your administrator to grant you the following IAM roles: </p> <ul> <li> Create Cloud KMS keys: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.admin">Cloud KMS Admin </a> (<code translate="no" dir="ltr">roles/cloudkms.admin</code>) on your key project </li> <li> Create GKE clusters: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.clusterAdmin">Kubernetes Engine Cluster Admin </a> (<code translate="no" dir="ltr">roles/container.clusterAdmin</code>) on your cluster project </li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <h3 id="requirements">Requirements</h3> <p>Control plane disk encryption with your own keys has the following requirements:</p> <ul> <li>Your cluster must run GKE version 1.31.1-gke.1846000 or later.</li> <li>
+<p>You must create your cluster in one of the following regions:</p> <ul> <li><code translate="no" dir="ltr">asia-east1</code></li> <li><code translate="no" dir="ltr">asia-northeast1</code></li> <li><code translate="no" dir="ltr">asia-southeast1</code></li> <li><code translate="no" dir="ltr">europe-west1</code></li> <li><code translate="no" dir="ltr">europe-west4</code></li> <li><code translate="no" dir="ltr">us-central1</code></li> <li><code translate="no" dir="ltr">us-central2</code></li> <li><code translate="no" dir="ltr">us-east1</code></li> <li><code translate="no" dir="ltr">us-east4</code></li> <li><code translate="no" dir="ltr">us-east5</code></li> <li><code translate="no" dir="ltr">us-south1</code></li> <li><code translate="no" dir="ltr">us-west1</code></li> <li><code translate="no" dir="ltr">us-west3</code></li> <li><code translate="no" dir="ltr">us-west4</code></li> </ul> <aside class="note"><strong>Note:</strong><span> Separately from GKE control plane authority, you can use <a href="confidential-gke-nodes">Confidential mode for Hyperdisk Balanced for your node disks</a>. If you plan to use Confidential mode for Hyperdisk Balanced for your nodes in addition to encrypting your control plane disks with your own keys, you must create the cluster in a <a href="https://docs.cloud.google.com/compute/docs/disks/disk-encryption#conf_hdb_regions">region that supports Confidential mode for Hyperdisk Balanced</a>. If you create the cluster in a different region, you won't be able to use Confidential mode for Hyperdisk Balanced for your nodes.</span></aside>
+</li> </ul> <h3 id="limitations">Limitations</h3> <ul> <li>You can only configure boot disk and etcd encryption keys during cluster creation.</li> <li>
+<p>For regional Standard mode clusters and for Autopilot clusters, the region in which you create a cluster must have capacity for Confidential mode for Hyperdisk Balanced in at least three zones in that region.</p> <p>For zonal Standard mode clusters, the cluster zone must have Hyperdisk Balanced capacity. For help with capacity, contact Cloud Customer Care.</p>
+</li> <li><p>GKE only supports keys from Cloud KMS. You can't use another Kubernetes KMS provider or another encryption provider.</p></li> <li><p>Cloud External Key Manager (Cloud EKM) keys aren't supported.</p></li> <li><p>You can't access or interact with the Google Cloud internal operational backups of etcd, which are only for disaster recovery.</p></li> <li><p>Multi-regional keyrings aren't supported. You must use a regional key ring.</p></li> </ul> <h2 id="create-keys">Create keys</h2> <p>In this section, you create an encryption key for the boot disks and etcd disks in your control plane and a separate encryption key for the Google Cloud internal operational backup of etcd. You can use one key ring to hold all of these keys and any other keys for the cluster.</p> <aside class="warning"><strong>Warning:</strong><span> Don't enable automatic key rotation with Cloud KMS. Rotating your encryption keys requires additional steps to ensure that your control plane resources are re-encrypted with new key versions before the original key versions are destroyed.</span></aside> <ol> <li>
+<p>Create the encryption key for your control plane boot disks and etcd disks:</p> 
+<pre>gcloud kms keys create KCP_DISK_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=LOCATION \
+    --purpose="encryption" \
+    --protection-level=PROTECTION_LEVEL \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KCP_DISK_KEY_NAME</var></code>: the name for the encryption key for your control plane boot disks and etcd disks.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEYRING_NAME</var></code>: the name of the key ring to hold your encryption keys for the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Google Cloud location for the key ring. This must be the same as your cluster location. For a list of regions, filter for "Region" in the <a href="https://docs.cloud.google.com/kms/docs/locations">Cloud KMS locations table</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROTECTION_LEVEL</var></code>: the protection level for the key, like <code translate="no" dir="ltr">software</code> or <code translate="no" dir="ltr">hsm</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: the project ID of your <em>key project</em>.</li> </ul>
+</li> <li>
+<p>Create the etcd internal backup encryption key:</p> 
+<pre>gcloud kms keys create ETCD_BACKUP_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=LOCATION \
+    --purpose="encryption" \
+    --protection-level=PROTECTION_LEVEL \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ETCD_BACKUP_KEY_NAME</var></code> with a name for the etcd internal backup encryption key.</p>
+</li> </ol> <h2 id="grant-roles-service-agent">Grant IAM roles to the GKE service agent</h2> <p>In this section, you grant IAM roles on the keys that you created to the <a href="service-accounts#gke-service-agents">GKE service agent</a> in the cluster project. The GKE service agent requires these roles to use these keys to encrypt the corresponding control plane resources.</p> <ol> <li>
+<p>Find your cluster project number:</p> 
+<pre>gcloud projects describe CLUSTER_PROJECT_ID \
+    --format='value(projectNumber)'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code> with the project ID of your GKE cluster project.</p> <p>The output is similar to the following:</p> 
+<pre>1234567890
+</pre>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.cryptoKeyEncrypterDecrypter">Cloud KMS CryptoKey Encrypter/Decrypter</a> (<code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypter</code>) role on the encryption key for boot disks and etcd disks to the GKE service agent in the cluster project:</p> 
+<pre>gcloud kms keys add-iam-policy-binding KCP_DISK_KEY_NAME \
+    --location=LOCATION \
+    --keyring=KEYRING_NAME \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/cloudkms.cryptoKeyEncrypterDecrypter \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KCP_DISK_KEY_NAME</var></code>: the name of the disk encryption key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Google Cloud location for the key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEYRING_NAME</var></code>: the name of the key ring that contains the encryption key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_NUMBER</var></code>: the numerical project number of the cluster project, which you found in the previous step.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: the project ID of your <em>key project</em>.</li> </ul>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.cryptoKeyEncrypterDecrypterViaDelegation">Cloud KMS CryptoKey Encrypter/Decrypter Via Delegation</a> (<code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypterViaDelegation</code>) role on the encryption key for boot disks and etcd disks to the GKE service agent in the cluster project:</p> 
+<pre>gcloud kms keys add-iam-policy-binding KCP_DISK_KEY_NAME \
+    --location=LOCATION \
+    --keyring=KEYRING_NAME \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/cloudkms.cryptoKeyEncrypterDecrypterViaDelegation \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.cloudKmsKeyUser">Cloud KMS Key User</a> role on the encryption keys for boot disks and etcd disks to the GKE service agent in the cluster project for the key rotation:</p> 
+<pre>gcloud kms keys add-iam-policy-binding KCP_DISK_KEY_NAME \
+    --location=LOCATION \
+    --keyring=KEYRING_NAME \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/container.cloudKmsKeyUser \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.cryptoKeyEncrypter">Cloud KMS CryptoKey Encrypter</a> (<code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypter</code>) role on the etcd internal backup encryption key to the GKE service agent in the cluster project:</p> 
+<pre>gcloud kms keys add-iam-policy-binding ETCD_BACKUP_KEY_NAME \
+    --location=LOCATION \
+    --keyring=KEYRING_NAME \
+    --member="serviceAccount:service-CLUSTER_PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role=roles/cloudkms.cryptoKeyEncrypter \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ETCD_BACKUP_KEY_NAME</var></code> with the name of the etcd operational backup encryption key.</p> <p>Granting the <code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypter</code> role prevents GKE from performing database restorations on your behalf and significantly increases the amount of time to restore functionality when a database problem occurs. To allow GKE to perform restorations for you, grant the <code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypter</code> role instead.</p>
+</li> </ol> <h2 id="use-encryption-keys-cluster">Use encryption keys in a cluster</h2> <p>This section shows you how to identify the paths to your encryption keys.</p> <ol> <li>
+<p>Identify the path to your disk encryption key:</p> 
+<pre>gcloud kms keys describe KCP_DISK_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=LOCATION \
+    --project=KEY_PROJECT_ID \
+    --format="value(name)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KCP_DISK_KEY_NAME</var></code>: the name of the encryption key for control plane boot disks and etcd disks.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEYRING_NAME</var></code>: the name of the key ring that contains the key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Google Cloud location of the key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: the project ID of your <em>key project</em>.</li> </ul> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEYRING_NAME/cryptoKeys/disk-encryption-key
+</pre>
+</li> <li>
+<p>Identify the path to your etcd internal backup encryption key:</p> 
+<pre>gcloud kms keys describe ETCD_BACKUP_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=LOCATION \
+    --project=KEY_PROJECT_ID \
+    --format="value(name)"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ETCD_BACKUP_KEY_NAME</var></code> with the name of the etcd operational backup encryption key.</p> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEYRING_NAME/cryptoKeys/etcd-backup-encryption-key
+</pre>
+</li> </ol> <h3 id="create-a-cluster">Create a cluster</h3> <aside class="warning"><strong>Warning:</strong><span> Revoking or deleting the Cloud KMS keys that you used for the encryption puts your cluster at risk of irrecoverable data loss.</span></aside> <p>In this section, you create a cluster with different options specified depending on which GKE control plane authority features you want to configure. You can only configure these features on a cluster during cluster creation. The following commands create Standard mode clusters. To create Autopilot mode clusters instead, use the same flags with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create-auto"><code translate="no" dir="ltr">gcloud container clusters create-auto</code></a> command.</p> <ul> <li>
+<p>To create a cluster that configures disk encryption and runs your own CAs and service account signing keys, do the following:</p> <ol> <li>Perform all of the key and CA configuration steps in <a href="../tutorials/run-your-own-cas-keys">Run your own certificate authorities and keys</a>.</li> <li>Find the paths to each of the service account keys and CAs by using the instructions in <a href="../tutorials/run-your-own-cas-keys#set-up-new-cluster">Set up CAs and keys on a new cluster</a>.</li> <li>
+<p>Create a cluster:</p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --location=LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --control-plane-disk-encryption-key=PATH_TO_DISK_KEY \
+    --gkeops-etcd-backup-encryption-key=PATH_TO_ETCD_BACKUP_KEY \
+    --service-account-signing-keys=PATH_TO_SIGNING_KEY_VERSION \
+    --service-account-verification-keys=PATH_TO_VERIFICATION_KEY_VERSION \
+    --cluster-ca=PATH_TO_CLUSTER_CA \
+    --etcd-peer-ca=PATH_TO_ETCD_PEER_CA \
+    --etcd-api-ca=PATH_TO_ETCD_API_CA \
+    --aggregation-ca=PATH_TO_AGGREGATION_CA
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your new cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your new cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: the project ID of your <a href="#identify-projects"><em>cluster project</em></a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_DISK_KEY</var></code>: the path to your disk encryption key from the previous steps in this document.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_ETCD_BACKUP_KEY</var></code>: the path to your etcd internal backup encryption key from the previous steps in this document.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_SIGNING_KEY_VERSION</var></code>: the path to the Kubernetes ServiceAccount signing key version in Cloud KMS.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_VERIFICATION_KEY_VERSION</var></code>: the path to the Kubernetes ServiceAccount verification key version in Cloud KMS.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_CLUSTER_CA</var></code>: the path to the cluster CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_ETCD_PEER_CA</var></code>: the path to the etcd peer CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_ETCD_API_CA</var></code>: the path to the etcd API CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_AGGREGATION_CA</var></code>: the path to the aggregation CA pool.</li> </ul>
+</li> </ol>
+</li> <li>
+<p>To create a cluster that only configures disk encryption using the keys that you created in this guide, run the following command:</p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --location=LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --control-plane-disk-encryption-key=PATH_TO_DISK_KEY \
+    --gkeops-etcd-backup-encryption-key=PATH_TO_ETCD_BACKUP_KEY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your new cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your new cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: the project ID of your <a href="#identify-projects"><em>cluster project</em></a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_DISK_KEY</var></code>: the path to your disk encryption key from the previous steps.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_ETCD_BACKUP_KEY</var></code>: the path to your etcd internal backup encryption key from the previous steps.</li> </ul>
+</li> </ul> <p>You can also specify all of these flags when you create a new Standard mode cluster.</p> <h2 id="verify-keys">Verify the encryption key status</h2> <p>This section shows you how to verify the encryption key that was used during cluster creation. You can perform this verification using Cloud Logging or by using the Google Cloud CLI.</p> <h3 id="verify-cloud-logging">Use Logging to verify keys</h3> <p>To verify the keys using Logging, do the following:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page:</p> 
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/query" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/query">Go to Logs Explorer</a> </p>
+</li> <li>
+<p>Get the cluster creation log by specifying the following query:</p> 
+<pre>resource.type="gke_cluster"
+resource.labels.cluster_name="CLUSTER_NAME"
+resource.labels.location="CLUSTER_LOCATION"
+protoPayload.serviceName="container.googleapis.com"
+protoPayload.methodName=~"google.container.v(1|1alpha1|1beta1).ClusterManager.CreateCluster"
+protoPayload.request.cluster.userManagedKeysConfig:*
+</pre>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> </ol> <p>In the output, check that the cluster creation parameters included a key path that corresponds to the key that you set up in Cloud KMS, like in the following example:</p> 
+<pre># lines omitted for clarity
+userManagedKeysConfig: {
+  controlPlaneDiskEncryptionKey: "projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/KCP_DISK_KEY_NAME"
+  gkeopsEtcdBackupEncryptionKey: "projects/KEY_PROJECT_ID/locations/LOCATION/keyRings/KEY_RING_NAME/cryptoKeys/ETCD_BACKUP_KEY_NAME"
+}
+</pre> <h3 id="verify-gcloud">Use the gcloud CLI to verify keys</h3> <p>To use the gcloud CLI to verify the encryption key, do the following:</p> <ol> <li>
+<p>For the disk encryption key, run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --format="value(userManagedKeysConfig.controlPlaneDiskEncryptionKey)"
+</pre>
+</li> <li>
+<p>For the etcd internal backup encryption key, run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --format="value(userManagedKeysConfig.gkeopsEtcdBackupEncryptionKey)"
+</pre>
+</li> </ol> <h2 id="rotation">Rotate etcd and control plane disk encryption keys</h2> <p>The encryption keys that you create don't expire. To improve your security posture, regularly rotate these keys and re-encrypt your resources with new key versions. For more information, see <a href="rotate-etcd-kcp-encryption-keys">Rotate etcd and control plane boot disk encryption keys</a>.</p> <h2 id="whats_next">What's next</h2> <ul> <li><a href="../concepts/about-control-plane-authority">Learn about what else you can view in the control plane</a></li> <li><a href="../tutorials/run-your-own-cas-keys">Run your own certificate authorities and keys in GKE</a></li> <li><a href="verify-control-plane-vm-integrity">Verify control plane VM integrity</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/encrypt-etcd-control-plane-disks" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/encrypt-etcd-control-plane-disks</a>
+  </p>
+</div>

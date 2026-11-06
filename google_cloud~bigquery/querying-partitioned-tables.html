@@ -1,0 +1,152 @@
+<h1 id="query-partitioned-tables">Query partitioned tables</h1> <p>When you query a <a href="partitioned-tables">partitioned table</a> in BigQuery, filtering on the partitioning column lets BigQuery prune partitions, which reduces the bytes scanned and lowers query costs. This document describes how to query time-unit column-partitioned, ingestion-time partitioned, and integer-range partitioned tables, and gives best practices for partition pruning.</p> <p>For general information about running queries, see <a href="running-queries">Run a query</a>.</p> <h2 id="overview">Overview</h2> <p>If a query uses a qualifying filter on the value of the partitioning column, BigQuery can scan the partitions that match the filter and skip the remaining partitions. This process is called <em>partition pruning</em>.</p> <p>Partition pruning is the mechanism BigQuery uses to eliminate unnecessary partitions from the input scan. The pruned partitions are not included when calculating the bytes scanned by the query. In general, partition pruning helps reduce query cost.</p> <p>Pruning behaviors vary for the different types of partitioning, so you could see a difference in bytes processed when querying tables that are partitioned differently but are otherwise identical. To estimate how many bytes a query will process, perform a <a href="running-queries#dry-run">dry run</a>.</p> <h2 id="query_a_time-unit_column-partitioned_table">Query a time-unit column-partitioned table</h2> <p>To prune partitions when you query a <a href="partitioned-tables#date_timestamp_partitioned_tables">time-unit column-partitioned table</a>, include a filter on the partitioning column.</p> <p>In the following example, assume that <code translate="no" dir="ltr">dataset.table</code> is partitioned on the <code translate="no" dir="ltr">transaction_date</code> column. The example query prunes dates before <code translate="no" dir="ltr">2016-01-01</code>.</p> 
+<pre>SELECT * FROM dataset.table
+WHERE transaction_date &gt;= '2016-01-01'</pre> <h2 id="query_an_ingestion-time_partitioned_table">Query an ingestion-time partitioned table</h2> <p><a href="partitioned-tables#ingestion_time">Ingestion-time partitioned tables</a> contain a pseudocolumn named <code translate="no" dir="ltr">_PARTITIONTIME</code>, which is the partitioning column. The value of the column is the UTC ingestion time for each row, truncated to the partition boundary (such as hourly or daily), as a <code translate="no" dir="ltr">TIMESTAMP</code> value.</p> <p>For example, if you append data on April 15, 2021, 08:15:00 UTC, the <code translate="no" dir="ltr">_PARTITIONTIME</code> column for those rows contains the following values:</p> <ul> <li>Hourly partitioned table: <code translate="no" dir="ltr">TIMESTAMP("2021-04-15 08:00:00")</code>
+</li> <li>Daily partitioned table: <code translate="no" dir="ltr">TIMESTAMP("2021-04-15")</code>
+</li> <li>Monthly partitioned table: <code translate="no" dir="ltr">TIMESTAMP("2021-04-01")</code>
+</li> <li>Yearly partitioned table: <code translate="no" dir="ltr">TIMESTAMP("2021-01-01")</code>
+</li> </ul> <p>If the partition granularity is daily, the table also contains a pseudocolumn named <code translate="no" dir="ltr">_PARTITIONDATE</code>. The value is equal to <code translate="no" dir="ltr">_PARTITIONTIME</code> truncated to a <code translate="no" dir="ltr">DATE</code> value.</p> <p>Both of these pseudocolumn names are reserved. You can't create a column with either name in any of your tables.</p> <p>To prune partitions, filter on either of these columns. For example, the following query scans only the partitions between the dates January 1, 2016 and January 2, 2016:</p> 
+<pre>SELECT
+  column
+FROM
+  dataset.table
+WHERE
+  _PARTITIONTIME BETWEEN TIMESTAMP('2016-01-01') AND TIMESTAMP('2016-01-02')</pre> <p>To select the <code translate="no" dir="ltr">_PARTITIONTIME</code> pseudocolumn, you must use an alias. For example, the following query selects <code translate="no" dir="ltr">_PARTITIONTIME</code> by assigning the alias <code translate="no" dir="ltr">pt</code> to the pseudocolumn:</p> 
+<pre>SELECT
+  _PARTITIONTIME AS pt, column
+FROM
+  dataset.table</pre> <p>For daily partitioned tables, you can select the <code translate="no" dir="ltr">_PARTITIONDATE</code> pseudocolumn in the same way:</p> 
+<pre>SELECT
+  _PARTITIONDATE AS pd, column
+FROM
+  dataset.table</pre> <p>The <code translate="no" dir="ltr">_PARTITIONTIME</code> and <code translate="no" dir="ltr">_PARTITIONDATE</code> pseudocolumns are not returned by a <code translate="no" dir="ltr">SELECT *</code> statement. You must select them explicitly:</p> 
+<pre>SELECT
+  _PARTITIONTIME AS pt, *
+FROM
+  dataset.table</pre> <h3 id="handle_time_zones_in_ingestion-time_partitioned_tables">Handle time zones in ingestion-time partitioned tables</h3> <p>The value of <code translate="no" dir="ltr">_PARTITIONTIME</code> is based on the UTC date when the field is populated. If you want to query data based on a time zone other than UTC, choose one of the following options:</p> <ul> <li>Adjust for time zone differences in your SQL queries.</li> <li>Use <a href="managing-partitioned-table-data#write-to-partition">partition decorators</a> to load data into specific ingestion-time partitions, based on a different time zone than UTC.</li> </ul> <h3 id="better_performance_with_pseudocolumns">Better performance with pseudocolumns</h3> <p>To improve query performance, use the <code translate="no" dir="ltr">_PARTITIONTIME</code> pseudocolumn by itself on the left side of a comparison.</p> <p>For example, the following two queries are equivalent. Depending on the table size, the second query might perform better, because it places <code translate="no" dir="ltr">_PARTITIONTIME</code> by itself on the left side of the <code translate="no" dir="ltr">&gt;</code> operator. Both queries process the same amount of data.</p> 
+<pre>-- Might be slower.
+SELECT
+  field1
+FROM
+  dataset.table1
+WHERE
+  TIMESTAMP_ADD(_PARTITIONTIME, INTERVAL 5 DAY) &gt; TIMESTAMP("2016-04-15");
+
+-- Often performs better.
+SELECT
+  field1
+FROM
+  dataset.table1
+WHERE
+  _PARTITIONTIME &gt; TIMESTAMP_SUB(TIMESTAMP('2016-04-15'), INTERVAL 5 DAY);</pre> <p>To limit the partitions that are scanned in a query, use a constant expression in your filter. The following query limits which partitions are pruned based on the first filter condition in the <code translate="no" dir="ltr">WHERE</code> clause. However, the second filter condition doesn't limit the scanned partitions, because it uses table values, which are dynamic.</p> 
+<pre>SELECT
+  column
+FROM
+  dataset.table2
+WHERE
+  -- This filter condition limits the scanned partitions:
+  _PARTITIONTIME BETWEEN TIMESTAMP('2017-01-01') AND TIMESTAMP('2017-03-01')
+  -- This one doesn't, because it uses dynamic table values:
+  AND _PARTITIONTIME = (SELECT MAX(timestamp) from dataset.table1)</pre> <p>To limit the partitions scanned, don't include any other columns in a <code translate="no" dir="ltr">_PARTITIONTIME</code> filter. For example, the following query does not limit the scanned partitions, because <code translate="no" dir="ltr">field1</code> is a column in the table.</p> 
+<pre>-- Scans all partitions of table2. No pruning.
+SELECT
+  field1
+FROM
+  dataset.table2
+WHERE
+  _PARTITIONTIME + field1 = TIMESTAMP('2016-03-28');</pre> <p>If you often query a particular range of times, consider creating a view that filters on the <code translate="no" dir="ltr">_PARTITIONTIME</code> pseudocolumn. For example, the following statement creates a view that includes only the most recent seven days of data from a table named <code translate="no" dir="ltr">dataset.partitioned_table</code>:</p> 
+<pre>-- This view provides pruning.
+CREATE VIEW dataset.past_week AS
+  SELECT *
+  FROM
+    dataset.partitioned_table
+  WHERE _PARTITIONTIME BETWEEN
+    TIMESTAMP_TRUNC(TIMESTAMP_SUB(CURRENT_TIMESTAMP, INTERVAL 7 * 24 HOUR), DAY)
+    AND TIMESTAMP_TRUNC(CURRENT_TIMESTAMP, DAY);</pre> <p>For information about creating views, see <a href="views">Creating views</a>.</p> <h2 id="query_an_integer-range_partitioned_table">Query an integer-range partitioned table</h2> <p>To prune partitions when you query an <a href="partitioned-tables#integer_range">integer-range partitioned table</a>, include a filter on the integer partitioning column.</p> <p>In the following example, assume that <code translate="no" dir="ltr">dataset.table</code> is an integer-range partitioned table with a partitioning specification of <code translate="no" dir="ltr">customer_id:0:100:10</code> The example query scans the three partitions that start with 30, 40, and 50.</p> 
+<pre>SELECT * FROM dataset.table
+WHERE customer_id BETWEEN 30 AND 50
+
++-------------+-------+
+| customer_id | value |
++-------------+-------+
+|          40 |    41 |
+|          45 |    46 |
+|          30 |    31 |
+|          35 |    36 |
+|          50 |    51 |
++-------------+-------+</pre> <p>Partition pruning is not supported for functions over an integer range partitioned column. For example, the following query scans the entire table.</p> 
+<pre>SELECT * FROM dataset.table
+WHERE customer_id + 1 BETWEEN 30 AND 50</pre> <h2 id="query_data_in_the_streaming_buffer">Query data in the write-optimized storage</h2> <p>The <code translate="no" dir="ltr">__UNPARTITIONED__</code> partition temporarily holds data that is streamed to a partitioned table while it is in the <a href="streaming-data-into-bigquery#dataavailability">write-optimized storage</a>. Data that is streamed directly to a specific partition of a partitioned table does not use the <code translate="no" dir="ltr">__UNPARTITIONED__</code> partition. Instead, the data is streamed directly to the partition.</p> <p>Data in the write-optimized storage has <code translate="no" dir="ltr">NULL</code> values in the <code translate="no" dir="ltr">_PARTITIONTIME</code> and <code translate="no" dir="ltr">_PARTITIONDATE</code> columns.</p> <p>To query data in the <code translate="no" dir="ltr">__UNPARTITIONED__</code> partition, use the <code translate="no" dir="ltr">_PARTITIONTIME</code> pseudocolumn with the <code translate="no" dir="ltr">NULL</code> value. For example:</p> 
+<pre>SELECT
+  column
+FROM dataset.table
+WHERE
+  _PARTITIONTIME IS NULL</pre> <p>For more information, see <a href="streaming-data-into-bigquery#streaming_into_partitioned_tables">Streaming into partitioned tables</a>.</p> <h2 id="best_practices_for_partition_pruning">Best practices for partition pruning</h2> <p>This section describes best practices for writing queries that utilize partition pruning to optimize query performance and reduce cost.</p> <h3 id="use_a_constant_filter_expression">Use a constant filter expression</h3> <p>To limit the partitions that are scanned in a query, filter the partitioning column using a constant expression, rather than a dynamic expression.</p> <p>The following query prunes partitions:</p> 
+<pre>SELECT
+  t1.name, t1.quantity
+FROM
+  table1 AS t1
+WHERE
+  t1.ts = CURRENT_TIMESTAMP()</pre> <p>In comparison, the following query doesn't prune partitions, because the predicate, <code translate="no" dir="ltr">WHERE t1.ts = (SELECT timestamp FROM table3 WHERE key = 2)</code>, is not a constant expression. This query compares the partitioning column to a dynamic value, what prevents partition pruning.</p> 
+<pre>SELECT
+  t1.name, t1.quantity
+FROM
+  table1 AS t1
+WHERE
+  t1.ts = (SELECT timestamp FROM table3 WHERE key = 2)</pre> <p>Additionally, a query with the following predicates don't prune partitions because they require a computation based on a second, non-constant table column <code translate="no" dir="ltr">ts2</code> or <code translate="no" dir="ltr">duration</code>:</p> 
+<pre>WHERE ts &gt;= ts2
+
+WHERE ts &lt; CURRENT_TIMESTAMP() - duration</pre> <h3 id="isolate_the_partitioning_column_or_use_supported_functions">Isolate the partitioning column or use supported functions</h3> <p>To prune partitions, filter conditions must be structured so that BigQuery can determine which partitions to scan without reading table data. To achieve this, isolate the partitioning column on one side of a comparison operator, or wrap the column only in a supported built-in function. You can use <a href="running-queries#dry-run">dry run</a> to verify if partition pruning is supported on your particular query.</p> <p>The following built-in functions on the partitioning column support partition pruning, if their additional arguments are constant:</p> <ul> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions#date_add"><code translate="no" dir="ltr">DATE_ADD</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions#date_diff"><code translate="no" dir="ltr">DATE_DIFF</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions#date_sub"><code translate="no" dir="ltr">DATE_SUB</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions#date_trunc"><code translate="no" dir="ltr">DATE_TRUNC</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/date_functions#extract"><code translate="no" dir="ltr">EXTRACT</code></a> with <code translate="no" dir="ltr">YEAR</code> part,</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/datetime_functions#datetime_diff"><code translate="no" dir="ltr">DATETIME_DIFF</code></a>,</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#timestamp_add"><code translate="no" dir="ltr">TIMESTAMP_ADD</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#timestamp_diff"><code translate="no" dir="ltr">TIMESTAMP_DIFF</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#timestamp_sub"><code translate="no" dir="ltr">TIMESTAMP_SUB</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#timestamp_trunc"><code translate="no" dir="ltr">TIMESTAMP_TRUNC</code></a>, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#extract"><code translate="no" dir="ltr">EXTRACT</code></a> with <code translate="no" dir="ltr">DATE</code> or <code translate="no" dir="ltr">YEAR</code> parts,</li> <li>
+<a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/timestamp_functions#format_timestamp"><code translate="no" dir="ltr">FORMAT_TIMESTAMP</code></a> with the following format specifiers: <code translate="no" dir="ltr">%F</code>, <code translate="no" dir="ltr">%Y-%m-%d</code> and <code translate="no" dir="ltr">%Y%m%d</code>.</li> </ul> <p>Other functions and complex mathematical operations will require a full table scan.</p> <h4 id="examples">Examples</h4> <p>The following queries show example predicates that support partition pruning.</p> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE datehour = '2025-03-30 12:00:00';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE datehour &gt;= '2025-03-30'
+  AND datehour &lt; TIMESTAMP_ADD('2025-03-30', INTERVAL 1 DAY);</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE DATE(datehour) = '2025-03-30';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE EXTRACT(DATE FROM datehour) = '2025-03-30';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE CAST(datehour AS DATE) = '2025-03-30';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE datehour &gt;= '2025-01-01' AND datehour &lt; '2025-02-01';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE TIMESTAMP_TRUNC(datehour, MONTH) &gt;= '2025-04-01'
+  AND TIMESTAMP_TRUNC(datehour, MONTH) &lt; '2025-07-01';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE TIMESTAMP_DIFF(datehour, '2025-01-01', DAY) &lt; 1;</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE TIMESTAMP_ADD(datehour, INTERVAL 1 DAY) &lt; '2025-01-03';</pre> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE TIMESTAMP_SUB(datehour, INTERVAL 1 DAY) &lt; '2025-01-01';</pre> <p>The following query skips all partitions because the predicate doesn't match any row.</p> 
+<pre>SELECT COUNT(*) FROM `bigquery-public-data.wikipedia.pageviews_2025`
+WHERE EXTRACT(YEAR FROM datehour) = 1900;</pre> <p>The following query select the first day of each month in the table, and it supports partition pruning. </p>
+
+<pre>SELECT COUNT(*) FROM bigquery-public-data.wikipedia.pageviews_2025
+WHERE DATE(datehour) IN UNNEST(GENERATE_DATE_ARRAY(
+  DATE_TRUNC(CURRENT_DATE(), YEAR),
+  DATE(DATE_TRUNC(CURRENT_DATE(), YEAR) + INTERVAL 1 YEAR - INTERVAL 1 DAY),
+  INTERVAL 1 MONTH
+))</pre> <p>Queries with the following predicates don't prune partitions because they manipulate the partitioning column with unsupported functions:</p> 
+<pre>WHERE FORMAT_DATE('%Y-%m-%d %H', ts) = '2025-03-28 20';
+
+WHERE EXTRACT(MONTH FROM ts) = 3 AND EXTRACT(HOUR FROM ts) = 20</pre> <p>Similarly, a query with the following predicate doesn't prune partitions because it manipulates the partitioning column with an arithmetic operation: </p>
+
+<pre>WHERE ts + INTERVAL 1 DAY &gt; CURRENT_TIMESTAMP()</pre> <p>To enable partition pruning, you must rewrite the expression by isolating the partitioning column <code translate="no" dir="ltr">ts</code> from the unsupported functions or arithmetic operations. For time ranges, use <code translate="no" dir="ltr">&gt;=</code> and <code translate="no" dir="ltr">&lt;</code> to capture the exact range. For arithmetic, move the operation to the other side of the comparison.</p> <p>The following query allows for partition pruning by isolating the partitioning column <code translate="no" dir="ltr">ts</code> for a time range:</p> 
+<pre>WHERE ts &gt;= '2025-03-28 20:00:00' AND ts &lt; '2025-03-28 21:00:00'</pre> <p>The following query allows for partition pruning by isolating the partitioning column from the arithmetic operation:</p> 
+<pre>WHERE ts &gt; CURRENT_TIMESTAMP() - INTERVAL 1 DAY</pre> <h3 id="filter_on_multiple_columns">Filter on multiple columns</h3> <p>A predicate on the partitioning column in a query doesn't restrict what else you can filter on. You can include predicates on other columns in the same <code translate="no" dir="ltr">WHERE</code> clause, and partition pruning will still occur as long as the condition evaluating the partitioning column follows the best practices. Note that <code translate="no" dir="ltr">AND</code> is important in the following example. If <code translate="no" dir="ltr">AND</code> is changed to <code translate="no" dir="ltr">OR</code>, partition pruning won't work, as even if a partition doesn't match the predicate on the partitioning column, it still cannot be pruned. Data in these partitions with <code translate="no" dir="ltr">meter_id = 1234</code> still qualifies for the query.</p> <p>Note that the predicates don't need to be written in a specific order. In the following sample query, assuming partitioning on the <code translate="no" dir="ltr">ts</code> column, partition pruning still occurs regardless of predicate placement.</p> 
+<pre>WHERE meter_id = 1234
+  AND ts &gt;= '2025-03-28 20:00:00' AND ts &lt; '2025-03-28 21:00:00'</pre> <h3 id="require_a_partition_filter_in_queries">Require a partition filter in queries</h3> <p>When you create a partitioned table, you can require the use of predicate filters by enabling the <strong>Require partition filter</strong> option. When this option is applied, attempts to query the partitioned table without specifying a <code translate="no" dir="ltr">WHERE</code> clause produce the following error:</p> <p><code translate="no" dir="ltr">Cannot query over table 'project_id.dataset.table' without a filter that can be
+used for partition elimination</code>.</p> <p>This requirement also applies to queries on views and materialized views that reference the partitioned table.</p> <p>There must be at least one predicate that only references a partitioning column for the filter to be considered eligible for partition elimination. For a table partitioned on column <code translate="no" dir="ltr">partition_id</code> with an additional column <code translate="no" dir="ltr">f</code> in its schema, both of the following <code translate="no" dir="ltr">WHERE</code> clauses satisfy the requirement:</p> 
+<pre>WHERE partition_id = "20221231"
+
+WHERE partition_id = "20221231" AND f = "20221130"</pre> <p>However, the following is not sufficient, and will result in an error:</p> 
+<pre>WHERE partition_id = "20221231" OR f = "20221130"</pre> <p>For ingestion-time partitioned tables, use either the <code translate="no" dir="ltr">_PARTITIONTIME</code> or <code translate="no" dir="ltr">_PARTITIONDATE</code> pseudocolumn.</p> <p>For more information about adding the <strong>Require partition filter</strong> option when you create a partitioned table, see <a href="creating-partitioned-tables">Create partitioned tables</a>. You can also <a href="managing-partitioned-tables#require-filter">update</a> this setting on an existing table.</p> <h2 id="whats_next">What's next</h2> <ul> <li>For an overview of partitioned tables, see <a href="partitioned-tables">Introduction to partitioned tables</a>.</li> <li>To learn more about creating partitioned tables, see <a href="creating-partitioned-tables">Create partitioned tables</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/querying-partitioned-tables" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/querying-partitioned-tables</a>
+  </p>
+</div>

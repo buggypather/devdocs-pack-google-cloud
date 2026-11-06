@@ -1,0 +1,164 @@
+<h1>Monitor VM and sole-tenant node usage for license reporting</h1>  <p>If you bring your own licenses for operating systems such as Windows Server, contractual obligations might require you to monitor and report how many VM instances, physical servers, and physical CPU cores you're using these licenses on.</p> <p>This article describes how you can use the open-source tool License Tracker to monitor the number of VM instances, physical servers, and physical CPU cores you're using, and how you can visualize the results by using Data Studio.</p> <p>The License Tracker tool works by analyzing Compute Engine audit logs to determine <em>placements</em> for each VM instance. A placement describes the time period during which a VM instance is running on a specific physical server. Each time a VM is migrated from one physical server to another marks the end of one placement and starts another.</p> <p>As an example, consider a VM instance that is started and, several months later, stopped again. At some point during its runtime, the VM is automatically migrated from <code translate="no" dir="ltr">Server 1</code> to <code translate="no" dir="ltr">Server 2</code> and later back to <code translate="no" dir="ltr">Server 1</code> again. This history corresponds to 3 placements:</p> <p><img src="https://docs.cloud.google.com/static/compute/images/tracking-vm-and-sole-tenant-usage-architecture-example.svg" alt="Multiple placements"></p> <p>When you run the License Tracker tool the first time, it analyzes Compute Engine usage of the past 90 days and writes its result to BigQuery. On subsequent runs, the tool analyzes the delta between the last run and the current day, and updates the BigQuery dataset accordingly.</p> <p>The License Tracker tool replaces the usage reporting feature provided by <a href="https://github.com/GoogleCloudPlatform/iap-desktop/releases/latest" class="external">IAP Desktop</a>.</p> <aside class="special"><strong>Important:</strong><span> The License Tracker tool is a Google-developed and community-supported open source project that is hosted in the <a href="https://github.com/GoogleCloudPlatform/gce-license-tracker" class="external">GoogleCloudPlatform/gce-license-tracker</a> repo on GitHub. The tool is governed solely by the <a href="https://github.com/GoogleCloudPlatform/gce-license-tracker/blob/master/LICENSE.txt" class="external">Apache License 2.0</a> and not by any other terms or conditions. It is distributed as is, without warranties of any kind.</span></aside> <h2 id="costs">Costs</h2> <p>This guide uses billable components of Google Cloud, including:</p> <ul> <li><a href="https://cloud.google.com/run/pricing">Cloud Run</a></li> <li><a href="https://cloud.google.com/bigquery/pricing">BigQuery</a></li> </ul> <p>Use the <a href="https://cloud.google.com/products/calculator/" track-type="tutorial" track-name="pricingCalculator" track-metadata-position="costs" track-metadata-end-goal="estimateCosts">pricing calculator</a> to generate a cost estimate based on your projected usage.</p> <h2 id="deploy_the_license_tracker_tool">Deploy the License Tracker tool</h2> <p>This section describes how to set up Cloud Run and Cloud Scheduler to automatically run the License Tracker tool once a day.</p> <p>The following diagram illustrates the solution described in this article:</p> <ul> <li>The License Tracker tool is deployed on Cloud Run and configured to analyze the logs of one or more projects.</li> <li>Once a day, Cloud Scheduler triggers the Cloud Run job, causing the License Tracker tool to update a BigQuery dataset.</li> <li>A Data Studio dashboard visualizes the data from BigQuery and makes it available to users.</li> </ul> <p><img src="https://docs.cloud.google.com/static/compute/images/tracking-vm-and-sole-tenant-usage-architecture.svg" alt="Architecture"></p> <h3 id="create_a_project">Create a project</h3> <p>To set up Cloud Run and Cloud Scheduler, create a new project:</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the BigQuery, Cloud Logging, Resource Manager, Cloud Build, Cloud Scheduler, and Cloud Run APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the BigQuery, Cloud Logging, Resource Manager, Cloud Build, Cloud Scheduler, and Cloud Run APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> </cloud-free-trial> </ol> <h3 id="deploy_the_application">Deploy the application</h3> <p>You now deploy the License Tracker tool to Cloud Run:</p> <ol> <li>
+<p>In the Google Cloud console, open <a href="https://docs.cloud.google.com/shell/docs/starting-cloud-shell" track-type="tutorial" track-name="usingCloudShell" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="launchCloudShell">Cloud Shell</a> by clicking the <strong>Activate Cloud Shell</strong> <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Activate Cloud Shell."> button.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="useConsole" class="button button-primary">Go to the Google Cloud console</a> </p>
+</li> <li>
+<p>Set an environment variable to contain your <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project ID</a>:</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of your project.</p>
+</li> <li>
+<p>Set the Cloud Run region to deploy to:</p> 
+<pre>
+gcloud config set run/region REGION
+</pre> <p>Replace <var translate="no">REGION</var> with a region that <a href="https://cloud.google.com/about/locations#products-available-by-location">supports Cloud Run and Cloud Scheduler</a>.</p>
+</li> <li>
+<p>Create a service account for the tool:</p> 
+<pre>
+SERVICE_ACCOUNT=$(gcloud iam service-accounts create license-tracker \
+  --display-name "License Tracker" \
+  --format "value(email)")
+</pre>
+</li> <li>
+<p>Allow the service to create and access a BigQuery dataset and to start Cloud Run jobs in the same project:</p> 
+<pre>
+gcloud projects add-iam-policy-binding $(gcloud config get-value core/project) \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/bigquery.admin"
+
+gcloud projects add-iam-policy-binding $(gcloud config get-value core/project) \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/run.invoker"
+</pre>
+</li> <li>
+<p>Allow Cloud Build <a href="https://docs.cloud.google.com/build/docs/deploying-builds/deploy-cloud-run#continuous-iam">to perform Cloud Run deployments</a> and manage Cloud Scheduler jobs:</p> 
+<pre>
+PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value core/project) --format='value(projectNumber)')
+
+gcloud iam service-accounts add-iam-policy-binding $SERVICE_ACCOUNT \
+  --member "serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
+  --role "roles/iam.serviceAccountUser"
+
+gcloud projects add-iam-policy-binding $(gcloud config get-value core/project) \
+  --member "serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
+  --role "roles/run.developer"
+
+gcloud projects add-iam-policy-binding $(gcloud config get-value core/project) \
+  --member "serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com" \
+  --role "roles/cloudscheduler.admin"
+</pre>
+</li> <li>
+<p>Clone the <a href="https://github.com/GoogleCloudPlatform/gce-license-tracker">GitHub repository</a> and switch to the <code translate="no" dir="ltr">latest</code> branch:</p> 
+<pre>
+git clone https://github.com/GoogleCloudPlatform/gce-license-tracker.git
+cd gce-license-tracker
+git checkout latest
+</pre>
+</li> <li>
+<p>Submit a build to Cloud Build:</p> 
+<pre>
+gcloud builds submit . --substitutions=_REGION=$(gcloud config get-value run/region)
+</pre> <p>The build deploys the License Tracker application to Cloud Run and configures Cloud Scheduler to trigger the job once a day.</p> <p>The build takes about 3 minutes to complete.</p>
+</li> </ol> <h3 id="select_projects_to_analyze">Select projects to analyze</h3> <p>The License Tracker tool analyzes all Google Cloud projects for which all of the following conditions apply:</p> <ul> <li>The Compute Engine API is enabled.</li> <li>The project grants <em>Compute Viewer</em> (<code translate="no" dir="ltr">roles/compute.viewer</code>) and <em>Logs Viewer</em> (<code translate="no" dir="ltr">roles/logging.viewer</code>) access to the tool's service account.</li> </ul> <p>To include a project, folder, or an entire organization in the analysis, do the following:</p> <div> <section><p class="_code-tab"><strong>Project</strong></p>
+
+<pre data-language="">
+SCOPE_ID=RESOURCE_PROJECT_ID
+SCOPE_TYPE=projects
+
+gcloud projects add-iam-policy-binding $SCOPE_ID \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/compute.viewer" \
+  --condition None
+gcloud projects add-iam-policy-binding $SCOPE_ID \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/logging.viewer" \
+  --condition None
+</pre> <p>Replace <var translate="no">RESOURCE_PROJECT_ID</var> with the ID of the Google Cloud project that you want the License Tracker tool to analyze.</p></section> <section><p class="_code-tab"><strong>Folder</strong></p>
+
+<pre data-language="">
+SCOPE_ID=RESOURCE_FOLDER_ID
+SCOPE_TYPE=folders
+
+gcloud resource-manager folders add-iam-policy-binding $SCOPE_ID \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/compute.viewer" \
+  --condition None
+gcloud resource-manager folders add-iam-policy-binding $SCOPE_ID \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/logging.viewer" \
+  --condition None
+</pre> <p>Replace <var translate="no">RESOURCE_FOLDER_ID</var> with the ID of the folder that contains the projects that you want the License Tracker tool to analyze.</p></section> <section><p class="_code-tab"><strong>Organization</strong></p>
+
+<pre data-language="">
+SCOPE_ID=ORGANIZATION_ID
+SCOPE_TYPE=organizations
+
+gcloud organizations add-iam-policy-binding $SCOPE_ID \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/compute.viewer" \
+  --condition None
+gcloud organizations add-iam-policy-binding $SCOPE_ID \
+  --member "serviceAccount:$SERVICE_ACCOUNT" \
+  --role "roles/logging.viewer" \
+  --condition None
+</pre> <p>Replace <var translate="no">ORGANIZATION_ID</var> with the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-organization#retrieving_your_organization_id">ID of your organization</a>.</p></section> </div>
+<aside class="note"><strong>Note:</strong><span> If one of the projects you want to analyze uses VPC service controls, then the License Tracker tool might not be allowed to access resources in this project. To grant the License Tracker tool access, include its project in the same perimeter or configure an appropriate <a href="https://docs.cloud.google.com/vpc-service-controls/docs/ingress-egress-rules">ingress policy</a>.</span></aside> <h3 id="start_the_initial_analysis">Start the initial analysis</h3> <p>You can now start an initial analysis:</p> <ol> <li>
+<p>In the Google Cloud console, go to <strong>Cloud Run <span aria-label="and then">&gt;</span> Jobs</strong>.</p> <p><a href="https://console.cloud.google.com/run/jobs/" target="console" track-type="solution" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Cloud Run jobs</a> </p>
+</li> <li><p>Select the <strong>license-tracker</strong> job to open the job details.</p></li> <li>
+<p>Click <strong>Execute</strong>.</p> <p>Depending on the number and size of projects that you selected, the initial analysis might take several hours to complete.</p> <p>When the job completes, your project contains a BigQuery dataset named <code translate="no" dir="ltr">license_usage</code>.</p>
+</li> <li>
+<p>Optionally, view logs in Cloud Logging:</p> <p><a href="https://console.cloud.google.com/logs/query;query=resource.labels.job_name%3D%22license-tracker%22" target="console" track-type="solution" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Logging</a> </p>
+</li> </ol> <h2 id="create_a_dashboard">Create a dashboard</h2> <p>You now create a Data Studio dashboard by creating a copy of a sample dashboard:</p> <ol> <li>
+<p>Copy the dashboard's data sources:</p> <ol> <li><a href="https://lookerstudio.google.com/datasources/45f5aff8-3fb7-45c2-a232-37e4883ac8f4">Nodes</a></li> <li><a href="https://lookerstudio.google.com/datasources/3ab0e73a-d008-4948-aeaa-015ee0c0e263">Licensed nodes</a></li> <li><a href="https://lookerstudio.google.com/datasources/42fe310d-f9a9-483e-8537-e9b89001a9f3">Nodes histogram</a></li> <li><a href="https://lookerstudio.google.com/datasources/ecf4b4dd-94f4-4038-bd72-38369f2e9509">Instances histogram</a></li> </ol> <p>For each of the data source, do the following:</p> <ol> <li>Click the link above to open the data source.</li> <li>Click <strong>Make a copy of this data source</strong>.</li> <li>Click <strong>Copy data source</strong>.</li> <li>If you're promoted to connect the dashboard to BigQuery, click <strong>Authorize</strong>.</li> <li>Optionally, click the header and rename the datasource.</li> <li>In the list of billing projects, select the project that you used to deploy the License Tracker tool.</li> <li>Click <strong>Reconnect</strong>.</li> <li>In the <strong>Apply connection changes</strong> dialog box, select <strong>Apply</strong>.</li> </ol>
+</li> <li>
+<p>Copy the dashboard:</p> <ol> <li>
+<p>Open the <a href="https://lookerstudio.google.com/reporting/ba0a1f0c-2e4c-4021-86cf-0cba52a5bfb5" class="external">sample dashboard</a>.</p> <p>The dashboard isn't connected to a datasource, so it doesn't show any data.</p>
+</li> <li><p>Click <strong>… &gt; Make a copy</strong></p></li> <li>
+<p>In the <strong>Copy this report</strong> dialog, select your copies of the data sources:</p> <p><img src="https://docs.cloud.google.com/static/compute/images/tracking-vm-and-sole-tenant-usage-copy-dashboard.png" alt="Copy dialog"></p>
+</li> <li>
+<p>Click <strong>Copy report</strong>.</p> <p>The dashboard now shows the data from your BigQuery dataset.</p>
+</li> </ol>
+</li> </ol> <h3 id="grant_other_users_access_to_the_dashboard">Grant other users access to the dashboard</h3> <p>The dashboard's data sources are configured to use <a href="https://support.google.com/looker-studio/answer/6371135#zippy=%2Cin-this-article%2Cviewers-credentials">the viewer's credentials</a> to access BigQuery. To grant another user access to the dashboard, you must:</p> <ol> <li>
+<a href="https://support.google.com/looker-studio/answer/7459147">Share the dashboard</a> and grant the user permission to view the report.</li> <li>Grant the <em>BigQuery Data Viewer</em> (<code translate="no" dir="ltr">roles/bigquery.dataViewer</code>) and <em>BigQuery Job User</em> (<code translate="no" dir="ltr">roles/bigquery.jobUser</code>) roles to the user. You can grant these roles <a href="https://docs.cloud.google.com/bigquery/docs/access-control#dataset_level">at the dataset or project level</a>.</li> </ol> <h3 id="customize_the_dashboard">Customize the dashboard</h3> <p>You can customize the dashboard by <a href="https://support.google.com/looker-studio/answer/9207624">using the Data Studio report editor</a> to modify existing charts or to add additional charts.</p> <p>All charts in the sample dashboard are based on the <code translate="no" dir="ltr">placements</code> view in the BigQuery dataset. This view contains all placements across all projects and uses the following schema:</p> <div>  <input type="text" placeholder="Column"> <table> <thead> <tr> <th>Column</th> <th>Data type</th> <th>Description</th> </tr> </thead> <tbody class="list"> <tr> <td>instance_id</td> <td>INTEGER</td> <td>Instance ID</td> </tr> <tr> <td>instance_name</td> <td>STRING</td> <td>Name of instance</td> </tr> <tr> <td>instance_zone</td> <td>STRING</td> <td>Zone ID of instance</td> </tr> <tr> <td>instance_project_id</td> <td>STRING</td> <td>Project ID of instance</td> </tr> <tr> <td>tenancy</td> <td>STRING</td> <td>
+<code translate="no" dir="ltr">S</code> if running on sole-tenant node, <code translate="no" dir="ltr">F</code> otherwise</td> </tr> <tr> <td>node_type</td> <td>STRING</td> <td>Sole-tenant <a href="sole-tenant-nodes#node_types">node type</a>
+</td> </tr> <tr> <td>node_project_id</td> <td>STRING</td> <td>Project ID of the node; this value might differ from <code translate="no" dir="ltr">instance_project_id</code> in case of shared sole-tenant nodes</td> </tr> <tr> <td>server_id</td> <td>STRING</td> <td>Unique ID of physical server</td> </tr> <tr> <td>operating_system_family</td> <td>STRING</td> <td>
+<code translate="no" dir="ltr">WIN</code>, <code translate="no" dir="ltr">LINUX</code>, or <code translate="no" dir="ltr">null</code> if unrecognized</td> </tr> <tr> <td>license</td> <td>STRING</td> <td>
+<a href="../licenses/about">License string</a> used by image</td> </tr> <tr> <td>license_type</td> <td>STRING</td> <td>
+<code translate="no" dir="ltr">BYOL</code>, <code translate="no" dir="ltr">SPLA</code>, or <code translate="no" dir="ltr">null</code> if unrecognized</td> </tr> <tr> <td>machine_type</td> <td>STRING</td> <td>Machine type of instance</td> </tr> <tr> <td>memory_mb</td> <td>INTEGER</td> <td>Amount of RAM (in MB) allocated to instance</td> </tr> <tr> <td>vcpu_count</td> <td>INTEGER</td> <td>Number of vCPUs allocated to instance</td> </tr> <tr> <td>vcpu_min_allocated</td> <td>INTEGER</td> <td>Minimum number of vCPUs allocated to instance; this value might differ from <code translate="no" dir="ltr">vcpu_count</code> when you're overcommitting CPUs on sole-tenant VMs</td> </tr> <tr> <td>maintenance_policy</td> <td>STRING</td> <td>Maintenance policy for instance</td> </tr> <tr> <td>start_date</td> <td>TIMESTAMP</td> <td>Beginning of placement</td> </tr> <tr> <td>end_date</td> <td>TIMESTAMP</td> <td>End of placement</td> </tr> </tbody> </table>  </div> <p>You can use the <code translate="no" dir="ltr">placement</code> view when customizing existing charts or adding your own charts to the dashboard.</p> <h2 id="upgrade_the_license_tracker_tool">Upgrade the License Tracker tool</h2> <p>This section describes how you can upgrade an existing deployment of the License Tracker tool to use a newer version of the application, or to use a different configuration.</p> <ol> <li>
+<p>In the Google Cloud console, open <a href="https://docs.cloud.google.com/shell/docs/starting-cloud-shell" track-type="tutorial" track-name="usingCloudShell" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="launchCloudShell">Cloud Shell</a> by clicking the <strong>Activate Cloud Shell</strong> <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Activate Cloud Shell."> button.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="useConsole" class="button button-primary">Go to the Google Cloud console</a> </p>
+</li> <li>
+<p>Set an environment variable to contain your <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project ID</a>:</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of the project that contains your existing deployment.</p>
+</li> <li>
+<p>Select the Cloud Run region of your existing deployment:</p> 
+<pre>
+gcloud config set run/region REGION
+</pre>
+</li> <li>
+<p>Clone the <a href="https://github.com/GoogleCloudPlatform/gce-license-tracker">GitHub repository</a> and switch to the <code translate="no" dir="ltr">latest</code> branch:</p> 
+<pre>
+git clone https://github.com/GoogleCloudPlatform/gce-license-tracker.git
+cd gce-license-tracker
+git checkout latest
+</pre>
+</li> <li>
+<p>Submit a build to Cloud Build:</p> 
+<pre>
+gcloud builds submit . --substitutions=_REGION=$(gcloud config get-value run/region)
+</pre> <p>The build updates your existing deployment and takes about 3 minutes to complete.</p>
+</li> </ol><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/nodes/determining-server-usage" class="_attribution-link">https://docs.cloud.google.com/compute/docs/nodes/determining-server-usage</a>
+  </p>
+</div>

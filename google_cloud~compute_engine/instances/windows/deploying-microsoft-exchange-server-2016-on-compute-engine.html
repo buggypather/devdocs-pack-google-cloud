@@ -1,0 +1,582 @@
+<h1>Deploying Microsoft Exchange Server 2016 on Compute Engine</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <p>This tutorial describes how you can deploy Microsoft Exchange Server 2016 on Compute Engine and configure it for <a href="https://docs.microsoft.com/en-us/exchange/high-availability/high-availability" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">high availability and site resilience</a>.</p> <p>The Exchange deployment will span two zones within a single region. In each zone, you will deploy a mailbox server and an edge transport server. The mailbox servers will be part of a database availability group so that mailbox data is replicated across zones.</p> <p>The following diagram illustrates the deployment:</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/exchange-architecture.svg" alt="Deployment of Microsoft Exchange"></p> <p>The article assumes that you have already deployed Active Directory on <a href="https://docs.cloud.google.com/">Google Cloud</a> and that you have basic knowledge of Exchange Server 2016, Active Directory, and Compute Engine.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Set up a project and a VPC network, and prepare them for the deployment of Exchange Server 2016.</li> <li>Deploy Exchange mailbox servers across two zones and create a <a href="https://docs.microsoft.com/en-us/exchange/high-availability/database-availability-groups/database-availability-groups" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">database availability group</a>.</li> <li>Deploy Exchange edge transport servers across two zones.</li> <li>Configure load balancing and firewall rules.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p>This tutorial uses billable components of Google Cloud, including:</p> <ul> <li>
+<a href="https://cloud.google.com/compute/vm-instance-pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Compute Engine</a> </li> <li>
+<a href="https://docs.cloud.google.com/vpc/network-pricing#lb" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Load Balancing</a> </li> </ul> <p>Use the <a href="https://cloud.google.com/products/calculator/" track-type="tutorial" track-name="pricingCalculator" track-metadata-position="body">Pricing Calculator</a> to generate a cost estimate based on your projected usage.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>To complete this guide, you need the following:</p> <ul> <li>
+<p>An existing Active Directory domain with at least one domain controller. The Active Directory domain must use a valid, publicly routable DNS domain name. Local domain names such as <code translate="no" dir="ltr">corp.local</code> or <a href="https://tools.ietf.org/html/rfc2606" class="external">reserved domain names</a> such as <code translate="no" dir="ltr">example.com</code> can't be used.</p> <p>Refer to <a href="https://docs.cloud.google.com/solutions/deploy-fault-tolerant-active-directory-environment">Deploying a fault-tolerant Microsoft Active Directory environment</a> for further details on how you can deploy an Active Directory environment on Compute Engine.</p>
+</li> <li><p>A private DNS forwarding zone for the DNS domain name of Active Directory that forwards DNS queries to your domain controllers.</p></li> <li><p>Administrative access to your Active Directory domain.</p></li> <li><p>A Google Cloud project and VPC with connectivity to your Active Directory domain controllers.</p></li> <li><p>A subnet to use for the Exchange VM instances. The subnet must span at least two zones.</p></li> </ul> <aside class="note"><strong>Note:</strong><span> Deploying Exchange Server requires that you extend the schema of your Active Directory domain. Managed AD currently does not support schema extensions. The tutorial therefore requires you to use self-managed Active Directory domain controllers.</span></aside> <p>Before you begin the deployment, review the <a href="https://docs.microsoft.com/en-us/exchange/high-availability/plan-ha" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">high availability and site resilience requirements for Exchange Server.</a>.</p> <ol> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </ol> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <div id="tutorial-content"> <h2 id="preparing_the_project_and_network">Preparing the project and network</h2> <p>To prepare your Google Cloud project and VPC for the deployment of Exchange Server, do the following:</p> <ol> <li>
+<p>Switch to your project in the Google Cloud console and open Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Open Cloud Shell</a> </p>
+</li> <li>
+<p>Initialize the following variables:</p> 
+<pre>
+VPC_NAME=VPC_NAME
+SUBNET_NAME=SUBNET_NAME
+SUBNET_REGION=SUBNET_REGION
+SUBNET_ZONE_1=$SUBNET_REGION-a
+SUBNET_ZONE_2=$SUBNET_REGION-b
+</pre> <p>Where:</p> <ul> <li>
+<var translate="no">VPC_NAME</var> is the name of your VPC.</li> <li>
+<var translate="no">SUBNET_NAME</var> is the name of your subnet.</li> <li>
+<var translate="no">SUBNET_REGION</var> is the region of your subnet.</li> </ul>
+</li> <li>
+<p>Set your default <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project ID</a>:</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of your Google Cloud project.</p>
+</li> </ol> <h3 id="creating_an_installation_disk">Creating an installation disk</h3> <p>You now create a disk that contains the installation Exchange Server installation media. By creating a disk that you can attach to multiple VM instances, you avoid having to download the installation media to each VM instance individually.</p> <ol> <li>
+<p>Follow the instructions in <a href="../../images/creating-an-image-from-an-iso-file">Creating an image from an ISO file</a>. Use the following URL as download URL:</p> 
+<pre>
+https://download.microsoft.com/download/6/6/F/66F70200-E2E8-4E73-88F9-A1F6E3E04650/ExchangeServer2016-x64-cu11.iso
+</pre>
+</li> <li>
+<p>Use the new image to create a disk in the first zone:</p> 
+<pre>
+gcloud compute disks create exchange-media-1 \
+  --zone=$SUBNET_ZONE_1 \
+  --image-project=$GOOGLE_CLOUD_PROJECT \
+  --image=IMAGE
+</pre> <p>Replace <var translate="no">IMAGE</var> with the name of the image that you created in the previous step.</p>
+</li> <li>
+<p>Create a disk in the second zone:</p> 
+<pre>
+gcloud compute disks create exchange-media-2 \
+  --zone=$SUBNET_ZONE_2 \
+  --image-project=$GOOGLE_CLOUD_PROJECT \
+  --image=IMAGE
+</pre> <p>Replace <var translate="no">IMAGE</var> with the name of the image that you created in the first step.</p>
+</li> </ol> <h3 id="creating_firewall_rules">Creating firewall rules</h3> <p>To allow <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/deployment-ref/network-ports" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">clients to connect to Exchange and to enable communication between Exchange servers</a>, you need to create several firewall rules. To simplify the creation of these firewall rules, you use <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">network tags</a>:</p> <ul> <li>Edge transport servers are annotated with the <code translate="no" dir="ltr">exchange-transport</code> tag.</li> <li>Mailbox servers are annotated with the <code translate="no" dir="ltr">exchange-mailbox</code> tag.</li> <li>The witness server is annotated with the <code translate="no" dir="ltr">exchange-witness</code> tag.</li> <li>All servers are annotated with the <code translate="no" dir="ltr">exchange</code> tag.</li> </ul> <p>Create firewall rules that use these network tags:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create firewall rules for the mailbox servers:</p> 
+<pre>
+gcloud compute firewall-rules create allow-all-between-exchange-servers \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp,udp,icmp \
+  --enable-logging \
+  --source-tags=exchange \
+  --target-tags=exchange \
+  --network=$VPC_NAME \
+  --priority 10000
+
+gcloud compute firewall-rules create allow-smtp-from-transport-to-mailbox \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:25 \
+  --enable-logging \
+  --source-tags=exchange-transport \
+  --target-tags=exchange-mailbox \
+  --network=$VPC_NAME \
+  --priority 10000
+
+gcloud compute firewall-rules create allow-edgesync-from-mailbox-to-transport \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:50636 \
+  --enable-logging \
+  --source-tags=exchange-mailbox \
+  --target-tags=exchange-transport \
+  --network=$VPC_NAME \
+  --priority 10000
+
+gcloud compute firewall-rules create allow-mail-to-mailbox \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:25,tcp:110,tcp:135,tcp:143,tcp:443,tcp:993,tcp:995 \
+  --enable-logging \
+  --target-tags=exchange-mailbox \
+  --network=$VPC_NAME \
+  --priority 10000
+
+gcloud compute firewall-rules create allow-smb-within-dag \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:135,tcp:445,udp:445,tcp:49152-65535 \
+  --enable-logging \
+  --source-tags=exchange-mailbox,exchange-witness \
+  --target-tags=exchange-mailbox,exchange-witness \
+  --network=$VPC_NAME \
+  --priority 10000
+</pre>
+</li> <li>
+<p>Create a firewall rule for the edge transport server:</p> 
+<pre>
+gcloud compute firewall-rules create allow-smtp-to-transport \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:25 \
+  --enable-logging \
+  --target-tags=exchange-transport \
+  --network=$VPC_NAME \
+  --priority 10000
+</pre>
+</li> </ol> <p>Your project and VPC are now ready for the deployment of Exchange Server.</p> <h2 id="deploying_the_mailbox_role">Deploying the mailbox role</h2> <p>You now deploy the <a href="https://docs.microsoft.com/en-us/exchange/architecture/architecture" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">mailbox servers</a> and a management server that you use to administer Exchange.</p> <p>The VM instances will use the <code translate="no" dir="ltr">n1-standard-8</code> <a href="../../machine-types">machine type</a>. For a more detailed analysis of your needs and their system requirements, see the <a href="https://learn.microsoft.com/powershell/exchange/find-exchange-cmdlet-permissions" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Find the permissions required to run any Exchange cmdlet</a>.</p> <h3 id="deploying_the_management_server">Deploying the management server</h3> <p>Follow these steps to create a VM instance that serves as the management server:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a <a href="../../startupscript#providing_a_startup_script_for_windows_instances">specialize script</a> for the VM instance. The script runs during VM initialization and installs the <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/prerequisites" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">client prerequisites for the Exchange 2016 management tools</a>:</p> 
+<pre>
+cat &lt;&lt; "EOF" &gt; specialize-admin.ps1
+
+$ErrorActionPreference = "stop"
+
+# Install required Windows features
+Install-WindowsFeature RSAT-ADDS,RSAT-DNS-Server
+Enable-WindowsOptionalFeature -Online -FeatureName IIS-ManagementScriptingTools, `
+    IIS-ManagementScriptingTools, `
+    IIS-IIS6ManagementCompatibility, `
+    IIS-LegacySnapIn, `
+    IIS-ManagementConsole, `
+    IIS-Metabase, `
+    IIS-WebServerManagementTools, `
+    IIS-WebServerRole
+
+# Install Visual C++ Redistributable Package for Visual Studio 2012
+(New-Object System.Net.WebClient).DownloadFile(
+    'http://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU3/vcredist_x64.exe',
+    "$env:Temp\vcredist_2012_x64.exe")
+&amp; $env:Temp\vcredist_2012_x64.exe /passive /norestart | Out-Default
+
+EOF
+</pre>
+</li> <li>
+<p>Create a VM instance that uses <code translate="no" dir="ltr">specialize-admin.ps1</code> as a specialize script and attach the Exchange installation disk as a secondary disk. You use the secondary disk later to install the Exchange management tools:</p> 
+<pre>
+gcloud compute instances create exchange-admin \
+  --image-family=windows-2019 \
+  --image-project=windows-cloud \
+  --machine-type=n1-standard-2 \
+  --subnet=$SUBNET_NAME \
+  --zone=$SUBNET_ZONE_1 \
+  --tags=exchange \
+  --disk=name=exchange-media-1,auto-delete=no,mode=ro \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-admin.ps1
+</pre>
+</li> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output exchange-admin --zone=$SUBNET_ZONE_1
+</pre> <p>Wait about 5 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li><p><a href="creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance</p></li> <li><p><a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using the username and password created in the previous step.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Command Prompt (Admin)</strong>.</p></li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>In the elevated command prompt, start a PowerShell session:</p> 
+<pre>
+powershell
+</pre>
+</li> <li>
+<p>Join the computer to your Active Directory domain:</p> 
+<pre>
+Add-Computer -Domain DOMAIN
+</pre> <p>Replace <var translate="no">DOMAIN</var> with the DNS name of your Active Directory domain.</p>
+</li> <li>
+<p>Restart the computer:</p> 
+<pre>
+Restart-Computer
+</pre> <p>Wait approximately 1 minute for the restart to complete.</p>
+</li> <li><p><a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using a domain user that is a member of the <strong>Enterprise Admins</strong> group.</p></li> <li><p>Follow the instructions to <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/prepare-ad-and-domains" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">prepare the Active Directory schema and domains for Exchange Server</a>. You can find the Exchange installation media on drive <code translate="no" dir="ltr">D:</code>.</p></li> <li><p>Follow the instructions to <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/post-installation-tasks/install-management-tools" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">install the Exchange management tools</a>.</p></li> </ol> <h3 id="deploying_the_mailbox_servers">Deploying the mailbox servers</h3> <p>You are now ready to deploy the VM instances that serve as mailbox servers:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a specialize script for the VM instance. The script runs during VM initialization and installs the <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/prerequisites" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">prerequisites for installing mailbox servers</a>:</p> 
+<pre>
+cat &lt;&lt; "EOF" &gt; specialize-mailbox.ps1
+
+$ErrorActionPreference = "stop"
+
+# Install required Windows features
+Install-WindowsFeature RSAT-ADDS
+Install-WindowsFeature `
+    NET-Framework-45-Features, `
+    Server-Media-Foundation, `
+    RPC-over-HTTP-proxy, `
+    RSAT-Clustering, `
+    RSAT-Clustering-CmdInterface, `
+    RSAT-Clustering-Mgmt, `
+    RSAT-Clustering-PowerShell, `
+    WAS-Process-Model, `
+    Web-Asp-Net45, `
+    Web-Basic-Auth, `
+    Web-Client-Auth, `
+    Web-Digest-Auth, `
+    Web-Dir-Browsing, `
+    Web-Dyn-Compression, `
+    Web-Http-Errors, `
+    Web-Http-Logging, `
+    Web-Http-Redirect, `
+    Web-Http-Tracing, `
+    Web-ISAPI-Ext, `
+    Web-ISAPI-Filter, `
+    Web-Lgcy-Mgmt-Console, `
+    Web-Metabase, `
+    Web-Mgmt-Console, `
+    Web-Mgmt-Service, `
+    Web-Net-Ext45, `
+    Web-Request-Monitor, `
+    Web-Server, `
+    Web-Stat-Compression, `
+    Web-Static-Content, `
+    Web-Windows-Auth, `
+    Web-WMI, `
+    Windows-Identity-Foundation, `
+    RSAT-ADDS
+
+# Install Visual C++ Redistributable Package for Visual Studio 2012
+(New-Object System.Net.WebClient).DownloadFile(
+    'http://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU3/vcredist_x64.exe',
+    "$env:Temp\vcredist_2012_x64.exe")
+&amp; $env:Temp\vcredist_2012_x64.exe /passive /norestart | Out-Default
+
+# Visual C++ Redistributable Package for Visual Studio 2013
+(New-Object System.Net.WebClient).DownloadFile(
+    'http://download.microsoft.com/download/2/E/6/2E61CFA4-993B-4DD4-91DA-3737CD5CD6E3/vcredist_x64.exe',
+    "$env:Temp\vcredist_2013_x64.exe")
+&amp; $env:Temp\vcredist_2013_x64.exe /passive /norestart | Out-Default
+
+# Install Microsoft Unified Communications Managed API
+(New-Object System.Net.WebClient).DownloadFile(
+    'https://download.microsoft.com/download/2/C/4/2C47A5C1-A1F3-4843-B9FE-84C0032C61EC/UcmaRuntimeSetup.exe',
+    "$env:Temp\UcmaRuntimeSetup.exe")
+&amp; $env:Temp\UcmaRuntimeSetup.exe /passive /norestart | Out-Default
+
+EOF
+</pre>
+</li> <li>
+<p>Create a VM instance in the first zone and pass <code translate="no" dir="ltr">specialize-mailbox.ps1</code> as the specialize script. Attach the Exchange installation disk as secondary disk. You use the secondary disk later to install the Exchange Server mailbox role:</p> 
+<pre>
+gcloud compute instances create mailbox-1-a \
+  --image-family=windows-2016 \
+  --image-project=windows-cloud \
+  --machine-type=n1-standard-8 \
+  --subnet=$SUBNET_NAME \
+  --tags exchange,exchange-mailbox \
+  --zone=$SUBNET_ZONE_1 \
+  --boot-disk-type pd-ssd \
+  --disk=name=exchange-media-1,auto-delete=no,mode=ro \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-mailbox.ps1
+</pre>
+</li> <li>
+<p>Create another VM instance in the second zone:</p> 
+<pre>
+gcloud compute instances create mailbox-1-b \
+  --image-family=windows-2016 \
+  --image-project=windows-cloud \
+  --machine-type=n1-standard-8 \
+  --subnet=$SUBNET_NAME \
+  --tags exchange,exchange-mailbox \
+  --zone=$SUBNET_ZONE_2 \
+  --boot-disk-type pd-ssd \
+  --disk=name=exchange-media-2,auto-delete=no,mode=ro \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-mailbox.ps1
+</pre>
+</li> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output mailbox-1-b --zone=$SUBNET_ZONE_2
+</pre> <p>Wait about 5 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code> and then press Ctrl+C. At this point, the VM instance is ready to use.</p>
+</li> <li>
+<p>For each of the two VM instances, perform the following steps:</p> <ol> <li>
+<a href="creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance</li> <li>
+<a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using the username and password created in the previous step.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Command Prompt (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>In the elevated command prompt, start a PowerShell session:</p> 
+<pre>
+powershell
+</pre>
+</li> <li>
+<p>Join the computer to your Active Directory domain:</p> 
+<pre>
+Add-Computer -Domain DOMAIN
+</pre> <p>Replace <var translate="no">DOMAIN</var> with the DNS name of your Active Directory domain.</p>
+</li> <li>
+<p>Restart the computer:</p> 
+<pre>
+Restart-Computer
+</pre> <p>Wait for approximately 1 minute for the restart to complete.</p>
+</li> <li><p><a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using a domain user that is a member of the <strong>Enterprise Admins</strong> group.</p></li> <li><p>Install the Exchange Server mailbox role by using the <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/deploy-new-installations/install-mailbox-role" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">setup wizard</a> or <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/deploy-new-installations/unattended-installs" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">unattended mode</a>. You can find the Exchange installation media on drive <code translate="no" dir="ltr">D:</code>.</p></li> </ol>
+</li> </ol> <h3 id="deploying_the_witness_server">Deploying the witness Server</h3> <p>To set up a database availability group (DAG) for the two mailbox servers, you need an extra VM instance to serve as witness server. To deploy the witness server, follow these steps:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a witness server in the first zone:</p> 
+<pre>
+gcloud compute instances create witness \
+  --image-family=windows-2016 \
+  --image-project=windows-cloud \
+  --machine-type n1-standard-8 \
+  --subnet $SUBNET_NAME \
+  --tags exchange,exchange-witness \
+  --zone $SUBNET_ZONE_1 \
+  --boot-disk-type pd-ssd \
+  "--metadata=sysprep-specialize-script-ps1=add-windowsfeature FS-FileServer"
+</pre>
+</li> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output witness --zone=$SUBNET_ZONE_1
+</pre> <p>Wait about 3 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li><p><a href="creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance</p></li> <li><p><a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using the username and password created in the previous step.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Command Prompt (Admin)</strong>.</p></li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>In the elevated command prompt, start a PowerShell session:</p> 
+<pre>
+powershell
+</pre>
+</li> <li>
+<p>Join the computer to your Active Directory domain:</p> 
+<pre>
+Add-Computer -Domain DOMAIN
+</pre> <p>Replace <var translate="no">DOMAIN</var> with the DNS name of your Active Directory domain.</p>
+</li> <li>
+<p>Restart the computer:</p> 
+<pre>
+Restart-Computer
+</pre> <p>Wait approximately 1 minute for the restart to complete.</p>
+</li> <li><p><a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using a domain user that is a member of the <strong>Enterprise Admins</strong> group.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Command Prompt (Admin)</strong>.</p></li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>In the elevated command prompt, start a PowerShell session:</p> 
+<pre>
+powershell
+</pre>
+</li> <li>
+<p>Add the <strong>Exchange Trusted Subsystem</strong> universal security group to the local <strong>Administrators</strong> group:</p> 
+<pre>
+Add-LocalGroupMember -Group Administrators -Member "DOMAIN\Exchange Trusted Subsystem"
+</pre> <p>Replace <var translate="no">DOMAIN</var> with the NetBIOS name of your Active Directory domain.</p>
+</li> </ol> <p>The two mailbox servers and the witness server are now fully deployed, but you still need to add them to a database availability group.</p> <h3 id="creating_a_database_availability_group">Creating a database availability group</h3> <p>To create a DAG, follow these steps:</p> <ol> <li>
+<a href="../connecting-to-windows#windows_gui">Connect to the management VM by using Remote Desktop</a> and log in using a domain user that is a member of the <strong>Enterprise Admins</strong> group.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Command Prompt (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>In the elevated command prompt, start a PowerShell session:</p> 
+<pre>
+powershell
+</pre>
+</li> <li>
+<p>Download and install the Chrome browser:</p> 
+<pre>
+Start-BitsTransfer `
+    -Source 'https://dl.google.com/chrome/install/latest/chrome_installer.exe' `
+    -Destination "$env:Temp\chrome_installer.exe"
+&amp; $env:Temp\chrome_installer.exe
+</pre>
+</li> <li>
+<p>To open the Exchange Admin Center (EAC), launch Chrome and navigate to the following URL:</p> 
+<pre>
+https://mailbox-1-a/ecp/?ExchClientVer=15
+</pre>
+</li> <li><p>Sign in using a domain user that is a member of the <strong>Enterprise Admins</strong> group.</p></li> <li><p>In the EAC menu, select <strong>servers &gt; database availability groups</strong>.</p></li> <li><p>Click <strong>+</strong>.</p></li> <li>
+<p>In the dialog, enter the following settings to <a href="https://docs.microsoft.com/en-us/exchange/high-availability/manage-ha/create-dags" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">create a database availability group</a>:</p> <ol> <li><strong>Database availability group name: <code translate="no" dir="ltr">mailbox</code></strong></li> <li><strong>Witness server: <code translate="no" dir="ltr">witness</code></strong></li> </ol>
+</li> <li><p>Click <strong>Save</strong>.</p></li> <li><p>Click the <strong>Managed DAG membership</strong> icon.</p></li> <li><p>In the dialog, click <strong>+</strong> to add a member server.</p></li> <li><p>Select <strong>mailbox-1-a</strong> and <strong>mailbox-1-b</strong> and click <strong>add.</strong></p></li> <li><p>Click <strong>OK.</strong></p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol> <p>Optionally, perform any <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/post-installation-tasks/post-installation-tasks" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Exchange Server post-installation tasks</a>.</p> <h3 id="setting_up_load_balancing">Setting up load balancing</h3> <p>To allow clients to connect to the mailbox servers, you now create an <a href="https://docs.cloud.google.com/load-balancing/docs/internal">internal load balancer</a> resource:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create one <a href="../../instance-groups/creating-groups-of-unmanaged-instances">unmanaged instance group</a> per zone:</p> 
+<pre>
+gcloud compute instance-groups unmanaged create mailbox-a --zone=$SUBNET_ZONE_1
+gcloud compute instance-groups unmanaged create mailbox-b --zone=$SUBNET_ZONE_2
+</pre>
+</li> <li>
+<p>Add the VM instances running the mailbox servers to the instance groups:</p> 
+<pre>
+gcloud compute instance-groups unmanaged add-instances mailbox-a \
+  --zone=$SUBNET_ZONE_1 \
+  --instances=mailbox-1-a
+gcloud compute instance-groups unmanaged add-instances mailbox-b \
+  --zone=$SUBNET_ZONE_2 \
+  --instances=mailbox-1-b
+</pre>
+</li> <li>
+<p>Create a health check that probes the HTTP path <code translate="no" dir="ltr">/owa/healthcheck.htm</code>:</p> 
+<pre>
+gcloud compute health-checks create http http-80\
+  --port=80 \
+  --request-path=/owa/healthcheck.htm
+</pre>
+</li> <li>
+<p>Create a load balancer backend and add the two instance groups:</p> 
+<pre>
+gcloud compute backend-services create mailbox-backend \
+  --load-balancing-scheme=internal \
+  --protocol=tcp \
+  --region=$SUBNET_REGION \
+  --health-checks=http-80 \
+  --session-affinity=CLIENT_IP_PORT_PROTO
+
+gcloud compute backend-services add-backend mailbox-backend \
+  --region=$SUBNET_REGION \
+  --instance-group=mailbox-a \
+  --instance-group-zone=$SUBNET_ZONE_1
+
+gcloud compute backend-services add-backend mailbox-backend \
+  --region=$SUBNET_REGION \
+  --instance-group=mailbox-b \
+  --instance-group-zone=$SUBNET_ZONE_2
+</pre>
+</li> <li>
+<p>Reserve a static IP address for the load balancer:</p> 
+<pre>
+gcloud compute addresses create mailbox-frontend \
+  --region=$SUBNET_REGION \
+  --subnet=$SUBNET_NAME
+</pre>
+</li> <li>
+<p>Create a forwarding rule for the load balancer:</p> 
+<pre>
+gcloud compute forwarding-rules create mailbox-frontend \
+  --region=$SUBNET_REGION \
+  --address=mailbox-frontend  \
+  --load-balancing-scheme=internal \
+  --network=$VPC_NAME \
+  --subnet=$SUBNET_NAME \
+  --ip-protocol=TCP \
+  --ports=ALL \
+  --backend-service=mailbox-backend  \
+  --backend-service-region=$SUBNET_REGION
+</pre>
+</li> <li>
+<p>Look up the IP address of the load balancer:</p> 
+<pre>
+gcloud compute addresses describe mailbox-frontend  \
+  --region=$SUBNET_REGION \
+  --format=value\(address\)
+</pre>
+</li> </ol> <h3 id="testing_the_mailbox_servers">Testing the mailbox servers</h3> <p>To verify that the mailbox servers have been deployed successfully, perform the following steps:</p> <ol> <li>On the management VM, open Chrome and navigate to <code translate="no" dir="ltr">https://&lt;var&gt;IP&lt;/var&gt;/owa/</code>, where <var translate="no">IP</var> is the IP address of the load balancer that you looked up earlier.</li> <li>
+<p>Sign in using a domain user.</p> <p>You should now see the user interface of Outlook Web Access.</p>
+</li> </ol> <h2 id="deploying_the_edge_transport_role">Deploying the edge transport role</h2> <p>You now deploy the <a href="https://docs.microsoft.com/en-us/exchange/architecture/edge-transport-servers/edge-transport-servers" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">edge transport servers</a>. The edge transport servers <a href="https://docs.microsoft.com/en-us/exchange/mail-flow/mail-flow" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">handle all inbound and outbound mail flow</a>.</p> <p>Unlike mailbox servers, edge transport servers are exposed to the internet. In an on-premises deployment, you might therefore deploy edge transport servers into a perimeter network that is isolated from the internal network by firewalls.</p> <p>On Google Cloud, deploying edge transport servers into a separate VPC or subnet is not necessary. Instead, you use firewall rules to micro-segment your network and restrict network communication from and to the edge transport servers.</p> <p>Unlike mailbox servers, the edge transport servers are not members of your Active Directory domain.</p> <p>The VM instances will use the <code translate="no" dir="ltr">n1-standard-8</code> <a href="../../machine-types">machine type</a>. Depending on how you plan to use the Exchange deployment, you might need to use larger machine types. Consult the <a href="https://learn.microsoft.com/powershell/exchange/find-exchange-cmdlet-permissions" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Find the permissions required to run any Exchange cmdlet</a> for a more detailed analysis of your needs and their system requirements.</p> <h3 id="deploying_the_edge_transport_servers">Deploying the edge transport servers</h3> <p>To deploy the edge transport servers, follow these steps:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a <a href="../../startupscript#providing_a_startup_script_for_windows_instances">specialize script</a> for the VM instance. The script runs during VM initialization and installs the <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/prerequisites" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">prerequisites for installing edge transport servers</a>:</p> 
+<pre>
+cat &lt;&lt; "EOF" &gt; specialize-transport.ps1
+
+# Install required Windows features
+Install-WindowsFeature ADLDS
+
+# Install Visual C++ Redistributable Package for Visual Studio 2012
+(New-Object System.Net.WebClient).DownloadFile(
+    'http://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU3/vcredist_x64.exe',
+    "$env:Temp\vcredist_2012_x64.exe")
+&amp; $env:Temp\vcredist_2012_x64.exe /passive /norestart | Out-Default
+
+EOF
+</pre>
+</li> <li>
+<p>Create a VM instance in the first zone and pass <code translate="no" dir="ltr">specialize-transport.ps1</code> as the specialize script. Attach the Exchange installation disk in read-only mode so that you can later install the Exchange Server transport server role:</p> 
+<pre>
+gcloud compute instances create transport-1-a \
+  --image-family=windows-2016 \
+  --image-project=windows-cloud \
+  --machine-type=n1-standard-8 \
+  --subnet=$SUBNET_NAME \
+  --tags exchange,exchange-transport \
+  --zone=$SUBNET_ZONE_1 \
+  --boot-disk-type pd-ssd \
+  --disk=name=exchange-media-1,auto-delete=no,mode=ro \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-transport.ps1
+</pre>
+</li> <li>
+<p>Create another VM instance in the second zone:</p> 
+<pre>
+gcloud compute instances create transport-1-b \
+  --image-family=windows-2016 \
+  --image-project=windows-cloud \
+  --machine-type=n1-standard-8 \
+  --subnet=$SUBNET_NAME \
+  --tags exchange,exchange-transport \
+  --zone=$SUBNET_ZONE_2 \
+  --boot-disk-type pd-ssd \
+  --disk=name=exchange-media-2,auto-delete=no,mode=ro \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-transport.ps1
+</pre>
+</li> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output transport-1-b --zone=$SUBNET_ZONE_2
+</pre> <p>Wait about 5 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li>
+<p>For each of the two edge transport server VM instances, perform the following steps:</p> <ol> <li>
+<a href="creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance.</li> <li>
+<a href="../connecting-to-windows#windows_gui">Connect to the VM by using Remote Desktop</a> and log in using the username and password created in the previous step.</li> <li>
+<a href="https://docs.microsoft.com/en-us/exchange/primary-dns-suffix-is-missing-exchange-2013-help" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Configure the primary DNS suffix</a> to match the DNS domain name used by your Active Directory domain.</li> <li>Install the Exchange Server edge transport server role by using the <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/deploy-new-installations/install-edge-transport-role" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">setup wizard</a> or <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/deploy-new-installations/unattended-installs" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">unattended mode</a>. You can find the Exchange installation media on drive <code translate="no" dir="ltr">D:</code>.</li> </ol>
+</li> </ol> <h3 id="registering_the_edge_transport_servers_in_dns">Registering the edge transport servers in DNS</h3> <p>Before you can set up an edge subscription for the edge transport servers, you have to assign DNS names to the server. Because the edge transport servers are not members of your Active Directory domain, you have to assign these names manually:</p> <ol> <li>On the management server, open a PowerShell console.</li> <li>
+<p>Create a CNAME record for <code translate="no" dir="ltr">transport-1-a</code> and <code translate="no" dir="ltr">transport-1-b</code>:</p> 
+<pre>
+Add-DnsServerResourceRecordCName `
+  -ComputerName (Get-ADDomainController).Hostname `
+  -HostNameAlias "transport-1-a.REGION-a.c.PROJECT-ID.internal." `
+  -Name "transport-1-a" `
+  -ZoneName "DOMAIN"
+
+Add-DnsServerResourceRecordCName `
+  -ComputerName (Get-ADDomainController).Hostname `
+  -HostNameAlias "transport-1-b.REGION-b.c.PROJECT-ID.internal." `
+  -Name "transport-1-b" `
+  -ZoneName "DOMAIN"
+</pre> <p>Where:</p> <ul> <li>
+<var translate="no">PROJECT-ID</var> is the project ID of the project in which your Exchange VM instances are deployed.</li> <li>
+<var translate="no">REGION</var> is the region in which your Exchange VM instances are deployed.</li> <li>
+<var translate="no">DOMAIN</var> is the DNS domain of your Active Directory domain.</li> </ul>
+</li> </ol> <h3 id="setting_up_edge_subscriptions">Setting up edge subscriptions</h3> <p>To populate the Active Directory Lightweight Directory Services (AD LDS) instances on the edge transport server with Active Directory data, you now set up <a href="https://docs.microsoft.com/en-us/Exchange/architecture/edge-transport-servers/edge-subscriptions" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">edge subscriptions</a>.</p> <aside class="note"><strong>Note:</strong><span> Perform the following steps on each of the two edge transport servers.</span></aside> <ol> <li>Open an elevated Exchange management shell by right-clicking <strong>Start</strong> &gt; <strong>Exchange Management Shell</strong> and selecting <strong>More</strong> &gt; <strong>Run as Administrator</strong>.</li> <li>
+<p>Create an edge subscription:</p> 
+<pre>
+New-EdgeSubscription -FileName "$env:UserProfile\Desktop\EdgeSubscriptionInfo-$env:computername.xml"
+</pre> <p>You should now see the subscription file on the desktop.</p>
+</li> <li>
+<p>Export the Exchange AD LDS server certificate:</p> <ol> <li>Open the Microsoft Management Console by clicking <strong>Start</strong> &gt; <strong>Run</strong>, entering <code translate="no" dir="ltr">mmc</code> and selecting <strong>OK</strong>.</li> <li>Select <strong>File</strong> &gt; <strong>Add/remove snap-in.</strong>
+</li> <li>In the list of snap-ins, select <strong>Certificates</strong> and click <strong>Add</strong>.</li> <li>Select <strong>Service account</strong>, then click <strong>Next</strong>.</li> <li>Select <strong>Local computer</strong>, then click <strong>Next</strong>.</li> <li>Select <strong>Microsoft Exchange ADAM</strong>, then click <strong>Finish</strong>.</li> <li>Click <strong>OK</strong>.</li> <li>In the left pane, navigate to <strong>Certificates</strong> &gt; <strong>ADAM_MSExchange\Personal</strong> &gt; <strong>Certificates</strong>
+</li> <li>Right-click the certificate in the right pane and select <strong>All tasks</strong> &gt; <strong>Export</strong>.</li> <li>Click <strong>Next</strong>.</li> <li>Select <strong>No, do not export the private key</strong> and click <strong>Next</strong>.</li> <li>Select <strong>Base-64 encoded X.509 (.cer)</strong> and click <strong>Next</strong>.</li> <li>Select a location to save the certificate to and click <strong>Next</strong>.</li> </ol>
+</li> <li>
+<p>For each of the two mailbox server VM instances, perform the following steps:</p> <ol> <li>Copy the Exchange AD LDS server certificate of both edge transport servers to a temporary location.</li> <li>Copy the subscription files of both edge transport servers to a temporary location.</li> <li>Open an elevated Exchange management shell by right-clicking <strong>Start</strong> &gt; <strong>Exchange Management Shell</strong> and selecting <strong>More</strong> &gt; <strong>Run as Administrator</strong>.</li> <li>
+<p>Import the Exchange AD LDS server certificate of <code translate="no" dir="ltr">transport-1-a</code>:</p> 
+<pre>
+Import-Certificate -FilePath "PATH" -CertStoreLocation cert:\LocalMachine\Root
+</pre> <p>Replace <var translate="no">PATH</var> with the path to the Exchange AD LDS server certificate of <code translate="no" dir="ltr">transport-1-a</code>.</p>
+</li> <li>
+<p>Import the Exchange AD LDS server certificate of <code translate="no" dir="ltr">transport-1-b</code>:</p> 
+<pre>
+Import-Certificate -FilePath "PATH" -CertStoreLocation cert:\LocalMachine\Root
+</pre> <p>Replace <var translate="no">PATH</var> with the path to the Exchange AD LDS server certificate of <code translate="no" dir="ltr">transport-1-b</code>.</p>
+</li> <li><p><a href="https://docs.microsoft.com/en-us/exchange/architecture/edge-transport-servers/edge-subscriptions" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Import the Edge Subscription files</a> of <code translate="no" dir="ltr">transport-1-a</code> and <code translate="no" dir="ltr">transport-1-b</code>.</p></li> <li><p><a href="https://docs.microsoft.com/en-us/exchange/architecture/edge-transport-servers/edge-subscription-procedures" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Manually start the EdgeSync process</a> on a mailbox server and <a href="https://docs.microsoft.com/en-us/exchange/architecture/edge-transport-servers/edge-subscription-procedures" class="external">verify that the synchronization succeeded</a>.</p></li> </ol>
+</li> </ol> <h3 id="setting_up_load_balancing_for_inbound_mail_flow">Setting up load balancing for inbound mail flow</h3> <p>To enable inbound email flow to the edge transport servers, you now create a <a href="https://docs.cloud.google.com/load-balancing/docs/network">network load balancer</a> resource:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a target pool:</p> 
+<pre>
+gcloud compute target-pools create transport-pool --region $SUBNET_REGION
+</pre>
+</li> <li>
+<p>Add the edge transport server VM instances to the target pool:</p> 
+<pre>
+gcloud compute target-pools add-instances transport-pool \
+  --instances-zone $SUBNET_ZONE_1 \
+  --instances transport-1-a
+
+gcloud compute target-pools add-instances transport-pool \
+  --instances-zone $SUBNET_ZONE_2 \
+  --instances transport-1-b
+</pre>
+</li> <li>
+<p>Reserve an external IP address for the load balancer:</p> 
+<pre>
+gcloud compute addresses create transport-frontend --region=$SUBNET_REGION
+</pre>
+</li> <li>
+<p>Create a forwarding rule:</p> 
+<pre>
+gcloud compute forwarding-rules create www-rule \
+  --region $SUBNET_REGION \
+  --ports 25 \
+  --address transport-frontend \
+  --target-pool transport-pool
+</pre>
+</li> <li>
+<p>Look up the IP address of the load balancer:</p> 
+<pre>
+gcloud compute addresses describe transport-frontend  \
+  --region=$SUBNET_REGION \
+  --format=value\(address\)
+</pre> <p>The transport servers are now available to receive email on port 25 of this IP address and will pass incoming email to the mailbox servers.</p>
+</li> <li>
+<p>Verify that email delivery works by following the instructions in <a href="https://docs.microsoft.com/en-us/exchange/mail-flow/test-smtp-with-telnet" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Use Telnet to test SMTP communication on Exchange servers</a>.</p> <aside class="note"><strong>Note:</strong><span> To prevent potential email service abuse and protect IP address reputation, outgoing connections to port 25 are <a href="../../tutorials/sending-mail">blocked for VM instances and Cloud Shell</a>. To test SMTP communication, perform the tests on your workstations instead of on a VM instance or Cloud Shell.</span></aside>
+</li> <li><p>To complete the setup of your edge transport servers, follow the steps in <a href="https://docs.microsoft.com/en-us/exchange/plan-and-deploy/post-installation-tasks/configure-mail-flow-and-client-access" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Configure mail flow and client access on Exchange servers</a>.</p></li> </ol> <h3 id="setting_up_outbound_email_flow_by_using_sendgrid">Setting up outbound email flow by using SendGrid</h3> <p>Because Google Cloud <a href="../../tutorials/sending-mail#using_standard_email_ports">does not allow outbound connections on port 25</a>, you now set up a custom send connector to handle outbound email.</p> <aside class="note"><strong>Note:</strong><span> This section shows how to use SendGrid to deliver internet email. You can use other third-party providers such as Mailgun or Mailjet to deliver internet email.</span></aside> <ol> <li>Use the <a href="https://console.cloud.google.com/marketplace/details/sendgrid-app/sendgrid-email">Google Cloud Marketplace</a> to sign up for the SendGrid email service.</li> <li>On the SendGrid website, create a new API key.</li> <li>Add the public IP addresses of the VM instances <code translate="no" dir="ltr">transport-1-a</code> and <code translate="no" dir="ltr">transport-1-b</code> to the list of allowed IP addresses.</li> </ol> <h4 id="creating_a_send_connector">Creating a send connector</h4> <p>You now create an <a href="https://docs.microsoft.com/en-us/exchange/architecture/edge-transport-servers/edge-subscriptions" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">outbound send connector</a> that uses SendGrid as smart host:</p> <ol> <li>Return to the Exchange Admin Center (EAC).</li> <li>In the EAC menu, select <strong>mail flow</strong> &gt; <strong>send connectors</strong>.</li> <li>Click <strong>+</strong>.</li> <li>In the <strong>New send connector</strong> dialog, enter the following settings: <ul> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">SendGrid</code>
+</li> <li>
+<strong>Type</strong>: <strong>Internet (for example, to send internet mail)</strong>
+</li> </ul>
+</li> <li>Click <strong>Next</strong>.</li> <li>Under <strong>Network settings</strong>, select <strong>Route mail through smart hosts</strong> and click <strong>+</strong>.</li> <li>On the <strong>Add smart host</strong> page, enter <code translate="no" dir="ltr">smtp.sendgrid.net</code>.</li> <li>Click <strong>Save</strong>.</li> <li>Click <strong>Next</strong>.</li> <li>Under <strong>Smart host authentication</strong>, select <strong>Basic authentication</strong>.</li> <li>Enter the following information: <ul> <li>
+<strong>User name</strong>: <code translate="no" dir="ltr">apikey</code>
+</li> <li>
+<strong>Password</strong>: Paste the API key created on the SendGrid website</li> </ul>
+</li> <li>Click <strong>Next</strong>.</li> <li>Under <strong>Address space</strong>, click <strong>+</strong>.</li> <li>Enter the following information: <ul> <li><strong>Type: <code translate="no" dir="ltr">SMTP</code></strong></li> <li>
+<strong>Full Qualified Domain Name (FQDN)</strong>: <code translate="no" dir="ltr">*</code>
+</li> <li>
+<strong>Cost</strong>: <code translate="no" dir="ltr">1</code>
+</li> </ul>
+</li> <li>Click <strong>Next</strong>.</li> <li>Under <strong>Source server</strong>, click <strong>+</strong>.</li> <li>Select <code translate="no" dir="ltr">transport-1-a</code> and <code translate="no" dir="ltr">transport-1-b</code> and click <strong>OK</strong>.</li> <li>Click <strong>Finish</strong>.</li> </ol> <h4 id="changing_the_smtp_port">Changing the SMTP port</h4> <p>You now configure the send connector to use a custom port:</p> <ol> <li>On one of the mailbox servers, open the Exchange management shell by right-clicking <strong>Start</strong> &gt; <strong>Exchange Management Shell</strong>.</li> <li>
+<p>Modify the send connector to use port <code translate="no" dir="ltr">2525</code>:</p> 
+<pre>
+Set-SendConnector -Identity "SendGrid" -port 2525
+</pre>
+</li> <li>
+<p>Trigger an edge synchronization to ensure that the configuration change is propagated to all edge transport servers:</p> 
+<pre>
+Start-EdgeSynchronization -ForceFullSync
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> To troubleshoot issues related to outbound email flow, check the <a href="https://docs.microsoft.com/en-us/exchange/mail-flow/transport-logs/transport-logs" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Send connectors log file</a> on the edge transport servers.</span></aside> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring further costs after you have completed this tutorial, delete the entities that you've created.</p> <h3 id="delete_the_project">Delete the Google Cloud project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/instances/windows/deploying-microsoft-exchange-server-2016-on-compute-engine" class="_attribution-link">https://docs.cloud.google.com/compute/docs/instances/windows/deploying-microsoft-exchange-server-2016-on-compute-engine</a>
+  </p>
+</div>

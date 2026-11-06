@@ -1,0 +1,159 @@
+<h1>Benchmark Persistent Disk performance on a Linux VM</h1>  <p>This document describes how to benchmark <a href="performance">Persistent Disk performance</a> on Linux virtual machines (VMs). For Windows VMs, see <a href="benchmarking-pd-performance-windows">Benchmark persistent disk performance on a Windows VM</a>.</p> <p>To benchmark Persistent Disk performance on Linux, use <a href="https://fio.readthedocs.io/" class="external">Flexible I/O tester (FIO)</a> instead of other disk benchmarking tools such as <a href="https://en.wikipedia.org/wiki/Dd_(Unix)" class="external"><code translate="no" dir="ltr">dd</code></a>. By default, <code translate="no" dir="ltr">dd</code> uses a very low I/O queue depth, and might not accurately test disk performance. In general, avoid using special devices such as <code translate="no" dir="ltr">/dev/urandom</code>, <code translate="no" dir="ltr">/dev/random</code>, and <code translate="no" dir="ltr">/dev/zero</code> in your Persistent Disk performance benchmarks.</p> <p>To <a href="#existing-disk">measure IOPS and throughput of a disk in use on a running instance</a>, benchmark the file system with its intended configuration. Use this option to test a realistic workload without losing the contents of your existing disk. Note that when you benchmark the file system on an existing disk, there are many factors specific to your development environment that may affect benchmarking results, and you may not reach the <a href="performance">disk performance limits</a>.</p> <p>To <a href="#raw-disk">measure the raw performance of a persistent disk</a>, benchmark the block device directly. Use this option to compare raw disk performance to <a href="performance#type_comparison">disk performance limits</a>.</p> <p>The following commands work with Debian or Ubuntu operating systems with the <code translate="no" dir="ltr">apt</code> package manager.</p> <h3 id="existing-disk">Benchmarking IOPS and throughput of a disk on a running instance</h3> <p>If you want to measure IOPS and throughput for a realistic workload on an active disk on a running instance without losing the contents of your disk, benchmark against a new directory on the existing file system. Each <code translate="no" dir="ltr">fio</code> test runs for five minutes.</p> <ol> <li><p><a href="../instances/connecting-to-instance">Connect to your instance</a>.</p></li> <li>
+<p>Install dependencies:</p> 
+<pre>sudo apt update
+sudo apt install -y fio
+</pre>
+</li> <li>
+<p>In the terminal, list the disks that are attached to your VM and find the disk that you want to test. If your persistent disk is not yet formatted, <a href="format-mount-disk-linux">format and mount the disk</a>.</p> 
+<pre>sudo lsblk
+</pre> 
+<pre>
+NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda      8:0    0   10G  0 disk
+└─sda1   8:1    0   10G  0 part /
+sdb      8:32   0  2.5T  0 disk /mnt/disks/mnt_dir
+</pre> <p>In this example, we test a 2,500 GB SSD persistent disk with device ID <code translate="no" dir="ltr">sdb</code>.</p>
+</li> <li>
+<p>Create a new directory, <code translate="no" dir="ltr">fiotest</code>, on the disk. In this example, the disk is mounted at <code translate="no" dir="ltr">/mnt/disks/mnt_dir</code>:</p> 
+<pre>TEST_DIR=/mnt/disks/mnt_dir/fiotest
+sudo mkdir -p $TEST_DIR
+</pre>
+</li> <li>
+<p>Test write throughput by performing sequential writes with multiple parallel streams (16+), using an I/O block size of 1 MB and an I/O depth of at least 64:</p> 
+<pre>sudo fio --name=write_throughput --directory=$TEST_DIR --numjobs=16 \
+--size=10G --time_based --runtime=5m --ramp_time=2s --ioengine=libaio \
+--direct=1 --verify=0 --bs=1M --iodepth=64 --rw=write \
+--group_reporting=1 --iodepth_batch_submit=64 \
+--iodepth_batch_complete_max=64
+</pre>
+</li> <li>
+<p>Test write IOPS by performing random writes, using an I/O block size of 4 KB and an I/O depth of at least 256:</p> 
+<pre> sudo fio --name=write_iops --directory=$TEST_DIR --size=10G \
+--time_based --runtime=5m --ramp_time=2s --ioengine=libaio --direct=1 \
+--verify=0 --bs=4K --iodepth=256 --rw=randwrite --group_reporting=1  \
+--iodepth_batch_submit=256  --iodepth_batch_complete_max=256
+</pre>
+</li> <li>
+<p>Test read throughput by performing sequential reads with multiple parallel streams (16+), using an I/O block size of 1 MB and an I/O depth of at least 64:</p> 
+<pre>sudo fio --name=read_throughput --directory=$TEST_DIR --numjobs=16 \
+--size=10G --time_based --runtime=5m --ramp_time=2s --ioengine=libaio \
+--direct=1 --verify=0 --bs=1M --iodepth=64 --rw=read \
+--group_reporting=1 \
+--iodepth_batch_submit=64 --iodepth_batch_complete_max=64
+</pre>
+</li> <li>
+<p>Test read IOPS by performing random reads, using an I/O block size of 4 KB and an I/O depth of at least 256:</p> 
+<pre>sudo fio --name=read_iops --directory=$TEST_DIR --size=10G \
+--time_based --runtime=5m --ramp_time=2s --ioengine=libaio --direct=1 \
+--verify=0 --bs=4K --iodepth=256 --rw=randread --group_reporting=1 \
+--iodepth_batch_submit=256  --iodepth_batch_complete_max=256
+</pre>
+</li> <li>
+<p>Clean up:</p> 
+<pre>sudo rm $TEST_DIR/write* $TEST_DIR/read*
+</pre>
+</li> </ol> <h3 id="raw-disk">Benchmarking raw persistent disk performance</h3> <p>If you want to measure the performance of persistent disks alone outside of your development environment, test read and write performance for a block device on a throwaway persistent disk and VM. Each <code translate="no" dir="ltr">fio</code> test runs for five minutes. The following commands assume a 2,500 GB SSD persistent disk attached to your VM. If your device size is different, modify the value of the <code translate="no" dir="ltr">--filesize</code> argument. This disk size is necessary to achieve the 32 vCPU VM throughput limits. For more information, see <a href="performance">Block storage performance</a>.</p> <aside class="warning"><strong>Warning:</strong><span> The commands in this section overwrite the contents of /dev/sdb. <em>We strongly recommend using a throwaway VM and disk</em>.</span></aside> <ol> <li><p><a href="../instances/create-start-instance">Create and start a VM instance</a>.</p></li> <li><p><a href="add-persistent-disk">Add a Persistent Disk to your VM instance</a> which you intend to benchmark.</p></li> <li><p><a href="../instances/connecting-to-instance">Connect to your instance</a>.</p></li> <li>
+<p>Install dependencies:</p> 
+<pre>sudo apt-get update
+sudo apt-get install -y fio
+</pre>
+</li> <li>
+<p>Fill the disk with nonzero data. Persistent disk reads from empty blocks have a latency profile that is different from blocks that contain data. We recommend filling the disk before running any read latency benchmarks.</p> 
+<pre># Running this command causes data loss on the second device.
+# We strongly recommend using a throwaway VM and disk.
+sudo fio --name=fill_disk \
+  --filename=/dev/sdb --filesize=2500G \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=128K --iodepth=64 --rw=randwrite \
+  --iodepth_batch_submit=64 --iodepth_batch_complete_max=64
+</pre>
+</li> <li>
+<p>Test write bandwidth by performing sequential writes with multiple parallel streams (16+), using 1 MB as the I/O size and having an I/O depth that is greater than or equal to 64.</p> 
+<pre># Running this command causes data loss on the second device.
+# We strongly recommend using a throwaway VM and disk.
+sudo fio --name=write_bandwidth_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=1M --iodepth=64 --iodepth_batch_submit=64 --iodepth_batch_complete_max=64 \
+  --rw=write --numjobs=16 --offset_increment=100G
+</pre>
+</li> <li>
+<p>Test write IOPS. To achieve maximum PD IOPS, you must maintain a deep I/O queue. If, for example, the write latency is 1 millisecond, the VM can achieve, at most, 1,000 IOPS for each I/O in flight. To achieve 15,000 write IOPS, the VM must maintain at least 15 I/Os in flight. If your disk and VM are able to achieve 30,000 write IOPS, the number of I/Os in flight must be at least 30 I/Os. If the I/O size is larger than 4 KB, the VM might reach the bandwidth limit before it reaches the IOPS limit.</p> 
+<pre># Running this command causes data loss on the second device.
+# We strongly recommend using a throwaway VM and disk.
+sudo fio --name=write_iops_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=4K --iodepth=256 --rw=randwrite \
+  --iodepth_batch_submit=256 --iodepth_batch_complete_max=256
+</pre>
+</li> <li>
+<p>Test write latency. While testing I/O latency, the VM must not reach maximum bandwidth or IOPS; otherwise, the observed latency won't reflect actual persistent disk I/O latency. For example, if the IOPS limit is reached at an I/O depth of 30 and the <code translate="no" dir="ltr">fio</code> command has double that, then the total IOPS remains the same and the reported I/O latency doubles.</p> 
+<pre># Running this command causes data loss on the second device.
+# We strongly recommend using a throwaway VM and disk.
+sudo fio --name=write_latency_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=4K --iodepth=4 --rw=randwrite --iodepth_batch_submit=4 \
+  --iodepth_batch_complete_max=4
+</pre>
+</li> <li>
+<p>Test read bandwidth by performing sequential reads with multiple parallel streams (16+), using 1 MB as the I/O size and having an I/O depth that is equal to 64 or greater.</p> 
+<pre>sudo fio --name=read_bandwidth_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=1M --iodepth=64 --rw=read --numjobs=16 --offset_increment=100G \
+  --iodepth_batch_submit=64 --iodepth_batch_complete_max=64
+</pre>
+</li> <li>
+<p>Test read IOPS. To achieve the maximum PD IOPS, you must maintain a deep I/O queue. If, for example, the I/O size is larger than 4 KB, the VM might reach the bandwidth limit before it reaches the IOPS limit. To achieve the maximum 100k read IOPS, specify <code translate="no" dir="ltr">--iodepth=256</code> for this test.</p> 
+<pre>sudo fio --name=read_iops_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=4K --iodepth=256 --rw=randread \
+  --iodepth_batch_submit=256 --iodepth_batch_complete_max=256
+</pre>
+</li> <li>
+<p>Test read latency. It's important to fill the disk with data to get a realistic latency measurement. It's important that the VM not reach IOPS or throughput limits during this test because after the persistent disk reaches its saturation limit, it pushes back on incoming I/Os and this is reflected as an artificial increase in I/O latency.</p> 
+<pre>sudo fio --name=read_latency_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --bs=4K --iodepth=4 --rw=randread \
+  --iodepth_batch_submit=4 --iodepth_batch_complete_max=4
+</pre>
+</li> <li>
+<p>Test sequential read bandwidth.</p> 
+<pre>sudo fio --name=read_bandwidth_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --numjobs=4 --thread --offset_increment=500G \
+  --bs=1M --iodepth=64 --rw=read \
+  --iodepth_batch_submit=64  --iodepth_batch_complete_max=64
+</pre>
+</li> <li>
+<p>Test sequential write bandwidth.</p> 
+<pre>sudo fio --name=write_bandwidth_test \
+  --filename=/dev/sdb --filesize=2500G \
+  --time_based --ramp_time=2s --runtime=5m \
+  --ioengine=libaio --direct=1 --verify=0 --randrepeat=0 \
+  --numjobs=4 --thread --offset_increment=500G \
+  --bs=1M --iodepth=64 --rw=write \
+  --iodepth_batch_submit=64  --iodepth_batch_complete_max=64
+</pre>
+</li> <li>
+<p>Clean up the throwaway Persistent Disk and VM:</p> <ol> <li>
+<a href="https://docs.cloud.google.com/compute/docs/samples/compute-disk-delete">Delete the disk</a> used for benchmarking performance.</li> <li>
+<a href="../instances/deleting-instance">Delete the VM</a> created for benchmarking performance.</li> </ol>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to monitor your disk performance by <a href="review-disk-metrics">reviewing disk performance metrics</a>.</li> <li>Learn about <a href="https://docs.cloud.google.com/compute/disks-image-pricing#persistentdisk">Persistent Disk pricing</a>.</li> <li>Learn how to <a href="optimizing-pd-performance">optimize Persistent Disk performance</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/disks/benchmarking-pd-performance-linux" class="_attribution-link">https://docs.cloud.google.com/compute/docs/disks/benchmarking-pd-performance-linux</a>
+  </p>
+</div>

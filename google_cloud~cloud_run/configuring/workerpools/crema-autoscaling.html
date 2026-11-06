@@ -1,0 +1,133 @@
+<h1>Autoscale worker pools with external metrics</h1> <p>This page describes how to autoscale Cloud Run worker pools using external event-driven metrics. Cloud Run External Metrics Autoscaling (CREMA) enables this functionality by leveraging <a href="https://github.com/kedacore/keda">Kubernetes-based Event Driven Autoscaling (KEDA)</a> to scale workloads based on external event sources.</p> <p>For supported scalers and compatibility with Cloud Run, see <a href="https://github.com/GoogleCloudPlatform/cloud-run-external-metrics-autoscaling/tree/main">Cloud Run External Metrics Autoscaling (CREMA)</a> in the Google Cloud GitHub documentation.</p> <h2 id="about-crema">About the autoscaler service</h2> <p>To autoscale worker pools, deploy the CREMA autoscaler service to Cloud Run. This service performs the following actions:</p> <ol> <li><p>Polls external event sources, such as <a href="https://keda.sh/docs/2.17/scalers/apache-kafka/">Apache Kafka</a> topics or <a href="https://keda.sh/docs/2.17/scalers/github-runner/">GitHub Runner Scaler</a>.</p></li> <li><p>Calculates the required instance count based on your <a href="https://github.com/GoogleCloudPlatform/cloud-run-external-metrics-autoscaling/tree/main">YAML configuration</a>.</p></li> <li><p>Updates the worker pool's instance count automatically.</p></li> </ol> <h2 id="before_you_begin">Before you begin</h2> <ol> <li><p>Make sure you have set up a new project for Cloud Run, as described in the <a href="../../setup">setup</a> page.</p></li> <li>
+<p>Enable the Artifact Registry, Cloud Build, Cloud Run Admin API, Secret Manager, and Parameter Manager APIs:</p> 
+<pre>gcloud services enable artifactregistry.googleapis.com \
+    cloudbuild.googleapis.com \
+    run.googleapis.com \
+    secretmanager.googleapis.com \
+    parametermanager.googleapis.com
+</pre>
+</li> <li><p>Configure an event-driven or request-based workload, such as GitHub Runners or Apache Kafka. To verify that your workload source is supported, see the <a href="https://github.com/GoogleCloudPlatform/cloud-run-external-metrics-autoscaling/tree/main">CREMA compatibility list</a> in the Google Cloud GitHub documentation.</p></li> <li><p>Review the <a href="https://cloud.google.com/products/calculator">pricing calculator</a> to estimate costs. You incur charges for your Cloud Run scaling service based on how often you trigger scaling.</p></li> </ol> <h2 id="required_roles">Required roles</h2> <p> To get the permissions that you need to autoscale your worker pool, ask your administrator to grant you the following IAM roles on your project: </p> <ul> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/artifactregistry#artifactregistry.repoAdmin">Artifact Registry Repository Administrator </a> (<code translate="no" dir="ltr">roles/artifactregistry.repoAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudbuild#cloudbuild.builds.editor">Cloud Build Editor </a> (<code translate="no" dir="ltr">roles/cloudbuild.builds.editor</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run#run.admin">Cloud Run Admin </a> (<code translate="no" dir="ltr">roles/run.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountCreator">Create Service Accounts </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountCreator</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/secretmanager#secretmanager.admin">Secret Manager Admin </a> (<code translate="no" dir="ltr">roles/secretmanager.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountUser">Service Account User </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountUser</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/serviceusage#serviceusage.serviceUsageConsumer">Service Usage Consumer </a> (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/storage#storage.admin">Storage Admin </a> (<code translate="no" dir="ltr">roles/storage.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/parametermanager#parametermanager.admin">Parameter Manager Admin </a> (<code translate="no" dir="ltr">roles/parametermanager.admin</code>)</li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <aside class="note"> <strong>Note:</strong> <a href="https://docs.cloud.google.com/iam/docs/roles-overview#basic">IAM basic roles</a> might also contain permissions to autoscale your worker pool. You shouldn't grant basic roles in a production environment, but you can grant them in a development or test environment. </aside> <h2 id="crema-service-account">Create a custom service account</h2> <p>Create a custom service account with the <a href="https://docs.cloud.google.com/iam/docs/using-iam-securely">minimum permissions required</a> to use provisioned resources required for your workload. To set up the service account, do the following:</p> 
+<pre>gcloud iam service-accounts create CREMA_SERVICE_ACCOUNT \
+  --display-name="CREMA Service Account"
+</pre> <p>Replace <var translate="no">CREMA_SERVICE_ACCOUNT</var> with a name for your custom service account, for example <code translate="no" dir="ltr">crema-service-account</code>. This command creates a service account that follows the format, <code translate="no" dir="ltr">crema-service-account@example-project.iam.gserviceaccount.com</code>.</p> <h2 id="yaml-config">Create the CREMA configuration file</h2> <p>To define your scaling logic, create a YAML configuration file in your root directory. This file instructs the CREMA service on which external sources to monitor, how to authenticate with the resources, and which worker pools to scale.</p> <h3 id="yaml_example">YAML example</h3> <p>The following example shows the configuration file to scale a Cloud Run worker pool (<code translate="no" dir="ltr">example-workerpool</code>) using the <a href="https://docs.github.com/en/actions/concepts/runners/self-hosted-runners">GitHub Runner</a> metrics. It uses a Secret Manager secret named <code translate="no" dir="ltr">github_runner_token</code> to authenticate with GitHub for reading the metrics.</p> 
+<pre>  apiVersion: crema/v1
+  kind: CremaConfig
+  metadata:
+    name: gh-demo
+  spec:
+    triggerAuthentications:
+      - metadata:
+          name: github-trigger-auth
+        spec:
+          gcpSecretManager:
+            secrets:
+              - parameter: personalAccessToken
+                id: github_runner_token
+                version: latest
+    scaledObjects:
+      - spec:
+          scaleTargetRef:
+            name: projects/example-project/locations/us-central1/workerpools/example-workerpool
+          triggers:
+            - type: github-runner
+              name: example-runner
+              metadata:
+                owner: repo-owner
+                runnerScope: repo
+                repos: repo-name
+                targetWorkflowQueueLength: 1
+              authenticationRef:
+                name: github-trigger-auth
+          advanced:
+            horizontalPodAutoscalerConfig:
+              behavior:
+                scaleDown:
+                  stabilizationWindowSeconds: 10
+                  policies:
+                    - type: Pods
+                      value: 100
+                      periodSeconds: 10
+                scaleUp:
+                  stabilizationWindowSeconds: 10
+                  policies:
+                    - type: Pods
+                      value: 2
+                      periodSeconds: 10
+        pollingInterval: 10
+</pre> <p>The YAML configuration uses the following high-level parameters:</p> <ul> <li><p><code translate="no" dir="ltr">triggerAuthentications</code>: determines how CREMA authenticates the external service, such as using a token stored in Secret Manager.</p></li> <li>
+<p><code translate="no" dir="ltr">scaledObjects</code>: defines the mapping between your Cloud Run worker pool and the external metric resource. This parameter includes:</p> <ul> <li><p><code translate="no" dir="ltr">scaleTargetRef</code>: the Cloud Run services or worker pools to scale.</p></li> <li><p><code translate="no" dir="ltr">triggers</code>: the specific external metric used for scaling. If your external metric source requires authentication, set the <code translate="no" dir="ltr">authenticationRef</code> field to specify one of the <code translate="no" dir="ltr">TriggerAuthentications</code> objects for credentials.</p></li> </ul>
+</li> <li><p><code translate="no" dir="ltr">pollingInterval</code>: controls the interval (in seconds) at which CREMA refreshes its metrics. If you omit this parameter, CREMA doesn't poll automatically, and you must trigger a scaling check manually using a POST request to the service.</p></li> </ul> <p>For more information on defining basic and advanced configuration metrics, see <a href="https://github.com/GoogleCloudPlatform/cloud-run-external-metrics-autoscaling/blob/main/metric-provider/api/README.md">Configuration reference</a> in the Google Cloud GitHub documentation.</p> <p>For the complete list of configuration definitions for your compatible scalers, see <a href="https://keda.sh/docs/2.17/scalers/">Scalers</a> in the KEDA documentation.</p> <h2 id="parameter">Store your CREMA configuration in Parameter Manager</h2> <p>To store parameter versions for your CREMA autoscaler service, follow these steps:</p> <ol> <li>
+<p>Create a parameter in the Parameter Manager:</p> 
+<pre>gcloud parametermanager parameters create PARAMETER_ID --location=global  --parameter-format=YAML
+</pre> <p>Replace <var translate="no">PARAMETER_ID</var> with the name of your parameter.</p>
+</li> <li>
+<p>Upload your local YAML file as a new parameter version:</p> 
+<pre>gcloud parametermanager parameters versions create PARAMETER_VERSION \
+  --location=global \
+  --parameter=PARAMETER_ID \
+  --payload-data-from-file=LOCAL_YAML_CONFIG_FILE
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">PARAMETER_VERSION</var>: the ID that you want to assign to the parameter version, for example, <code translate="no" dir="ltr">1</code>.</li> <li>
+<var translate="no">LOCAL_YAML_CONFIG_FILE</var>: the path to your YAML configuration file.</li> </ul>
+</li> </ol> <p>For more information, see <a href="https://docs.cloud.google.com/secret-manager/parameter-manager/docs/create-parameter">Create a parameter</a>.</p> <h2 id="grant_additional_permissions_to_your_crema_service_account">Grant additional permissions to your CREMA service account</h2> <p>To scale the worker pool you specified in your YAML configuration, grant the following permissions on the custom service account:</p> <ol> <li>
+<p>Grant your CREMA service account permission to read from the Parameter Manager:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:CREMA_SERVICE_ACCOUNT_NAME \
+  --role="roles/parametermanager.parameterViewer"
+</pre> <p>Replace the following:</p> <ul> <li><p><var translate="no">PROJECT_ID</var>: the ID of your Google Cloud project.</p></li> <li><p><var translate="no">CREMA_SERVICE_ACCOUNT_NAME</var>: the name of your <a href="#crema-service-account">CREMA service account</a>.</p></li> </ul>
+</li> <li>
+<p>Grant your CREMA service account the <code translate="no" dir="ltr">roles/run.developer</code> role on the worker pool. This allows the CREMA service to modify the instance count of your worker pool in response to changing metrics:</p> 
+<pre>WORKER_POOL_NAME=WORKER_POOL_NAME
+WORKER_POOL_REGION=WORKER_POOL_REGION
+gcloud run worker-pools add-iam-policy-binding $WORKER_POOL_NAME \
+  --region=$WORKER_POOL_REGION \
+  --member="serviceAccount:CREMA_SERVICE_ACCOUNT_NAME" \
+  --role="roles/run.developer"
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">WORKER_POOL_NAME</var>: the name of the worker pool.</li> <li>
+<var translate="no">WORKER_POOL_REGION</var>: the region of your worker pool.</li> </ul>
+</li> <li>
+<p>Grant your CREMA service account permission to write metrics:</p> 
+<pre> gcloud projects add-iam-policy-binding PROJECT_ID \
+   --member="serviceAccount:CREMA_SERVICE_ACCOUNT_NAME" \
+   --role="roles/monitoring.metricWriter"
+</pre>
+</li> <li>
+<p>Grant your CREMA service account the service account user role:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:CREMA_SERVICE_ACCOUNT_NAME" \
+  --role="roles/iam.serviceAccountUser"
+</pre>
+</li> </ol> <h3 id="crema-service">Deploy the service to scale your workloads</h3> <p>To deploy the service to scale your worker pool, run the following command with a prebuilt container image:</p> 
+<pre>gcloud run deploy SERVICE_NAME\
+  --image=us-central1-docker.pkg.dev/cloud-run-oss-images/crema-v1/autoscaler:1.0 \
+  --region=SERVICE_REGION \
+  --service-account="CREMA_SERVICE_ACCOUNT_NAME" \
+  --no-allow-unauthenticated \
+  --no-cpu-throttling \
+  --base-image=us-central1-docker.pkg.dev/serverless-runtimes/google-24/runtimes/java25 \
+  --labels=created-by=crema \
+  --set-env-vars="CREMA_CONFIG=projects/PROJECT_ID/locations/PARAMETER_REGION/parameters/PARAMETER_ID/versions/PARAMETER_VERSION,OUTPUT_SCALER_METRICS=True"
+</pre> <p>Replace the following:</p> <ul> <li><p><var translate="no">SERVICE_NAME</var>: the name of your autoscaler service.</p></li> <li><p><var translate="no">SERVICE_REGION</var>: the region of your service.</p></li> <li><p><var translate="no">CREMA_SERVICE_ACCOUNT_NAME</var>: the name of your <a href="#crema-service-account">CREMA service account</a>.</p></li> <li><p><var translate="no">PROJECT_ID</var>: the ID of your Google Cloud project.</p></li> <li><p><var translate="no">PARAMETER_REGION</var>, <var translate="no">PARAMETER_ID</var>, and <var translate="no">PARAMETER_VERSION</var>: values you <a href="#parameter">stored in the Parameter Manager</a>.</p></li> </ul> <p>You can also deploy your CREMA service using a <a href="https://github.com/GoogleCloudPlatform/cloud-run-external-metrics-autoscaling">custom container image you build</a> from the source code with Cloud Build.</p> <h2 id="test">Test your CREMA service</h2> <p>To verify your autoscaling service is working correctly, <a href="../../logging#service-logs">check the <strong>Logs</strong> tab of the Cloud Run service</a>.</p> <p>You should see the following logs in your service's logs each time metrics are refreshed:</p> <p>Each log message is labeled with the component that emitted it.</p> 
+<pre>[INFO] [METRIC-PROVIDER] Starting metric collection cycle
+[INFO] [METRIC-PROVIDER] Successfully fetched scaled object metrics ...
+[INFO] [METRIC-PROVIDER] Sending scale request ...
+[INFO] [SCALER] Received ScaleRequest ...
+[INFO] [SCALER] Current instances ...
+[INFO] [SCALER] Recommended instances ...
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li><p>Learn how to use <a href="../../tutorials/github-runner">self-hosted GitHub runners on worker pools to execute the workflows defined in your GitHub repository, and scale your worker pool with CREMA</a>.</p></li> <li><p>Learn more about <a href="../../deploy-worker-pools">Cloud Run worker pools</a>.  </p></li>
+</ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/configuring/workerpools/crema-autoscaling" class="_attribution-link">https://docs.cloud.google.com/run/docs/configuring/workerpools/crema-autoscaling</a>
+  </p>
+</div>

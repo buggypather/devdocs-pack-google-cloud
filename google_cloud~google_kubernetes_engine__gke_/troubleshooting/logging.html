@@ -1,0 +1,342 @@
+<h1>Troubleshoot missing logs in GKE</h1>  <p>Issues with the logging pipeline in Google Kubernetes Engine (GKE) can prevent your cluster logs from appearing in Cloud Logging, hindering your monitoring and debugging efforts.</p> <p>Use this document to learn how to verify configurations and permissions, resolve resource and performance issues, investigate filters and application behavior, and address platform or service problems affecting your logs.</p> <p>This information is important for Platform admins and operators who maintain cluster observability and for anyone who uses Cloud Logging to troubleshoot GKE operations. For more information about the common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>For more information about how to use logs to troubleshoot your workloads and clusters, see <a href="introduction-logging">Conduct historical analysis with Cloud Logging</a>.</p> <h2 id="find-by-symptom">Find your solution by symptom</h2> <p>If you've identified a specific symptom related to your missing logs, use the following table to find troubleshooting advice:</p> <table> <thead> <tr> <th style="width:20%">Category</th> <th>Symptom or observation</th> <th>Potential cause</th> <th>Troubleshooting steps</th> </tr> </thead> <tbody> <tr> <td rowspan="4" class="category-heading"><strong>Configuration</strong></td> <td>No logs from <em>any</em> cluster in the project are visible.</td> <td>The Cloud Logging API is disabled for the project.</td> <td><a href="#api-not-enabled">Verify the Cloud Logging API status</a></td> </tr> <tr> <td>Logs are missing from a <em>specific cluster</em>, or only certain log types are missing.</td> <td>Cluster-level logging is disabled for the required log types.</td> <td><a href="#cluster-logging-disabled">Verify cluster logging configuration</a></td> </tr> <tr> <td>Logs are missing from nodes in a <em>specific node pool</em>.</td> <td>The node pool's nodes lack the required access scope.</td> <td><a href="#node-pool-scopes">Verify node pool access scopes</a></td> </tr> <tr> <td>Permission errors (<code translate="no" dir="ltr">401</code> or <code translate="no" dir="ltr">403</code>) appear in logging agent logs.</td> <td>The node's service account is missing the required permission.</td> <td><a href="#sa-permissions">Verify node service account permissions</a></td> </tr> <tr> <td rowspan="2" class="category-heading"><strong>Resource and performance</strong></td> <td>Logs are missing intermittently, or you see <code translate="no" dir="ltr">RESOURCE_EXHAUSTED</code> errors.</td> <td>The project is exceeding the Cloud Logging API write quota.</td> <td><a href="#api-quota">Investigate Cloud Logging API quota usage</a></td> </tr> <tr> <td>Some logs from a specific node are missing, often during high traffic or load.</td> <td>The node is exceeding logging agent throughput limits, or lacks resources (CPU or memory) to process logs.</td> <td><a href="#node-throughput-resources">Investigate node throughput and resource usage</a></td> </tr> <tr> <td rowspan="4" class="category-heading"><strong>Filtering and application behavior</strong></td> <td>Specific logs that match a certain pattern are consistently missing.</td> <td>A log exclusion filter in Cloud Logging is unintentionally dropping the logs.</td> <td><a href="#log-exclusions">Investigate log exclusion filters</a></td> </tr> <tr> <td>Logs from a container are significantly delayed or appear only after the container exits.</td> <td>The application's output is fully buffered, often due to piping <code translate="no" dir="ltr">stdout</code>.</td> <td><a href="#container-log-buffering">Investigate container log buffering and delays</a></td> </tr> <tr> <td>Expected logs don't appear in search results.</td> <td>Query filters in Logs Explorer might be too restrictive.</td> <td><a href="#log-queries">Investigate Logs Explorer queries</a></td> </tr> <tr> <td>No logs are visible from a specific application Pod, but other cluster logs are present.</td> <td>The application inside the container isn't writing to <code translate="no" dir="ltr">stdout</code> or <code translate="no" dir="ltr">stderr</code>.</td> <td><a href="#application-issues">Investigate application-specific logging behavior</a></td> </tr> <tr> <td rowspan="3" class="category-heading"><strong>Platform and service</strong></td> <td>Logs older than a certain date don't appear.</td> <td>The logs have passed their retention period and have been deleted by Cloud Logging.</td> <td><a href="#log-retention">Investigate log retention periods</a></td> </tr> <tr> <td>Widespread log loss or delays across projects or clusters.</td> <td>Cloud Logging service issue or ingestion delay.</td> <td><a href="#service-issues">Investigate Cloud Logging service issues and delays</a></td> </tr> <tr> <td>Logging issues coincide with cluster version limitations.</td> <td>Unsupported GKE version.</td> <td><a href="#unsupported-version">Investigate cluster version</a></td> </tr> </tbody> </table> <h2 id="automated-tools">Use automated diagnostic tools</h2> <p>The following sections cover tools that can automatically inspect your cluster for common misconfigurations and help investigate complex problems.</p> <h3 id="debugging-gke-logs-with-gcpdiag">Debug GKE logging issues with <code translate="no" dir="ltr">gcpdiag</code>
+</h3> If you are missing or getting incomplete logs from your GKE cluster, use the <code translate="no" dir="ltr">gcpdiag</code> tool for troubleshooting. <p><a href="https://gcpdiag.dev"><code translate="no" dir="ltr">gcpdiag</code></a> is an open source tool. It is not an officially supported Google Cloud product. You can use the <code translate="no" dir="ltr">gcpdiag</code> tool to help you identify and fix Google Cloud project issues. For more information, see the <a href="https://github.com/GoogleCloudPlatform/gcpdiag/#gcpdiag---diagnostics-for-google-cloud-platform">gcpdiag project on GitHub</a>.</p> <div> When logs from the GKE cluster are missing or incomplete, investigate potential causes by focusing on the following core configuration settings: <ul> <li>
+<strong>Project-level logging:</strong> helps ensure that the Google Cloud project housing the GKE cluster has the Cloud Logging API enabled.</li> <li>
+<strong>Cluster-level logging:</strong> verifies that logging is explicitly enabled within the configuration of the GKE cluster.</li> <li>
+<strong>Node pool permissions:</strong> confirms that the nodes within the cluster's node pools have the <code translate="no" dir="ltr">Cloud Logging Write</code> scope enabled, allowing them to send log data.</li> <li>
+<strong>Service account permissions:</strong> validates that the service account used by the node pools possesses the necessary IAM permissions to interact with Cloud Logging. Specifically, the <code translate="no" dir="ltr">roles/logging.logWriter</code> role is typically required.</li> <li>
+<strong>Cloud logging API write quotas:</strong> verifies that Cloud Logging API Write quotas have not been exceeded within the specified timeframe.</li> </ul> </div>  <section> <p class="_code-tab"><strong>Google Cloud console</strong></p> <ol> <li>Complete and then copy the following command. </li> 
+<pre data-language="">gcpdiag runbook gke/logs \
+    --parameter project_id=PROJECT_ID \
+    --parameter name=CLUSTER_NAME \
+    --parameter location=LOCATION</pre> <li>Open the Google Cloud console and activate Cloud Shell.</li> <a href="https://console.cloud.google.com/logs" target="console" track-type="gcpdiagOnTroubleshootingPages" track-name="troubleshootWithGcpdiag" track-metadata-end-goal="runbook-gke-logs" class="button button-primary">Open Cloud console</a> <li>Paste the copied command.</li> <li>Run the <code translate="no" dir="ltr">gcpdiag</code> command, which downloads the <code translate="no" dir="ltr">gcpdiag</code> docker image, and then performs diagnostic checks. If applicable, follow the output instructions to fix failed checks. </li> </ol> </section> <section> <p class="_code-tab"><strong>Docker</strong></p> <p>You can <a href="https://github.com/GoogleCloudPlatform/gcpdiag" track-type="troubleshootWithGcpdiag" track-name="gcpdiagDocker"> run <code translate="no" dir="ltr">gcpdiag</code> using a wrapper</a> that starts <code translate="no" dir="ltr">gcpdiag</code> in a <a href="https://www.docker.com/">Docker</a> container. Docker or <a href="https://podman.io/">Podman</a> must be installed.</p> <ol> <li>Copy and run the following command on your local workstation. 
+<pre data-language="console">curl https://gcpdiag.dev/gcpdiag.sh &gt;gcpdiag &amp;&amp; chmod +x gcpdiag</pre> </li> <li> Execute the <code translate="no" dir="ltr">gcpdiag</code> command. 
+<pre data-language="">./gcpdiag runbook gke/logs \
+    --parameter project_id=PROJECT_ID \
+    --parameter name=CLUSTER_NAME \
+    --parameter location=LOCATION</pre> </li> </ol> </section>  <div> <p>View <a href="https://gcpdiag.dev/runbook/diagnostic-trees/gke/logs/#parameters">available parameters</a> for this runbook.</p> <p>Replace the following:</p> <ul> <li>
+<var translate="no"><code translate="no" dir="ltr">PROJECT_ID</code></var>: the ID of the project containing the resource.</li> <li>
+<var translate="no"><code translate="no" dir="ltr">CLUSTER_NAME</code></var>: the name of the GKE cluster.</li> <li>
+<var translate="no"><code translate="no" dir="ltr">LOCATION</code></var>: the Compute Engine region or zone (for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code> ) for the cluster.</li> </ul> <p>Useful flags:</p> <ul> <li>
+<code translate="no" dir="ltr">--universe-domain</code>: If applicable, the <a href="https://cloud.google.com/blog/products/identity-security/new-sovereign-controls-for-gcp-via-assured-workloads">Trusted Partner Sovereign Cloud</a> domain hosting the resource</li> <li>
+<code translate="no" dir="ltr">--parameter</code> or <code translate="no" dir="ltr">-p</code>: Runbook parameters</li> </ul> <p>For a list and description of all <code translate="no" dir="ltr">gcpdiag</code> tool flags, see the <a href="https://github.com/GoogleCloudPlatform/gcpdiag"><code translate="no" dir="ltr">gcpdiag</code> usage instructions</a>.</p> </div> <h3 id="gemini-investigations">Use Gemini Cloud Assist investigations</h3> <p>Consider using <a href="https://docs.cloud.google.com/cloud-assist/investigations">Gemini Cloud Assist investigations</a> to gain additional insights into your logs and resolve issues. For more information about different ways to initiate an investigation by using the Logs Explorer, see <a href="https://docs.cloud.google.com/cloud-assist/investigations#entry-points">Troubleshoot issues with Gemini Cloud Assist Investigations</a> in the Gemini documentation.</p> <h2 id="verify-settings">Verify logging configuration and permissions</h2> <p>Incorrect settings are a common reason for missing GKE logs. Use the following sections to verify your Cloud Logging configuration.</p> <h3 id="api-not-enabled">Verify the Cloud Logging API status</h3> <p>For logs to be collected from any cluster in your project, the Cloud Logging API must be enabled.</p> <p><strong>Symptoms</strong>:</p> <p>No logs from any GKE resources in your project are visible in Cloud Logging.</p> <p><strong>Cause</strong>:</p> <p>The Cloud Logging API is disabled for the Google Cloud project, preventing the logging agent on the nodes from sending logs.</p> <p><strong>Resolution</strong>:</p> <p>To verify that the Cloud Logging API is enabled and enable it if necessary, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Cloud Logging API</strong> page.</p> <p><a href="https://console.cloud.google.com/apis/library/logging.googleapis.com" target="console" class="button button-primary">Go to the <strong>Cloud Logging API page</strong></a> </p>
+</li> <li><p>Select your project.</p></li> <li><p>The Cloud Logging API is enabled if you see <strong>API enabled</strong> in the page header. If you don't see <strong>API enabled</strong>, then click the <strong>Enable</strong> button.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Check if the API is enabled:</p> 
+<pre data-language="bash">gcloud services list --enabled --filter="NAME=logging.googleapis.com"
+</pre> <p>The output should be the following:</p> 
+<pre data-language="bash">NAME: logging.googleapis.com
+TITLE: Cloud Logging API
+</pre>
+</li> <li>
+<p>If the API isn't listed in the enabled services, enable it:</p> 
+<pre data-language="bash">gcloud services enable logging.googleapis.com \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p>
+</li> </ol></section> </div> <h3 id="cluster-logging-disabled">Verify cluster logging configuration</h3> <p>GKE lets you configure which log types (such as <code translate="no" dir="ltr">SYSTEM</code> or <code translate="no" dir="ltr">WORKLOAD</code>) are collected from a cluster.</p> <p><strong>Symptoms</strong>:</p> <p>No logs are appearing in Cloud Logging from a specific GKE cluster, or only certain types of logs (like <code translate="no" dir="ltr">SYSTEM</code>) are missing.</p> <p><strong>Cause</strong>:</p> <p>Cluster-level logging is disabled for the required log types. If you're using an Autopilot cluster, this isn't the cause of your logging issues. This setting is configurable for Standard clusters, but is always enabled by default on Autopilot clusters and can't be disabled.</p> <p><strong>Resolution</strong>:</p> <p>To check and update the cluster's logging configuration, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Kubernetes clusters</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Kubernetes clusters</a></p>
+</li> <li><p>Click the name of the cluster that you want to investigate.</p></li> <li><p>Click the <strong>Details</strong> tab and navigate to the <strong>Features</strong> section.</p></li> <li><p>In the <strong>Logging</strong> row, review which log types, such as <strong>System</strong> or <strong>Workloads</strong>, are enabled.</p></li> <li><p>If the log types that you want to collect are disabled or incorrect, click <span class="material-icons" aria-hidden="true" translate="no">edit</span> <strong>Edit Logging</strong>.</p></li> <li><p>In the <strong>Components</strong> list, select the checkboxes for the log types that you want to collect and click <strong>OK</strong>. For more information about available log types, see <a href="../concepts/about-logs#available-logs">About GKE logs</a>.</p></li> <li><p>Click <strong>Save Changes</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>To check the logging configuration, describe the cluster:</p> 
+<pre data-language="bash">gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --format="value(name,loggingConfig.componentConfig.enableComponents)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Compute Engine region or zone (for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code> ) for the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> </ul> <p>If logging is enabled, the output is similar to the following:</p> 
+<pre data-language="bash">example-cluster    SYSTEM_COMPONENTS;WORKLOADS
+</pre> <p>If the output is <code translate="no" dir="ltr">NONE</code>, then logging is disabled.</p>
+</li> <li>
+<p>If the log types that you want are disabled or incorrect, update the logging configuration:</p> 
+<pre data-language="bash">gcloud container clusters update CLUSTER_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --logging=LOGGING_TYPE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LOGGING_TYPE</var></code> with <code translate="no" dir="ltr">SYSTEM</code>, <code translate="no" dir="ltr">WORKLOAD</code>, or both. To collect any logs, <code translate="no" dir="ltr">SYSTEM</code> must be enabled. <code translate="no" dir="ltr">WORKLOAD</code> logs can't be collected on their own. For more information about available log types, see <a href="../concepts/about-logs#available-logs">About GKE logs</a>.</p>
+</li> </ol></section> </div> <h3 id="node-pool-scopes">Verify node pool access scopes</h3> <aside class="note"><strong>Note:</strong><span> This section applies only to Standard GKE clusters. If you are troubleshooting an Autopilot cluster, skip this section.</span></aside> <p>Nodes in a GKE cluster use OAuth access scopes to get permission to interact with Google Cloud APIs, including Cloud Logging.</p> <p><strong>Symptoms</strong>:</p> <p>Logs are missing from nodes in a specific node pool.</p> <p><strong>Cause</strong>:</p> <p>The nodes in the node pool don't have the necessary OAuth access scope. One of the following scopes is required for nodes to write logs to Cloud Logging:</p> <ul> <li>
+<code translate="no" dir="ltr">https://www.googleapis.com/auth/logging.write</code>: grants permission to write logs. This is the minimum scope required.</li> <li>
+<code translate="no" dir="ltr">https://www.googleapis.com/auth/logging.admin</code>: grants full access to the Cloud Logging API, which includes the permissions from <code translate="no" dir="ltr">logging.write</code>.</li> <li>
+<code translate="no" dir="ltr">https://www.googleapis.com/auth/cloud-platform</code>: grants full access to all enabled Google Cloud APIs, which includes the permissions from <code translate="no" dir="ltr">logging.write</code>.</li> </ul> <p><strong>Resolution</strong>:</p> <p>To verify the permissions and grant the required roles if missing, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Verify the node pool's access scopes:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Kubernetes clusters</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Kubernetes clusters</a></p>
+</li> <li><p>To open the cluster's details page, click the name of the cluster that you want to investigate.</p></li> <li><p>Click the <strong>Nodes</strong> tab.</p></li> <li><p>In the <strong>Node Pools</strong> section, click the name of the node pool that you want to investigate.</p></li> <li><p>Navigate to the <strong>Security</strong> section.</p></li> <li>
+<p>Review the scopes listed in the <strong>Access scopes</strong> field. Ensure that at least one of the required scopes is present:</p> <ul> <li><strong>Stackdriver Logging API - Write Only</strong></li> <li><strong>Stackdriver Logging API - Full</strong></li> <li><strong>Cloud Platform - Enabled</strong></li> </ul> <p>If the required scopes are missing, re-create the node pool. You can't change access scopes on an existing node pool.</p>
+</li> </ol>
+</li> <li>
+<p>If needed, create a new node pool with the required scope:</p> <ol> <li>Navigate back to the cluster details page for the cluster that you want to modify.</li> <li>Click the <strong>Nodes</strong> tab.</li> <li>Click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Create user-managed node pool</strong>.</li> <li>Fill in the <strong>Node pool details</strong> section.</li> <li>In the left-hand navigation, click <strong>Security</strong>.</li> <li>In the <strong>Access scopes</strong> section, select the roles that you want to add: <ul> <li>To add specific scopes, select <strong>Set access for each API</strong>.</li> <li>To allow full access, select <strong>Allow full access to all Cloud APIs</strong>.</li> </ul>
+</li> <li>Configure any other sections as needed.</li> <li>Click <strong>Create</strong>.</li> </ol>
+</li> <li><p><a href="../how-to/migrate-nodes">Migrate your workloads to the new node pool</a>. After you migrate workloads to the new node pool, your applications run on nodes that have the necessary scopes to send logs to Cloud Logging.</p></li> <li>
+<p>Delete the old node pool:</p> <ol> <li>Navigate back to the cluster details page and select the <strong>Nodes</strong> tab.</li> <li>In the <strong>Node Pools</strong> section, find the old node pool.</li> <li>Next to the node pool, click <span class="material-icons" aria-hidden="true" translate="no">delete</span> <strong>Delete</strong> .</li> <li>When prompted, confirm deletion by typing the node pool name and click <strong>Delete</strong>.</li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Verify the node pool's access scopes:</p> 
+<pre data-language="bash">gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --format="value(nodePools[].name,nodePools[].config.oauthScopes)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Compute Engine region or zone (for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code> ) for the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> </ul> <p>Review the output for each node pool. Ensure that at least one of the required scopes (<code translate="no" dir="ltr">https://www.googleapis.com/auth/logging.write</code>, <code translate="no" dir="ltr">https://www.googleapis.com/auth/cloud-platform</code>, or <code translate="no" dir="ltr">https://www.googleapis.com/auth/logging.admin</code>) is listed. If the required scopes are missing, re-create the node pool. You can't change access scopes on an existing node pool.</p>
+</li> <li>
+<p>If needed, create a new node pool with the required scope:</p> 
+<pre data-language="bash">gcloud container node-pools create NEW_NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --scopes=https://www.googleapis.com/auth/logging.write,OTHER_SCOPES
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NEW_NODE_POOL_NAME</var></code>: a name for the new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">OTHER_SCOPES</var></code>: a comma-separated list of any other scopes that your nodes require. If you don't need other scopes, omit this placeholder and the preceding comma.</li> </ul>
+</li> <li><p><a href="../how-to/migrate-nodes">Migrate your workloads to the new node pool</a>. After you migrate workloads to the new node pool, your applications run on nodes that have the necessary scopes to send logs to Cloud Logging.</p></li> <li>
+<p>Delete the old node pool:</p> 
+<pre data-language="bash">gcloud container node-pools delete OLD_NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre>
+</li> </ol></section> </div> <h3 id="sa-permissions">Verify node service account permissions</h3> <p>Nodes use a service account to authenticate with Google Cloud services, and this account needs specific IAM permissions to write logs.</p> <p><strong>Symptoms</strong>:</p> <ul> <li>Logs are missing from nodes.</li> <li>Inspecting logging agent logs (for example, Fluent Bit) might show permission-related errors, such as <code translate="no" dir="ltr">401</code> or <code translate="no" dir="ltr">403</code> codes when trying to write to Cloud Logging.</li> <li>You might see a <code translate="no" dir="ltr">Grant Critical Permissions to Node Service Account</code> notification for the cluster in the Google Cloud console.</li> </ul> <p><strong>Cause</strong>:</p> <p>This issue is caused by one of the following service accounts:</p> <ul> <li><p><strong>Node service account</strong>: the service account used by the node pool's nodes lacks the necessary IAM permissions to write logs to Cloud Logging. The node service account must have a role that includes the <code translate="no" dir="ltr">logging.logEntries.create</code> permission.</p></li> <li><p><strong>GKE node service agent</strong>: in GKE version 1.33 and later, the GKE <a href="../how-to/service-accounts#default-node-service-agent">node service agent</a> (<code translate="no" dir="ltr">service-<var translate="no">PROJECT_NUMBER</var>@gcp-sa-gkenode.iam.gserviceaccount.com</code>) must have the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.defaultNodeServiceAgent">Kubernetes Default Node Service Agent</a> (<code translate="no" dir="ltr">roles/container.defaultNodeServiceAgent</code>) role. This role gives GKE access to manage node resources and operations, including logging components.</p></li> </ul> <p>You can identify service accounts that don't have the required access by using <a href="../how-to/optimize-with-recommenders">recommendations</a>. To use recommendations to check for missing permissions, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>In the <strong>Kubernetes clusters</strong> page, locate the <strong>Notifications</strong> column.</li> <li>Check the <strong>Notifications</strong> column for the <strong>Grant critical permissions</strong> recommendation. This recommendation means that the <code translate="no" dir="ltr">NODE_SA_MISSING_PERMISSIONS</code> check has failed.</li> <li>If the recommendation is present, click it. A details panel opens, explaining the missing permissions and providing the steps to fix it.</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>List recommendations for missing service account permissions:</p> 
+<pre data-language="bash">gcloud recommender recommendations list \
+    --recommender=google.container.DiagnosisRecommender \
+    --location LOCATION \
+    --project PROJECT_ID \
+    --format yaml \
+    --filter="recommenderSubtype:NODE_SA_MISSING_PERMISSIONS"
+</pre>
+</li> <li>
+<p>Analyze the command output:</p> <ul> <li><p>If the command returns an empty list, then the recommender hasn't found any active <code translate="no" dir="ltr">NODE_SA_MISSING_PERMISSIONS</code> recommendations. The service accounts it checked appear to have the required permissions.</p></li> <li>
+<p>If the command returns one or more YAML blocks, then the recommender has identified a permission issue. Review the output for the following key fields:</p> <ul> <li>
+<code translate="no" dir="ltr">description</code>: provides a summary of the issue, such as specifying that your node service account is missing the <code translate="no" dir="ltr">roles/logging.logWriter</code> role or that the GKE service agent is missing the <code translate="no" dir="ltr">roles/container.defaultNodeServiceAgent</code> role.</li> <li>
+<code translate="no" dir="ltr">resource</code>: specifies the cluster that's affected.</li> <li>
+<code translate="no" dir="ltr">content.operations</code>: contains the recommended resolution. This section provides the exact <code translate="no" dir="ltr">gcloud projects
+add-iam-policy-binding</code> command required to grant the specific missing role.</li> </ul>
+</li> </ul>
+</li> </ol></section> </div> <p>The recommender can take up to 24 hours to reflect recent changes.</p> <p><strong>Resolution</strong>:</p> <p>To resolve this issue, try these steps:</p> <ol> <li>Grant the <code translate="no" dir="ltr">roles/container.defaultNodeServiceAccount</code> role on the cluster project to the node service account. This role includes the permissions that GKE needs to write logs. For more information, see <a href="https://docs.cloud.google.com/kubernetes-engine/security/configure-node-service-accounts#grant-minimum-role">Grant the minimum required role for GKE</a>.</li> <li>
+<p>After you complete the preceding step, if logs are still missing and the cluster uses version 1.33 or later, grant the <code translate="no" dir="ltr">roles/container.defaultNodeServiceAgent</code> role on the project to the GKE node service agent:</p> <ol> <li>
+<p>Get your project number:</p> 
+<pre>gcloud projects describe PROJECT_ID --format="value(projectNumber)"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p>
+</li> <li>
+<p>To grant the <code translate="no" dir="ltr">roles/container.defaultNodeServiceAgent</code> role to the node service agent, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>IAM</strong> page.</p> 
+<p><a class="button button-primary" href="https://console.cloud.google.com/iam-admin/iam" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="iam-admin/iam">Go to IAM</a> </p> </li> <li><p>Select the <strong>Include Google-provided role grants</strong> checkbox.</p></li> <li>
+<p>In the <span class="material-icons" aria-hidden="true" translate="no"> filter_list </span><strong>Filter</strong> field, specify the following service agent email address:</p> 
+<pre data-language="bash">service-PROJECT_NUMBER@gcp-sa-gkenode.iam.gserviceaccount.com
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> with the project number from the output of the preceding step.</p>
+</li> <li><p>Press <kbd>Enter</kbd>.</p></li> <li><p>Click <span class="material-icons" aria-hidden="true" translate="no">edit</span> <strong>Edit principal</strong>.</p></li> <li><p>Click <span class="material-icons" aria-hidden="true" translate="no">add</span> <strong>Add roles</strong>.</p></li> <li><p>In the search field, enter <code translate="no" dir="ltr">Kubernetes Engine Default Node Service Agent</code> and select the role.</p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Verify if the <code translate="no" dir="ltr">roles/container.defaultNodeServiceAgent</code> role is bound to the service agent:</p> 
+<pre data-language="bash">gcloud projects get-iam-policy PROJECT_ID \
+    --flatten="bindings[].members" \
+    --format='table(bindings.role)' \
+    --filter="bindings.members:serviceAccount:service-PROJECT_NUMBER@gcp-sa-gkenode.iam.gserviceaccount.com"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> with the project number from the output of the preceding step.</p> <p>In the output, look for <code translate="no" dir="ltr">roles/container.defaultNodeServiceAgent</code>.</p>
+</li> <li>
+<p>If the role is missing, grant it:</p> 
+<pre data-language="bash">gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-PROJECT_NUMBER@gcp-sa-gkenode.iam.gserviceaccount.com" \
+    --role="roles/container.defaultNodeServiceAgent"
+</pre>
+</li> </ol></section> </div>
+</li> </ol>
+</li> </ol> <h2 id="resource-performance">Troubleshoot resource and performance issues</h2> <p>If logs are missing intermittently or are dropped from high-traffic nodes, the cause might not be a misconfiguration, but a performance issue. Use the following sections to investigate whether your project is exceeding API quotas or if high log volume is overwhelming the agents on specific nodes.</p> <h3 id="api-quota">Investigate Cloud Logging API quota usage</h3> <p>To protect the service, Cloud Logging enforces a write quota on all projects, limiting the total volume of logs that Cloud Logging can ingest per minute.</p> <p><strong>Symptoms</strong>:</p> <ul> <li>Logs are intermittently or completely missing.</li> <li>You see <code translate="no" dir="ltr">RESOURCE_EXHAUSTED</code> errors related to <code translate="no" dir="ltr">logging.googleapis.com</code> in node or logging agent logs.</li> </ul> <p><strong>Cause</strong>:</p> <p>The project is exceeding the Cloud Logging API write requests quota. This issue prevents the logging agent from sending logs.</p> <p><strong>Resolution</strong>:</p> <p>To check the quota usage and request an increase, do the following:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Quotas</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/iam-admin/quotas" target="console" track-name="consoleLink" track-type="tasks">Go to Quotas</a></p>
+</li> <li><p>In the <span class="material-icons" aria-hidden="true" translate="no"> filter_list </span><strong>Filter</strong> field, type <code translate="no" dir="ltr">Cloud Logging API</code> and press <kbd>Enter</kbd>.</p></li> <li><p>In the filtered list, find the quota for <strong>Log write bytes per minute per region</strong> for the region that your cluster is in.</p></li> <li><p>Review the values in the <strong>Current usage percentage</strong> column. If usage is at or near the limit, you've likely exceeded the quota.</p></li> <li><p>To request an increase, click <strong>Edit quota</strong>, and follow the prompts. For more information, see <a href="https://docs.cloud.google.com/docs/quotas/view-manage">View and manage quotas</a>.</p></li> </ol> <p>To reduce usage, consider <a href="https://docs.cloud.google.com/logging/docs/routing/overview#exclusions">excluding logs</a> or reducing log verbosity from applications. You can also set up <a href="https://docs.cloud.google.com/docs/quota_detail/monitor#quota_alerts">alerting policies</a> to be notified before reaching the limit.</p> <h3 id="node-throughput-resources">Investigate node throughput and resource usage</h3> <p>The GKE logging agent on each node has its own throughput limit, which can be exceeded.</p> <p><strong>Symptoms</strong>:</p> <p>Logs from specific nodes are intermittently missing or delayed, particularly during periods of high cluster activity or heavy node resource usage.</p> <p><strong>Cause</strong>:</p> <p>The GKE logging agent has a default throughput limit (approximately 100 KBps per node). If applications on a node generate logs faster than this limit, the agent might drop logs, even if the project's overall API quota isn't exceeded. You can monitor node logging throughput by using the <code translate="no" dir="ltr">kubernetes.io/node/logs/input_bytes</code> metric in <a href="https://docs.cloud.google.com/monitoring/charts/metrics-explorer">Metrics Explorer</a>.</p> <p>Logs might also be missing if the node is under heavy CPU or memory pressure, leaving insufficient resources for the agent to process logs.</p> <p><strong>Resolution</strong>:</p> <p>To reduce throughput, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Standard clusters</strong></p>
+<p>Try the following solutions:</p> <ul> <li><p><strong>Enable high throughput logging</strong>: this feature increases the per-node capacity. For more information, see <a href="../how-to/adjust-log-throughput">Adjust Cloud Logging agent throughput</a>.</p></li> <li><p><strong>Reduce log volume</strong>: analyze application logging patterns. Reduce unnecessary or excessively verbose logging.</p></li> <li><p><strong>Deploy a custom logging agent</strong>: you can deploy and manage your own customized Fluent Bit DaemonSet, but you are then responsible for its configuration and maintenance.</p></li> <li><p><strong>Check node resource usage</strong>: even if the log volume is within limits, ensure the nodes aren't under heavy CPU or memory pressure. Insufficient node resources can hinder the logging agent's ability to process and send logs. You can check metrics like <code translate="no" dir="ltr">kubernetes.io/node/cpu/core_usage_time</code> and <code translate="no" dir="ltr">kubernetes.io/node/memory/used_bytes</code> in <a href="https://docs.cloud.google.com/monitoring/charts/metrics-explorer">Metrics Explorer</a>.</p></li> </ul></section> <section><p class="_code-tab"><strong>Autopilot clusters</strong></p>
+<p>Try the following solutions:</p> <ul> <li><p><strong>Reduce log volume</strong>: analyze your application logging patterns. Reduce unnecessary or excessively verbose logging. Ensure logs are structured where possible, because these types of logs can help with efficient processing. Exclude logs that aren't essential.</p></li> <li><p><strong>Optimize application performance</strong>: because node resources are managed in Autopilot clusters, ensure your applications aren't excessively consuming CPU or memory, which could indirectly affect the performance of node components like the logging agent. Although you don't manage nodes directly, application efficiency affects overall node health.</p></li> </ul></section> </div> <h2 id="filtering-application">Troubleshoot filtering and application issues</h2> <p>When your application successfully generates logs, but they still don't appear in Cloud Logging, the issue is often caused by filtering or the application's logging behavior. The following sections explore issues like log exclusion filters, container-level buffering, restrictive search queries, and applications not writing to <code translate="no" dir="ltr">stdout</code> or <code translate="no" dir="ltr">stderr</code>.</p> <h3 id="log-exclusions">Investigate log exclusion filters</h3> <p>The Logs Explorer only shows logs that match all filters in your query and the selected time range.</p> <p><strong>Symptoms</strong>:</p> <p>Specific logs that match certain criteria are missing from Cloud Logging, but other logs from the same sources are present.</p> <p><strong>Cause</strong>:</p> <p>Log exclusion filters are defined in your Cloud Logging sinks (often the <code translate="no" dir="ltr">_Default</code> sink). These rules silently drop logs that match specific criteria, even if they were successfully sent by the node.</p> <p><strong>Resolution</strong>:</p> <p>To review and modify exclusion filters, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Router</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs/router" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Router</a></p>
+</li> <li>
+<p>Identify the problematic filter:</p> <ol> <li>For each sink (besides the <code translate="no" dir="ltr">_Required</code> sink, which can't have exclusion filters) click <span class="material-icons" aria-hidden="true" translate="no">more_vert</span> <strong>More actions</strong> and select <strong>View sink details</strong>.</li> <li>Review the queries in the <strong>Exclusion filters</strong> section. Compare the filter logic against the attributes of your missing logs (for example, resource type, labels, or keywords).</li> <li>Copy the exclusion filter query.</li> <li>
+<p>Go to the <strong>Logs Explorer</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li><p>Paste the exclusion filter query into the query pane and click <strong>Run query</strong>.</p></li> <li><p>Review the results. The logs displayed are what the filter <em>would exclude</em>. If your missing logs appear in these results, then this filter is likely the cause.</p></li> </ol>
+</li> <li>
+<p>Disable or edit the filter:</p> <ol> <li>Return to the <strong>Logs Router</strong> page.</li> <li>Click <span class="material-icons" aria-hidden="true" translate="no">more_vert</span> <strong>More actions</strong> for the sink with the suspect filter and select <strong>Edit sink</strong>.</li> <li>Locate the <strong>Choose logs to filter out of sink</strong> section and find the exclusion filter.</li> <li>You can either click <strong>Disable</strong> to disable the filter, or modify its query to be more specific.</li> <li>Click <strong>Update sink</strong>. Changes apply to new logs.</li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>List all sinks in the project:</p> 
+<pre data-language="bash">gcloud logging sinks list --project=PROJECT_ID
+</pre>
+</li> <li>
+<p>View each sink's exclusion filters:</p> 
+<pre data-language="bash">gcloud logging sinks describe SINK_NAME --project=PROJECT_ID
+</pre> <p>In the output, review the <code translate="no" dir="ltr">exclusions</code> section. Compare the filter logic against the attributes of your missing logs (for example, resource type, labels, or keywords).</p>
+</li> <li>
+<p>To modify exclusions, update the sink's configuration:</p> <ol> <li>
+<p>Export the sink's configuration to a local file (for example, <code translate="no" dir="ltr">sink-config.yaml</code>):</p> 
+<pre data-language="bash">gcloud logging sinks describe SINK_NAME \
+    --format=yaml &gt; sink-config.yaml
+</pre>
+</li> <li><p>Open the <code translate="no" dir="ltr">sink-config.yaml</code> file in a text editor.</p></li> <li><p>Find the <code translate="no" dir="ltr">exclusions:</code> section and remove or modify the problematic filter.</p></li> <li>
+<p>Update the modified sink:</p> 
+<pre data-language="bash">gcloud logging sinks update SINK_NAME sink-config.yaml \
+    --project=PROJECT_ID
+</pre> <p>For more information about this command, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/logging/sinks/update"><code translate="no" dir="ltr">gcloud logging sinks update</code></a> documentation.</p>
+</li> </ol>
+</li> </ol></section> </div> <h3 id="container-log-buffering">Investigate container log buffering and delays</h3> <p>Applications and operating systems often use buffering to write data in chunks instead of line-by-line, which can improve performance.</p> <p><strong>Symptoms</strong>:</p> <ul> <li>Logs from specific containers appear in Cloud Logging only after the container exits, or there's a significant delay in the logs appearing.</li> <li>Sometimes, logs are incomplete.</li> </ul> <p><strong>Cause</strong>:</p> <p>This issue is often caused by log buffering. Although standard output (<code translate="no" dir="ltr">stdout</code>) is typically line-buffered when connected to a terminal, this behavior changes when output is piped. If an application's logs or startup scripts within a container pipe <code translate="no" dir="ltr">stdout</code> to other commands (for example, <code translate="no" dir="ltr">my-app | grep ...</code>), the output might become fully buffered. As a result, logs are held until the buffer is full or the pipe closes. This behavior can cause delays or data loss if the container terminates unexpectedly. Application-internal buffering can also cause delays.</p> <p><strong>Resolution</strong>:</p> <p>To resolve the issue, try the following solutions:</p> <ul> <li>
+<strong>Avoid piping <code translate="no" dir="ltr">stdout</code></strong>: if possible, modify container entry points or application commands to write logs directly to <code translate="no" dir="ltr">stdout</code> or <code translate="no" dir="ltr">stderr</code> without piping through other commands like <code translate="no" dir="ltr">grep</code> or <code translate="no" dir="ltr">sed</code> within the container.</li> <li>
+<strong>Ensure line buffering</strong>: <ul> <li>If piping is unavoidable, use tools that support line buffering. For example, use <code translate="no" dir="ltr">grep --line-buffered</code>.</li> <li>For custom applications, ensure they flush logs frequently, ideally after each line, when they write to <code translate="no" dir="ltr">stdout</code>. Many logging libraries have settings to control buffering.</li> </ul>
+</li> <li>
+<p><strong>Test buffering behavior</strong>: deploy the following Pod manifest and observe the effects in the logs by using the <code translate="no" dir="ltr">kubectl logs -f buffered-pod</code> command. Experiment by commenting and uncommenting the different <code translate="no" dir="ltr">command</code> arrays in the <code translate="no" dir="ltr">buffered-container</code> manifest:</p> 
+<pre># buffered.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+name: run-script
+data:
+run.sh: |
+    #!/bin/bash
+    echo "Starting..."
+    for i in $(seq 3600); do
+    echo "Log ${i}"
+    sleep 1
+    done
+    echo "Exiting."
+---
+apiVersion: v1
+kind: Pod
+metadata:
+name: buffered-pod
+spec:
+containers:
+    - name: buffered-container
+    image: ubuntu  # Or any other image with bash
+
+    # Case 1: Direct execution - line buffered by default to TTY
+    # Logs appear immediately.
+    command: ['/bin/bash', '-c', '/mnt/run.sh']
+
+    # Case 2: Piped to grep - fully buffered by default
+    # Logs might be delayed or appear in chunks.
+    # command: ['/bin/bash', '-c', '/mnt/run.sh | grep Log']
+
+    # Case 3: Piped to grep with --line-buffered
+    # Logs appear immediately.
+    # command: ['/bin/bash', '-c', '/mnt/run.sh | grep --line-buffered Log']
+
+    volumeMounts:
+        - name: scripts
+        mountPath: /mnt
+volumes:
+    - name: scripts
+    configMap:
+        name: run-script
+        defaultMode: 0777
+restartPolicy: Never
+</pre>
+</li> </ul> <h3 id="log-queries">Investigate Logs Explorer queries</h3> <p>If you are confident your logs are being collected but you can't find them, your search query or time range might be the issue.</p> <p><strong>Symptoms</strong>:</p> <p>Expected logs aren't appearing in search results, even though you know the application is generating them.</p> <p><strong>Cause</strong>:</p> <p>Your query in the Logs Explorer might have filters (for example, on namespaces, labels, resource types, or text) that inadvertently exclude the logs that you're looking for.</p> <p><strong>Resolution</strong>:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logging/logs" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li><p>Click <strong>Pick time range</strong>. Even if you think you know when the logs occurred, try a significantly broader range to rule out timing issues.</p></li> <li>
+<p>Simplify the query:</p> <ol> <li>Clear all filters.</li> <li>
+<p>Try filtering by your cluster only:</p> 
+<pre>resource.type="k8s_container"
+resource.labels.cluster_name="CLUSTER_NAME"
+resource.labels.location="LOCATION"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Compute Engine region or zone (for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code> ) for the cluster.</li> </ul>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> </ol>
+</li> <li>
+<p>If the broad query works, re-introduce your original filters one by one:</p> <ul> <li>
+<strong>Resource type</strong>: make sure that you use the correct resource type. For example, are you filtering by <code translate="no" dir="ltr">k8s_container</code> when you should be filtering by <code translate="no" dir="ltr">k8s_node</code>?</li> <li>
+<strong>Labels</strong>: double-check spellings for <code translate="no" dir="ltr">resource.labels</code> such as <code translate="no" dir="ltr">namespace_name</code>, <code translate="no" dir="ltr">container_name</code>, or custom labels.</li> <li>
+<strong>Severity</strong>: make sure the severity level (for example, <code translate="no" dir="ltr">severity=ERROR</code>) isn't too restrictive.</li> <li>
+<strong>Text payload</strong>: check for spelling mistakes and overly restrictive strings in search terms. For example, use <code translate="no" dir="ltr">:</code> for "contains" instead of <code translate="no" dir="ltr">=</code> for an exact match (<code translate="no" dir="ltr">jsonPayload.message:"error"</code> instead of <code translate="no" dir="ltr">jsonPayload.message="error"</code>).</li> </ul>
+</li> <li><p>Verify that your filters account for case sensitivity (text is usually case-insensitive, but labels might not be), ensure values have no hidden characters or extra spaces, and check if terms with special characters need to be enclosed in quotes.</p></li> <li><p>Review the <strong>Timeline</strong>. Sudden drops when adding a filter can help you to identify the problematic part of the query.</p></li> </ol> <p>For more advice about effective logging queries, see <a href="https://docs.cloud.google.com/logging/docs/view/logging-query-language#finding-quickly">Finding log entries quickly</a> in the Cloud Logging documentation.</p> <p>If you still can't find the logs after you refine your query, the issue might not be the query, but a problem described in other sections of this document.</p> <h3 id="application-issues">Investigate application-specific logging behavior</h3> <p>The GKE logging agent only collects logs written to the <code translate="no" dir="ltr">stdout</code> and <code translate="no" dir="ltr">stderr</code> streams.</p> <p><strong>Symptoms</strong>:</p> <p>No logs for a specific Pod or container are visible in Cloud Logging, even though other logs from the cluster are present.</p> <p><strong>Cause</strong>:</p> <p>The application isn't writing to <code translate="no" dir="ltr">stdout</code> or <code translate="no" dir="ltr">stderr</code>. It might be misconfigured to write logs to a file inside the container, where the logging agent can't collect them.</p> <p>The application might also be mixing JSON and non-JSON text in its output. The logging agent's parser expects a consistent format (JSON or text) from a single stream. If an application configured for JSON logging outputs a plain-text line, it can break the parser, causing logs to be dropped or ingested incorrectly.</p> <p><strong>Resolution</strong>:</p> <ol> <li>
+<p>Determine the Pod name and namespace of the application whose logs are missing:</p> 
+<pre>kubectl get pods -n NAMESPACE_NAME
+</pre>
+</li> <li>
+<p>Check container logs:</p> <ul> <li>
+<p>If the Pod has a single container, run the following command:</p> 
+<pre>kubectl logs POD_NAME \
+    -n NAMESPACE_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: the name of your Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_NAME</var></code>: the namespace of your Pod.</li> </ul>
+</li> <li>
+<p>If the Pod has multiple containers, specify the container name:</p> 
+<pre>kubectl logs POD_NAME \
+    -c CONTAINER_NAME \
+    -n NAMESPACE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CONTAINER_NAME</var></code> with the name of the container within the Pod.</p>
+</li> <li>
+<p>To follow logs in real-time, run the following command:</p> 
+<pre>kubectl logs -f POD_NAME \
+    -c CONTAINER_NAME \
+    -n NAMESPACE_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: the name of your Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTAINER_NAME</var></code>: the name of the container within the Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_NAME</var></code>: the namespace of your Pod.</li> </ul>
+</li> </ul>
+</li> <li>
+<p>Analyze the output:</p> <ul> <li>
+<p>If the <code translate="no" dir="ltr">kubectl logs</code> command has no output or if the command output doesn't contain the expected logs, then the problem is with the application itself. The <code translate="no" dir="ltr">kubectl logs</code> command reads directly from the <code translate="no" dir="ltr">stdout</code> and <code translate="no" dir="ltr">stderr</code> streams captured by the container runtime. If logs aren't here, GKE's logging agent can't see them.</p> <p>Change your application's code or configuration to stop writing to a file and instead log all messages directly to <code translate="no" dir="ltr">stdout</code> (for regular logs) and <code translate="no" dir="ltr">stderr</code> (for error logs).</p>
+</li> <li><p>If you see a mix of JSON strings and plain text lines, this output indicates a mixed-format issue. Configure your application to only write valid, single-line JSON objects to <code translate="no" dir="ltr">stdout</code> and <code translate="no" dir="ltr">stderr</code>.</p></li> <li><p>If the <code translate="no" dir="ltr">kubectl logs</code> command <em>does</em> show the expected logs, then the issue is likely further down the logging pipeline (for example, agent, permissions, or Cloud Logging service).</p></li> </ul>
+</li> </ol> <h2 id="platform-service-issues">Troubleshoot platform and service issues</h2> <p>The following sections help you investigate issues external to your immediate configuration, such as log retention policies, Cloud Logging health, or unsupported GKE versions.</p> <h3 id="log-retention">Investigate log retention periods</h3> <p>Logs are stored in buckets, and each bucket has a retention period that defines how long its logs are kept before being automatically deleted.</p> <p><strong>Symptoms</strong>:</p> <p>Logs older than a certain date are missing.</p> <p><strong>Cause</strong>:</p> <p>The logs that you're searching for are older than the retention period for the log bucket that they were routed to.</p> <p><strong>Resolution</strong>:</p> <p>To identify and update the retention period, select one of the following options:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Identify the bucket to which your GKE logs are routed to:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Router</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs/router" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Router</a></p>
+</li> <li>
+<p>Review the <strong>Destination</strong> column, which shows where the logs are being routed.</p> <p>The destination looks similar to the following:</p> 
+<pre data-language="bash">logging.googleapis.com/projects/PROJECT_ID/locations/LOCATION/buckets/BUCKET_ID
+</pre> <p>Note the <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>, <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>, and <code translate="no" dir="ltr"><var translate="no">BUCKET_ID</var></code>.</p> <p>Logs are often routed to the <code translate="no" dir="ltr">_Default</code> bucket, but might also be routed to other buckets if you have custom sinks configured.</p>
+</li> </ol>
+</li> <li>
+<p>Check the log bucket retention period:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Storage</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs/storage" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Storage</a></p>
+</li> <li><p>Find the buckets matching the <code translate="no" dir="ltr"><var translate="no">BUCKET_ID</var></code>, <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>, and <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> from the sink's destination.</p></li> <li><p>For each relevant bucket, view the <strong>Retention period</strong> column.</p></li> <li>
+<p>If the logs that you want to view are older than the retention period, then Cloud Logging has deleted them. If you need a longer retention period, do the following:</p> <ol> <li>For the bucket whose retention period you want to extend, click <span class="material-icons" aria-hidden="true" translate="no">more_vert</span> <strong>More actions</strong>.</li> <li>Select <strong>Edit bucket</strong>, and update the retention period. Be aware of <a href="https://cloud.google.com/stackdriver/pricing#logs-storage">potential cost implications</a>.</li> </ol>
+</li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Identify the bucket to which your GKE logs are routed to:</p> 
+<pre data-language="bash">gcloud logging sinks list --project=PROJECT_ID
+</pre> <p>Review the output. The <code translate="no" dir="ltr">destination</code> field for each sink shows where the logs are being routed. The destination format for a log bucket is:</p> 
+<pre data-language="bash">logging.googleapis.com/projects/PROJECT_ID/locations/LOCATION/buckets/BUCKET_ID
+</pre> <p>Note the <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>, <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>, and <code translate="no" dir="ltr"><var translate="no">BUCKET_ID</var></code>.</p> <p>Logs are often routed to the <code translate="no" dir="ltr">_Default</code> bucket.</p>
+</li> <li>
+<p>Check the log bucket retention period:</p> 
+<pre data-language="bash">gcloud logging buckets describe BUCKET_ID \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre> <p>In the output, look for the <code translate="no" dir="ltr">retentionDays</code> field. If the logs that you need are older than the value listed for <code translate="no" dir="ltr">retentionDays</code>, then Cloud Logging has deleted them.</p>
+</li> <li>
+<p>If you need a longer retention period, update it:</p> 
+<pre data-language="bash">gcloud logging buckets update BUCKET_ID \
+    --location=LOCATION \
+    --retention-days=RETENTION_DAYS \
+    --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_ID</var></code>: the ID of the log bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Compute Engine region or zone (for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code> ) for the bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RETENTION_DAYS</var></code>: the number of days to retain logs. Be aware of <a href="https://cloud.google.com/stackdriver/pricing#logs-storage">potential cost implications</a> for increasing the retention period.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> </ul>
+</li> </ol></section> </div> <h3 id="service-issues">Investigate Cloud Logging service issues and ingestion delays</h3> <p>Sometimes, the logging pipeline itself might experience issues, either from a service-wide disruption or a temporary, large-scale ingestion delay.</p> <p><strong>Symptoms</strong>:</p> <ul> <li>Widespread or intermittent log loss across multiple projects or clusters.</li> <li>Logs are significantly delayed in appearing in Logs Explorer.</li> </ul> <p><strong>Cause</strong>:</p> <ul> <li>
+<strong>Cloud Logging service disruption</strong>: a rare, service-wide disruption can prevent log ingestion, leading to widespread delays or total log loss.</li> <li>
+<strong>High log volume</strong>: even without an official disruption, high log volume from your project or region can temporarily overwhelm the ingestion service, causing logs to be delayed in appearing.</li> </ul> <p><strong>Resolution</strong>:</p> <ul> <li><p>Check the status of Google Cloud services by visiting the <a href="https://status.cloud.google.com/">Google Cloud Service Health dashboard</a>. Look for any open incidents related to Cloud Logging or GKE.</p></li> <li><p>Account for potential ingestion delays. If logs aren't immediately visible, and there are no active incidents, allow some time for ingestion, especially if the log volume is high. Check again after a few minutes.</p></li> </ul> <h3 id="unsupported-version">Investigate cluster version</h3> <p>GKE regularly releases new versions that include bug fixes and performance improvements for components, including the logging agent.</p> <p><strong>Symptoms</strong>:</p> <p>Logging issues coincide with cluster version limitations.</p> <p><strong>Cause</strong>:</p> <p>The cluster might be running an older or unsupported GKE version that has known logging agent issues or lacks certain logging features.</p> <p><strong>Resolution</strong>:</p> <p>To resolve this issue, do the following:</p> <ol> <li>
+<p>Check your cluster's version:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location LOCATION \
+    --format="value(currentMasterVersion)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Compute Engine region or zone (for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code> ) for the cluster.</li> </ul>
+</li> <li><p>To ensure it's a supported version, compare this version against the <a href="../release-schedule">GKE Release schedule</a>.</p></li> <li><p>If the cluster is using an unsupported version, <a href="../how-to/upgrading-a-cluster">upgrade your cluster</a>.</p></li> </ol> <h2 id="verify-logs-collected">Verify that the logs are collected</h2> <p>Verify that the logs you expect are collected. For a description of collected logs, see <a href="../concepts/about-logs#what_logs">What logs are collected</a>.</p> <p>For example, in the audit logs, the <code translate="no" dir="ltr">command.gke.io/dryRun</code> label helps you distinguish between logs from dry run requests and logs from requests that modified resources.</p> <p>The logs with these labels are produced when you run a <code translate="no" dir="ltr">kubectl</code> command with the <a href="https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/576-dry-run/README.md#kubectl"><code translate="no" dir="ltr">--dry-run=server</code></a> flag. However, <code translate="no" dir="ltr">kubectl</code> commands with the <code translate="no" dir="ltr">--dry-run=client</code> flag don't produce logs because they don't make requests to the Kubernetes API server.</p> <h2 id="whats_next">What's next</h2> <ul> <li>
+<p>If you can't find a solution to your problem in the documentation, see <a href="../getting-support" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Get support</a> for further help, including advice on the following topics:</p> <ul> <li>Opening a support case by contacting <a href="https://cloud.google.com/support-hub" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Cloud Customer Care</a>.</li> <li>Getting support from the community by <a href="http://stackoverflow.com/questions/tagged/google-kubernetes-engine" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">asking questions on StackOverflow</a> and using the <code translate="no" dir="ltr">google-kubernetes-engine</code> tag to search for similar issues. You can also join the <a href="https://googlecloud-community.slack.com/messages/C0B9GKTKJ/" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">#kubernetes-engine</code> Slack channel</a> for more community support.</li> <li>Opening issues or feature requests by using the <a href="https://docs.cloud.google.com/support/docs/issue-trackers" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">public issue tracker</a>.</li> </ul>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/logging" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/logging</a>
+  </p>
+</div>

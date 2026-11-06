@@ -1,0 +1,161 @@
+<h1>Design resilient long-running GPU jobs</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <aside class="beta"> <p> <strong> Preview — Long running GPU jobs </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>This tutorial explains how to design and deploy resilient, GPU-enabled Cloud Run jobs running up to 12 hours.</p> <p>Although Cloud Run supports extended task timeouts, it does not offer an SLA for uninterrupted execution. Because GPU-enabled tasks are not live-migrated, routine weekly maintenance will terminate them mid-run. Consequently, any extended task should be expected to be interrupted at least once. To ensure your job finishes successfully without wasting compute resources, design your application to checkpoint and resume rather than relying on a single, uninterrupted run.</p> <p>This tutorial guides you on how to implement checkpointing, handle platform <code translate="no" dir="ltr">SIGTERM</code> signals, and configure maximum retries.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <p>In this tutorial, you will do the following:</p> <ul> <li>Prepare a Python application that implements checkpointing and handles <code translate="no" dir="ltr">SIGTERM</code> signals.</li> <li>Create a Cloud Storage bucket to persist checkpoints.</li> <li>Build and deploy a Cloud Run job with GPU enabled, a 12 hour task timeout, and a configured retry policy.</li> <li>Run the job and understand how to monitor for preemption events in the logs.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://docs.cloud.google.com/build/docs">Cloud Build</a></li> <li><a href="https://docs.cloud.google.com/artifact-registry">Artifact Registry</a></li> <li><a href="https://docs.cloud.google.com/run">Cloud Run</a></li> <li><a href="https://docs.cloud.google.com/storage">Cloud Storage</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> </cloud-free-trial> <li>
+<p> Enable the Cloud Run, Artifact Registry, Cloud Build, and Cloud Storage APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com storage.googleapis.com</pre>
+</li> <li>Set your region as an environment variable: 
+<pre>export REGION=REGION</pre>
+</li> <li>Create a service account for the job: 
+<pre>gcloud iam service-accounts create gpu-job-sa</pre>
+</li> <li>Ensure you have [sufficient GPU quota](/run/docs/configuring/jobs/gpu#request-quota) (e.g., Nvidia L4) in your chosen region.</li> </ol> </section> <div id="tutorial-content"> <h2 id="prepare_the_application">Prepare your application</h2> <p>To make a long-running job resilient, your application must:</p> <ol> <li>
+<p>Periodically save progress (checkpointing) to a persistent location, such as a mounted Cloud Storage bucket.</p> <p>You have approximately 10 seconds after <code translate="no" dir="ltr">SIGTERM</code> before the task is killed. This is not enough time to write a large model checkpoint. Treat the <code translate="no" dir="ltr">SIGTERM</code> handler as a best-effort flush of small state only, and rely on periodic checkpointing as your primary protection. Choose your checkpoint interval based on how much work you can afford to lose, bearing in mind that more frequent checkpoints mean more time not spent doing useful work. The goal is to achieve the right balance for your use case.</p>
+</li> <li><p>Restore state from the last checkpoint upon startup.</p></li> <li><p>Listen for the <code translate="no" dir="ltr">SIGTERM</code> signal, which Cloud Run sends 10 seconds before the maintenance process, and attempt to save a final checkpoint before exiting.</p></li> </ol> <p>The following example illustrates how to implement these features.</p> <h3 id="create_the_application_code">Create the application code</h3> <ol> <li>
+<p>Create a directory for your project:</p> 
+<pre>mkdir gc-run-gpu-resilience
+cd gc-run-gpu-resilience
+</pre>
+</li> <li>
+<p>Create a file named <code translate="no" dir="ltr">task.py</code>, and paste in the following script to simulate a training or batch process that supports checkpointing and signal handling:</p> 
+<pre>import os
+import sys
+import time
+import signal
+
+# The checkpoint directory will be mounted to this path
+CHECKPOINT_DIR = "/checkpoints"
+# Cloud Run sets these variables automatically
+JOB_NAME = os.environ.get("CLOUD_RUN_JOB", "local-job")
+TASK_INDEX = os.environ.get("CLOUD_RUN_TASK_INDEX", "0")
+CHECKPOINT_FILE = os.path.join(
+    CHECKPOINT_DIR, f"{JOB_NAME}-task-{TASK_INDEX}-checkpoint.txt")
+TOTAL_STEPS = 100
+current_step = 0
+is_exiting = False
+
+def save_checkpoint(step):
+    print(f"Saving checkpoint at step {step} to {CHECKPOINT_FILE}...")
+    try:
+        # Write to a temp file and rename to ensure atomicity
+        temp_file = CHECKPOINT_FILE + ".tmp"
+        with open(temp_file, "w") as f:
+            f.write(str(step))
+        os.rename(temp_file, CHECKPOINT_FILE)
+        print("Checkpoint saved successfully.")
+    except Exception as e:
+        print(f"Failed to save checkpoint: {e}")
+
+def load_checkpoint():
+    print(f"Looking for a checkpoint at {CHECKPOINT_FILE}...")
+    global current_step
+    if os.path.exists(CHECKPOINT_FILE):
+        try:
+            with open(CHECKPOINT_FILE, "r") as f:
+                current_step = int(f.read().strip())
+            print(f"Resuming from checkpointed step {current_step}.")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}. Starting from scratch.")
+    else:
+        print("No checkpoint found. Starting from scratch.")
+
+def sigterm_handler(signum, frame):
+    global is_exiting
+    print("Received SIGTERM signal from platform. Initiating graceful shutdown...")
+    is_exiting = True
+
+# Register the signal handler for SIGTERM
+signal.signal(signal.SIGTERM, sigterm_handler)
+
+# Load existing checkpoint if any to resume work
+load_checkpoint()
+
+# Simulate work loop
+while current_step &lt; TOTAL_STEPS and not is_exiting:
+    print(f"Processing step {current_step}/{TOTAL_STEPS}...")
+    # Simulate heavy GPU computation
+    time.sleep(1)
+    current_step += 1
+    # Periodically save checkpoint (e.g., every 5 steps)
+    if current_step % 5 == 0:
+        save_checkpoint(current_step)
+
+if is_exiting:
+    # Save final state before exiting due to preemption
+    # Best-effort only: with ~10s before SIGKILL this will not complete for
+    # large state. Periodic checkpointing (above) is what actually protects
+    # you.
+    save_checkpoint(current_step)
+    # Note that save_checkpoint already writes-then-renames for atomicity,
+    # which is good, but the reason it matters here is that a truncated
+    # checkpoint from an interrupted final save must not clobber the last
+    # good one.
+    print("Graceful shutdown complete. Exiting with error code to trigger retry.")
+    # Exit with a non-zero code to signal to Cloud Run that the task
+    # was interrupted and needs to be retried from the checkpoint.
+    sys.exit(143)
+    # Note that this statement deliberately consumes of the configured retry
+    # attempts.
+
+print("Task completed successfully.")
+sys.exit(0)
+</pre>
+</li> <li><p>Create a <code translate="no" dir="ltr">Dockerfile</code> to containerize the application:</p></li> </ol> <p>See this <a href="https://github.com/GoogleCloudPlatform/devrel-demos/blob/main/ai-ml/finetune_gemma/README.md">example</a> for a more detailed, realistic implementation.</p> <h2 id="create-bucket">Create a Cloud Storage bucket for checkpoints</h2> <p>Create a Cloud Storage bucket to store the checkpoint files, and grant your job's service account permission to access it.</p> <ol> <li>
+<p>Create the bucket:</p> 
+<pre>gcloud storage buckets create gs://gpu-checkpoints-PROJECT_ID \
+    --location REGION
+</pre>
+</li> <li>
+<p>Grant the Storage Object Admin role to the job's service account:</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://gpu-checkpoints-PROJECT_ID \
+    --member="serviceAccount:gpu-job-sa@PROJECT_ID.iam.gserviceaccount.com" \
+    --role="roles/storage.objectAdmin"
+</pre>
+</li> </ol> <h2 id="deploy-job">Deploy the job</h2> <p>Deploy the job to Cloud Run:</p> 
+<pre>gcloud beta run jobs deploy gpu-resilient-job \
+    --source=. \
+    --region REGION \
+    --gpu 1 \
+    --gpu-type nvidia-l4 \
+    --no-gpu-zonal-redundancy \
+    --task-timeout 168h \
+    --max-retries 3 \
+    --service-account gpu-job-sa@PROJECT_ID.iam.gserviceaccount.com \
+    --add-volume=name=checkpoint-volume,type=cloud-storage,bucket=gpu-checkpoints-PROJECT_ID \
+    --add-volume-mount=volume=checkpoint-volume,mount-path=/checkpoints
+</pre> <p>Note the following critical flags:</p> <ul> <li>
+<code translate="no" dir="ltr">--task-timeout 168h</code>: Allows the task to run for up to 12 hours.</li> <li>
+<code translate="no" dir="ltr">--max-retries 3</code>: For GPU jobs with a timeout greater than 1 hour, we recommend setting the default configuration of 3 retries. To prevent silent failures during platform maintenance, we recommend against setting 0 retries. Finally, we recommend budgeting for at least 1 retry for maintenance-related failure as well as for additional retries for application failures over a 12 hour execution period.</li> <li>
+<p><code translate="no" dir="ltr">--add-volume</code> and <code translate="no" dir="ltr">--add-volume-mount</code>: Mounts the Cloud Storage bucket to <code translate="no" dir="ltr">/checkpoints</code> so the application can persist state across task retries.</p> <aside class="caution"><strong>Caution:</strong><span> Note that timeout is per attempt, the total exposure is timeout x (retries + 1), and that GPU time is billed for the full duration of each attempt.</span></aside>
+</li> </ul> <h2 id="run-job">Run and monitor the job</h2> <ol> <li>
+<p>Execute the job:</p> 
+<pre>gcloud run jobs execute gpu-resilient-job --region REGION
+</pre> <p>This command returns a message resembling the following:</p> 
+<pre>Execution [gpu-resilient-job-abcde] has been successfully started.
+
+View details about this execution by running `gcloud run jobs executions
+describe gpu-resilient-job-abcde`.
+
+See logs for this execution at: https://console.cloud.google.com/logs/viewer?project=YOUR_PROJECT_ID&amp;resource=cloud_run_job/job_name/my-job/location/my-region/execution_id/gpu-resilient-job-abcde
+</pre> <p>The string <code translate="no" dir="ltr">gpu-resilient-job-abcde</code> is the auto-generated unique ID for this specific execution attempt. You can use it to monitor or cancel this specific run. The output also includes a direct link to the Logs Explorer page in the Google Cloud console to view output or errors from your job tasks.</p>
+</li> <li>
+<p>Monitor the logs. If a maintenance event occurs, Cloud Run logs a warning. You will see:</p> <ul> <li>Your application logs: <code translate="no" dir="ltr">Received SIGTERM signal from platform. Initiating graceful shutdown...</code> followed by <code translate="no" dir="ltr">Saving checkpoint...</code>.</li> <li>A system log indicating preemption: <code translate="no" dir="ltr">Container instance preemption initiated by the platform due to underlying hardware maintenance.</code> with reason <code translate="no" dir="ltr">INSTANCE_PREEMPTED</code>.</li> <li>Cloud Run automatically restarting the task.</li> <li>Your application logs upon restart: <code translate="no" dir="ltr">Resuming from checkpointed step X.</code>.</li> </ul>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p>To avoid additional charges to your Google Cloud account, delete all the resources you deployed with this quickstart.</p> <h3 id="delete-repo">Delete your repository</h3> <p>Cloud Run only charges for the time your job executes. However, you might still be <a href="https://cloud.google.com/artifact-registry/pricing">charged for storing the container image in Artifact Registry</a>. To delete Artifact Registry repositories, follow the steps in <a href="https://docs.cloud.google.com/artifact-registry/docs/manage-repos#delete">Delete repositories</a> in the Artifact Registry documentation.</p> <h3 id="delete-service">Delete your job</h3> <p>Cloud Run jobs only incur cost when a job task is executing. To delete your Cloud Run job, follow one of these steps:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To delete a job:</p> <ol> <li>
+<p>In the Google Cloud console, go to Cloud Run:</p> <p><a href="https://console.cloud.google.com/run/jobs" target="console" track-type="task" track-name="consoleLink" track-metadata-end-goal="deleteService" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>Locate the job you want to delete in the jobs list, and click its checkbox to select it.</p></li> <li><p>Click <strong>Delete</strong>. This terminates all the job executions in progress and all running container instances.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To delete a job, run the following command:</p> 
+<pre data-language="bash">gcloud run jobs delete JOB_NAME</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">JOB_NAME</var></code> with the name of the job.</p></section> </div> <h3 id="delete_your_test_project">Delete your test project</h3> <p>Deleting your Google Cloud project stops billing for all resources in that project. To release all Google Cloud resources in your project, follow these steps:</p> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <p>Delete the Cloud Storage bucket:</p> 
+<pre>gcloud storage buckets delete gs://gpu-checkpoints-PROJECT_ID
+</pre> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn more about <a href="../jobs-retries">Jobs retries and checkpoints</a>.</li> <li>Review <a href="../configuring/jobs/gpu-best-practices">GPU performance best practices</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/tutorials/long-running-gpu-jobs" class="_attribution-link">https://docs.cloud.google.com/run/docs/tutorials/long-running-gpu-jobs</a>
+  </p>
+</div>

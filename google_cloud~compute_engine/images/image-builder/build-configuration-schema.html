@@ -1,0 +1,119 @@
+<h1>Cloud Build configuration file</h1>  <aside class="note"> <b>Note:</b> Image Builder is generally available, but your project must be added to an allowlist before you can use it. To request access, submit the <a href="https://forms.gle/4NncEhwetZDjaPx9A">access request form</a> or contact your Google Cloud account team. The allowlist covers only the service accounts in your project and doesn't cover Google-owned service accounts. For more information, see <a href="prerequisites#allowlist-coverage">Service accounts covered by the allowlist</a>. </aside> <p>This document describes the structure and parameters of the Cloud Build configuration file (<code translate="no" dir="ltr">cloudbuild.yaml</code>) that's used to orchestrate the steps of the Image Builder pipeline: parsing, building, validation, and release publishing.</p> <h2 id="schema-overview">Schema overview</h2> <p>A standard Image Builder <code translate="no" dir="ltr">cloudbuild.yaml</code> file follows the <a href="https://docs.cloud.google.com/build/docs/build-config-file-schema">standard Cloud Build configuration file structure</a> and orchestrates three sequential container build steps: <code translate="no" dir="ltr">/build</code>, <code translate="no" dir="ltr">/validate</code>, and <code translate="no" dir="ltr">/publish</code>.</p> 
+<pre>substitutions:
+  _GCS_WORKDIR: 'gs://BUCKET_NAME/workdir/'
+  _IMAGE_BUILDER_CONFIG_PATH: 'imagebuilder.yaml'
+  _SERVICE_ACCOUNT: 'projects/PROJECT_ID/serviceAccounts/SERVICE_ACCOUNT_EMAIL'
+  _IMAGE_OUTPUT_PATH: 'image-builder/binaryOut'
+  _ARTIFACT_REGISTRY_RESOURCE_URI: 'projects/PROJECT_ID/locations/REGION/repositories/REPOSITORY_NAME/packages/PACKAGE_NAME/versions/v${BUILD_ID}'
+
+steps:
+  # Step 1: Parse configs and run OS customization on the worker VM
+  - name: 'REGION-docker.pkg.dev/image-builder-official/release/builder:stable'
+    script: |
+      #!/usr/bin/env bash
+      /build
+    id: 'imagebuilder-customize'
+    results:
+      - name: image_builder_telemetry_metrics
+      - name: base_image
+        attestationType: "https://cloudbuild.googleapis.com/attestations/build_content_restrictions"
+        attestationContent: base_image
+
+  # Step 2: Validate by running system boot checks on the test VM
+  - name: 'REGION-docker.pkg.dev/image-builder-official/release/validator:stable'
+    script: |
+      #!/usr/bin/env bash
+      /validate
+    id: 'imagebuilder-validate'
+    results:
+      - name: image_builder_telemetry_metrics
+
+  # Step 3: Register OS image and publish tar file to Artifact Registry
+  - name: 'REGION-docker.pkg.dev/image-builder-official/release/builder:stable'
+    script: |
+      #!/usr/bin/env bash
+      /publish
+    id: 'imagebuilder-publish'
+    results:
+      - name: image_builder_telemetry_metrics
+
+options:
+  automapSubstitutions: true
+  requestedVerifyOption: VERIFIED
+  substitutionOption: ALLOW_LOOSE
+  dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY
+
+artifacts:
+  generic_artifacts:
+    - folder: '${_IMAGE_OUTPUT_PATH}'
+      registry_path: '${_ARTIFACT_REGISTRY_RESOURCE_URI}'
+
+timeout: '3600s'</pre> <h2 id="substitutions">Substitution variables</h2> <p>The <code translate="no" dir="ltr">cloudbuild.yaml</code> file uses the following substitution variables to map directly to environment variables for execution:</p> 
+<pre>substitutions:
+  _GCS_WORKDIR: 'gs://BUCKET_NAME/workdir/'
+  _IMAGE_BUILDER_CONFIG_PATH: 'imagebuilder.yaml'
+  _SERVICE_ACCOUNT: 'projects/PROJECT_ID/serviceAccounts/SERVICE_ACCOUNT_EMAIL'
+  _IMAGE_OUTPUT_PATH: 'image-builder/binaryOut'
+  _ARTIFACT_REGISTRY_RESOURCE_URI: 'projects/PROJECT_ID/locations/REGION/repositories/REPOSITORY_NAME/packages/PACKAGE_NAME/versions/v${BUILD_ID}'</pre> <ul> <li>
+<code translate="no" dir="ltr">_GCS_WORKDIR</code>: The regional Cloud Storage path used as a temporary staging location for artifacts like serial logs, temporary image archives, and guest execution histories. The bucket must already exist.</li> <li>
+<p><code translate="no" dir="ltr">_IMAGE_BUILDER_CONFIG_PATH</code>: The path to your <code translate="no" dir="ltr">imagebuilder.yaml</code> customization recipe. This can be a remote Cloud Storage path (for example, <code translate="no" dir="ltr">gs://<var translate="no">BUCKET_NAME</var>/imagebuilder.yaml</code>), or a relative path in your workspace or GitHub repository depending on the source.</p> <aside class="note"><strong>Note:</strong><span> If fetching the configuration file from a remote Cloud Storage location, the object size must not exceed 1 MB.</span></aside>
+</li> <li><p><code translate="no" dir="ltr">_SERVICE_ACCOUNT</code>: The full Identity and Access Management (IAM) resource name of the <a href="prerequisites#service-account">service account configured to run the build</a> and authorize orchestrator steps.</p></li> <li><p><code translate="no" dir="ltr">_IMAGE_OUTPUT_PATH</code>: The output path of the exported tar file inside the Cloud Build <code translate="no" dir="ltr">/workspace/</code> directory.</p></li> <li><p><code translate="no" dir="ltr">_ARTIFACT_REGISTRY_RESOURCE_URI</code> (Optional): The resource URI for the generic repository in Artifact Registry. If provided, the pipeline pushes the generated immutable image tar file and generates attestations at this location.</p></li> </ul> <h2 id="steps">Steps</h2> <p>Image Builder runs three distinct container steps in sequence to orchestrate your OS image build. Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> in the container image path with the target Google Cloud region where you set up your pipelines, such as <code translate="no" dir="ltr">us-central1</code>, <code translate="no" dir="ltr">europe-west1</code>, or <code translate="no" dir="ltr">asia-east1</code>:</p> 
+<pre>steps:
+  - name: 'REGION-docker.pkg.dev/image-builder-official/release/builder:stable'
+    script: |
+      #!/usr/bin/env bash
+      /build
+    id: 'imagebuilder-customize'
+
+  - name: 'REGION-docker.pkg.dev/image-builder-official/release/validator:stable'
+    script: |
+      #!/usr/bin/env bash
+      /validate
+    id: 'imagebuilder-validate'
+
+  - name: 'REGION-docker.pkg.dev/image-builder-official/release/builder:stable'
+    script: |
+      #!/usr/bin/env bash
+      /publish
+    id: 'imagebuilder-publish'</pre> <h3 id="telemetry-step-id-requirements">Telemetry and step ID requirements</h3> <p>The orchestrator container identifies and tracks the progression of each build phase—customization, validation, and publishing—by reading the <code translate="no" dir="ltr">id</code> field of each step in your <code translate="no" dir="ltr">cloudbuild.yaml</code> file.</p> <p>Step IDs must begin with the <code translate="no" dir="ltr">imagebuilder-</code> prefix, such as <code translate="no" dir="ltr">imagebuilder-customize</code>, <code translate="no" dir="ltr">imagebuilder-validate</code>, and <code translate="no" dir="ltr">imagebuilder-publish</code>, to enable Image Builder to collect service-specific telemetry metrics.</p> <p>When you include <code translate="no" dir="ltr">image_builder_telemetry_metrics</code> in the <code translate="no" dir="ltr">results</code> block of each step, Image Builder securely collects high-level pipeline execution metrics to monitor and track service reliability as follows:</p> <ul> <li>Build execution and status: Success or failure status and completion duration for each build step and customization action.</li> <li>Environment details: The Compute Engine machine type, zone, and container version tag used during execution.</li> <li>Image metadata: Base OS distribution, version, and configured guest OS features.</li> <li>Validation test results: Pass, fail, or skipped status of automated system validation tests, such as VM boot, Secure Boot, block storage health, guest agent status, and network driver binding.</li> </ul> <h3 id="customize-step">Customization step</h3> <p>The customization step validates the schema of <code translate="no" dir="ltr">imagebuilder.yaml</code>, checks IAM permissions, launches the worker VM instance, mounts the customization binary disk, runs the customization provisioner, and securely exports the boot disk partition.</p> <ul> <li>
+<strong>Container image</strong>: <code translate="no" dir="ltr">us-central1-docker.pkg.dev/image-builder-official/release/builder:stable</code>
+</li> <li>
+<strong>Script command</strong>: <code translate="no" dir="ltr">/build</code>
+</li> <li>
+<strong>Results sub-block</strong>: <ul> <li>
+<code translate="no" dir="ltr">image_builder_telemetry_metrics</code>: Collects customization build execution metrics.</li> <li>
+<code translate="no" dir="ltr">base_image</code> (Optional): Records base source image details in build attestation metadata when you specify an Artifact Registry generic repository destination. Set <code translate="no" dir="ltr">attestationType: "https://cloudbuild.googleapis.com/attestations/build_content_restrictions"</code> to create a verifiable record of your image's origins.</li> </ul>
+</li> </ul> <h3 id="validate-step">Validation step</h3> <p>The validation step boots a temporary test VM from the customized OS image and runs active automated validation test suites.</p> <ul> <li>
+<strong>Container image</strong>: <code translate="no" dir="ltr">us-central1-docker.pkg.dev/image-builder-official/release/validator:stable</code>
+</li> <li>
+<strong>Script command</strong>: <code translate="no" dir="ltr">/validate</code>
+</li> <li>
+<strong>Results sub-block</strong>: <code translate="no" dir="ltr">image_builder_telemetry_metrics</code> collects validation testing execution metrics.</li> </ul> <h3 id="publish-step">Publishing step</h3> <p>The publishing step registers the final OS image, deletes temporary intermediate disks, uploads the tar file payload to Artifact Registry if configured, and writes out Supply Chain Levels for Software Artifacts (SLSA) provenance records.</p> <ul> <li>
+<strong>Container image</strong>: <code translate="no" dir="ltr">us-central1-docker.pkg.dev/image-builder-official/release/builder:stable</code>
+</li> <li>
+<strong>Script command</strong>: <code translate="no" dir="ltr">/publish</code>
+</li> <li>
+<strong>Results sub-block</strong>: <code translate="no" dir="ltr">image_builder_telemetry_metrics</code> collects publishing release execution metrics.</li> </ul> <h2 id="options">Options</h2> <p>The options flags define execution settings on the Cloud Build server. You must configure the following options:</p> 
+<pre>options:
+  automapSubstitutions: true
+  requestedVerifyOption: VERIFIED
+  substitutionOption: ALLOW_LOOSE
+  dynamicSubstitutions: true
+  logging: CLOUD_LOGGING_ONLY
+</pre> <p>For more information about these settings, see <a href="https://docs.cloud.google.com/build/docs/build-config-file-schema#options">Options in the Cloud Build configuration file</a>.</p> <ul> <li>
+<code translate="no" dir="ltr">automapSubstitutions</code>: Set to <code translate="no" dir="ltr">true</code> to ensure substitution variables are mapped into the container environment.</li> <li>
+<code translate="no" dir="ltr">requestedVerifyOption</code>: Set to <code translate="no" dir="ltr">VERIFIED</code>. This setting instructs Cloud Build to automatically generate SLSA build provenance attestations. This provenance provides cryptographic verification that the image was built exactly as defined in your pipeline, helping prevent tampering and ensuring software supply chain integrity.</li> <li>
+<code translate="no" dir="ltr">substitutionOption</code>: Set to <code translate="no" dir="ltr">ALLOW_LOOSE</code>. This setting is required to force Cloud Build to ignore dynamic parameters or unused script arguments.</li> <li>
+<code translate="no" dir="ltr">dynamicSubstitutions</code>: Set to <code translate="no" dir="ltr">true</code> to allow system evaluation variables, like <code translate="no" dir="ltr">${BUILD_ID}</code>, to resolve correctly.</li> <li>
+<code translate="no" dir="ltr">logging</code>: Set to <code translate="no" dir="ltr">CLOUD_LOGGING_ONLY</code> to restrict build logs strictly to Cloud Logging.</li> </ul> <h2 id="artifacts">Artifacts</h2> <p>Configure the <code translate="no" dir="ltr">artifacts</code> block when you export image archives and attestations to Artifact Registry:</p> 
+<pre>artifacts:
+  generic_artifacts:
+    - folder: '${_IMAGE_OUTPUT_PATH}'
+      registry_path: '${_ARTIFACT_REGISTRY_RESOURCE_URI}'
+</pre><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/images/image-builder/build-configuration-schema" class="_attribution-link">https://docs.cloud.google.com/compute/docs/images/image-builder/build-configuration-schema</a>
+  </p>
+</div>

@@ -1,0 +1,413 @@
+<h1>Deploy an external multi-cluster Gateway</h1>  <p>This document guides you through a practical example to deploy an external multi-cluster Gateway to route internet traffic to an application that runs in two different GKE clusters.</p> Multi-cluster Gateways provide a powerful way to manage traffic for services deployed across multiple GKE clusters. By using Google's global load-balancing infrastructure, you can create a single entry point for your applications, which simplifies management and improves reliability. <p>In this tutorial, you use a sample <code translate="no" dir="ltr">store</code> application to simulate a real-world scenario where an online shopping service is owned and operated by separate teams and deployed across a <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs">fleet</a> of shared GKE clusters.</p> This example shows you how to set up path-based routing to direct traffic to different clusters. <h2 id="before_you_begin">Before you begin</h2> <p>Multi-cluster Gateways require some environmental preparation before they can be deployed. Before you proceed, follow the steps in <a href="prepare-environment-multi-cluster-gateways">Prepare your environment for multi-cluster Gateways</a>:</p> <ol> <li><p><a href="prepare-environment-multi-cluster-gateways#deploy-clusters">Deploy</a> GKE clusters.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke#register_your_cluster_on">Register</a> your clusters to a fleet (if they aren't already).</p></li> <li><p><a href="prepare-environment-multi-cluster-gateways#enable_multi-cluster_services_in_the_fleet">Enable</a> the multi-cluster Service and multi-cluster Gateway controllers.</p></li> </ol> <p>Finally, review the GKE Gateway controller <a href="deploying-gateways#limitations">limitations and known issues</a> before you use the controller in your environment.</p> <h2 id="external-gateway">Multi-cluster, multi-region, external Gateway</h2> <p>In this tutorial, you create an external multi-cluster Gateway that serves external traffic across an application running in two GKE clusters.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-gateway-ex1-v2.svg" alt="store.example.com is deployed across two GKE clusters and exposed
+to the internet using a multi-cluster Gateway"></p> <p>In the following steps you:</p> <ol> <li>
+<a href="#demo-app">Deploy the sample <code translate="no" dir="ltr">store</code> application</a> to the <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code> clusters.</li> <li>
+<a href="#service-export">Configure Services on each cluster to be exported</a> into your fleet (multi-cluster Services).</li> <li>
+<a href="#deploy-gateway">Deploy an external multi-cluster Gateway and an HTTPRoute</a> to your config cluster (<code translate="no" dir="ltr">gke-west-1</code>).</li> </ol> <p>After the application and Gateway resources are deployed, you can control traffic across the two GKE clusters using path-based routing:</p> <ul> <li>Requests to <code translate="no" dir="ltr">/west</code> are routed to <code translate="no" dir="ltr">store</code> Pods in the <code translate="no" dir="ltr">gke-west-1</code> cluster.</li> <li>Requests to <code translate="no" dir="ltr">/east</code> are routed to <code translate="no" dir="ltr">store</code> Pods in the<code translate="no" dir="ltr">gke-east-1</code> cluster.</li> <li>Requests to any other path are routed to either cluster, according to its health, capacity, and proximity to the requesting client.</li> </ul> <h3 id="demo-app">Deploying the demo application</h3> <ol> <li>
+<p>Create the <code translate="no" dir="ltr">store</code> Deployment and Namespace in all three of the clusters that were deployed in <a href="prepare-environment-multi-cluster-gateways#deploy-clusters">Prepare your environment for multi-cluster Gateways</a>:</p> 
+<pre>kubectl apply --context gke-west-1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store.yaml
+kubectl apply --context gke-west-2 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store.yaml
+kubectl apply --context gke-east-1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store.yaml
+</pre> <p>It deploys the following resources to each cluster:</p> 
+<pre>namespace/store created
+deployment.apps/store created
+</pre> <p>All examples in this page use the app deployed in this step. Make sure that the app is deployed across all three clusters before trying any of the remaining steps. This example uses only clusters <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code> , and <code translate="no" dir="ltr">gke-west-2</code> is used in another example.</p>
+</li> </ol> <h3 id="mcs">Multi-cluster Services</h3> <p>Services are how Pods are exposed to clients. Because the GKE <a href="../concepts/gateway-api#gateway_controller">Gateway controller</a> uses container-native load balancing, it does not use the ClusterIP or Kubernetes load balancing to reach Pods. Traffic is sent directly from the load balancer to the Pod IP addresses. However, Services still play a critical role as a logical identifier for Pod grouping.</p> <p><a href="../concepts/multi-cluster-services">Multi-cluster Services (MCS)</a> is an API standard for Services that span clusters and its GKE controller provides service discovery across GKE clusters. The multi-cluster Gateway controller uses MCS API resources to group Pods into a Service that is addressable across or spans multiple clusters.</p> <p>The multi-cluster Services API defines the following custom resources:</p> <ul> <li>
+<em>ServiceExports</em> map to a Kubernetes Service, exporting the endpoints of that Service to all clusters registered to the fleet. When a Service has a corresponding ServiceExport it means that the Service can be addressed by a multi-cluster Gateway.</li> <li>
+<em>ServiceImports</em> are automatically generated by the multi-cluster Service controller. ServiceExport and ServiceImport come in pairs. If a ServiceExport exists in the fleet, then a corresponding ServiceImport is created to allow the Service mapped to the ServiceExport to be accessed from across clusters.</li> </ul> <p>Exporting Services works in the following way. A store Service exists in <code translate="no" dir="ltr">gke-west-1</code> which selects a group of Pods in that cluster. A ServiceExport is created in the cluster which lets the Pods in <code translate="no" dir="ltr">gke-west-1</code> become accessible from the other clusters in the fleet. The ServiceExport maps to and exposes Services that have the same name and Namespace as the ServiceExport resource.</p> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+</pre> <p>The following diagram shows what happens after a ServiceExport is deployed. If a ServiceExport and Service pair exist then the multi-cluster Service controller deploys a corresponding ServiceImport to every GKE cluster in the fleet. The ServiceImport is the local representation of the <code translate="no" dir="ltr">store</code> Service in every cluster. This enables the <code translate="no" dir="ltr">client</code> Pod in <code translate="no" dir="ltr">gke-east-1</code> to use ClusterIP or headless Services to reach the <code translate="no" dir="ltr">store</code> Pods in <code translate="no" dir="ltr">gke-west-1</code>. When used in this manner multi-cluster Services provide east-west load balancing between clusters without requiring an internal LoadBalancer Service. To use multi-cluster Services for cluster-to-cluster load balancing, see <a href="multi-cluster-services">Configuring multi-cluster Services</a>.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-service-example1-v2.svg" alt="Multi-cluster Services exports Services across clusters which allows
+cluster-to-cluster communication"></p> <p>Multi-cluster Gateways also use ServiceImports, but not for cluster-to-cluster load balancing. Instead, Gateways use ServiceImports as logical identifiers for a Service that exists in another cluster or that stretches across multiple clusters. The following HTTPRoute references a ServiceImport instead of a Service resource. By referencing a ServiceImport, this indicates that it is forwarding traffic to a group of backend Pods that run across one or more clusters.</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-route
+  namespace: store
+  labels:
+    gateway: multi-cluster-gateway
+spec:
+  parentRefs:
+  - kind: Gateway
+    namespace: store
+    name: external-http
+  hostnames:
+  - "store.example.com"
+  rules:
+  - backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store
+      port: 8080
+</pre> <p>The following diagram shows how the HTTPRoute routes <code translate="no" dir="ltr">store.example.com</code> traffic to <code translate="no" dir="ltr">store</code> Pods on <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code>. The load balancer treats them as one pool of backends. If the Pods from one of the clusters becomes unhealthy, unreachable, or has no traffic capacity, then traffic load is balanced to the remaining Pods on the other cluster. New clusters can be added or removed with the <code translate="no" dir="ltr">store</code> Service and ServiceExport. This transparently adds or removes backend Pods without any explicit routing configuration changes.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-service-example2-v2.svg" alt="MCS resource"></p> <h3 id="service-export">Exporting Services</h3> <p>At this point, the application is running across both clusters. Next, you expose and export the applications by deploying Services and ServiceExports to each cluster.</p> <ol> <li>
+<p>Apply the following manifest to the <code translate="no" dir="ltr">gke-west-1</code> cluster to create your <code translate="no" dir="ltr">store</code> and <code translate="no" dir="ltr">store-west-1</code> Services and ServiceExports:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-west-1
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store-west-1
+  namespace: store
+EOF
+</pre>
+</li> <li>
+<p>Apply the following manifest to the <code translate="no" dir="ltr">gke-east-1</code> cluster to create your <code translate="no" dir="ltr">store</code> and <code translate="no" dir="ltr">store-east-1</code> Services and ServiceExports:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-east-1 -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-east-1
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store-east-1
+  namespace: store
+EOF
+</pre>
+</li> <li>
+<p>Verify that the correct ServiceExports have been created in the clusters.</p> 
+<pre>kubectl get serviceexports --context CLUSTER_NAME --namespace store
+</pre> <p>Replace <var translate="no">CLUSTER_NAME</var> with <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code>. The output resembles the following:</p> 
+<pre># gke-west-1
+NAME           AGE
+store          2m40s
+store-west-1   2m40s
+
+# gke-east-1
+NAME           AGE
+store          2m25s
+store-east-1   2m25s
+</pre> <p>The output demonstrates that the <code translate="no" dir="ltr">store</code> Service contains <code translate="no" dir="ltr">store</code> Pods across both clusters, and the <code translate="no" dir="ltr">store-west-1</code> and <code translate="no" dir="ltr">store-east-1</code> Services only contain <code translate="no" dir="ltr">store</code> Pods on their respective clusters. These overlapping Services are used to target the Pods across multiple clusters or a subset of Pods on a single cluster.</p>
+</li> <li>
+<p>After a few minutes verify that the accompanying ServiceImports have been automatically created by the multi-cluster Services controller across all clusters in the fleet.</p> <aside class="note"><strong>Note:</strong><span> The first MCS you create in your fleet can take up to 20 min to be fully operational. Exporting new services after the first one is created or adding endpoints to existing Multi-cluster Services is faster (up to a few minutes in some cases).</span></aside>
+<pre>kubectl get serviceimports --context CLUSTER_NAME --namespace store
+</pre> <p>Replace <var translate="no">CLUSTER_NAME</var> with <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code>. The output should resemble the following:</p> 
+<pre># gke-west-1
+NAME           TYPE           IP                  AGE
+store          ClusterSetIP   ["10.112.31.15"]    6m54s
+store-east-1   ClusterSetIP   ["10.112.26.235"]   5m49s
+store-west-1   ClusterSetIP   ["10.112.16.112"]   6m54s
+
+# gke-east-1
+NAME           TYPE           IP                  AGE
+store          ClusterSetIP   ["10.72.28.226"]    5d10h
+store-east-1   ClusterSetIP   ["10.72.19.177"]    5d10h
+store-west-1   ClusterSetIP   ["10.72.28.68"]     4h32m
+</pre> <p>This demonstrates that all three Services are accessible from both clusters in the fleet. However, because there is only a single active config cluster per fleet, you can only deploy Gateways and HTTPRoutes that reference these ServiceImports in <code translate="no" dir="ltr">gke-west-1</code>. When an HTTPRoute in the config cluster references these ServiceImports as backends, the Gateway can forward traffic to these Services no matter which cluster they are exported from.</p>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> The Gateway controller does not use ServiceImports or the ClusterSetIP to perform routing, even though the ClusterSetIP can be used to load balance traffic directly between clusters for east-west use cases. ServiceImports are only used by Gateways for their service discovery information. All Gateway traffic flows directly from the load balancer to the Pod IP addresses without any kube-proxy load balancing.</span></aside> <h3 id="deploy-gateway">Deploying the Gateway and HTTPRoute</h3> <p>Once the applications have been deployed, you can then configure a Gateway using the <code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code> GatewayClass. This Gateway creates an external Application Load Balancer configured to distribute traffic across your target clusters.</p> <ol> <li>
+<p>Apply the following Gateway manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: external-http
+  namespace: store
+spec:
+  gatewayClassName: gke-l7-global-external-managed-mc
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      kinds:
+      - kind: HTTPRoute
+EOF
+</pre>
+<aside class="note"><strong>Note:</strong><span> It might take several minutes (up to 10) for the Gateway to fully deploy and serve traffic.</span></aside> <p>This Gateway configuration deploys external Application Load Balancer resources with the following naming convention: <code translate="no" dir="ltr">gkemcg1-<var translate="no">NAMESPACE</var>-<var translate="no">GATEWAY_NAME</var>-<var translate="no">HASH</var></code>.</p> <p>The default resources created with this configuration are:</p> <ul> <li>1 load balancer: <code translate="no" dir="ltr">gkemcg1-store-external-http-<var translate="no">HASH</var></code>
+</li> <li>1 public IP address: <code translate="no" dir="ltr">gkemcg1-store-external-http-<var translate="no">HASH</var></code>
+</li> <li>1 forwarding rule: <code translate="no" dir="ltr">gkemcg1-store-external-http-<var translate="no">HASH</var></code>
+</li> <li>2 backend services: <ul> <li>Default 404 backend service: <code translate="no" dir="ltr">gkemcg1-store-gw-serve404-<var translate="no">HASH</var></code>
+</li> <li>Default 500 backend service: <code translate="no" dir="ltr">gkemcg1-store-gw-serve500-<var translate="no">HASH</var></code>
+</li> </ul>
+</li> <li>1 Health check: <ul> <li>Default 404 health check: <code translate="no" dir="ltr">gkemcg1-store-gw-serve404-<var translate="no">HASH</var></code>
+</li> </ul>
+</li> <li>0 routing rules (URLmap is empty)</li> </ul> <p>At this stage, any request to the <var translate="no">GATEWAY_IP</var>:80 results in a default page displaying the following message: <code translate="no" dir="ltr">fault filter abort</code>.</p> <aside class="warning"><strong>Warning:</strong><span> In this example, we are deploying an external multi-cluster Gateway listening on port 80. If you are deploying an external multi-cluster Gateway for a production environment, you should ensure that you configure a set of features to properly secure your Gateway, depending on your context and your environment. To learn more about how to secure a multi-cluster Gateway, see <a href="secure-gateway">Secure a Gateway</a>, or how to apply Policies to a multi-cluster Gateway, see <a href="configure-gateway-resources">Configure Gateway resources using Policies</a>.</span></aside>
+</li> <li>
+<p>Apply the following HTTPRoute manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: public-store-route
+  namespace: store
+  labels:
+    gateway: external-http
+spec:
+  hostnames:
+  - "store.example.com"
+  parentRefs:
+  - name: external-http
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /west
+    backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store-west-1
+      port: 8080
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /east
+    backendRefs:
+      - group: net.gke.io
+        kind: ServiceImport
+        name: store-east-1
+        port: 8080
+  - backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store
+      port: 8080
+EOF
+</pre> <p>At this stage, any request to the <var translate="no">GATEWAY_IP</var>:80 results in a default page displaying the following message: <code translate="no" dir="ltr">fault filter abort</code>.</p> <p>After deployment, this HTTPRoute configures the following routing behavior:</p> <ul> <li>Requests to <code translate="no" dir="ltr">/west</code> are routed to <code translate="no" dir="ltr">store</code> Pods in the <code translate="no" dir="ltr">gke-west-1</code> cluster, because Pods selected by the <code translate="no" dir="ltr">store-west-1</code> ServiceExport only exist in the <code translate="no" dir="ltr">gke-west-1</code> cluster.</li> <li>Requests to <code translate="no" dir="ltr">/east</code> are routed to <code translate="no" dir="ltr">store</code> Pods in the<code translate="no" dir="ltr">gke-east-1</code> cluster, because Pods selected by the <code translate="no" dir="ltr">store-east-1</code> ServiceExport only exist in the <code translate="no" dir="ltr">gke-east-1</code> cluster.</li> <li>Requests to any other path are routed to <code translate="no" dir="ltr">store</code> Pods in either cluster, according to its health, capacity, and proximity to the requesting client.</li> <li>Requests to the <var translate="no">GATEWAY_IP</var>:80 results in a default page displaying the following message: <code translate="no" dir="ltr">fault filter abort</code>.</li> </ul> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-gateway-routing-v2.svg" alt="The HTTPRoute enables routing to different subsets of clusters by using
+overlapping Services"></p> <p>Note that if all the Pods on a given cluster are unhealthy (or don't exist) then traffic to the <code translate="no" dir="ltr">store</code> Service would only be sent to clusters that actually have <code translate="no" dir="ltr">store</code> Pods. The existence of a ServiceExport and Service on a given cluster does not guarantee that traffic is sent to that cluster. Pods must exist and respond affirmatively to the load balancer health check or else the load balancer just sends traffic to healthy <code translate="no" dir="ltr">store</code> Pods in other clusters.</p> <p>New resources are created with this configuration:</p> <ul> <li>3 backend services: <ul> <li>The <code translate="no" dir="ltr">store</code> backend service: <code translate="no" dir="ltr">gkemcg1-store-store-8080-<var translate="no">HASH</var></code>
+</li> <li>The <code translate="no" dir="ltr">store-east-1</code> backend service: <code translate="no" dir="ltr">gkemcg1-store-store-east-1-8080-<var translate="no">HASH</var></code>
+</li> <li>The <code translate="no" dir="ltr">store-west-1</code> backend service: <code translate="no" dir="ltr">gkemcg1-store-store-west-1-8080-<var translate="no">HASH</var></code>
+</li> </ul>
+</li> <li>3 Health checks: <ul> <li>The <code translate="no" dir="ltr">store</code> health check: <code translate="no" dir="ltr">gkemcg1-store-store-8080-<var translate="no">HASH</var></code>
+</li> <li>The <code translate="no" dir="ltr">store-east-1</code> health check: <code translate="no" dir="ltr">gkemcg1-store-store-east-1-8080-<var translate="no">HASH</var></code>
+</li> <li>The <code translate="no" dir="ltr">store-west-1</code> health check: <code translate="no" dir="ltr">gkemcg1-store-store-west-1-8080-<var translate="no">HASH</var></code>
+</li> </ul>
+</li> <li>1 routing rule in the URLmap: <ul> <li>The <code translate="no" dir="ltr">store.example.com</code> routing rule:</li> <li>1 Host: <code translate="no" dir="ltr">store.example.com</code>
+</li> <li>Multiple <code translate="no" dir="ltr">matchRules</code> to route to the new backend services</li> </ul>
+</li> </ul>
+</li> </ol> <p>The following diagram shows the resources you've deployed across both clusters. Because <code translate="no" dir="ltr">gke-west-1</code> is the Gateway config cluster, it is the cluster in which our Gateway, HTTPRoutes, and ServiceImports are watched by the Gateway controller. Each cluster has a <code translate="no" dir="ltr">store</code> ServiceImport and another ServiceImport specific to that cluster. Both point at the same Pods. This lets the HTTPRoute specify exactly where traffic should go - to the <code translate="no" dir="ltr">store</code> Pods on a specific cluster or to the <code translate="no" dir="ltr">store</code> Pods across all clusters.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/multi-cluster-service-example3-v2.svg" alt="This is the Gateway and Multi-cluster Service resource model across both
+clusters"></p> <p>Note that this is a logical resource model, not a depiction of the traffic flow. The traffic path goes directly from the load balancer to backend Pods and has no direct relation to whichever cluster is the config cluster.</p> <h3 id="validating_deployment">Validating deployment</h3> <p>You can now issue requests to our multi-cluster Gateway and distribute traffic across both GKE clusters.</p> <ol> <li>
+<p>Validate that the Gateway and HTTPRoute have been deployed successfully by inspecting the Gateway status and events.</p> 
+<pre>kubectl describe gateways.gateway.networking.k8s.io external-http --context gke-west-1 --namespace store
+</pre> <p>Your output should look similar to the following:</p> 
+<pre>Name:         external-http
+Namespace:    store
+Labels:       &lt;none&gt;
+Annotations:  networking.gke.io/addresses: /projects/PROJECT_NUMBER/global/addresses/gkemcg1-store-external-http-laup24msshu4
+              networking.gke.io/backend-services:
+                /projects/PROJECT_NUMBER/global/backendServices/gkemcg1-store-gw-serve404-80-n65xmts4xvw2, /projects/PROJECT_NUMBER/global/backendServices/gke...
+              networking.gke.io/firewalls: /projects/PROJECT_NUMBER/global/firewalls/gkemcg1-l7-default-global
+              networking.gke.io/forwarding-rules: /projects/PROJECT_NUMBER/global/forwardingRules/gkemcg1-store-external-http-a5et3e3itxsv
+              networking.gke.io/health-checks:
+                /projects/PROJECT_NUMBER/global/healthChecks/gkemcg1-store-gw-serve404-80-n65xmts4xvw2, /projects/PROJECT_NUMBER/global/healthChecks/gkemcg1-s...
+              networking.gke.io/last-reconcile-time: 2023-10-12T17:54:24Z
+              networking.gke.io/ssl-certificates:
+              networking.gke.io/target-http-proxies: /projects/PROJECT_NUMBER/global/targetHttpProxies/gkemcg1-store-external-http-94oqhkftu5yz
+              networking.gke.io/target-https-proxies:
+              networking.gke.io/url-maps: /projects/PROJECT_NUMBER/global/urlMaps/gkemcg1-store-external-http-94oqhkftu5yz
+API Version:  gateway.networking.k8s.io/v1
+Kind:         Gateway
+Metadata:
+  Creation Timestamp:  2023-10-12T06:59:32Z
+  Finalizers:
+    gateway.finalizer.networking.gke.io
+  Generation:        1
+  Resource Version:  467057
+  UID:               1dcb188e-2917-404f-9945-5f3c2e907b4c
+Spec:
+  Gateway Class Name:  gke-l7-global-external-managed-mc
+  Listeners:
+    Allowed Routes:
+      Kinds:
+        Group:  gateway.networking.k8s.io
+        Kind:   HTTPRoute
+      Namespaces:
+        From:  Same
+    Name:      http
+    Port:      80
+    Protocol:  HTTP
+Status:
+  Addresses:
+    Type:   IPAddress
+    Value:  34.36.127.249
+  Conditions:
+    Last Transition Time:  2023-10-12T07:00:41Z
+    Message:               The OSS Gateway API has deprecated this condition, do not depend on it.
+    Observed Generation:   1
+    Reason:                Scheduled
+    Status:                True
+    Type:                  Scheduled
+    Last Transition Time:  2023-10-12T07:00:41Z
+    Message:
+    Observed Generation:   1
+    Reason:                Accepted
+    Status:                True
+    Type:                  Accepted
+    Last Transition Time:  2023-10-12T07:00:41Z
+    Message:
+    Observed Generation:   1
+    Reason:                Programmed
+    Status:                True
+    Type:                  Programmed
+    Last Transition Time:  2023-10-12T07:00:41Z
+    Message:               The OSS Gateway API has altered the "Ready" condition semantics and reservedit for future use.  GKE Gateway will stop emitting it in a future update, use "Programmed" instead.
+    Observed Generation:   1
+    Reason:                Ready
+    Status:                True
+    Type:                  Ready
+  Listeners:
+    Attached Routes:  1
+    Conditions:
+      Last Transition Time:  2023-10-12T07:00:41Z
+      Message:
+      Observed Generation:   1
+      Reason:                Programmed
+      Status:                True
+      Type:                  Programmed
+      Last Transition Time:  2023-10-12T07:00:41Z
+      Message:               The OSS Gateway API has altered the "Ready" condition semantics and reservedit for future use.  GKE Gateway will stop emitting it in a future update, use "Programmed" instead.
+      Observed Generation:   1
+      Reason:                Ready
+      Status:                True
+      Type:                  Ready
+    Name:                    http
+    Supported Kinds:
+      Group:  gateway.networking.k8s.io
+      Kind:   HTTPRoute
+Events:
+  Type    Reason  Age                    From                   Message
+  ----    ------  ----                   ----                   -------
+  Normal  UPDATE  35m (x4 over 10h)      mc-gateway-controller  store/external-http
+  Normal  SYNC    4m22s (x216 over 10h)  mc-gateway-controller  SYNC on store/external-http was a success
+</pre>
+</li> <li>
+<p>Once the Gateway has deployed successfully retrieve the external IP address from <code translate="no" dir="ltr">external-http</code> Gateway.</p> 
+<pre>kubectl get gateways.gateway.networking.k8s.io external-http -o=jsonpath="{.status.addresses[0].value}" --context gke-west-1 --namespace store
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">VIP</var></code> in the following steps with the IP address you receive as output.</p>
+</li> <li>
+<p>Send traffic to the root path of the domain. This load balances traffic to the <code translate="no" dir="ltr">store</code> ServiceImport which is across cluster <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code>. The load balancer sends your traffic to the closest region to you and you might not see responses from the other region.</p> 
+<pre>curl -H "host: store.example.com" http://VIP
+</pre> <p>The output confirms that the request was served by Pod from the <code translate="no" dir="ltr">gke-east-1</code> cluster:</p> 
+<pre>{
+  "cluster_name": "gke-east-1",
+  "zone": "us-east1-b",
+  "host_header": "store.example.com",
+  "node_name": "gke-gke-east-1-default-pool-7aa30992-t2lp.c.agmsb-k8s.internal",
+  "pod_name": "store-5f5b954888-dg22z",
+  "pod_name_emoji": "⏭",
+  "project_id": "agmsb-k8s",
+  "timestamp": "2021-06-01T17:32:51"
+}
+</pre>
+</li> <li>
+<p>Next send traffic to the <code translate="no" dir="ltr">/west</code> path. This routes traffic to the <code translate="no" dir="ltr">store-west-1</code> ServiceImport which only has Pods running on the <code translate="no" dir="ltr">gke-west-1</code> cluster. A cluster-specific ServiceImport, like <code translate="no" dir="ltr">store-west-1</code>, enables an application owner to explicitly send traffic to a specific cluster, rather than letting the load balancer make the decision.</p> 
+<pre>curl -H "host: store.example.com" http://VIP/west
+</pre> <p>The output confirms that the request was served by Pod from the <code translate="no" dir="ltr">gke-west-1</code> cluster:</p> 
+<pre>{
+  "cluster_name": "gke-west-1", 
+  "zone": "us-west1-a", 
+  "host_header": "store.example.com",
+  "node_name": "gke-gke-west-1-default-pool-65059399-2f41.c.agmsb-k8s.internal",
+  "pod_name": "store-5f5b954888-d25m5",
+  "pod_name_emoji": "🍾",
+  "project_id": "agmsb-k8s",
+  "timestamp": "2021-06-01T17:39:15",
+}
+</pre>
+</li> <li>
+<p>Finally, send traffic to the <code translate="no" dir="ltr">/east</code> path.</p> 
+<pre>curl -H "host: store.example.com" http://VIP/east
+</pre> <p>The output confirms that the request was served by Pod from the <code translate="no" dir="ltr">gke-east-1</code> cluster:</p> 
+<pre>{
+  "cluster_name": "gke-east-1",
+  "zone": "us-east1-b",
+  "host_header": "store.example.com",
+  "node_name": "gke-gke-east-1-default-pool-7aa30992-7j7z.c.agmsb-k8s.internal",
+  "pod_name": "store-5f5b954888-hz6mw",
+  "pod_name_emoji": "🧜🏾",
+  "project_id": "agmsb-k8s",
+  "timestamp": "2021-06-01T17:40:48"
+}
+</pre>
+</li> </ol> <h2 id="clean_up">Clean up</h2> <p>After completing the exercises on this document, follow these steps to remove resources and prevent unwanted charges incurring on your account:</p> <ol> <li><p><a href="deleting-a-cluster">Delete the clusters</a>.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/unregister">Unregister the clusters</a> from the fleet if they don't need to be registered for another purpose.</p></li> <li>
+<p>Disable the <code translate="no" dir="ltr">multiclusterservicediscovery</code> feature:</p> 
+<pre>gcloud container fleet multi-cluster-services disable
+</pre>
+</li> <li>
+<p>Disable Multi Cluster Ingress:</p> 
+<pre>gcloud container fleet ingress disable
+</pre>
+</li> <li>
+<p>Disable the APIs:</p> 
+<pre>gcloud services disable \
+    multiclusterservicediscovery.googleapis.com \
+    multiclusteringress.googleapis.com \
+    trafficdirector.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+</li> </ol> <h2 id="troubleshooting">Troubleshooting</h2> <h3 id="no-healthy-upstream">No healthy upstream</h3> <p><strong>Symptom:</strong></p> <p>The following issue might occur when you create a Gateway but cannot access the backend services (503 response code):</p> 
+<pre>no healthy upstream
+</pre> <p><strong>Reason:</strong></p> <p>This error message indicates that the health check prober cannot find healthy backend services. It is possible that your backend services are healthy but you might need to customize the health checks.</p> <p><strong>Workaround:</strong></p> <p>To resolve this issue, <a href="configure-gateway-resources#configure_health_check">customize your health check</a> based on your application's requirements (for example, <code translate="no" dir="ltr">/health</code>) using a <code translate="no" dir="ltr">HealthCheckPolicy</code>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about the <a href="../concepts/gateway-api">Gateway controller</a>.</li> <li>To configure backend TLS for your multi-cluster Gateway, see <a href="secure-gateway#configure-backend-tls">Configure backend TLS</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploying-multi-cluster-gateways" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploying-multi-cluster-gateways</a>
+  </p>
+</div>

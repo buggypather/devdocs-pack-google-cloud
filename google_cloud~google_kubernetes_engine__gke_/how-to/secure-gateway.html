@@ -1,0 +1,785 @@
+<h1>Secure a Gateway</h1>  <p>This page explains how you can secure a Gateway using various security features:</p> <ul> <li><p>SSL Policies to help ensure the Gateway is using the required secure protocols and algorithms</p></li> <li><p>Certificates to secure Client-to-Gateway and Gateway-to-Backends traffic with TLS</p></li> <li><p>Google Cloud Armor security policy to protect Services from DDoS attacks</p></li> <li><p>Identity-Aware Proxy (IAP) to provide a layer of authentication and authorization before allowing access to a Service</p></li> <li><p>Authorization policies to enforce identity-based access control and zero-trust architecture at the Gateway layer</p></li> </ul> <p>To learn more about Gateway security, see <a href="../concepts/gateway-security">Gateway security</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h3 id="requirements">GKE Gateway controller requirements</h3> <ul> <li>Gateway API is supported on <a href="../concepts/alias-ips">VPC-native</a> clusters only.</li> <li>If you are using the regional or cross-region GatewayClasses, you must enable a <a href="https://docs.cloud.google.com/load-balancing/docs/proxy-only-subnets">proxy-only subnet</a>.</li> <li>Your cluster must have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled.</li> <li>If you are using Istio, you must upgrade Istio to one of the following versions: <ul> <li>1.15.2 or later</li> <li>1.14.5 or later</li> <li>1.13.9 or later.</li> </ul>
+</li> <li><p>If you are using Shared VPC, then in the host project, you need to assign the <code translate="no" dir="ltr">Compute Network User</code> role to the GKE Service account for the service project. </p></li> <li><p>Ensure that you have an existing Autopilot or Standard cluster. If you need one, <a href="creating-an-autopilot-cluster">create an Autopilot cluster</a>.</p></li> </ul> <h3 id="restrictions_and_limitations">Restrictions and limitations</h3> <p>In addition to the GKE Gateway controller <a href="deploying-gateways#limitations">restrictions and limitations</a>, the following limitations apply specifically to Gateway security:</p> <ul> <li><p>TLS configurations using either an <a href="secure-gateway#secure-using-ssl-certificate">SSL Certificate</a> or <a href="secure-gateway#secure-using-certificate-manager">Certificate Manager</a> on Gateways are not supported with GKE version 1.28.4-gke.1083000. Use a <a href="secure-gateway#secure-using-secret">Kubernetes secret</a> as a workaround for this GKE version.</p></li> <li><p>You cannot use the <code translate="no" dir="ltr">networking.gke.io/certmap</code> annotation with a <code translate="no" dir="ltr">tls.certificateRefs</code> on the same Gateway resource. If you reference a CertificateMap in a Gateway, GKE will treat this as an error.</p></li> <li><p>Certificate Manager supports both self-managed and Google-managed certificates. Google-managed certificates are compatible with regional Gateways and global Gateways.</p></li> <li><p>When using Google-managed SSL certificates, you must create the SSL certificates outside of GKE before you attach them to your Gateway.</p></li> <li><p>You cannot use the same service as a backend to a regional and a global Gateway if you are referencing a <a href="#cloud_armor">Google Cloud Armor backend security policy</a> in your GCPBackendPolicy. You must create two separate services and policies for this use case.</p></li> <li><p>The Gateway controller does not support the ManagedCertificate resource.</p></li> <li><p>The Gateway controller does not support the <code translate="no" dir="ltr">networking.gke.io/managed-certificates</code> annotation.</p></li> <li><p>If you <a href="configure-cdn-for-gateway">configure Cloud CDN with GKE Gateway</a>, you can't enable both IAP and Cloud CDN with the same Gateway, including individual routes with Cloud CDN. If you need to enable Cloud CDN for a route that uses a GCPHTTPFilter resource, you must first remove any existing GCPBackendPolicy that configures IAP for that Gateway.</p></li> <li><p><strong>TrustConfig quota.</strong> For information about the total size of all TrustConfig resources in each location, see <a href="https://docs.cloud.google.com/certificate-manager/docs/quotas#resource_quotas_and_limits">Resource quotas and limits</a>.</p></li> <li><p><strong>Location alignment.</strong> The referenced TrustConfig resource must exist in the same location (global or specific region) as the Gateway that uses the Service.</p></li> <li><p><strong>Namespace constraint.</strong> The BackendTLSPolicy resource and its target resource must be in the same namespace.</p></li> </ul> <p>For a list of supported Gateway API fields and capabilities of the GatewayClass resources available on GKE, see <a href="gatewayclass-capabilities">GatewayClass capabilities</a>.</p> <h2 id="secure-using-secret">Secure a Gateway using a Kubernetes Secret</h2> <p>In this example, you configure a Gateway using a <a href="https://kubernetes.io/docs/concepts/configuration/secret/">Kubernetes Secret</a>.</p> <h3 id="store-certificate-secret">Store a certificate in a Kubernetes Secret</h3> <p>You can use a certificate issued and validated by your certificate authority (CA) or create a self-signed certificate. The following steps use a self-signed certificate.</p> <ol> <li>
+<p>Create a private key:</p> 
+<pre>openssl genrsa -out PRIVATE_KEY_FILE 2048
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PRIVATE_KEY_FILE</var></code> with the name of your private key file, such as <code translate="no" dir="ltr">private-key.pem</code>. For more information, see <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/self-managed-certs#private-key">Select or create a private key</a>.</p>
+</li> <li>
+<p>Create an <a href="https://github.com/openssl/openssl/blob/master/apps/openssl.cnf">Open SSL configuration file</a>:</p> 
+<pre>cat &lt;&lt;EOF &gt;CONFIG_FILE
+[req]
+default_bits              = 2048
+req_extensions            = extension_requirements
+distinguished_name        = dn_requirements
+prompt                    = no
+
+[extension_requirements]
+basicConstraints          = CA:FALSE
+keyUsage                  = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName            = @sans_list
+
+[dn_requirements]
+0.organizationName        = example
+commonName                = store.example.com
+
+[sans_list]
+DNS.1                     = store.example.com
+EOF
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CONFIG_FILE</var></code> with the name for the new config file, such as <code translate="no" dir="ltr">config-file.cnf</code>.</p>
+</li> <li>
+<p>Create a certificate signing request (CSR) file:</p> 
+<pre>openssl req -new -key PRIVATE_KEY_FILE \
+    -out CSR_FILE \
+    -config CONFIG_FILE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CSR_FILE</var></code> with the name of the new CSR file, such as <code translate="no" dir="ltr">cert.pem</code>. For more information, see <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/self-managed-certs#create-csr">Create a CSR</a>.</p>
+</li> <li>
+<p>Sign the CSR:</p> 
+<pre>openssl x509 -req \
+    -signkey PRIVATE_KEY_FILE \
+    -in CSR_FILE \
+    -out CERTIFICATE_FILE \
+    -extfile CONFIG_FILE \
+    -extensions extension_requirements \
+    -days 30
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CERTIFICATE_FILE</var></code> with the path and name of the file that the command generates, such as <code translate="no" dir="ltr">cert-file.pem</code>. For more information, see <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/self-managed-certs#create-cert">Sign the CSR</a>.</p>
+</li> <li>
+<p>Create a Kubernetes TLS Secret using the key and the certificate file that you created:</p> 
+<pre>kubectl create secret tls store-example-com \
+    --cert=CERTIFICATE_FILE \
+    --key=PRIVATE_KEY_FILE
+</pre> <p>GKE saves the certificate and key as a Kubernetes resource that you can attach to your Gateway.</p>
+</li> </ol> <h3 id="create-resources-secret">Create a Gateway and HTTPRoute</h3> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">external-gateway.yaml</code>:</p> 
+<pre>kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: external-http
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs: # Directly reference the Kubernetes Secret containing the TLS certificate and private key.
+      - name: store-example-com # The name of the TLS secret.
+</pre> <p>This manifest describes a Gateway with the following properties:</p> <ul> <li>
+<code translate="no" dir="ltr">gatewayClassName: gke-l7-global-external-managed</code>: deploys a global external Application Load Balancer.</li> <li>
+<code translate="no" dir="ltr">protocol: HTTPS</code> and <code translate="no" dir="ltr">port: 443</code>: required for enabling TLS.</li> <li>
+<code translate="no" dir="ltr">tls</code>: references the Kubernetes Secret created in the previous step.</li> </ul>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f external-gateway.yaml
+</pre>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">store-external-route.yaml</code>:</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-external
+  labels:
+    gateway: external-http
+spec:
+  parentRefs:
+  - name: external-http # Link this route to the 'external-http' Gateway.
+  hostnames:
+  - "store.example.com" # Match traffic for this hostname.
+  rules:
+  - backendRefs: # Define where to forward the traffic.
+    - name: store-v1
+      port: 8080
+</pre> <p>This manifest describes an HTTPRoute that matches traffic to <code translate="no" dir="ltr">store.example.com</code> and sends it to the <code translate="no" dir="ltr">store-v1</code> Service.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f store-external-route.yaml
+</pre>
+</li> </ol> <h3 id="verify-gateway-secret">Verify the Gateway</h3> <p>Verify that the Gateway works by sending a request over the internet.</p> <ol> <li>
+<p>Get the IP address of the Gateway:</p> 
+<pre>kubectl get gateway external-http -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>The output is similar to the following:</p> 
+<pre>203.0.113.12
+</pre> <p>This output is a public IP address, which means any client with internet access can connect to it.</p>
+</li> <li>
+<p>Access the domain of the Gateway using <code translate="no" dir="ltr">curl</code>:</p> 
+<pre>curl https://store.example.com --resolve store.example.com:443:GATEWAY_IP_ADDRESS --cacert CERTIFICATE_FILE -v
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code>: the IP address of the Gateway load balancer.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_FILE</var></code>: the certificate file that you generated. You must save this file on the machine that you are using to connect to the Gateway. The certificate is required to authenticate the Gateway because the Gateway uses a self-signed certificate.</li> </ul> <p>The <code translate="no" dir="ltr">--resolve</code> option resolves the domain name to the IP address of the Gateway, which is required because DNS is not configured for this domain.</p> <p>The output is similar to the following:</p> 
+<pre>...
+* TLSv1.2 (OUT), TLS handshake, Client hello (1):
+* TLSv1.2 (IN), TLS handshake, Server hello (2):
+* TLSv1.2 (IN), TLS handshake, Certificate (11):
+* TLSv1.2 (IN), TLS handshake, Server key exchange (12):
+* TLSv1.2 (IN), TLS handshake, Server finished (14):
+* TLSv1.2 (OUT), TLS handshake, Client key exchange (16):
+* TLSv1.2 (OUT), TLS change cipher, Change cipher spec (1):
+* TLSv1.2 (OUT), TLS handshake, Finished (20):
+* TLSv1.2 (IN), TLS change cipher, Change cipher spec (1):
+* TLSv1.2 (IN), TLS handshake, Finished (20):
+* SSL connection using TLSv1.2 / ECDHE-RSA-CHACHA20-POLY1305
+* ALPN, server accepted to use h2
+# This block shows the certificate details presented by the Gateway.
+# The value of the 'common name' field matches the requested hostname.
+* Server certificate:
+*  subject: O=example; CN=store.example.com
+*  start date: Apr 19 15:54:50 2021 GMT
+*  expire date: Apr 19 15:54:50 2022 GMT
+*  common name: store.example.com (matched)
+*  issuer: O=example; CN=store.example.com
+*  SSL certificate verify ok.
+...
+{
+  "cluster_name": "gw",
+  "host_header": "store.example.com",
+  "metadata": "store-v1",
+  "node_name": "gke-gw-default-pool-51ccbf30-yya8.c.agmsb-k8s.internal",
+  "pod_name": "store-v1-84b47c7f58-tj5mn",
+  "pod_name_emoji": "😍",
+  "project_id": "agmsb-k8s",
+  "timestamp": "2021-04-19T16:30:08"
+  # Several lines of output omitted here.
+}
+</pre> <p>This output includes a successful TLS handshake followed by a response from the application. The TLS connection is terminated at the Gateway and the application responds to the client securely.</p>
+</li> </ol> <h2 id="secure-using-ssl-certificate">Secure a Gateway using an SSL certificate</h2> <p>In this example, you configure a Gateway with a <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates">Google-managed SSL certificate</a>.</p> <aside class="note"><strong>Note:</strong><span> Configuring an SSL Certificate and the <code translate="no" dir="ltr">networking.gke.io/certmap</code> annotation on the same Gateway is not a valid configuration and the controller will treat this as an error.</span></aside> <h3 id="create-ssl">Create an SSL certificate</h3> <ol> <li>
+<p>Create a Google-managed global SslCertificate resource:</p> 
+<pre>gcloud compute ssl-certificates create store-example-com \
+    --domains=store.example.com \
+    --global
+</pre>
+</li> </ol> <h3 id="create-resources-ssl">Create a Gateway and HTTPRoute</h3> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">external-gateway.yaml</code>:</p> 
+<pre>kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: external-http
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate # Terminate TLS using your SSL certificate.
+      options:
+        networking.gke.io/pre-shared-certs: store-example-com # Specify the Google Cloud SSL certificate resource name.
+</pre> <p>This manifest describes a Gateway with the following properties:</p> <ul> <li>
+<code translate="no" dir="ltr">gatewayClassName: gke-l7-global-external-managed</code>: deploys a global external Application Load Balancer.</li> <li>
+<code translate="no" dir="ltr">protocol:HTTPS</code> and <code translate="no" dir="ltr">port:443</code>: required for enabling TLS.</li> <li>
+<code translate="no" dir="ltr">tls.mode:Terminate</code>: terminates TLS using your SSL certificate.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f external-gateway.yaml
+</pre>
+</li> <li>
+<p>Save the following HTTPRoute manifest as <code translate="no" dir="ltr">store-external-route.yaml</code>:</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-external
+  labels:
+    gateway: external-http
+spec:
+  parentRefs:
+  - name: external-http
+  hostnames:
+  - "store.example.com"
+  rules:
+  - backendRefs:
+    - name: store-v1
+      port: 8080
+</pre>
+</li> <li>
+<p>Deploy the HTTPRoute in your cluster:</p> 
+<pre>kubectl apply -f store-external-route.yaml
+</pre> <p>It might take several minutes for GKE to deploy the Gateway.</p>
+</li> </ol> <h3 id="verify-gateway-ssl">Verify the Gateway</h3> <ol> <li>
+<p>Get the IP address of the Gateway:</p> 
+<pre>kubectl get gateway external-http -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>The output is similar to the following:</p> 
+<pre>203.0.113.12
+</pre> <p>This output is a public IP address, which means any client with internet access can connect to it.</p>
+</li> <li>
+<p><a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/google-managed-certs#update-dns">Update an A or AAAA record</a> to direct your domain to the IP address of the Gateway.</p> <p>This step is only necessary if you are configuring a Google-managed SSL certificate. If you are configuring a self-managed certificate, you can skip this step.</p> <p>After the DNS records are updated, it can take up to 10 minutes for your load balancer to begin using the Google-managed certificate.</p>
+</li> <li>
+<p>Verify that the Gateway is working by sending a request over the internet using <code translate="no" dir="ltr">curl</code>:</p> 
+<pre>curl https://store.example.com -v
+</pre> <p>The output is similar to the following:</p> 
+<pre>...
+* TLSv1.2 (OUT), TLS handshake, Client hello (1):
+* TLSv1.2 (IN), TLS handshake, Server hello (2):
+* TLSv1.2 (IN), TLS handshake, Certificate (11):
+* TLSv1.2 (IN), TLS handshake, Server key exchange (12):
+* TLSv1.2 (IN), TLS handshake, Server finished (14):
+* TLSv1.2 (OUT), TLS handshake, Client key exchange (16):
+* TLSv1.2 (OUT), TLS change cipher, Change cipher spec (1):
+* TLSv1.2 (OUT), TLS handshake, Finished (20):
+* TLSv1.2 (IN), TLS change cipher, Change cipher spec (1):
+* TLSv1.2 (IN), TLS handshake, Finished (20):
+* SSL connection using TLSv1.2 / ECDHE-RSA-CHACHA20-POLY1305
+* ALPN, server accepted to use h2
+* Server certificate:
+*  subject: O=example; CN=store.example.com
+*  start date: Apr 19 15:54:50 2021 GMT
+*  expire date: Apr 19 15:54:50 2022 GMT
+*  common name: store.example.com (matched)
+*  issuer: O=example; CN=store.example.com
+*  SSL certificate verify ok.
+...
+{
+  "cluster_name": "gw",
+  "host_header": "store.example.com",
+  "metadata": "store-v1",
+  "node_name": "gke-gw-default-pool-51ccbf30-yya8.c.agmsb-k8s.internal",
+  "pod_name": "store-v1-84b47c7f58-tj5mn",
+  "pod_name_emoji": "😍",
+  "project_id": "agmsb-k8s",
+  "timestamp": "2021-04-19T16:30:08",
+  "zone": "us-west1-a"
+}
+</pre> <p>This output includes a successful TLS handshake and a response from the application. TLS is terminated at the Gateway correctly and the application responds to the client securely.</p>
+</li> </ol> <h2 id="secure-using-certificate-manager">Secure a Gateway using Certificate Manager</h2> <p>In this example, you configure a Gateway using <a href="https://docs.cloud.google.com/certificate-manager/docs">Certificate Manager</a>.</p> <aside class="note"><strong>Note:</strong><span> Configuring an SSL Certificate and the <code translate="no" dir="ltr">networking.gke.io/certmap</code> annotation on the same Gateway is not a valid configuration and the controller will treat this as an error.</span></aside> <h3 id="create-certificate-map">Create a Certificate</h3> <div> <section><p class="_code-tab"><strong>Global Gateway</strong></p>
+<p>To create a global Gateway, you reference a <a href="https://docs.cloud.google.com/certificate-manager/docs/maps">certificate map</a> resource that contains one or more certificates. You must create at least one certificate and add it as an entry to your certificate map.</p> <ol> <li><p>To create a certificate, first create a <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/self-managed-certs#create-key-and-cert">private key and certificate file</a>.</p></li> <li>
+<p>Create a Certificate resource by loading your self-managed certificate and key:</p> 
+<pre data-language="">gcloud certificate-manager certificates create store-example-com-cert \
+    --certificate-file="cert.pem" \
+    --private-key-file="PRIVATE_KEY_FILE"
+</pre>
+</li> <li>
+<p>Create a CertificateMap:</p> 
+<pre data-language="">gcloud certificate-manager maps create store-example-com-map
+</pre>
+</li> <li>
+<p>Create a CertificateMapEntry which assigns the certificate to the CertificateMap:</p> 
+<pre data-language="">gcloud certificate-manager maps entries create store-example-com-map-entry \
+    --map=store-example-com-map \
+    --hostname=store.example.com \
+    --certificates=store-example-com-cert
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Regional Gateway</strong></p>
+<p>For a regional Gateway, you create a Certificate which will be specified directly when creating the Gateway. Unlike a global Gateway, you don't need to create a CertificateMap to which certificates are assigned.</p> <ol> <li><p>Create a <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/self-managed-certs#create-key-and-cert">private key and certificate file</a>.</p></li> <li><p>Create a Certificate resource by uploading your certificate file and key:</p></li> </ol> 
+<pre data-language="">gcloud certificate-manager certificates create "CERTIFICATE_NAME" \
+    --certificate-file="CERTIFICATE_FILE" \
+    --private-key-file="PRIVATE_KEY_FILE" \
+    --location="REGION"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_NAME</var></code>: the name of your certificate, for example <code translate="no" dir="ltr">store-example-com-cert</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_FILE</var></code>: the name of the certificate file, for example, <code translate="no" dir="ltr">cert.pem</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PRIVATE_KEY_FILE</var></code>: the name of your private key file, such as <code translate="no" dir="ltr">private-key.pem</code>. For more information, see <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/self-managed-certs#private-key">Select or create a private key</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the name of the region in which you are configuring the Gateway, for example <code translate="no" dir="ltr">us-central1</code>.</li> </ul> <aside class="note"><strong>Note:</strong><span> If you use a cross-region Gateway, replace the <code translate="no" dir="ltr">--location</code> flag with a <code translate="no" dir="ltr">--scope=all-regions</code> flag. Failing to use <code translate="no" dir="ltr">--scope=all-regions</code> will result in the certificate not being found when creating the gateway. For example, <code translate="no" dir="ltr">'Certificate' was not found</code>.</span></aside></section> </div> <h3 id="create-resources-certificate-manager">Create a Gateway and HTTPRoute</h3> <div> <section><p class="_code-tab"><strong>Global Gateway</strong></p>
+<p>To create a global Gateway, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">cert-map-gateway.yaml</code>:</p> 
+<pre data-language="">kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: external-http
+  annotations:
+    networking.gke.io/certmap: store-example-com-map
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+  # No TLS section is included here because TLS is handled by the certmap annotation.
+</pre> <p>This manifest describes a Gateway with the following properties:</p> <ul> <li>
+<code translate="no" dir="ltr">gatewayClassName: gke-l7-global-external-managed</code>: deploys a global external Application Load Balancer.</li> <li>
+<code translate="no" dir="ltr">protocol: HTTPS</code> and <code translate="no" dir="ltr">port: 443</code>: required for enabling TLS.</li> </ul> <p>There is no TLS section because TLS is configured with Certificate Manager using the annotation <code translate="no" dir="ltr">networking.gke.io/certmap</code>.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f cert-map-gateway.yaml
+</pre> <p>It might take several minutes for GKE to deploy the Gateway.</p>
+</li> <li>
+<p>To create an HTTPRoute, save the following manifest as <code translate="no" dir="ltr">cert-map-http-route.yaml</code>:</p> 
+<pre data-language="">apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: foo
+  namespace: default
+spec:
+  parentRefs:
+  - name: external-http
+  hostnames:
+  - foo.example.com
+  rules:
+  - matches:
+    - path:
+        value: /
+    backendRefs:
+    - name: foo-v1
+      port: 8080
+</pre>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f cert-map-http-route.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Regional Gateway</strong></p>
+<p>When creating a regional Gateway, you can specify certificates managed by Certificate Manager and certificates managed by Compute Engine.</p> <ol> <li>
+<p>To create a regional external Gateway, save the following manifest as <code translate="no" dir="ltr">external-gateway.yaml</code>:</p> 
+<pre data-language="">   kind: Gateway
+   apiVersion: gateway.networking.k8s.io/v1
+   metadata:
+     name: gateway
+     namespace: corp
+   spec:
+     gatewayClassName: gke-l7-regional-external-managed
+     listeners:
+     - name: gateway-pre-shared-certmap
+       protocol: HTTPS
+       port: 443
+       tls:
+         mode: Terminate # TLS is terminated at the Gateway.
+         options: # Specifies a comma-separated list of Certificate Manager certificates to use for TLS termination.
+           networking.gke.io/cert-manager-certs: store-example-com-cert1, store-example-com-cert2 # These certificates are directly managed by Certificate Manager.
+       allowedRoutes:
+         kinds:
+         - kind: HTTPRoute
+         namespaces:
+           from: All
+</pre> <p>This manifest describes a Gateway with the following properties:</p> <ul> <li>
+<code translate="no" dir="ltr">gatewayClassName</code>: <code translate="no" dir="ltr">gke-l7-regional-external-managed</code>: deploys a regional external Application Load Balancer.</li> <li>
+<code translate="no" dir="ltr">protocol: HTTPS</code> and <code translate="no" dir="ltr">port: 443</code>: required for enabling TLS.</li> <li>
+<code translate="no" dir="ltr">options</code>: <ul> <li>
+<code translate="no" dir="ltr">networking.gke.io/cert-manager-certs</code> : certificates managed by Certificate Manager.</li> </ul>
+</li> </ul> <p>To create a regional internal Gateway, in the preceding example, change the value of <code translate="no" dir="ltr">gatewayClassName</code> to <code translate="no" dir="ltr">gke-l7-rilb</code>. This deploys an internal Application Load Balancer.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f external-gateway.yaml
+</pre>
+</li> <li>
+<p>To create an HTTPRoute, save the following manifest as <code translate="no" dir="ltr">store-external-route.yaml</code>:</p> 
+<pre data-language="">apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: store-external
+  labels:
+    gateway: external-http
+spec:
+  parentRefs:
+  - name: external-http
+  hostnames:
+  - "store.example.com"
+  rules:
+  - backendRefs:
+    - name: store-v1
+      port: 8080
+</pre> <p>This manifest describes an HTTPRoute that matches traffic for <code translate="no" dir="ltr">store.example.com</code> and forwards the traffic to the <code translate="no" dir="ltr">store-v1</code> Service.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre data-language="">kubectl apply -f store-external-route.yaml
+</pre>
+</li> </ol></section> </div> <h3 id="verify-gateway-certificate-manager">Verify the Gateway</h3> <ol> <li>
+<p>Get the IP address of the Gateway:</p> 
+<pre>kubectl get gateway external-http -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>The output is similar to the following:</p> 
+<pre>203.0.113.12
+</pre> <p>This output is a public IP address, which means any client with internet access can connect to it.</p>
+</li> <li>
+<p><a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/google-managed-certs#update-dns">Update an A or AAAA record</a> to direct your domain to the IP address of the Gateway.</p> <p>This step is only necessary if you are configuring a Google-managed SSL Certificate. If you are configuring a self-managed certificate, you can skip this step.</p> <p>After the DNS records are updated, it can take up to 10 minutes for your load balancer to begin using the Google-managed certificate.</p>
+</li> <li>
+<p>Access the domain of the Gateway using <code translate="no" dir="ltr">curl</code>:</p> 
+<pre>curl https://store.example.com --resolve store.example.com:443:GATEWAY_IP_ADDRESS --cacert CERTIFICATE_FILE -v
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code>: the IP address of the Gateway load balancer.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_FILE</var></code>: the certificate file that you generated. You must save this file on the machine that you are using to connect to the Gateway. The certificate is required to authenticate the Gateway because the Gateway uses a self-signed certificate.</li> </ul> <p>The output is similar to the following:</p> 
+<pre>...
+* TLSv1.2 (OUT), TLS handshake, Client hello (1):
+* TLSv1.2 (IN), TLS handshake, Server hello (2):
+* TLSv1.2 (IN), TLS handshake, Certificate (11):
+* TLSv1.2 (IN), TLS handshake, Server key exchange (12):
+* TLSv1.2 (IN), TLS handshake, Server finished (14):
+* TLSv1.2 (OUT), TLS handshake, Client key exchange (16):
+* TLSv1.2 (OUT), TLS change cipher, Change cipher spec (1):
+* TLSv1.2 (OUT), TLS handshake, Finished (20):
+* TLSv1.2 (IN), TLS change cipher, Change cipher spec (1):
+* TLSv1.2 (IN), TLS handshake, Finished (20):
+* SSL connection using TLSv1.2 / ECDHE-RSA-CHACHA20-POLY1305
+* ALPN, server accepted to use h2
+* Server certificate:
+*  subject: O=example; CN=store.example.com
+*  start date: Apr 19 15:54:50 2021 GMT
+*  expire date: Apr 19 15:54:50 2022 GMT
+*  common name: store.example.com (matched)
+*  issuer: O=example; CN=store.example.com
+*  SSL certificate verify ok.
+...
+{
+  "cluster_name": "gw",
+  "host_header": "store.example.com",
+  "metadata": "store-v1",
+  "node_name": "gke-gw-default-pool-51ccbf30-yya8.c.agmsb-k8s.internal",
+  "pod_name": "store-v1-84b47c7f58-tj5mn",
+  "pod_name_emoji": "😍",
+  "project_id": "agmsb-k8s",
+  "timestamp": "2021-04-19T16:30:08",
+  "zone": "us-west1-a"
+}
+</pre> <p>This output includes a successful TLS handshake and a response from the application. TLS is terminated at the Gateway correctly and the application responds to the client securely.</p>
+</li> </ol> <h2 id="configure-frontend-mtls">Configure frontend mTLS for a Gateway</h2> <p>You can configure client certificate validation, also known as frontend mTLS, for your GKE Gateway.</p> <p>Frontend mTLS is supported for the following GatewayClasses:</p> <ul> <li><code translate="no" dir="ltr">gke-l7-global-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-rilb</code></li> <li><code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-rilb-mc</code></li> </ul> <p>Frontend mTLS lets the Gateway authenticate the certificates presented by clients, and is valid for HTTPS listeners that use <code translate="no" dir="ltr">Terminate</code> mode.</p> <aside class="note"><strong>Note:</strong><span> An HTTPS Gateway requires a server certificate. For information about how to configure server certificates, see the earlier sections of this document.</span></aside> <p>You can configure frontend mTLS in one of the following ways:</p> <ul> <li>Use Gateway API configuration (recommended).</li> <li>Use a self-managed <code translate="no" dir="ltr">TrustConfig</code> annotation on the Gateway (advanced).</li> </ul> <h3 id="configure-frontend-mtls-api">Configure frontend mTLS using Gateway API configuration (recommended)</h3> <aside class="note"><strong>Note:</strong><span> Configuring frontend mTLS by using the <code translate="no" dir="ltr">tls.frontend.default.validation</code> field requires Gateway API version 1.5 or later.</span></aside> <p>Using Gateway API is the recommended way to configure client certificate validation. This method involves storing trust sources in a Kubernetes ConfigMap and referencing this ConfigMap in the Gateway specification.</p> <ol> <li>
+<p>Create trust sources.</p> <p>Trust sources establish and validate the root of trust for client certificates that are presented to the load balancer. GKE Gateway supports trust sources based on root certificates.</p> <p>To create certificates, see <a href="https://docs.cloud.google.com/load-balancing/docs/https/setting-up-mtls-ccm#create_the_root_and_intermediate_certificates">Create the root and intermediate certificates</a>.</p>
+</li> <li>
+<p>Create a ConfigMap.</p> <p>Store your trust sources in a Kubernetes ConfigMap. Each key in the ConfigMap must contain exactly one PEM-encoded CA certificate in a valid x509 format. You must create this ConfigMap in the same namespace as your Gateway resource unless you use a ReferenceGrant. To reference a ConfigMap in a different namespace, see <a href="../concepts/gateway-api#referencegrant">ReferenceGrant</a>.</p> <p>Place the certificate data under the <code translate="no" dir="ltr">ca.crt</code> key:</p> 
+<pre>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-cert
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    &lt;PEM_DATA&gt;
+    -----END CERTIFICATE-----
+</pre>
+<aside class="note"><strong>Note:</strong><span> You can reference up to eight ConfigMap resources per configuration (either in the default or per-port configuration). Only root certificates are supported when using a ConfigMap. To use intermediate or allowed certificates, you must use a self-managed TrustConfig resource.</span></aside> <p>To create a ConfigMap with your certificates, run the following command:</p> 
+<pre>kubectl create configmap my-config \
+    --from-file=ca.crt=ROOT_CERT_PATH
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ROOT_CERT_PATH</var></code> with the path to your certificate file. A ConfigMap can contain only one certificate.</p>
+</li> <li>
+<p>Configure the Gateway.</p> <p>Attach the ConfigMap to your Gateway by adding a <code translate="no" dir="ltr">tls</code> section that contains the <code translate="no" dir="ltr">frontend.default.validation</code> field to your Gateway specification. The <code translate="no" dir="ltr">default</code> configuration is required and applies to all HTTPS listeners that use <code translate="no" dir="ltr">Terminate</code> mode unless you specify a per-port configuration. The following example shows an end-to-end Gateway configuration that includes both a server certificate (by using the <code translate="no" dir="ltr">certmap</code> annotation) and client certificate validation (by using the <code translate="no" dir="ltr">tls.frontend.default.validation</code> field):</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mtls-example
+  annotations:
+    networking.gke.io/certmap: store-example-com-map
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  tls:
+    frontend:
+      default:
+        validation:
+          caCertificateRefs:
+          - kind: ConfigMap
+            group: ""
+            name: my-config
+  listeners:
+  - name: foo-https
+    protocol: HTTPS
+    port: 443
+    hostname: foo.example.com
+    tls:
+      mode: Terminate
+      # No certificateRefs needed when using the certmap annotation
+</pre>
+</li> <li>
+<p>Override configuration per port.</p> <p>You can also specify unique trust sources for individual ports. A per-port configuration overrides the default configuration for all listeners configured for that port.</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mtls-port-override
+  annotations:
+    networking.gke.io/certmap: store-example-com-map
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  tls:
+    frontend:
+      default:
+        validation:
+          caCertificateRefs:
+          - kind: ConfigMap
+            group: ""
+            name: global-ca-config
+      perPort:
+      - port: 8443
+        tls:
+          validation:
+            caCertificateRefs:
+            - kind: ConfigMap
+              group: ""
+              name: port-specific-ca-config
+  listeners:
+  - name: https-default
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+  - name: https-override
+    protocol: HTTPS
+    port: 8443
+    tls:
+      mode: Terminate
+</pre>
+</li> <li>
+<p>Optional: configure the client validation mode.</p> <p>By default, GKE Gateways enforce strict client certificate validation (<code translate="no" dir="ltr">AllowValidOnly</code>). To allow invalid or missing client certificates, in the <code translate="no" dir="ltr">frontend.default.validation</code> configuration, set the value of the <code translate="no" dir="ltr">mode</code> key to <code translate="no" dir="ltr">AllowInsecureFallback</code>:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mtls-example
+  annotations:
+    networking.gke.io/certmap: store-example-com-map # Add this annotation
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  tls:
+    frontend:
+      default:
+        validation:
+          caCertificateRefs:
+          - kind: ConfigMap
+            group: ""
+            name: my-config
+          mode: AllowInsecureFallback
+  listeners:
+  - name: foo-https
+    protocol: HTTPS
+    port: 443
+    hostname: foo.example.com
+    tls:
+      mode: Terminate
+      # No certificateRefs needed when using the certmap annotation
+</pre>
+</li> </ol> <h3 id="configure-self-managed-trustconfig">Use a self-managed TrustConfig (advanced)</h3> <p>Alternatively, configure client certificate validation by annotating your Gateway with a TrustConfig resource. Use this self-managed method if you need additional flexibility or if your configuration exceeds standard Gateway API limitations. This method is mutually exclusive with the Gateway API configuration method and applies to all HTTPS listeners on the Gateway (per-port overrides are not supported).</p> <ol> <li>
+<p>Create a TrustConfig resource. For instructions, see <a href="https://docs.cloud.google.com/load-balancing/docs/https/setting-up-mtls-ccm#trustconfig">Create a trust config resource</a>.</p> <p>When you create the TrustConfig resource, specify <code translate="no" dir="ltr">global</code> for global Gateways (<code translate="no" dir="ltr">gke-l7-global-external-managed</code>) and all multi-cluster Gateways (<code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code>, <code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code>, <code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code>, and <code translate="no" dir="ltr">gke-l7-rilb-mc</code>), or the appropriate region (for example, <code translate="no" dir="ltr">us-central1</code>) for regional Gateways (<code translate="no" dir="ltr">gke-l7-regional-external-managed</code> and <code translate="no" dir="ltr">gke-l7-rilb</code>).</p>
+</li> <li>
+<p>Attach the TrustConfig to your Gateway by using the <code translate="no" dir="ltr">networking.gke.io/frontend-trust-config</code> annotation.</p> <p>The following example shows an end-to-end Gateway configuration that includes both a server certificate (using the <code translate="no" dir="ltr">certmap</code> annotation) and client certificate validation (using the <code translate="no" dir="ltr">TrustConfig</code> annotation):</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mtls-example
+  annotations:
+    networking.gke.io/frontend-trust-config: my-trust-config
+    networking.gke.io/certmap: store-example-com-map # Add this annotation
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+  - name: foo-https
+    protocol: HTTPS
+    port: 443
+    hostname: foo.example.com
+    tls:
+      mode: Terminate
+      # Remove certificateRefs and replace with the comment
+      # No certificateRefs needed when using the certmap annotation
+</pre>
+</li> <li>
+<p>Optional: configure the client validation mode.</p> <p>By default, GKE Gateways enforce strict client certificate validation (<code translate="no" dir="ltr">REJECT_INVALID</code>). To allow invalid or missing client certificates, set the <code translate="no" dir="ltr">networking.gke.io/allow-invalid-or-missing-client-cert</code> annotation to <code translate="no" dir="ltr">true</code>.</p>
+</li> </ol> <h2 id="configure-backend-tls">Configure backend TLS for a Gateway</h2> <p>Backend TLS enables the GKE Gateway load balancer to verify the identity of the backends it connects to. Backend TLS adds an explicit verification step during the TLS handshake between the Gateway and the backend Pod. The Gateway acts as the TLS client, validating the backend server's certificate against a set of trusted Certificate Authorities (CAs) that you configure. This verification occurs when a new connection is established, ensuring the Gateway communicates only with trusted backends and enhancing overall security.</p> <aside class="note"><strong>Note:</strong><span> Ensure that your application Pods are running an HTTPS server on the port targeted by your Service or InferencePool.</span></aside> <p>You can configure <em>backend authenticated TLS</em> using a BackendTLSPolicy resource attached to a Service, InferencePool, ServiceImport, or GCPInferencePoolImport. The BackendTLSPolicy must reside in the same namespace as the target resource.</p> <p>Backend TLS is supported for the following GatewayClasses:</p> <ul> <li><code translate="no" dir="ltr">gke-l7-global-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-rilb</code></li> <li><code translate="no" dir="ltr">gke-l7-rilb-mc</code></li> </ul> <h2 id="configure-backend-mtls">Configure backend mTLS for a Gateway</h2> <aside class="note"><strong>Note:</strong><span> Configuring backend mTLS by using the <code translate="no" dir="ltr">spec.tls.backend.clientCertificateRef</code> field requires Gateway API version 1.5 or later.</span></aside> <p>Backend mutual TLS (mTLS) is a feature built on top of backend authenticated TLS. Although backend authenticated TLS verifies the identity of backend Pods to the load balancer, backend mTLS enables the GKE Gateway load balancer to also authenticate its own identity to backend Pods by presenting a client certificate. You must configure backend authenticated TLS as part of setting up backend mTLS.</p> <p>GKE Gateway configures backend mTLS by using the standard Gateway API <code translate="no" dir="ltr">spec.tls.backend.clientCertificateRef</code> field.</p> <p>Backend mTLS is supported for the following GatewayClasses:</p> <ul> <li><code translate="no" dir="ltr">gke-l7-global-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-rilb</code></li> <li><code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-rilb-mc</code></li> </ul> <p>To configure backend mTLS, complete the following steps:</p> <ol> <li>Store the client certificate and private key in a standard Kubernetes Secret.</li> <li>Reference the client certificate Secret in your Gateway resource specification.</li> <li>Configure backend authenticated TLS by using a BackendTLSPolicy that targets your Service.</li> </ol> <h3 id="step_1_store_client_credentials">Step 1: Store client credentials</h3> <p>Before storing your client credentials, ensure that your certificate complies with the <a href="https://docs.cloud.google.com/load-balancing/docs/backend-authenticated-tls-backend-mtls#certificate-requirements">certificate requirements</a>.</p> <p>To store the client certificate and private key in a standard Kubernetes TLS Secret in the same namespace as your Gateway resource, run the following command:</p> 
+<pre>kubectl create secret tls gateway-client-identity \
+    --cert=PATH_TO_CERT_FILE \
+    --key=PATH_TO_KEY_FILE \
+    --namespace=default
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_CERT_FILE</var></code>: the path to your PEM-formatted client certificate file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_KEY_FILE</var></code>: the path to your PEM-formatted private key file.</li> </ul> <h3 id="step_2_reference_client_credentials_in_the_gateway">Step 2: Reference client credentials in the Gateway</h3> <ol> <li>
+<p>To reference the client certificate Secret under the <code translate="no" dir="ltr">spec.tls.backend</code> block of your Gateway resource, save the following manifest as <code translate="no" dir="ltr">my-gateway.yaml</code>:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+  namespace: default
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  tls:
+    backend:
+      clientCertificateRef:
+        group: "" # empty group resolves to Core API
+        kind: Secret
+        name: gateway-client-identity
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+</pre>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f my-gateway.yaml
+</pre>
+</li> </ol> <h3 id="step_3_apply_the_backendtlspolicy">Step 3: Apply the BackendTLSPolicy</h3> <p>To validate the backend server's identity, you must apply a BackendTLSPolicy targeting the Service that is referenced by your HTTPRoute.</p> <p>For detailed instructions and manifests on how to set up backend authenticated TLS, see <a href="#configure-backend-tls">Configure backend TLS for a Gateway</a>.</p> <h3 id="use_a_kubernetes_configmap_standard">Use a Kubernetes ConfigMap (Standard)</h3> <aside class="success"> <strong>Best practice:</strong> We recommend this method for configuring backend TLS because it uses standard Kubernetes built-in objects and is fully conformant with Gateway API. </aside> <p>In this method, you provide the CA certificate directly in a Kubernetes ConfigMap.</p> <ol> <li>
+<p>Create a ConfigMap resource containing your PEM-encoded CA certificates. For more information, see <a href="https://docs.cloud.google.com/load-balancing/docs/mtls#certificate-requirements">certificate requirements</a>. Each ConfigMap must contain only one CA certificate. You must create this ConfigMap in the same namespace as your BackendTLSPolicy resource. BackendTLSPolicy doesn't support cross-namespace references to ConfigMap resources.</p> <aside class="note"><strong>Note:</strong><span> A single BackendTLSPolicy supports referencing up to eight ConfigMap resources in the <code translate="no" dir="ltr">caCertificateRefs</code> field.</span></aside> <p>The certificate data must be placed under the <code translate="no" dir="ltr">ca.crt</code> key:</p> 
+<pre>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-backend-ca
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    PEM_DATA
+    -----END CERTIFICATE-----
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PEM_DATA</var></code> with the Base64-encoded, PEM-formatted content of your CA certificate.</p>
+</li> <li>
+<p>Target a Service, InferencePool, ServiceImport, or GCPInferencePoolImport with a BackendTLSPolicy that references the ConfigMap:</p> <div> <section><p class="_code-tab"><strong>Service</strong></p>
+<p>The following manifest shows a BackendTLSPolicy targeting a Service:</p> 
+<pre data-language="">apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: secure-backend-policy
+spec:
+  targetRefs:
+  - group: "" # empty group means Core API.
+    kind: Service
+    name: my-service-name
+  validation:
+    hostname: "backend.example.com"
+    caCertificateRefs:
+    - group: "" # empty group means Core API.
+      kind: ConfigMap
+      name: my-backend-ca
+</pre></section> <section><p class="_code-tab"><strong>InferencePool</strong></p>
+<p>The following manifest shows a BackendTLSPolicy targeting an InferencePool:</p> 
+<pre data-language="">apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: secure-backend-policy-inferencepool
+spec:
+  targetRefs:
+  - group: "inference.networking.k8s.io" # For InferencePool
+    kind: InferencePool
+    name: my-inference-pool
+  validation:
+    hostname: "backend.example.com"
+    caCertificateRefs:
+    - group: "" # empty group means Core API.
+      kind: ConfigMap
+      name: my-backend-ca
+</pre></section> <section><p class="_code-tab"><strong>ServiceImport</strong></p>
+<p>The following manifest shows a BackendTLSPolicy targeting a ServiceImport:</p> 
+<pre data-language="">apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: secure-backend-policy-serviceimport
+spec:
+  targetRefs:
+  - group: "net.gke.io" # For ServiceImport
+    kind: ServiceImport
+    name: my-service-import
+  validation:
+    hostname: "backend.example.com"
+    caCertificateRefs:
+    - group: "" # empty group means Core API.
+      kind: ConfigMap
+      name: my-backend-ca
+</pre></section> <section><p class="_code-tab"><strong>GCPInferencePoolImport</strong></p>
+<p>The following manifest shows a BackendTLSPolicy targeting a GCPInferencePoolImport:</p> 
+<pre data-language="">apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: secure-backend-policy-gcpinferencepoolimport
+spec:
+  targetRefs:
+  - group: "networking.gke.io" # For GCPInferencePoolImport
+    kind: GCPInferencePoolImport
+    name: my-gcp-inference-pool-import
+  validation:
+    hostname: "backend.example.com"
+    caCertificateRefs:
+    - group: "" # empty group means Core API.
+      kind: ConfigMap
+      name: my-backend-ca
+</pre></section> </div>
+</li> </ol> <h3 id="use_a_self-managed_trustconfig_advanced_2">Use a self-managed TrustConfig (Advanced)</h3> <aside class="note"><strong>Note:</strong><span> Use this method if your configuration requires advanced features like certificate allowlisting, or if it exceeds standard Gateway API limitations, such as the maximum number of supported intermediate or trust anchor certificates.</span></aside> <p>This method lets you reference a TrustConfig resource that you manage independently in Google Cloud Certificate Manager.</p> <ol> <li>
+<p>Create a TrustConfig resource in Certificate Manager. The TrustConfig must be created in the same project and location as the Gateway.</p> <ul> <li>For <em>global</em> or <em>multi-cluster</em> Gateways (including regional multi-cluster) and <em>cross-regional</em> Gateways, use the <code translate="no" dir="ltr">global</code> location.</li> <li>For <em>regional single-cluster</em> Gateways, use the same region as the Gateway.</li> <li>If your Service is used by multiple Gateways in different locations, you must create a TrustConfig resource with the same name in each of those locations.</li> </ul>
+</li> <li>
+<p>Target a Service with a BackendTLSPolicy that references the external TrustConfig resource through the <code translate="no" dir="ltr">options</code> field:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: secure-backend-policy
+spec:
+  targetRefs:
+  - group: "" # empty group means Core API.
+    kind: Service
+    name: my-service-name
+  validation:
+    wellKnownCACertificates: "System"
+    hostname: "backend.example.com"
+    options:
+      networking.gke.io/backend-trust-config: "my-trust-config-name"
+</pre>
+<aside class="note"><strong>Note:</strong><span> You cannot use both the <code translate="no" dir="ltr">wellKnownCACertificates: "System"</code> and <code translate="no" dir="ltr">caCertificateRefs</code> settings on the same object; doing so invalidates the policy.</span></aside>
+</li> </ol> <h3 id="backendtlspolicy-fields">BackendTLSPolicy field reference</h3> <p>The following table describes the key fields in a BackendTLSPolicy resource:</p> <table> <thead> <tr> <th>Field</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><strong><code translate="no" dir="ltr">targetRefs</code></strong></td> <td>The backend resources to which this policy applies. Supports Service (<code translate="no" dir="ltr">group:
+      ""</code>), InferencePool (<code translate="no" dir="ltr">group:
+      "inference.networking.k8s.io"</code>), ServiceImport (<code translate="no" dir="ltr">group:
+      "net.gke.io"</code>), or GCPInferencePoolImport (<code translate="no" dir="ltr">group:
+      "networking.gke.io"</code>). <strong>Note:</strong> For <code translate="no" dir="ltr">gke-l7-global-external-managed</code> and <code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code> GatewayClasses, only Service and ServiceImport backends are supported.</td> </tr> <tr> <td><strong><code translate="no" dir="ltr">validation.hostname</code></strong></td> <td>The hostname (SNI) used by the Gateway during the TLS handshake with the backend pods.</td> </tr> <tr> <td><strong><code translate="no" dir="ltr">validation.subjectAltNames</code></strong></td> <td>Optional. Defines one or more Subject Alternative Names (SANs) to validate against the backend's certificate. Supports <code translate="no" dir="ltr">Hostname</code> and <code translate="no" dir="ltr">URI</code> (such as SPIFFE IDs).</td> </tr> <tr> <td><strong><code translate="no" dir="ltr">validation.caCertificateRefs</code></strong></td> <td>Standard method. References a list of ConfigMap resources (up to eight) in the same namespace. Each ConfigMap must contain a single PEM-encoded CA certificate under the <code translate="no" dir="ltr">ca.crt</code> key. Cross-namespace references are not supported.</td> </tr> <tr> <td><strong><code translate="no" dir="ltr">validation.wellKnownCACertificates</code></strong></td> <td>Advanced method. Set the value to <code translate="no" dir="ltr">System</code> when using a self-managed TrustConfig.</td> </tr> <tr> <td><strong><code translate="no" dir="ltr">options</code></strong></td> <td>A map for GKE-specific options. Use the <code translate="no" dir="ltr">networking.gke.io/backend-trust-config</code> setting to reference an external TrustConfig resource.</td> </tr> </tbody> </table> <h3 id="verify-backend-tls">Verify the Backend TLS configuration</h3> <p>After applying the BackendTLSPolicy, verify that the Gateway controller has accepted the configuration by checking the policy status:</p> 
+<pre>kubectl describe backendtlspolicy POLICY_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POLICY_NAME</var></code> with the name of your policy.</p> <p>A policy is successfully applied if it contains <code translate="no" dir="ltr">Accepted</code> and <code translate="no" dir="ltr">ResolvedRefs</code> conditions with <code translate="no" dir="ltr">Status: "True"</code> in the <code translate="no" dir="ltr">Status.Ancestors</code> section:</p> 
+<pre>Status:
+  Ancestors:
+  - Ancestor Ref:
+      Group: gateway.networking.k8s.io
+      Kind: Gateway
+      Name: my-gateway-name
+      Namespace: default
+    Conditions:
+    - Last Transition Time: "2026-02-17T15:19:26Z"
+      Message: ""
+      Reason: Accepted
+      Status: "True"
+      Type: Accepted
+    - Last Transition Time: "2026-02-17T15:19:26Z"
+      Message: ""
+      Reason: ResolvedRefs
+      Status: "True"
+      Type: ResolvedRefs
+    Controller Name: networking.gke.io/gateway
+</pre> <p>If <code translate="no" dir="ltr">Status</code> is <code translate="no" dir="ltr">False</code> for any of these conditions, it indicates the policy has not been applied. Check the <code translate="no" dir="ltr">Reason</code> and <code translate="no" dir="ltr">Message</code> fields for more details. Common errors include referencing a ConfigMap in <code translate="no" dir="ltr">caCertificateRefs</code> that does not exist or is missing the <code translate="no" dir="ltr">ca.crt</code> key.</p> <p>This status confirms that the Gateway has successfully validated the policy and applied the TLS settings to the backends of the target Service or InferencePool. The BackendTLSPolicy resource must reside in the same namespace as the target resource.</p> <h2 id="load-balancer-tls">Secure load balancer to application traffic using TLS</h2> <p>You can encrypt traffic from the load balancer to backend Pods using the <code translate="no" dir="ltr">ports[].appProtocol</code> field. The supported fields for <code translate="no" dir="ltr">appProtocol</code> are: <code translate="no" dir="ltr">HTTP</code>, <code translate="no" dir="ltr">HTTPS</code>, <code translate="no" dir="ltr">HTTP2</code>, and <code translate="no" dir="ltr">kubernetes.io/h2c</code>.</p> <p>The following manifest describes a Service that specifies the load balancer must use HTTPS traffic to communication with the backend Pods:</p> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  name: store-v2
+spec:
+  selector:
+    app: store
+    version: v2
+  ports:
+  - port: 8080
+    targetPort: 8080
+    appProtocol: HTTPS
+</pre> <p>The GKE Gateway controller doesn't manage the certificate used by backend Pods. It is your responsibility to ensure the certificate used on the backend Pods is valid.</p> <aside class="note"><strong>Note:</strong><span> The previously supported <code translate="no" dir="ltr">networking.gke.io/app-protocol</code> is deprecated. This annotation is not supported by the GKE Gateway controller.</span></aside> <h2 id="ssl_-_policies">Secure client to load balancer traffic using SSL policies</h2> <p>When your applications are exposed through an external gateway that uses HTTPS, it is important to use the latest protocols or specify the minimum <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-policies-concepts">SSL or TLS</a> version. You can secure the client to load balancer traffic by using SSL policies.</p> <p>To know more about SSL policies that can be attached to your Gateway and how to create them, see <a href="configure-gateway-resources#configure_ssl_policies">Configure SSL Policies to secure client to load balancer traffic</a>.</p> <h2 id="cloud_armor">Protect your backends using Google Cloud Armor</h2> <p><a href="https://docs.cloud.google.com/armor/docs/security-policy-overview">Google Cloud Armor security policies</a> help you protect your load-balanced applications from web-based attacks. Once you have <a href="https://docs.cloud.google.com/armor/docs/configure-security-policies">configured a Google Cloud Armor security policy</a>, you can reference it in a GCPBackendPolicy applied to your Kubernetes Services.</p> <p>To configure Google Cloud Armor policies with Gateway, see <a href="configure-gateway-resources#configure_cloud_armor">Configure Google Cloud Armor security policy to secure your backend Services</a>.</p> <h2 id="identity-aware_proxy">Authenticate requests to your backends using Identity-Aware Proxy</h2> <p><a href="https://docs.cloud.google.com/iap/docs/concepts-overview">Identity-Aware Proxy</a> helps you protect your backends from unwanted traffic by authenticating clients sending requests to your applications and enforcing role-based traffic authorization. After you enable <a href="https://docs.cloud.google.com/iap/docs/enabling-kubernetes-howto">Identity-Aware Proxy for GKE</a>, you can reference your OAuth credentials in a GCPBackendPolicy applied to your Kubernetes Services.</p> <p>To configure Identity-Aware Proxy with Gateway, see <a href="configure-gateway-resources#configure_iap">Configure Identity-Aware Proxy</a>.</p> <aside class="note"><strong>Note:</strong><span> IAP is incompatible with Cloud CDN. If your application requires edge caching by using the GCPHTTPFilter resource, ensure that IAP is not enabled for the same Gateway or its routes. For more information about configuring caching, see <a href="configure-cdn-for-gateway">Configure Cloud CDN for Gateway</a>.</span></aside> <h2 id="configure-cors">Configure Cross-Origin Resource Sharing (CORS)</h2> <p>Cross-Origin Resource Sharing (CORS) is a security mechanism that helps web applications running at one origin (domain) securely access resources hosted on a different origin. You can configure CORS policies directly in your HTTPRoute resources by using the <code translate="no" dir="ltr">CORS</code> filter. When you configure the CORS filter, GKE Gateway offloads responding to preflight (<code translate="no" dir="ltr">OPTIONS</code>) requests and injecting CORS response headers from your application code.</p> <p>For more information about how to configure the CORS filter and the supported fields, see <a href="deploying-gateways#configure-cors">Configure Cross-Origin Resource Sharing (CORS)</a>.</p> <h2 id="auth-policy">Enforce access control using authorization policies</h2> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This product or feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA products and features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>You can enforce granular, identity-based access control on traffic that enters your Gateway by using authorization policies (GCPAuthzPolicy). This policy lets you define rules that <code translate="no" dir="ltr">ALLOW</code> or <code translate="no" dir="ltr">DENY</code> requests based on the source identity (such as a client certificate's Subject Alternative Name or common name), the target path, or specific HTTP headers.</p> <p>For advanced security scenarios, you can delegate authorization decisions to external services or third-party engines (such as a custom web application firewall) by using an authorization extension (GCPAuthzExtension).</p> <h3 id="allow-auth-policy">Set up an <code translate="no" dir="ltr">ALLOW</code> authorization policy</h3> <p>The following example describes an authorization policy that applies to a Gateway in the <code translate="no" dir="ltr">default</code> namespace. The policy restricts access by only allowing requests to the <code translate="no" dir="ltr">/home</code> and <code translate="no" dir="ltr">/public</code> paths, which implicitly denies access to all other paths.</p> <ol> <li>
+<p>Save the following manifest to <code translate="no" dir="ltr">allow-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAuthzPolicy
+metadata:
+  name: allow-paths
+  namespace: default
+spec:
+  enforcementLevel: L7
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: "GATEWAY_NAME"
+  action: ALLOW
+  rules:
+  - to:
+      operations:
+      - paths:
+        - type: Exact
+          value: "/home"
+        - type: Exact
+          value: "/public"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f allow-policy.yaml
+</pre>
+</li> </ol> <h3 id="deny-auth-policy">Set up a <code translate="no" dir="ltr">DENY</code> authorization policy</h3> <p>The following example describes an authorization policy that applies to a Gateway in the <code translate="no" dir="ltr">default</code> namespace. The policy explicitly denies all requests to the <code translate="no" dir="ltr">/private</code> path while permitting access to all other paths by default.</p> <ol> <li>
+<p>Save the following manifest to <code translate="no" dir="ltr">deny-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAuthzPolicy
+metadata:
+  name: deny-path
+  namespace: default
+spec:
+  enforcementLevel: L7
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: "GATEWAY_NAME"
+  action: DENY
+  rules:
+  - to:
+      operations:
+      - paths:
+        - type: Exact
+          value: "/private"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f deny-policy.yaml
+</pre>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="../concepts/gateway-security">Gateway security</a>.</li> <li>Learn how to <a href="configure-gateway-resources">configure Gateway resources using Policies</a>.</li> <li>Learn how to <a href="deploying-gateways">deploy Gateways</a>.</li> <li>Learn more about <a href="../concepts/gateway-api">Gateway API</a>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/secure-gateway" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/secure-gateway</a>
+  </p>
+</div>

@@ -1,0 +1,158 @@
+<h1 id="migrating-permissions-from-hadoop">Migrating permissions from Hadoop</h1> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <aside class="note"><strong>Note:</strong><span> To get support or provide feedback for this feature, contact <a href="mailto:bigquery-permission-migration-support@google.com">bigquery-permission-migration-support@google.com</a>.</span></aside> <p>This document describes how you can migrate permissions from Apache Hadoop Distributed File System (HDFS), Ranger HDFS, and Apache Hive into Identity and Access Management (IAM) roles in Cloud Storage or BigQuery.</p> <p>The permissions migration process consists of the following steps:</p> <ol> <li>
+<a href="#generate_a_principals_mapping_file">Generate a principals mapping file</a> by first creating a principal ruleset YAML configuration file. Then, run the permission migration tool with the principal ruleset YAML file with the HDFS or Ranger metadata files to generate a principals mapping file.</li> <li>
+<a href="#generate_target_permissions_file">Generate a target permissions mapping file</a> by first creating a permissions ruleset YAML file. Then, run the permission migration tool with the permissions ruleset YAML file and the table mapping configuration files, and the HDFS or Ranger metadata files, to generate a target permissions mapping file.</li> <li>Run the permission migration tool with the target permissions file to <a href="#apply_permissions">apply permissions to Cloud Storage or BigQuery</a>. You can also use the provided python script to generate a Terraform file that you can use to apply permissions on your own.</li> </ol> <h2 id="before_you_begin">Before you begin</h2> <p>Before you migrate permissions, verify that you have done the following:</p> <ul> <li>
+<a href="hadoop-metadata#install-dumper">Install the <code translate="no" dir="ltr">dwh-migration-dumper</code> tool</a>.</li> <li>
+<a href="migration-assessment#extract-metadata-logs">Run the <code translate="no" dir="ltr">dwh-migration-dumper</code> tool</a> to generate the necessary metadata for your data source.</li> </ul> <p>You can also find the Terraform generator script in the <code translate="no" dir="ltr">terraform.zip</code> file inside the release package.</p> <h2 id="generate_a_principals_mapping_file">Generate a principals mapping file</h2> <p>A principals mapping file defines mapping rules that maps principals from your source to Google Cloud IAM principals.</p> <p>To generate a principals mapping file, you must first manually create a principal ruleset YAML file to define how principals are mapped from your source to Google Cloud IAM principals. In the principals ruleset YAML file, define mapping rules for each of your sources, either <code translate="no" dir="ltr">ranger</code>, <code translate="no" dir="ltr">HDFS</code>, or both.</p> <p>The following example shows a principals ruleset YAML file that maps Apache Ranger groups to service accounts in Google Cloud:</p> 
+<pre>  ranger:
+    user_rules:
+      - skip: true
+    group_rules:
+      # Skip internal Ranger groups.
+      - skip: true
+        when: "group.groupSource == 0"
+
+      # Map all roles to Google Cloud Platform service accounts.
+      - map:
+          type:
+            value: serviceAccount
+          email_address:
+            expression: "group.name + 'my-service-account@my-project.iam.gserviceaccount.com'"
+
+    role_rules:
+      - skip: true
+
+  hdfs:
+    user_rules:
+      - skip: true
+    group_rules:
+      - skip: true
+    other_rules:
+      - skip: true</pre> <p>The following example shows a principals ruleset YAML file that maps HDFS users to specific Google Cloud users:</p> 
+<pre>  ranger:
+    user_rules:
+      - skip: true
+    group_rules:
+      - skip: true
+    role_rules:
+      - skip: true
+
+  hdfs:
+    user_rules:
+      # Skip user named 'example'
+      - when: "user.name == 'example'"
+        skip: true
+      # Map all other users to their name at google.com
+      - when: "true"
+        map:
+          type:
+            value: user
+          email_address:
+            expression: "user.name + '@google.com'"
+
+    group_rules:
+      - skip: true
+    other_rules:
+      - skip: true</pre> <p>For more information about the syntax for creating a principals ruleset YAML file, see <a href="#ruleset_yaml_files">Ruleset YAML files</a>.</p> <p>Once you have created a principals ruleset YAML file, upload it to a Cloud Storage bucket. You must also include either the HDFS file, the Apache Ranger file generated by the <code translate="no" dir="ltr">dwh-migration-dumper</code> tool, or both, depending on which source you are migrating permissions from. You can then run the permissions migration tool to generate the principals mapping file.</p> <p>The following example shows how you can run the permissions migration tool to migrate from both HDFS and Apache Ranger, resulting in a principals mapping file named <code translate="no" dir="ltr">principals.yaml</code>.</p> 
+<pre>./dwh-permissions-migration expand \
+    --principal-ruleset gs://MIGRATION_BUCKET/principals-ruleset.yaml \
+    --hdfs-dumper-output gs://MIGRATION_BUCKET/hdfs-dumper-output.zip \
+    --ranger-dumper-output gs://MIGRATION_BUCKET/ranger-dumper-output.zip \
+    --output-principals gs://MIGRATION_BUCKET/principals.yaml</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">MIGRATION_BUCKET</var></code> with the name of the Cloud Storage bucket that contains your migration files.</p> <p>Once you've run the tool, inspect the generated <code translate="no" dir="ltr">principals.yaml</code> file to verify that it contains principals from your source mapped to Google Cloud IAM principals. You can edit the file manually before the next steps.</p> <h2 id="generate_target_permissions_file">Generate target permissions file</h2> <p>The target permissions file contains information about the mapping of source permissions set in the Hadoop cluster to IAM roles for BigQuery or Cloud Storage managed folders. To generate a target permissions file, you must first manually create a permissions ruleset YAML file that specifies how permissions from Ranger or HDFS map to Cloud Storage or BigQuery.</p> <p>The following example accepts all Ranger permissions to Cloud Storage:</p> 
+<pre>gcs:
+  ranger_hive_rules:
+    - map: {}
+      log: true</pre> <p>The following example accepts all HDFS permissions except the <code translate="no" dir="ltr">hadoop</code> principal:</p> 
+<pre>gcs:
+  hdfs_rules:
+    - when:
+        source_principal.name == 'hadoop'
+      skip: true
+    - map: {}</pre> <p>The following example overrides the default role mapping for the table <code translate="no" dir="ltr">tab0</code>, and uses defaults for all other permissions</p> 
+<pre>gcs:
+  ranger_hive_rules:
+    ranger_hive_rules:
+      - when: table.name == 'tab0'
+        map:
+          role:
+            value: "roles/customRole"
+      - map: {}</pre> <p>For more information about the syntax for creating a permissions ruleset YAML file, see <a href="#ruleset_yaml_files">Ruleset YAML files</a>.</p> <p>Once you have created a permissions ruleset YAML file, upload it to a Cloud Storage bucket. You must also include either the HDFS file, the Apache Ranger file generated by the <code translate="no" dir="ltr">dwh-migration-dumper</code> tool, or both, depending on which source you are migrating permissions from. You must also include the <a href="hadoop-transfer#generate_tables_mapping_yaml_files">tables configuration YAML files</a> and the <a href="#generate_a_principals_mapping_file">principals mapping file</a>.</p> <p>You can then run the permissions migration tool to generate the target permissions file.</p> <p>The following example shows how you can run the permissions migration tool to migrate from both HDFS and Apache Ranger, with the tables mapping configuration files and the principals mapping file named <code translate="no" dir="ltr">principals.yaml</code>, resulting in a principals mapping file named <code translate="no" dir="ltr">permissions.yaml</code>.</p> 
+<pre>./dwh-permissions-migration build \
+    --permissions-ruleset gs://MIGRATION_BUCKET/permissions-config.yaml \
+    --tables gs://MIGRATION_BUCKET/tables/ \
+    --principals gs://MIGRATION_BUCKET/principals.yaml \
+    --ranger-dumper-output gs://MIGRATION_BUCKET/ranger-dumper-output.zip \
+    --hdfs-dumper-output gs://MIGRATION_BUCKET/hdfs-dumper-output.zip \
+    --output-permissions gs://MIGRATION_BUCKET/permissions.yaml</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">MIGRATION_BUCKET</var></code> with the name of the Cloud Storage bucket that contains your migration files.</p> <p>Once you've run the tool, inspect the generated <code translate="no" dir="ltr">permissions.yaml</code> file to verify that it contains permissions from your source mapped to Cloud Storage or BigQuery IAM bindings. You can edit the manually before the next steps.</p> <h2 id="apply_permissions">Apply permissions</h2> <p>Once you have generated a target permissions file, you can then run the permissions migration tool to apply the IAM permissions to Cloud Storage or BigQuery.</p> <p>Before you run the permissions migration tool, verify that you have met the following prerequisites:</p> <ul> <li>You have created the required principals (users, groups, service accounts) in Google Cloud.</li> <li>You have created the Cloud Storage managed folders or tables that will host the migrated data.</li> <li>The user running the tool has permissions to manage roles for the Cloud Storage managed folders or tables.</li> </ul> <p>You can apply permissions by running the following command:</p> 
+<pre>./dwh-permissions-migration apply \
+--permissions gs://MIGRATION_BUCKET/permissions.yaml</pre> <p>Where <code translate="no" dir="ltr"><var translate="no">MIGRATION_BUCKET</var></code> is the name of the Cloud Storage bucket that contains your migration files.</p> <h3 id="apply_permissions_as_a_terraform_configuration">Apply permissions as a Terraform configuration</h3> <p>To apply the migrated permissions, you can also convert the target permissions file into a Terraform Infrastructure-as-Code (IaC) configuration and apply it to Cloud Storage.</p> <ol> <li>Verify that you have Python 3.7 or higher.</li> <li>
+<a href="http://docs.python.org/3/library/venv.html">Create a new virtual environment</a> and activate it.</li> <li>
+<p>From the <code translate="no" dir="ltr">permissions-migration/terraform</code> directory, install the dependencies from the <code translate="no" dir="ltr">requirements.txt</code> file using the following command:</p> 
+<pre>python -m pip install -r requirements.txt</pre>
+</li> <li>
+<p>Run the generator command:</p> 
+<pre>python tf_generator PATH LOCATION OUTPUT</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH</var></code>: the path to the generated <code translate="no" dir="ltr">permissions.yaml</code> file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the <a href="https://docs.cloud.google.com/storage/docs/locations">location of your Cloud Storage bucket</a> where the script checks and creates folders based on the permission configuration.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">OUTPUT</var></code>: the path to the output file, <code translate="no" dir="ltr">main.tf</code>.</li> </ul>
+</li> </ol> <h2 id="ruleset_yaml_files">Ruleset YAML files</h2> <p>Ruleset YAML files are used to map principals and roles when migrating permissions from HDFS or Apache Ranger to Google Cloud. Ruleset YAML files use Common Expression Language (CEL) for specifying predicates (where the result is boolean) and expressions (where the result is string).</p> <p>Ruleset YAML files have the following characteristics:</p> <ul> <li>Mapping rules of each type are executed sequentially from top to bottom for each input object.</li> <li>CEL expressions have access to context variables, and context variables depend on the section of the ruleset. For example, you can use the <code translate="no" dir="ltr">user</code> variable to map to source user objects, and you can use the <code translate="no" dir="ltr">group</code> variable to map to groups.</li> <li>You can use CEL expressions or use static values to change default values. For example, when mapping a group, you can override the output value <code translate="no" dir="ltr">type</code> from the default value <code translate="no" dir="ltr">group</code> to another value like <code translate="no" dir="ltr">serviceAccount</code>.</li> <li>There must be at least one rule which matches every input object.</li> </ul> <p>In an HDFS or Apache Ranger permissions migration, a ruleset YAML file can be used to define either a principal mapping file or a role mapping file.</p> <h3 id="mapping_rules_in_ruleset_yaml_files">Mapping rules in ruleset YAML files</h3> <p>The ruleset YAML file consists of mapping rules that specify how objects match from your source to your target during a permissions migration. A mapping rule can contain the following sections or clauses:</p> <ul> <li>
+<code translate="no" dir="ltr">when</code>: A predicate clause that limits the applicability of the rule <ul> <li>A string represents a boolean CEL expression. Values can be <code translate="no" dir="ltr">true</code> or <code translate="no" dir="ltr">false</code>
+</li> <li>The rule applies only if the <code translate="no" dir="ltr">when</code> clause evaluates to <code translate="no" dir="ltr">true</code>
+</li> <li>Default value is <code translate="no" dir="ltr">true</code>
+</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">map</code>: A clause that specifies the contents of a result field. The value for this clause depends on the type of object processed and can be defined as: <ul> <li>
+<code translate="no" dir="ltr">expression</code> to evaluate as a string</li> <li>
+<code translate="no" dir="ltr">value</code> for a constant string</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">skip</code>: Specifies that the input object shouldn't be mapped <ul> <li>Can be either <code translate="no" dir="ltr">true</code> or <code translate="no" dir="ltr">false</code>
+</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">log</code>: A predicate clause that helps debug or develop rules <ul> <li>A string represents a boolean CEL expression. Values can be <code translate="no" dir="ltr">true</code> or <code translate="no" dir="ltr">false</code>
+</li> <li>Default value is <code translate="no" dir="ltr">false</code>
+</li> <li>If set to <code translate="no" dir="ltr">true</code>, the output contains an execution log that can be used to monitor or diagnose issues in the execution</li> </ul>
+</li> </ul> <h3 id="creating_a_principal_ruleset_yaml_file">Creating a principal ruleset YAML file</h3> <p>A principal mapping file is used to generate <a href="https://docs.cloud.google.com/iam/docs/principal-identifiers">principal identifiers</a> by providing a value for <code translate="no" dir="ltr">email_address</code> and <code translate="no" dir="ltr">type</code>.</p> <ul> <li>Use <code translate="no" dir="ltr">email_address</code> to specify the email for the Google Cloud principal.</li> <li>Use <code translate="no" dir="ltr">type</code> to specify the nature of the principal in Google Cloud. The value for <code translate="no" dir="ltr">type</code> can either be <code translate="no" dir="ltr">user</code>, <code translate="no" dir="ltr">group</code>, or <code translate="no" dir="ltr">serviceAccount</code>.</li> </ul> <p>Any CEL expression used in the rules has access to variables which represent the processed object. The fields in the variables are based on the contents of the HDFS or Apache Ranger metadata files. The available variables depend on the section of the ruleset:</p> <ul> <li>For <code translate="no" dir="ltr">user_rules</code>, use the variable <code translate="no" dir="ltr">user</code>
+</li> <li>For <code translate="no" dir="ltr">group_rules</code>, use the variable <code translate="no" dir="ltr">group</code>
+</li> <li>For <code translate="no" dir="ltr">other_rules</code>, use the variable <code translate="no" dir="ltr">other</code>
+</li> <li>For <code translate="no" dir="ltr">role_rules</code>, use the variable <code translate="no" dir="ltr">role</code>
+</li> </ul> <p>The following example maps users from HDFS to users in the Google Cloud with their username, followed by <code translate="no" dir="ltr">@google.com</code> as their email address:</p> 
+<pre>hdfs:
+  user_rules:
+    # Skip user named 'example'
+    - when: "user.name == 'example'"
+      skip: true
+    # Map all other users to their name at google.com
+    - when: "true"
+      map:
+        type:
+          value: user
+        email_address:
+          expression: "user.name + '@google.com'"</pre> <h4 id="override_default_role_mapping">Override default role mapping</h4> <p>To use non-default principals, you can either skip or modify the default role mappings using the ruleset files.</p> <p>The following example shows how you can skip a section of rules:</p> 
+<pre>hdfs:
+  user_rules:
+    - skip: true
+  group_rules:
+    - skip: true
+  other_rules:
+    - skip: true</pre> <h3 id="creating_a_permissions_ruleset_yaml_file">Creating a permissions ruleset YAML file</h3> <p>A permissions ruleset YAML file is used to generate a target permissions mapping file. To create a permissions ruleset YAML file, use CEL expressions in your permissions ruleset YAML to map HDFS or Apache Ranger permissions to Cloud Storage or BigQuery roles.</p> <h4 id="default_role_mapping">Default role mapping</h4> <p>HDFS file roles are determined by source file permissions:</p> <ul> <li>If the <code translate="no" dir="ltr">w</code> bit is set, then the default role is <code translate="no" dir="ltr">writer</code>
+</li> <li>If the <code translate="no" dir="ltr">r</code> bit is set, then the default role is <code translate="no" dir="ltr">reader</code>
+</li> <li>If neither bits are set, then the role is empty</li> </ul> <p>Ranger HDFS:</p> <ul> <li>If the access set contains <code translate="no" dir="ltr">write</code>, then the default role is <code translate="no" dir="ltr">writer</code>
+</li> <li>If the access set contains <code translate="no" dir="ltr">read</code>, then the default role is <code translate="no" dir="ltr">reader</code>
+</li> <li>If the access set contains neither, then the role is empty</li> </ul> <p>Ranger:</p> <ul> <li>If the access set contains <code translate="no" dir="ltr">update</code>, <code translate="no" dir="ltr">create</code>, <code translate="no" dir="ltr">drop</code>, <code translate="no" dir="ltr">alter</code>, <code translate="no" dir="ltr">index</code>, <code translate="no" dir="ltr">lock</code>, <code translate="no" dir="ltr">all</code>, <code translate="no" dir="ltr">write</code>, or <code translate="no" dir="ltr">refresh</code>, then the default role is <code translate="no" dir="ltr">writer</code>
+</li> <li>If the access set contains <code translate="no" dir="ltr">select</code> or <code translate="no" dir="ltr">read</code>, then the default role is <code translate="no" dir="ltr">reader</code>
+</li> <li>If the access set contains none of the preceding permissions, then the role is empty</li> </ul> <p>Cloud Storage:</p> <ul> <li>
+<code translate="no" dir="ltr">roles/storage.objectUser</code> - Writer</li> <li>
+<code translate="no" dir="ltr">roles/storage.objectViewer</code> - Reader</li> </ul> <p>BigQuery:</p> <ul> <li>
+<code translate="no" dir="ltr">roles/bigquery.dataOwner</code> - Writer</li> <li>
+<code translate="no" dir="ltr">roles/bigquery.dataViewer</code> - Reader</li> </ul> <p>The following example shows how you can accept default mappings without any changes in the ruleset YAML file:</p> 
+<pre>ranger_hdfs_rules:
+  - map: {}</pre> <h4 id="override_default_role_mapping_2">Override default role mapping</h4> <p>To use non-default roles, you can either skip or modify the default role mappings using the ruleset files.</p> <p>The following example shows how you can override a default role mapping using a map clause with the role field using a value clause:</p> 
+<pre>ranger_hdfs_rules:
+  - map:
+    role:
+      value: "roles/customRole"</pre> <h3 id="merging_permission_mappings">Merging permission mappings</h3> <p>If multiple permission mappings are generated for the same targeted resource, the mapping with the widest access is used. For example, if an HDFS rule gives a reader role to principal <code translate="no" dir="ltr">pa1</code> on an HDFS location, and a Ranger rule gives a writer role to the same principal on the same location, then the writer role is assigned.</p> <h3 id="string_quoting_in_cel_expressions">String quoting in CEL expressions</h3> <p>Use quotation marks <code translate="no" dir="ltr">""</code> to wrap the entire CEL expression in YAML. Within the CEL expression, use single quotes <code translate="no" dir="ltr">''</code> for quoting strings. For example:</p> 
+<pre>"'permissions-migration-' + group.name + '@google.com'"</pre><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/hadoop-permissions-migration" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/hadoop-permissions-migration</a>
+  </p>
+</div>

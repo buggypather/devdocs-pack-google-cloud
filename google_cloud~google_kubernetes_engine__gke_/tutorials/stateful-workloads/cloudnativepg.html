@@ -1,0 +1,322 @@
+<h1>Deploy PostgreSQL to GKE using CloudNativePG</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>The guide shows you how to deploy PostgreSQL clusters on Google Kubernetes Engine (GKE) using the <a href="https://cloudnative-pg.io/">CloudNativePG</a> operator.</p> <p><a href="https://www.postgresql.org/">PostgreSQL</a> is an open-source object-relational database with several decades of active development, ensuring stable client performance. It offers a range of features, including replication, point-in-time recovery, security features, and extendability. PostgreSQL is compatible with major operating systems and fully complies with ACID (Atomicity, Consistency, Isolation, Durability) standards.</p> <p>This guide is intended for platform administrators, cloud architects, and operations professionals interested in deploying Postgres clusters on GKE. Running Postgres in GKE instead of using <a href="https://docs.cloud.google.com/sql/docs/postgres/quickstarts"> Cloud SQL</a> can give more flexibility and configuration control to experienced database administrators.</p> <h3 id="benefits">Benefits</h3> <p>CloudNativePG is an open-source operator developed by <a href="https://www.enterprisedb.com/">EDB</a> under an <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2</a> license. It brings the following features to PostgreSQL deployment:</p> <ul> <li>A declarative and Kubernetes-native way to manage and configure and PostgreSQL clusters</li> <li>Backup management using <a href="../../how-to/persistent-volumes/volume-snapshots">volume snapshots</a> or <a href="https://cloudnative-pg.io/documentation/1.21/appendixes/object_stores/#google-cloud-storage">Cloud Storage</a>
+</li> <li>In-transit encrypted <a href="https://cloudnative-pg.io/documentation/1.21/certificates/">TLS</a> connection, the ability to use your own certificate authority and integration with Certificate Manager for automated TLS certificate issuance and rotation</li> <li>Rolling updates for minor PostgreSQL releases</li> <li>Use of Kubernetes API server to maintain a PostgreSQL cluster status and failovers for high availability with no additional tools required</li> <li>A built-in Prometheus exporter configuration through user-defined metrics written in SQL</li> </ul> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Plan and deploy GKE infrastructure for Postgres</li> <li>Deploy and configure the CloudNativePG Postgres operator with Helm</li> <li>Deploy a PostgreSQL cluster</li> <li>Configure PostgreSQL authentication and observability</li> </ul> <h3 id="deployment-architecture">Deployment architecture</h3> <p>PostgreSQL has various deployment options from a standalone database server to a replicated highly-available cluster. This tutorial focuses on the highly-available cluster deployment to GKE.</p> <p>In this deployment, the PostgreSQL cluster workloads are distributed across multiple availability zones within the regional GKE cluster, ensuring high availability and redundancy. For more information, see <a href="../../concepts/regional-clusters">regional clusters</a>.</p> <p>The following diagram shows a Postgres cluster running on multiple nodes and zones in a GKE cluster:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-cloudnativepg-postgresql.svg" alt="Postgres cluster on
+GKE"></p> <ul> <li><p>The default setup includes one main PostgreSQL server and two backup servers ready to take over in case the main server fails, ensuring continuous database availability.</p></li> <li><p>The CloudNativePG operator resources use a separate namespace of the GKE cluster for better resource isolation and recommended microservices approach of one database per PostgreSQL cluster. The database and its corresponding user (app user) are defined in the Kubernetes custom resource representing the cluster.</p></li> <li><p>Storage is a crucial component when discussing databases. Storage must perform efficiently, ensure continuous availability, and guarantee data consistency. For these reasons, we recommend the <code translate="no" dir="ltr">premium-rwo</code> storage class, which is based on SSD disks. The CloudNativePG operator automatically creates <code translate="no" dir="ltr">PersistentVolumeClaims</code> as needed when setting up Pods for the PostgreSQL cluster.</p></li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/compute/disks-image-pricing">Compute Engine</a></li> <li><a href="https://cloud.google.com/kubernetes-engine/pricing/">GKE</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p><a href="https://docs.cloud.google.com/shell">Cloud Shell</a> is preinstalled with the software you need for this tutorial, including <a href="https://kubernetes.io/docs/reference/kubectl/"><code translate="no" dir="ltr">kubectl</code></a>, the <a href="https://docs.cloud.google.com/sdk/gcloud">gcloud CLI</a>, <a href="https://helm.sh/">Helm</a>, and <a href="https://docs.cloud.google.com/docs/terraform">Terraform</a>. If you don't use Cloud Shell, you must install the gcloud CLI.</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Compute Engine, IAM, GKE, Resource Manager APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable compute.googleapis.com iam.googleapis.com container.googleapis.com cloudresourcemanager.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Compute Engine, IAM, GKE, Resource Manager APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable compute.googleapis.com iam.googleapis.com container.googleapis.com cloudresourcemanager.googleapis.com</pre>
+</li> </div> </cloud-free-trial> <li> <p> Grant roles to your user account. Run the following command once for each of the following IAM roles: <code translate="no" dir="ltr">roles/compute.securityAdmin, roles/compute.viewer, roles/container.clusterAdmin, roles/container.admin, roles/iam.serviceAccountAdmin, roles/iam.serviceAccountUser</code> </p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID --member="user:USER_IDENTIFIER" --role=ROLE</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USER_IDENTIFIER</var></code>: The identifier for your user account. For example, <code translate="no" dir="ltr">myemail@example.com</code>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: The IAM role that you grant to your user account.</li> </ul> </li> </ol> </section> <div id="tutorial-content"> <h3 id="envsetup">Set up your environment</h3> <p>To set up your environment, follow these steps:</p> <ol> <li>
+<p>Set environment variables:</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=postgres
+export REGION=us-central1
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</p>
+</li> <li>
+<p>Clone the GitHub repository:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+</pre>
+</li> <li>
+<p>Change to the working directory:</p> 
+<pre>cd kubernetes-engine-samples/databases/postgresql-cloudnativepg
+</pre>
+</li> </ol> <h2 id="create-cluster">Create your cluster infrastructure</h2> <p>In this section, you run a Terraform script to create a private, highly-available, regional GKE cluster.</p> <p>You can install the operator using a <a href="../../concepts/choose-cluster-mode" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Standard or Autopilot</a> cluster.</p> <div> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>The following diagram shows a private regional Standard GKE cluster deployed across three different zones:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-cloudnativepg-standard-architecture.svg" alt></p> <p>To deploy this infrastructure, run the following commands:</p> 
+<pre data-language="">export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=terraform/gke-standard init
+terraform -chdir=terraform/gke-standard apply \
+-var project_id=${PROJECT_ID}   \
+-var region=${REGION}  \
+-var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>When prompted, type <code translate="no" dir="ltr">yes</code>. It might take several minutes for this command to complete and for the cluster to show a ready status.</p> <p>Terraform creates the following resources:</p> <ul> <li>A VPC network and private subnet for the Kubernetes nodes</li> <li>A router to access the internet through NAT</li> <li>A private GKE cluster in the <code translate="no" dir="ltr">us-central1</code> region</li> <li>A node pools with auto scaling enabled (one to two nodes per zone, one node per zone minimum)</li> </ul> <p>The output is similar to the following:</p> 
+<pre data-language="">...
+Apply complete! Resources: 14 added, 0 changed, 0 destroyed.
+...
+</pre></section> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>The following diagram shows a private regional Autopilot GKE cluster:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-cloudnativepg-autopilot-architecture.svg" alt></p> <p>To deploy the infrastructure, run the following commands:</p> 
+<pre data-language="">export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=terraform/gke-autopilot init
+terraform -chdir=terraform/gke-autopilot apply \
+-var project_id=${PROJECT_ID} \
+-var region=${REGION} \
+-var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>When prompted, type <code translate="no" dir="ltr">yes</code>. It might take several minutes for this command to complete and for the cluster to show a ready status.</p> <p>Terraform creates the following resources:</p> <ul> <li>A VPC network and private subnet for the Kubernetes nodes</li> <li>A router to access the internet through NAT</li> <li>A private GKE cluster in the <code translate="no" dir="ltr">us-central1</code> region</li> <li>A <code translate="no" dir="ltr">ServiceAccount</code> with logging and monitoring permission</li> <li>Google Cloud Managed Service for Prometheus for cluster monitoring</li> </ul> <p>The output is similar to the following:</p> 
+<pre data-language="">...
+Apply complete! Resources: 12 added, 0 changed, 0 destroyed.
+...
+</pre></section> </div> <h3 id="connect-to-the-cluster">Connect to the cluster</h3> <p>Configure <code translate="no" dir="ltr">kubectl</code> to communicate with the cluster:</p> 
+<pre>gcloud container clusters get-credentials ${KUBERNETES_CLUSTER_PREFIX}-cluster --location ${REGION}
+</pre> <h2 id="deploy-cloudnativepg-operator">Deploy the CloudNativePG operator</h2> <p>Deploy the CloudNativePG to your Kubernetes cluster using a Helm chart:</p> <ol> <li>
+<p>Add the CloudNativePG operator Helm Chart repository:</p> 
+<pre>helm repo add cnpg https://cloudnative-pg.github.io/charts
+</pre>
+</li> <li>
+<p>Deploy the CloudNativePG operator using the Helm command-line tool:</p> 
+<pre>helm upgrade --install cnpg \
+    --namespace cnpg-system \
+    --create-namespace \
+    cnpg/cloudnative-pg
+</pre> <p>The output is similar to the following:</p> 
+<pre>Release "cnpg" does not exist. Installing it now.
+NAME: cnpg
+LAST DEPLOYED: Fri Oct 13 13:52:36 2023
+NAMESPACE: cnpg-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+...
+</pre>
+</li> </ol> <h2 id="deploy-postgres">Deploy Postgres</h2> <p>The following manifest describes a PostgreSQL cluster as defined by the CloudNativePG operator's custom resource:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: gke-pg-cluster
+spec:
+  description: "Standard GKE PostgreSQL cluster"
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.2
+  enableSuperuserAccess: true
+  instances: 3
+  startDelay: 300
+  primaryUpdateStrategy: unsupervised
+  postgresql:
+    pg_hba:
+      - host all all 10.48.0.0/20 md5
+  bootstrap:
+    initdb:
+      database: app
+  storage:
+    storageClass: premium-rwo
+    size: 2Gi
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "1000m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  affinity:
+    enablePodAntiAffinity: true
+    tolerations:
+    - key: cnpg.io/cluster
+      effect: NoSchedule
+      value: gke-pg-cluster
+      operator: Equal
+    additionalPodAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: app.component
+              operator: In
+              values:
+              - "pg-cluster"
+          topologyKey: topology.kubernetes.io/zone
+  monitoring:
+    enablePodMonitor: true</pre> </div> <p>This manifest has the following fields:</p> <ul> <li>
+<code translate="no" dir="ltr">spec.instances</code>: the number of cluster Pods</li> <li>
+<code translate="no" dir="ltr">spec.primaryUpdateStrategy</code>: the rolling update strategy: <ul> <li>
+<code translate="no" dir="ltr">Unsupervised</code>: autonomously updates the primary cluster node after the replica nodes</li> <li>
+<code translate="no" dir="ltr">Supervised</code>: manual switchover is required for the primary cluster node</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">spec.postgresql</code>: <code translate="no" dir="ltr">postgres.conf</code> file parameter overrides, such as <a href="https://cloudnative-pg.io/documentation/current/postgresql_conf/">pg-hba</a> rules, LDAP, and requirements for sync replicas to be met.</li> <li>
+<code translate="no" dir="ltr">spec.storage</code>: storage-related settings, such as storage class, volume size, and <a href="https://cloudnative-pg.io/documentation/current/storage/">write-ahead log</a> settings.</li> <li>
+<code translate="no" dir="ltr">spec.bootstrap</code>: parameters of the initial database created in the cluster, user credentials, and database restore options</li> <li>
+<code translate="no" dir="ltr">spec.resources</code>: requests and limits for cluster Pods</li> <li>
+<code translate="no" dir="ltr">spec.affinity</code>: affinity and anti-affinity rules of the cluster workloads</li> </ul> <h3 id="create-basic-cluster">Create a basic Postgres cluster</h3> <ol> <li>
+<p>Create a namespace:</p> 
+<pre>kubectl create ns pg-ns
+</pre>
+</li> <li>
+<p>Create the PostgreSQL cluster using the custom resource:</p> 
+<pre>kubectl apply -n pg-ns -f manifests/01-basic-cluster/postgreSQL_cluster.yaml
+</pre> <p>This command might take several minutes to complete.</p>
+</li> <li>
+<p>Check the status of the cluster:</p> 
+<pre>kubectl get cluster -n pg-ns --watch
+</pre> <p>Wait for the output to show a status of <code translate="no" dir="ltr">Cluster in healthy state</code> before you move to the next step.</p> 
+<pre>NAME             AGE     INSTANCES   READY   STATUS                     PRIMARY
+gke-pg-cluster   2m53s   3           3       Cluster in healthy state   gke-pg-cluster-1
+</pre>
+</li> </ol> <h3 id="verify">Inspect the resources</h3> <p>Confirm that GKE created the resources for the cluster:</p> 
+<pre>kubectl get cluster,pod,svc,pvc,pdb,secret,cm -n pg-ns
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                        AGE   INSTANCES   READY   STATUS                     PRIMARY
+cluster.postgresql.cnpg.io/gke-pg-cluster   32m   3           3       Cluster in healthy state   gke-pg-cluster-1
+
+NAME                   READY   STATUS    RESTARTS   AGE
+pod/gke-pg-cluster-1   1/1     Running   0          31m
+pod/gke-pg-cluster-2   1/1     Running   0          30m
+pod/gke-pg-cluster-3   1/1     Running   0          29m
+
+NAME                        TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)    AGE
+service/gke-pg-cluster-r    ClusterIP   10.52.11.24   &lt;none&gt;        5432/TCP   32m
+service/gke-pg-cluster-ro   ClusterIP   10.52.9.233   &lt;none&gt;        5432/TCP   32m
+service/gke-pg-cluster-rw   ClusterIP   10.52.1.135   &lt;none&gt;        5432/TCP   32m
+
+NAME                                     STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+persistentvolumeclaim/gke-pg-cluster-1   Bound    pvc-bbdd1cdd-bdd9-4e7c-8f8c-1a14a87e5329   2Gi        RWO            standard       32m
+persistentvolumeclaim/gke-pg-cluster-2   Bound    pvc-e7a8b4df-6a3e-43ce-beb0-b54ec1d24011   2Gi        RWO            standard       31m
+persistentvolumeclaim/gke-pg-cluster-3   Bound    pvc-dac7f931-6ac5-425f-ac61-0cfc55aae72f   2Gi        RWO            standard       30m
+
+NAME                                                MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+poddisruptionbudget.policy/gke-pg-cluster           1               N/A               1                     32m
+poddisruptionbudget.policy/gke-pg-cluster-primary   1               N/A               0                     32m
+
+NAME                                TYPE                       DATA   AGE
+secret/gke-pg-cluster-app           kubernetes.io/basic-auth   3      32m
+secret/gke-pg-cluster-ca            Opaque                     2      32m
+secret/gke-pg-cluster-replication   kubernetes.io/tls          2      32m
+secret/gke-pg-cluster-server        kubernetes.io/tls          2      32m
+secret/gke-pg-cluster-superuser     kubernetes.io/basic-auth   3      32m
+
+NAME                                DATA   AGE
+configmap/cnpg-default-monitoring   1      32m
+configmap/kube-root-ca.crt          1      135m
+</pre> <p>The operator creates the following resources:</p> <ul> <li>A cluster custom resource representing the PostgreSQL cluster which is controlled by the operator</li> <li>PersistentVolumeClaim resources with corresponding Persistent Volumes</li> <li>Secrets with user credentials for accessing the database and replication between Postgres nodes.</li> <li>Three database endpoint services: <code translate="no" dir="ltr">&lt;name&gt;-rw</code>, <code translate="no" dir="ltr">&lt;name&gt;-ro</code>, and <code translate="no" dir="ltr">&lt;name&gt;-r</code> to connect to the cluster. For more information, see <a href="https://cloudnative-pg.io/documentation/1.21/architecture/">PostgreSQL architecture</a>.</li> </ul> <h2 id="authenticate-to-postgres">Authenticate to Postgres</h2> <p>You can connect to the PostgreSQL database and check access through different service endpoints created by the operator. To do this, you use an additional Pod with a PostgreSQL client and synchronized application user credentials mounted as environment variables.</p> <ol> <li>
+<p>Run the client Pod to interact with your Postgres cluster:</p> 
+<pre>kubectl apply -n pg-ns -f manifests/02-auth/pg-client.yaml
+</pre>
+</li> <li>
+<p>Run an <code translate="no" dir="ltr">exec</code> command on the <code translate="no" dir="ltr">pg-client</code> Pod and login to the <code translate="no" dir="ltr">gke-pg-cluster-rw</code> Service:</p> 
+<pre>kubectl wait --for=condition=Ready -n pg-ns pod/pg-client --timeout=300s
+kubectl exec -n pg-ns -i -t pg-client -- /bin/sh
+</pre>
+</li> <li>
+<p>Login to the database using the <code translate="no" dir="ltr">gke-pg-cluster-rw</code> Service to establish a connection with Read-Write privileges:</p> 
+<pre>psql postgresql://$CLIENTUSERNAME:$CLIENTPASSWORD@gke-pg-cluster-rw.pg-ns/app
+</pre> <p>The terminal starts with your database name:</p> 
+<pre>app=&gt;
+</pre>
+</li> <li>
+<p>Create a table:</p> 
+<pre>CREATE TABLE travel_agency_clients (
+client VARCHAR ( 50 ) UNIQUE NOT NULL,
+address VARCHAR ( 50 ) UNIQUE NOT NULL,
+phone VARCHAR ( 50 ) UNIQUE NOT NULL);
+</pre>
+</li> <li>
+<p>Insert data into the table:</p> 
+<pre>INSERT INTO travel_agency_clients(client, address, phone)
+VALUES ('Tom', 'Warsaw', '+55555')
+RETURNING *;
+</pre>
+</li> <li>
+<p>View the data that you created:</p> 
+<pre>SELECT * FROM travel_agency_clients ;
+</pre> <p>The output is similar to the following:</p> 
+<pre>client | address |  phone
+--------+---------+---------
+Tom    | Warsaw  | +55555
+(1 row)
+</pre>
+</li> <li>
+<p>Logout of the current database session:</p> 
+<pre>exit
+</pre>
+</li> <li>
+<p>Login to the database using the <code translate="no" dir="ltr">gke-pg-cluster-ro</code> Service to verify read-only access. This Service permits querying data but restricts any write operations:</p> 
+<pre>psql postgresql://$CLIENTUSERNAME:$CLIENTPASSWORD@gke-pg-cluster-ro.pg-ns/app
+</pre>
+</li> <li>
+<p>Attempt to insert new data:</p> 
+<pre>INSERT INTO travel_agency_clients(client, address, phone)
+VALUES ('John', 'Paris', '+55555')
+RETURNING *;
+</pre> <p>The output is similar to the following:</p> 
+<pre>ERROR:  cannot execute INSERT in a read-only transaction
+</pre>
+</li> <li>
+<p>Attempt to read data:</p> 
+<pre>SELECT * FROM travel_agency_clients ;
+</pre> <p>The output is similar to the following:</p> 
+<pre>client | address |  phone
+--------+---------+---------
+Tom    | Warsaw  | +55555
+(1 row)
+</pre>
+</li> <li>
+<p>Logout of the current database session:</p> 
+<pre>exit
+</pre>
+</li> <li>
+<p>Exit the Pod shell:</p> 
+<pre>exit
+</pre>
+</li> </ol> <h2 id="how-prometheus-collects">Understand how Prometheus collects metrics for your Postgres cluster</h2> <p>The following diagram shows how Prometheus metrics collecting works:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-cloudnativepg-metrics-architecture.svg" alt></p> <p>In the diagram, a GKE private cluster contains:</p> <ul> <li>A Postgres Pod that gathers metrics on path <code translate="no" dir="ltr">/</code> and port <code translate="no" dir="ltr">9187</code>
+</li> <li>Prometheus-based collectors that process the metrics from the Postgres Pod</li> <li>A <code translate="no" dir="ltr">PodMonitoring</code> resource that sends metrics to Cloud Monitoring</li> </ul> <p>To enable metrics to be collected from your Pods, perform the following steps:</p> <ol> <li>
+<p>Create the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring"><code translate="no" dir="ltr">PodMonitoring</code></a> resource:</p> 
+<pre>kubectl apply -f manifests/03-observability/pod-monitoring.yaml -n pg-ns
+</pre>
+</li> <li>
+<p>In the Google Cloud console, go to the <strong>Metrics explorer</strong> page:</p> <p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/metrics-explorer" target="console" track-name="tasks" track-type="consoleLink">Go to Metrics explorer</a></p> <p>The dashboard shows a non-zero metrics ingestion rate.</p>
+</li> <li><p>In <strong>Select a metric</strong>, enter <strong>Prometheus Target</strong>.</p></li> <li><p>In the <strong>Active Metric Categories</strong> section, select <strong>Cnpg</strong>.</p></li> </ol> <h3 id="create-dashboard">Create a metrics dashboard</h3> <p>To visualize the exported metrics, create a metrics dashboard.</p> <ol> <li>
+<p>Deploy a dashboard:</p> 
+<pre>gcloud --project "${PROJECT_ID}" monitoring dashboards create --config-from-file manifests/03-observability/gcp-pg.json
+</pre>
+</li> <li>
+<p>In the Google Cloud console, go to the <strong>Dashboards</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/dashboards" target="console" track-name="tasks" track-type="consoleLink">Go to Dashboards</a></p>
+</li> <li>
+<p>Select the <strong>PostgresQL Prometheus Overview</strong> dashboard.</p> <p>To review how dashboards monitor functions you can reuse actions from the <strong>Database authentication</strong> section, and apply read and write requests on the database, then review gathered metrics visualization in a dashboard.</p>
+</li> <li>
+<p>Connect to the client Pod:</p> 
+<pre>kubectl exec -n pg-ns -i -t pg-client -- /bin/sh
+</pre>
+</li> <li>
+<p>Insert random data:</p> 
+<pre>psql postgresql://$CLIENTUSERNAME:$CLIENTPASSWORD@gke-pg-cluster-rw.pg-ns/app -c "CREATE TABLE test (id serial PRIMARY KEY, randomdata VARCHAR ( 50 ) NOT NULL);INSERT INTO test (randomdata) VALUES (generate_series(1, 1000));"
+</pre>
+</li> <li><p>Refresh the dashboard. The graphs update with actualized metrics.</p></li> <li>
+<p>Exit the Pod shell:</p> 
+<pre>exit
+</pre>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <h3 id="delete_individual_resources">Delete individual resources</h3> <ol> <li>
+<p>Set environment variables.</p> 
+<pre>export PROJECT_ID=${PROJECT_ID}
+export KUBERNETES_CLUSTER_PREFIX=postgres
+export REGION=us-central1
+</pre>
+</li> <li>
+<p>Run the <code translate="no" dir="ltr">terraform destroy</code> command:</p> 
+<pre>export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform  -chdir=terraform/FOLDER destroy \
+  -var project_id=${PROJECT_ID} \
+  -var region=${REGION} \
+  -var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FOLDER</var></code> with either <code translate="no" dir="ltr">gke-autopilot</code> or <code translate="no" dir="ltr">gke-standard</code>.</p> <p>When prompted, type <code translate="no" dir="ltr">yes</code>.</p>
+</li> <li>
+<p>Find all unattached disks:</p> 
+<pre>export disk_list=$(gcloud compute disks list --filter="-users:* AND labels.name=${KUBERNETES_CLUSTER_PREFIX}-cluster" --format "value[separator=|](name,zone)")
+</pre>
+</li> <li>
+<p>Delete the disks:</p> 
+<pre>for i in $disk_list; do
+  disk_name=$(echo $i| cut -d'|' -f1)
+  disk_zone=$(echo $i| cut -d'|' -f2|sed 's|.*/||')
+  echo "Deleting $disk_name"
+  gcloud compute disks delete $disk_name --zone $disk_zone --quiet
+done
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/stateful-workloads/cloudnativepg" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/stateful-workloads/cloudnativepg</a>
+  </p>
+</div>

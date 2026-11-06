@@ -1,0 +1,68 @@
+<h1>Configure external replicas</h1>  This page describes how to configure a Cloud SQL instance that replicates to a replica external to Cloud SQL using the <a href="configure-logical-replication"> pglogical extension</a> with <code translate="no" dir="ltr">logical decoding</code>. <p>For more information about replication, see <a href="../replication">About replication in Cloud SQL</a>.</p> <h2 id="set_up_the_external_replica_configuration">Set up the external replica configuration</h2> <h3 id="before_you_begin">Before you begin</h3> <p>Before you start this task, you must have a Cloud SQL instance and an external PostgreSQL instance.</p> <aside class="special"><strong>Important:</strong><span> Instances that use <a href="../high-availability">high availability (HA)</a> can't be used as replication subscribers, because they don't have a consistent outgoing IP address.</span></aside> <h3 id="source-instance-requirements">Source instance requirements</h3> <p>The source instance for an external read replica must be a primary or standalone instance. You can't use a Cloud SQL read replica as the source instance for an external read replica. Read replicas are sometimes recreated from the disk clone of their primary instance and their replication state to an external read replica can't be maintained by the read replica.</p> <h3 id="configure_the_primary_instance">Configure the primary instance</h3> <ol> <li>Go to the <a href="https://console.cloud.google.com/sql/instances" target="console">Cloud SQL Instances page</a> in the Google Cloud console.</li> <li>Enable access on the primary instance for the IP address of the external replica. <p>For information about enabling IP access, see <a href="../configure-ip">Configuring access for IP connections</a>.</p>
+</li> <li>Record the public IP address and the public outgoing IP address of the primary instance for later use. You can find these values on the instance's <b>Overview</b> page.</li> <li>Click the Cloud Shell icon <img src="https://docs.cloud.google.com/static/sql/images/cloud-shell-icon.png"> in the upper right corner.</li> <li>At the Cloud Shell prompt, use the built-in PostgreSQL client to connect to your primary instance: 
+<pre>   
+gcloud sql connect PRIMARY_INSTANCE_NAME \
+--user=postgres
+   
+   </pre> </li> <li>Enter your root password. You should then see the postgres prompt.</li> <li>Create a PostgreSQL user with the <code translate="no" dir="ltr">REPLICATION</code> attribute. 
+<pre>CREATE USER REPLICATION_USER WITH REPLICATION IN ROLE cloudsqlsuperuser LOGIN PASSWORD 'REPLICATION_USER_PASSWORD';
+   </pre> </li> <li>Install and configure the pglogical extension: <p>Edit the Cloud SQL instance to add and set the following flags:</p> <ul> <li><code translate="no" dir="ltr">cloudsql.enable_pglogical</code></li> <li><code translate="no" dir="ltr">cloudsql.logical_decoding</code></li> <li><code translate="no" dir="ltr">max_replication_slots</code></li> <li><code translate="no" dir="ltr">max_worker_processes</code></li> <li><code translate="no" dir="ltr">max_wal_senders</code></li> <p>For more information about these flags, see the <a href="configure-logical-replication#postgresql-resources">PostgreSQL resources</a> page.</p> </ul> <p>Restart the database, then login, change to the replication_user, create the <code translate="no" dir="ltr">pglogical</code> extension: </p>
+
+<pre>CREATE EXTENSION pglogical;
+   </pre> </li> <li>Create a pglogical node: <p> A pglogical _node_ represents a physical PostgreSQL instance, and stores connection details for that instance.</p> 
+<pre>SELECT pglogical.create_node(
+  node_name := 'provider',
+  dsn := 'host=PRIMARY_PUBLIC_IP_ADDRESS port=5432 dbname=DATABASE_NAME user=REPLICATION_USER password=REPLICATION_USER_PASSWORD'
+   );
+   </pre> </li> <li>If you are starting with a new database, create the same database and tables on both the primary and replica instances. For example: 
+<pre>CREATE DATABASE test;
+
+\connect test;
+
+CREATE TABLE replica_test (id SERIAL PRIMARY KEY, data text);
+INSERT INTO replica_test (data) VALUES ('apple'), ('banana'), ('cherry');
+
+CREATE EXTENSION pglogical;</pre> </li> <li>If you already have a database on the primary instance, you must create the same on the replica. To do this, export the database from the primary instance to a Cloud Storage bucket and import it into the replica. Learn more about <a href="../import-export/exporting#cloud-sql"> Exporting data from Cloud SQL to a SQL dump file in Cloud Storage</a>. </li> <li> To support replicating different sets of data to different destinations, pglogical has the concept of a replication set. For example, to add a table to the default replication set: 
+<pre>SELECT pglogical.replication_set_add_table('default', 'replica_test', true);
+   </pre> </li> </ol> <h3 id="configure_the_external_replica">Configure the external replica</h3> <ol> <li>Create a special user for replication and grant replication privileges: 
+<pre>CREATE USER REPLICATION_USER WITH REPLICATION SUPERUSER LOGIN PASSWORD 'REPLICATION_USER_PASSWORD';
+   </pre> </li> <li>If you are starting with a new database, use the <var translate="no">REPLICATION_USER</var> to create the same database and tables on both the primary and replica instances. For example: 
+<pre>CREATE DATABASE test;
+\connect test;
+CREATE TABLE replica_test (id SERIAL PRIMARY KEY, data text);
+INSERT INTO replica_test (data) VALUES ('apple'), ('banana'), ('cherry');
+  </pre> </li> <li>If you are seeding the external replica instance with a file you exported file from the primary instance, download the exported file from Cloud Storage. If your external replica is on a Compute Engine instance, you can download the file using the <code translate="no" dir="ltr">gcloud storage</code> command: 
+<pre>gcloud storage cp gs://BUCKET_NAME/DUMP_FILE_NAME .
+    </pre> </li> <li>Import the file into your database. 
+<pre>
+psql --user=postgres --password &lt; DUMP_FILE_NAME.
+</pre> </li> <li>Install <code translate="no" dir="ltr">pglogical</code> according to your OS. For example, on Debian systems running PostgreSQL version 13, <code translate="no" dir="ltr">sudo apt-get install postgresql-13-pglogical</code>. </li> <li>Login to the database as the replication_user and set the following parameters: 
+<pre>ALTER SYSTEM SET shared_preload_libraries = 'pglogical';
+ALTER SYSTEM SET max_replication_slots = #; (where # is the same as you set on the primary).
+ALTER SYSTEM SET max_worker_processes = #; (where # is the same as you set on the primary).
+# Logout of the database and restart it. For example,
+# sudo /etc/init.d/postgresql restart
+# Log back in the database as the replication_user.
+# Since the pglogical extension is created local to each database, you need to
+# execute CREATE EXTENSION pglogical in each database you create, so if you
+# haven't already done that:
+CREATE EXTENSION pglogical;
+   For more information about these flags, see the PostgreSQL resources page.
+  </pre> </li> <li>Create a pglogical node: 
+<pre>SELECT pglogical.create_node(
+  node_name := 'subscriber',
+  dsn := 'host=REPLICA_PUBLIC_IP_ADDRESS port=5432 dbname=DATABASE_NAME user=REPLICATION_USER password=REPLICATION_USER_PASSWORD'
+  );
+  </pre> </li> <li>Create a pglogical subscription: 
+<pre>SELECT pglogical.create_subscription(
+    subscription_name := 'SUBSCRIPTION_NAME',
+    provider_dsn := 'host=PRIMARY_PUBLIC_IP_ADDRESS port=5432 dbname=DATABASE_NAME user=REPLICATION_USER password=REPLICATION_USER_PASSWORD'
+);
+  </pre> </li> <li>Check the status of the subscription: 
+<pre>SELECT * FROM pglogical.show_subscription_status('SUBSCRIPTION_NAME');
+   </pre> </li> <li>If the status appears as <code translate="no" dir="ltr">replicating</code>, then the setup is successful. </li> <li>Insert some data into the primary and check the replica to make sure the data appears there as well. </li> </ol> <h2 id="troubleshooting-external-replica">Troubleshoot</h2> See <a href="configure-logical-replication#troubleshooting-pglogical">Troubleshooting pglogical</a> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="manage-replicas">manage replicas</a>.</li> <li>Learn more about <a href="../replication">replication in Cloud SQL</a>. </li> <li>Learn more about <a href="https://www.postgresql.org/docs/current/static/logical-replication.html" target="_blank">PostgreSQL replication</a>.</li> <li>Learn more about <a href="https://www.postgresql.org/docs/current/static/runtime-config-replication.html" target="_blank">replication configuration settings</a>. </li> <li>Learn more about <a href="replication-from-external">replicating from an external server</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/postgres/replication/configure-external-replica" class="_attribution-link">https://docs.cloud.google.com/sql/docs/postgres/replication/configure-external-replica</a>
+  </p>
+</div>

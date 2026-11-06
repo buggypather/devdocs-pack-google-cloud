@@ -1,0 +1,303 @@
+<h1>Configure autoscaling for LLM workloads on TPUs</h1>  <p>Configure autoscaling for your large language model (LLM) workloads on Google Kubernetes Engine (GKE) running on TPUs, using the <a href="../../../concepts/horizontalpodautoscaler">Horizontal Pod Autoscaler</a> (HPA) and single-host <a href="https://github.com/google/JetStream">JetStream</a>. This helps you efficiently manage fluctuating LLM inference workloads, optimize resource utilization, and ensure consistent performance for your applications.</p> <p>HPA automatically adjusts the number of pod replicas based on observed CPU utilization or other custom metrics. JetStream facilitates the deployment of LLMs, enabling effective scaling. For best practices on selecting metrics for autoscaling, see <a href="../../../best-practices/machine-learning/inference/autoscaling-tpu">Best practices for autoscaling LLM workloads with TPUs on GKE</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Familiarize yourself with and complete the workflow in <a href="../../../tutorials/serve-gemma-tpu-jetstream">Serve Gemma using TPUs on GKE with JetStream</a>. Make sure the <var translate="no">PROMETHEUS_PORT</var> argument is set in your JetStream deployment manifest.</li> </ul> <h2 id="metrics">Autoscale using metrics</h2> <p>You can use the workload-specific performance metrics that are emitted by the JetStream inference server or TPU performance metrics to direct autoscaling for your Pods.</p> <p>To set up autoscaling with metrics, follow these steps:</p> <ol> <li>
+<p><strong>Export the metrics from the JetStream server to Cloud Monitoring</strong>. You use <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed">Google Cloud Managed Service for Prometheus</a>, which simplifies deploying and configuring your Prometheus collector. Google Cloud Managed Service for Prometheus is enabled by default in your GKE cluster; you can also <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#enable-mgdcoll-gke">enable it manually</a>.</p> <p>The following example manifest shows how to set up your <a href="https://github.com/GoogleCloudPlatform/prometheus-engine/blob/main/doc/api.md#podmonitoring">PodMonitoring</a> resource definitions to direct Google Cloud Managed Service for Prometheus to scrape metrics from your Pods at recurring intervals of 15 seconds:</p> <p>If you need to scrape server metrics, use the following manifest. With server metrics, scrape intervals as frequent as 5 seconds are supported.</p> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: jetstream-podmonitoring
+spec:
+  selector:
+    matchLabels:
+      app: maxengine-server
+  endpoints:
+  - interval: 15s
+    path: "/"
+    port: PROMETHEUS_PORT
+  targetLabels:
+    metadata:
+    - pod
+    - container
+    - node
+</pre> <p>If you need to scrape TPU metrics, use the following manifest. With system metrics, scrape intervals as frequent as 15 seconds are supported.</p> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: tpu-metrics-exporter
+  namespace: kube-system
+  labels:
+    k8s-app: tpu-device-plugin
+spec:
+  endpoints:
+    - port: 2112
+      interval: 15s
+  selector:
+    matchLabels:
+      k8s-app: tpu-device-plugin
+</pre>
+</li> <li>
+<p><strong>Install a Metrics Adapter.</strong> This adapter makes the server metrics that you exported to Monitoring visible to the HPA controller. For more details, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/hpa">Horizontal pod autoscaling</a> in the Google Cloud Managed Service for Prometheus documentation.</p> <ul> <li>If you want JetStream to scale with individual metrics, use the <a href="https://github.com/GoogleCloudPlatform/k8s-stackdriver/tree/master/custom-metrics-stackdriver-adapter">Custom Metrics Stackdriver Adapter</a>.</li> <li>If you want JetStream to scale with the value of an expression composed of multiple distinct metrics, use the third-party <a href="https://github.com/GoogleCloudPlatform/k8s-stackdriver/tree/master/custom-metrics-stackdriver-adapter">Prometheus Adapter</a>.</li> </ul>  <div> <section><p class="_code-tab"><strong>Custom Metrics Stackdriver Adapter</strong></p>
+<p>The Custom Metrics Stackdriver Adapter supports querying metrics from Google Cloud Managed Service for Prometheus, starting with <a href="https://github.com/GoogleCloudPlatform/k8s-stackdriver/releases/tag/cm-sd-adapter-v0.13.1">version v0.13.1 of the adapter</a>.</p> <p>To install the Custom Metrics Stackdriver Adapter, do the following:</p> <ol> <li><p>Set up <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed">managed collection</a> in your cluster.</p></li> <li>
+<p>Install the Custom Metrics Stackdriver Adapter in your cluster.</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre>
+</li> <li><p>If you have <a href="../../workload-identity">Workload Identity Federation for GKE</a> enabled on your Kubernetes cluster and you use Workload Identity Federation for GKE, you must also grant the Monitoring Viewer role to the service account the adapter runs under. Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p></li> </ol> 
+<pre data-language="">export PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format 'get(projectNumber)')
+gcloud projects add-iam-policy-binding projects/PROJECT_ID \
+  --role roles/monitoring.viewer \
+  --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter
+</pre></section> <section><p class="_code-tab"><strong>Prometheus Adapter</strong></p>
+<p>Be aware of these considerations when using <code translate="no" dir="ltr">prometheus-adapter</code> to scale using Google Cloud Managed Service for Prometheus:</p> <ul> <li>Route queries through the Prometheus frontend UI proxy, just like when <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui">querying Google Cloud Managed Service for Prometheus using the Prometheus API or UI</a>. This frontend is installed in a later step.</li> <li>By default, the <a href="https://github.com/kubernetes-sigs/prometheus-adapter/blob/7bdb7f14b922298df2de392d5450205467b32404/deploy/manifests/deployment.yaml#L34"><code translate="no" dir="ltr">prometheus-url</code></a> argument of the <code translate="no" dir="ltr">prometheus-adapter</code> Deployment is set to <code translate="no" dir="ltr">--prometheus-url=http://frontend.default.svc:9090/</code>, where <code translate="no" dir="ltr">default</code> is the namespace where you deployed the frontend. If you deployed the frontend in another namespace, configure this argument accordingly.</li> <li>In the <code translate="no" dir="ltr">.seriesQuery</code> field of the rules config, you can't use a regular expression (regex) matcher on a metric name. Instead, fully specify metric names.</li> </ul> <p>As data can take slightly longer to be available within Google Cloud Managed Service for Prometheus compared to upstream Prometheus, configuring overly eager autoscaling logic can cause unwanted behavior. Although there is no guarantee on data freshness, data is typically available to query 3-7 seconds after it is sent to Google Cloud Managed Service for Prometheus, excluding any network latency.</p> <p>All queries issued by <code translate="no" dir="ltr">prometheus-adapter</code> are global in scope. This means that if you have applications in two namespaces that emit identically named metrics, an HPA configuration using that metric scales using data from both applications. To avoid scaling using incorrect data, always use <code translate="no" dir="ltr">namespace</code> or <code translate="no" dir="ltr">cluster</code> filters in your PromQL.</p> <p>To set up an example HPA configuration using <code translate="no" dir="ltr">prometheus-adapter</code> and managed collection, follow these steps:</p> <ol> <li>Set up <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed">managed collection</a> in your cluster.</li> <li>
+<p>Deploy the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui#promui-deploy">Prometheus frontend UI proxy</a> in your cluster. Create the following manifest named <code translate="no" dir="ltr">prometheus-frontend.yaml</code>:</p> 
+<pre data-language="">  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: frontend
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: frontend
+    template:
+      metadata:
+        labels:
+          app: frontend
+      spec:
+        automountServiceAccountToken: true
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: kubernetes.io/arch
+                  operator: In
+                  values:
+                  - arm64
+                  - amd64
+                - key: kubernetes.io/os
+                  operator: In
+                  values:
+                  - linux
+        containers:
+        - name: frontend
+          image: gke.gcr.io/prometheus-engine/frontend:v0.8.0-gke.4
+          args:
+          - "--web.listen-address=:9090"
+          - "--query.project-id=PROJECT_ID"
+          ports:
+          - name: web
+            containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: web
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - all
+            privileged: false
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: web
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: prometheus
+  spec:
+    clusterIP: None
+    selector:
+      app: frontend
+    ports:
+    - name: web
+      port: 9090
+</pre> <p>Then, apply the manifest:</p> 
+<pre data-language="">kubectl apply -f prometheus-frontend.yaml
+</pre>
+</li> <li>
+<p>Ensure <code translate="no" dir="ltr">prometheus-adapter</code> is installed in your cluster by installing the <code translate="no" dir="ltr">prometheus-community/prometheus-adapter</code> helm chart. Create the following <code translate="no" dir="ltr">values.yaml</code> file:</p> 
+<pre data-language="">rules:
+  default: false
+  external:
+  - seriesQuery: 'jetstream_prefill_backlog_size'
+    resources:
+      template: &lt;&lt;.Resource&gt;&gt;
+    name:
+      matches: ""
+      as: "jetstream_prefill_backlog_size"
+    metricsQuery: avg(&lt;&lt;.Series&gt;&gt;{&lt;&lt;.LabelMatchers&gt;&gt;,cluster="CLUSTER_NAME"})
+  - seriesQuery: 'jetstream_slots_used_percentage'
+    resources:
+      template: &lt;&lt;.Resource&gt;&gt;
+    name:
+      matches: ""
+      as: "jetstream_slots_used_percentage"
+    metricsQuery: avg(&lt;&lt;.Series&gt;&gt;{&lt;&lt;.LabelMatchers&gt;&gt;,cluster="CLUSTER_NAME"})
+  - seriesQuery: 'memory_used'
+    resources:
+      template: &lt;&lt;.Resource&gt;&gt;
+    name:
+      matches: ""
+      as: "memory_used_percentage"
+    metricsQuery: avg(memory_used{cluster="CLUSTER_NAME",exported_namespace="default",container="jetstream-http"}) / avg(memory_total{cluster="CLUSTER_NAME",exported_namespace="default",container="jetstream-http"})
+</pre> <p>Then, use this file as the values file for deploying your helm chart:</p> 
+<pre data-language="">helm repo add prometheus-community https://prometheus-community.github.io/helm-charts &amp;&amp; helm repo update &amp;&amp; helm install example-release prometheus-community/prometheus-adapter -f values.yaml
+</pre>
+</li> </ol> <p>If you use <a href="../../../concepts/workload-identity">Workload Identity Federation for GKE</a>, you also need to <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui#gmp-wli-svcacct">configure and authorize a service account</a> by running the following commands:</p> <ol> <li>
+<p>Create a Kubernetes ServiceAccount:</p> 
+<pre data-language="">kubectl create sa prom-frontend-sa
+</pre>
+</li> <li>
+<p>Grant the Kubernetes ServiceAccount the Monitoring Viewer role (<code translate="no" dir="ltr">roles/monitoring.viewer</code>) on the project:</p> 
+<pre data-language="">export PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format 'get(projectNumber)')
+gcloud projects add-iam-policy-binding projects/PROJECT_ID \
+  --role=roles/monitoring.viewer \
+  --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/default/sa/prom-frontend-sa \
+  --condition=None
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p>
+</li> <li>
+<p>Configure the <code translate="no" dir="ltr">frontend</code> Deployment to use the <code translate="no" dir="ltr">prom-frontend-sa</code> ServiceAccount:</p> 
+<pre data-language="">kubectl set serviceaccount deployment frontend prom-frontend-sa
+</pre>
+</li> </ol></section> </div>
+</li> <li>
+<p><strong>Set up the metric-based HPA resource.</strong> Deploy an HPA resource that is based on your preferred server metric. For more details, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/hpa">Horizontal pod autoscaling</a> in the Google Cloud Managed Service for Prometheus documentation. The specific HPA configuration depends on the type of metric (server or TPU) and which metric adapter is installed.</p> <p>A few values are required across all HPA configurations and must be set in order to create an HPA resource:</p> <ul> <li>
+<var translate="no">MIN_REPLICAS</var>: The minimum number of JetStream pod replicas allowed. If not modifying the JetStream deployment manifest from the <a href="../../../tutorials/serve-gemma-tpu-jetstream#deploy-jetstream">Deploy JetStream</a> step, we recommend setting this to 1.</li> <li>
+<var translate="no">MAX_REPLICAS</var>: The maximum number of JetStream pod replicas allowed. The example JetStream deployment requires 8 chips per replica and the node pool contains 16 chips. If you want to keep scale up latency low, set this to 2. Larger values trigger the Cluster Autoscaler to create new nodes in the node pool, thus increasing scale up latency.</li> <li><p><var translate="no">TARGET</var>: The targeted average for this metric across all JetStream instances. See the <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details">Kubernetes Documentation for Autoscaling</a> for more information about how replica count is determined from this value.</p></li> </ul> <div> <section><p class="_code-tab"><strong>Custom Metrics Stackdriver Adapter</strong></p>
+<p> Custom Metrics Stackdriver Adapter supports scaling your workload with the average value of individual metric queries from Google Cloud Managed Service for Prometheus across all Pods. When using Custom Metrics Stackdriver Adapter, we advise scaling with the <code translate="no" dir="ltr">jetstream_prefill_backlog_size</code> and <code translate="no" dir="ltr">jetstream_slots_used_percentage</code> server metrics and the <code translate="no" dir="ltr">memory_used</code> TPU metric.</p> <p>To create an HPA manifest for scaling with server metrics, create the following <code translate="no" dir="ltr">hpa.yaml</code> file:</p> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jetstream-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: maxengine-server
+  minReplicas: MIN_REPLICAS
+  maxReplicas: MAX_REPLICAS
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: prometheus.googleapis.com|jetstream_METRIC|gauge
+      target:
+        type: AverageValue
+        averageValue: TARGET
+</pre> <p>When using the Custom Metrics Stackdriver Adapter with TPU metrics, we recommend only using the <code translate="no" dir="ltr">kubernetes.io|node|accelerator|memory_used</code> metric for scaling. To create an HPA manifest for scaling with this metric, create the following <code translate="no" dir="ltr">hpa.yaml</code> file:</p> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jetstream-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: maxengine-server
+  minReplicas: MIN_REPLICAS
+  maxReplicas: MAX_REPLICAS
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: prometheus.googleapis.com|memory_used|gauge
+        selector:
+          matchLabels:
+            metric.labels.container: jetstream-http
+            metric.labels.exported_namespace: default
+      target:
+        type: AverageValue
+        averageValue: TARGET
+</pre></section> <section><p class="_code-tab"><strong>Prometheus Adapter</strong></p>
+<p> Prometheus Adapter supports scaling your workload with the value of PromQL queries from Google Cloud Managed Service for Prometheus. Earlier, you defined the <code translate="no" dir="ltr">jetstream_prefill_backlog_size</code> and <code translate="no" dir="ltr">jetstream_slots_used_percentage</code> server metrics that represent the average value across all Pods.</p> <p>To create an HPA manifest for scaling with server metrics, create the following <code translate="no" dir="ltr">hpa.yaml</code> file:</p> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jetstream-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: maxengine-server
+  minReplicas: MIN_REPLICAS
+  maxReplicas: MAX_REPLICAS
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: jetstream_METRIC
+      target:
+        type: AverageValue
+        averageValue: TARGET
+</pre> <p>To create an HPA manifest for scaling with TPU metrics, we recommend only using the <code translate="no" dir="ltr">memory_used_percentage</code> defined in the prometheus-adapter helm values file. <code translate="no" dir="ltr">memory_used_percentage</code> is the name given to the following PromQL query which reflects the current average memory used across all accelerators:</p> 
+<pre data-language="">avg(kubernetes_io:node_accelerator_memory_used{cluster_name="CLUSTER_NAME"}) / avg(kubernetes_io:node_accelerator_memory_total{cluster_name="CLUSTER_NAME"})
+</pre> <p>To create an HPA manifest for scaling with <code translate="no" dir="ltr">memory_used_percentage</code>, create the following <code translate="no" dir="ltr">hpa.yaml</code> file:</p> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jetstream-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: maxengine-server
+  minReplicas: MIN_REPLICAS
+  maxReplicas: MAX_REPLICAS
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: memory_used_percentage
+      target:
+        type: AverageValue
+        averageValue: TARGET
+</pre></section> </div>
+</li> </ol> <h2 id="multiple-metrics">Scale using multiple metrics</h2> <p>You can also configure scaling based on multiple metrics. To learn about how replica count is determined using multiple metrics, refer to the <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#scaling-on-multiple-metrics">Kubernetes documentation on auto-scaling</a>. To build this type of HPA manifest, collect all entries from the <code translate="no" dir="ltr">spec.metrics</code> field of each HPA resource into a single HPA resource. The following snippet shows an example of how you can bundle the HPA resources:</p> 
+<pre>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jetstream-hpa-multiple-metrics
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: maxengine-server
+  minReplicas: MIN_REPLICAS
+  maxReplicas: MAX_REPLICAS
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: jetstream_METRIC
+      target:
+        type: AverageValue
+      averageValue: JETSTREAM_METRIC_TARGET
+  - type: External
+    external:
+      metric:
+        name: memory_used_percentage
+      target:
+        type: AverageValue
+      averageValue: EXTERNAL_METRIC_TARGET
+</pre> <h2 id="monitor-test">Monitor and test autoscaling</h2> <p>You can observe how your JetStream workloads scale based on your HPA configuration.</p> <p>To observe the replica count in real-time, run the following command:</p> 
+<pre>kubectl get hpa --watch
+</pre> <p>The output from this command should be similar to the following:</p> 
+<pre>NAME            REFERENCE                     TARGETS      MINPODS   MAXPODS   REPLICAS   AGE
+jetstream-hpa   Deployment/maxengine-server   0/10 (avg)   1         2         1          1m
+</pre> <p>To test your HPA's ability to scale, use the following command which sends a burst of 100 requests to the model endpoint. This will exhaust the available decode slots and cause a backlog of requests on the prefill queue, triggering the HPA to increase the size of the model deployment.</p> 
+<pre>seq 100 | xargs -P 100 -n 1 curl --request POST --header "Content-type: application/json" -s localhost:8000/generate --data '{ "prompt": "Can you provide a comprehensive and detailed overview of the history and development of artificial intelligence.", "max_tokens": 200 }'
+</pre>
+<aside class="note"><strong>Note:</strong><span> If you are using a private cluster, you need to <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/troubleshooting#control-plane-firewall">install an internal firewall rule</a> on port <code translate="no" dir="ltr">6443</code> from the control plane to your nodes.</span></aside> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="../../autoscale-using-metrics">autoscale based on custom or external metrics</a>.</li> <li>Learn more about <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/">Horizontal Pod Autoscaling</a> from the open source Kubernetes documentation.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/inference/autoscaling-tpu" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/inference/autoscaling-tpu</a>
+  </p>
+</div>

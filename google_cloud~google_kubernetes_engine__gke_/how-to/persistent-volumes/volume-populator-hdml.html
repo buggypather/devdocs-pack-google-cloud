@@ -1,0 +1,309 @@
+<h1>Automate data transfer from Cloud Storage to a Hyperdisk ML volume using GKE Volume Populator</h1>  <p>This document shows you how to preload datasets from Cloud Storage buckets to Google Cloud Hyperdisk ML volumes using Google Kubernetes Engine (GKE) Volume Populator during dynamic provisioning. For more information, see <a href="../../concepts/about-volume-populator">About GKE Volume Populator</a>.</p> <p>When you train machine learning models on GKE, quick access to data in Hyperdisk ML volumes is essential for performance. The GKE Volume Populator speeds up machine learning workflows by automatically preloading large datasets from Cloud Storage buckets into your Hyperdisk ML volumes during dynamic provisioning. This process optimizes data access and streamlines operations for AI/ML applications, which can increase development velocity and lead to more efficient services.</p> <p>This document is for ML engineers and storage specialists who create and allocate storage, manage data security and access, and customize AI/ML training infrastructure in GKE. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="node-pool-management">Node pool management for GKE Volume Populator with Hyperdisk ML</h2> <p>Efficient node pool sizing, provisioning, and scaling is crucial for successfully running the data transfer Jobs that are created by GKE Volume Populator to populate Hyperdisk ML volumes. You use a compute class to define the node requirements, such as machine type and size, for these specific data transfer Jobs. A compute class lets you control the cost and performance of the data transfer process. For more information, see <a href="../../concepts/about-custom-compute-classes#benefits">Benefits of custom compute classes</a>.</p> <p>To choose a cluster that is most suited for your data transfer Jobs, understand <a href="#about-compute-class">how compute classes work with different cluster types for Hyperdisk ML</a>.</p> <h2 id="objectives">Objectives</h2> <p>In this guide, you perform the following tasks:</p> <ul> <li>
+<a href="#prepare-your-environment">Configure your GKE cluster environment</a> to support data transfers using GKE Volume Populator, including cluster creation, compute class definition, and permissions setup.</li> <li>
+<a href="#gcpdatasource">Create a <code translate="no" dir="ltr">GCPDataSource</code> custom resource</a> to specify the source Cloud Storage bucket.</li> <li>
+<a href="#create-storageclass">Define a <code translate="no" dir="ltr">StorageClass</code></a> for Hyperdisk ML.</li> <li>
+<a href="#create-pvc">Create a <code translate="no" dir="ltr">PersistentVolumeClaim</code></a> that references the <code translate="no" dir="ltr">GCPDataSource</code> to trigger the data population to a Hyperdisk ML volume.</li> <li>
+<a href="#view-data-transfer">Verify the data transfer</a>.</li> <li>
+<a href="#create-pod">Consume the populated volume in a Pod</a>.</li> <li>
+<a href="#clean-up">Clean up the resources</a>.</li> </ul> <h2 id="before-you-begin">Before you begin</h2> <p>Make sure you have performed the following tasks:</p> <ol> <li>
+<p>Enable the GKE and Cloud Storage APIs.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable the APIs </a></p>
+</li> <li><p>Make sure that billing is enabled for your <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project">Google Cloud project</a>.</p></li> <li><p>Download and install the <a href="https://docs.cloud.google.com/sdk/docs/install-sdk">Google Cloud CLI command-line tool</a>, or use <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a> to run <code translate="no" dir="ltr">gcloud CLI</code> and <code translate="no" dir="ltr">kubectl</code> commands. Cloud Shell is a shell environment for managing resources hosted on Google Cloud. It comes preinstalled with the <a href="https://docs.cloud.google.com/sdk/gcloud">gcloud</a> and <a href="https://kubernetes.io/docs/reference/kubectl/">kubectl</a> command-line tool.</p></li> <li><p><a href="https://docs.cloud.google.com/compute/docs/gcloud-compute#set_default_zone_and_region_in_your_local_client">Set a default region and zone</a>.</p></li> <li><p>Create, or use an existing <a href="https://docs.cloud.google.com/storage/docs/creating-buckets">Cloud Storage bucket</a>. This guide assumes that you already have a Cloud Storage bucket populated with your model training data.</p></li> <li><p><a href="gce-pd-csi-driver#enabling_the_on_an_existing_cluster">Enable the Compute Engine Persistent Disk CSI driver</a> on existing Standard clusters that might have the driver explicitly disabled. On new Autopilot and Standard clusters, GKE enables the driver by default. The destination Hyperdisk ML storage that you create must be managed by the <a href="https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver">Compute Engine Persistent Disk CSI driver</a>.</p></li> <li><p><a href="../workload-identity#authenticating_to">Enable Workload Identity Federation for GKE</a> on your cluster. This allows the Kubernetes service account used by GKE Volume Populator to access the source Cloud Storage bucket. For more information, see <a href="#permissions">Set up necessary permissions</a>.</p></li> </ol> <h2 id="requirements">Requirements</h2> <p>To transfer data by using GKE Volume Populator, meet the following requirements:</p> <ul> <li>Your GKE cluster must be running version <code translate="no" dir="ltr">1.33.2-gke.4780000</code> or later.</li> <li>Your <code translate="no" dir="ltr">GCPDataSource</code> custom resource must be in the same namespace as your GKE workload. Data sources that span different namespaces aren't supported.</li> <li>Select a <a href="https://docs.cloud.google.com/compute/docs/disks/hd-types/hyperdisk-ml#machine-series">supported VM</a> when you <a href="#create-compute-class">create your compute class</a>. Confirm that your project has <a href="https://docs.cloud.google.com/kubernetes-engine/quotas">sufficient quota</a> for the machine type you select.</li> <li>The <code translate="no" dir="ltr">gcs-to-hdml-compute-class</code> compute class name is predefined for the transfer Job, and it must be specified exactly when you create your compute class.</li> </ul> <h2 id="costs">Costs</h2> <p>Although there is no direct cost for using GKE Volume Populator, storage and data transfers incur billing charges. The associated indirect costs include the following:</p> <ul> <li>
+<strong>Compute Engine instances used by GKE</strong>: the cost of the nodes used to run the data transfer Jobs. The node management and cost implications vary by cluster types. For more information, see the respective cluster types in <a href="#create-cluster">Create your GKE cluster</a>.</li> <li>
+<strong>Transfer Job node size</strong>: for optimal transfer performance, a transfer Job by default scales up a node with 24 vCPUs. This applies to all cluster types. If you want to adjust the node size and type for specific cost or performance optimizations, you can do so when <a href="#create-compute-class">creating your compute class</a>.</li> <li>
+<strong>Storage used in your Cloud Storage bucket</strong>: for more information, see <a href="https://cloud.google.com/storage/pricing">Cloud Storage pricing</a>.</li> <li>
+<strong>Hyperdisk ML volume costs</strong>: this includes the storage capacity and performance (IOPS/throughput) of the Hyperdisk ML volumes you create. For more information, see <a href="https://docs.cloud.google.com/compute/docs/disks/hyperdisks#pricing">Hyperdisk pricing</a>.</li> </ul> <h2 id="prepare-your-environment">Prepare your environment</h2> <p>In this section, you create your GKE cluster infrastructure with appropriate hardware, and set up necessary permissions to access your data in Cloud Storage.</p> <p>Before creating your cluster to use GKE Volume Populator with Hyperdisk ML, understand how a compute class is applied to different types of clusters, and who is responsible for the node management--GKE or you.</p> <h3 id="about-compute-class">How compute classes work with different cluster types for Hyperdisk ML</h3> <p>GKE Volume Populator uses a custom compute class to determine the types of nodes to use for the data transfer Jobs. The following table describes the behavior of your compute class depending on your cluster configuration:</p> <table> <thead> <tr> <th>Consideration</th> <th>GKE Autopilot, and GKE Standard <em>with</em> node auto-provisioning</th> <th>GKE Standard <em>without</em> node auto-provisioning</th> </tr> </thead> <tbody> <tr> <td><b>Compute class setting</b></td> <td>
+<code translate="no" dir="ltr">nodePoolAutoCreation</code> enabled</td> <td>
+<code translate="no" dir="ltr">nodePoolAutoCreation</code> disabled</td> </tr> <tr> <td><b>Node management</b></td> <td>GKE automatically creates and manages nodes.</td> <td>You manually create and manage nodes.</td> </tr> <tr> <td><b>Node scaling</b></td> <td>Automatic</td> <td>Manual</td> </tr> <tr> <td><b>Node labeling</b></td> <td>Not applicable</td> <td>You must label the nodes with <code translate="no" dir="ltr"><a href="#create-compute-class">cloud.google.com/compute-class=gcs-to-hdml-compute-class</a></code>
+</td> </tr> <tr> <td><b>More information</b></td> <td><a href="../../concepts/about-custom-compute-classes#autoprovisioning-and-compute-classes">Node auto-provisioning and compute classes</a></td> <td><a href="../../concepts/about-custom-compute-classes#manual-node-pools">Configure manually-created node pools</a></td> </tr> </tbody> </table> <p>GKE initiates the data transfer Job after provisioning the <code translate="no" dir="ltr">PersistentVolume</code> for the <a href="../../concepts/persistent-volumes#persistentvolumeclaims"><code translate="no" dir="ltr">PersistentVolumeClaim</code></a>. To populate the Hyperdisk ML volume, this <code translate="no" dir="ltr">PersistentVolumeClaim</code> must reference the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/gcpdatasource"><code translate="no" dir="ltr">GCPDataSource</code></a>, which defines the source data in Cloud Storage.</p> <h3 id="create-cluster">Create your GKE cluster</h3> <p>You can choose to deploy your data transfer pipeline by using a <a href="../../concepts/choose-cluster-mode">Standard or Autopilot cluster</a> with GKE version <code translate="no" dir="ltr">1.33.2-gke.4780000</code> or later. Each cluster type has its own advantages and different pricing models.</p> <ul> <li>Choose Autopilot for easier cluster management, cost efficiency, and autoscaling.</li> <li>Choose Standard <em>with</em> <a href="../../concepts/node-auto-provisioning">node auto-provisioning</a> enabled if you need autoscaling with more control over node provisioning.</li> <li>Choose Standard <em>without</em> node auto-provisioning enabled if you need maximum control and are comfortable managing all aspects of node provisioning, scaling, and maintenance.</li> </ul> <div>  <section> <p class="_code-tab"><strong>Autopilot</strong></p> <p>In GKE Autopilot clusters, GKE automatically handles the creation and deletion of nodes required for the data transfer Jobs. When the transfer Job is complete, the node resources are automatically scaled down. You don't need to manually delete the transfer Pods or the nodes that the Pods ran on.</p> <p>To create a new Autopilot cluster, run the following command:</p> 
+<pre data-language="">  gcloud container clusters create-auto CLUSTER_NAME \
+    --location=LOCATION \
+    --cluster-version=CLUSTER_VERSION
+  </pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name for the cluster that you're creating.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute region for your cluster. For example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE version for the cluster. Use <code translate="no" dir="ltr">1.33.2-gke.4780000</code> in this guide.</li> </ul> </section> <section> <p class="_code-tab"><strong>Standard (with node auto-provisioning)</strong></p> <p>In GKE Standard clusters <em>with</em> node auto-provisioning enabled, GKE automatically handles the creation and deletion of nodes required for the data transfer Jobs. When the transfer Job is complete, the node resources are automatically scaled down. You don't need to manually delete the transfer Pods or the nodes that the Pods ran on.</p> <p>To create a new Standard cluster with node auto-provisioning enabled, run the following command:</p> 
+<pre data-language="">  gcloud container clusters create CLUSTER_NAME \
+    --cluster-version=CLUSTER_VERSION \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --workload-pool=PROJECT_ID.svc.id.goog \
+    --enable-autoprovisioning \
+    --min-cpu MINIMUM_CPU \
+    --min-memory MINIMUM_MEMORY \
+    --max-cpu MAXIMUM_CPU \
+    --max-memory MAXIMUM_MEMORY \
+  --autoprovisioning-scopes=https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring,https://www.googleapis.com/auth/devstorage.read_only
+  </pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name for the cluster that you're creating with node auto-provisioning enabled.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE version for the cluster. Use <code translate="no" dir="ltr">1.33.2-gke.4780000</code> in this guide.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute zone or region for your cluster. For example, <code translate="no" dir="ltr">us-central1-a</code> or <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MINIMUM_CPU</var></code>: the minimum number of vCPUs to auto-provision. For example, <code translate="no" dir="ltr">10</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MINIMUM_MEMORY</var></code>: the minimum amount of memory in GiB to auto-provision. For example, <code translate="no" dir="ltr">200</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAXIMUM_CPU</var></code>: the maximum number of vCPUs to auto-provision. For example, <code translate="no" dir="ltr">100</code>. This limit is the total of the CPU resources across all existing manually created node pools and all the node pools that GKE might automatically create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAXIMUM_MEMORY</var></code>: the maximum amount of memory to auto-provision. For example, <code translate="no" dir="ltr">1000</code>. This limit is the total of the memory resources across all existing, manually created node pools and all the node pools that GKE might automatically create.</li> </ul> </section> <section> <p class="_code-tab"><strong>Standard (without node auto-provisioning)</strong></p> <p>To use GKE Volume Populator on a Standard cluster where node auto-provisioning is not enabled, you can use an existing node pool or create a dedicated transfer node pool. The nodes must have capacity to run the transfer Jobs and labels matching the <code translate="no" dir="ltr">compute-class</code>.</p> <p>Specify the <a href="#create-compute-class"><code translate="no" dir="ltr">gcs-to-hdml-compute-class</code></a> compute class as a node label when you create your cluster and node pool. Note that the compute class name, <code translate="no" dir="ltr">gcs-to-hdml-compute-class</code>, is predefined for the transfer Job, and it must be specified exactly.</p> <p>To create a new Standard cluster without node auto-provisioning, and a new node pool within that cluster, run the following commands:</p> 
+<pre data-language="">  gcloud container clusters create CLUSTER_NAME \
+    --cluster-version=CLUSTER_VERSION \
+    --location=LOCATION \
+    --num-nodes=1 \
+    --project=PROJECT_ID \
+    --workload-pool=PROJECT_ID.svc.id.goog
+
+  gcloud container node-pools create NODE_POOL_NAME\
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --num-nodes=1 \
+    --machine-type=c3-standard-44 \
+    --node-labels="cloud.google.com/compute-class=gcs-to-hdml-compute-class" \
+    --node-taints="cloud.google.com/compute-class=gcs-to-hdml-compute-class:NoSchedule"
+  </pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name for the cluster that you're creating without node auto-provisioning enabled.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE version for the cluster. Use <code translate="no" dir="ltr">1.33.2-gke.4780000</code> in this guide.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute region for your cluster. For example, <code translate="no" dir="ltr">us-central1-a</code> or <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name for the node pool that you're creating in your new cluster. This node pool is used by the GKE Volume Populator to deploy the temporary data transfer Jobs.</li> </ul> <p>To avoid incurring unnecessary costs, run the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/node-pools/delete"><code translate="no" dir="ltr">gcloud container node-pools delete</code></a> command to delete any manually created transfer node pools after the data transfer is complete.</p> </section>  </div> <h3 id="create-compute-class">Create your compute class</h3> <p>To create a compute class to specify and prioritize the types of VMs that can be used as nodes in your cluster, follow these steps:</p> <ol> <li>Save the following manifest as <code translate="no" dir="ltr">computeclass.yaml</code>: <div>  <section> <p class="_code-tab"><strong>With node auto-provisioning</strong></p> <p>For Autopilot clusters, and Standard clusters with node auto-provisioning enabled, define your compute class <em>with</em> the <code translate="no" dir="ltr">nodePoolAutoCreation</code> section as follows. When node auto-provisioning is enabled, GKE automatically creates new node pools with the <code translate="no" dir="ltr">gcs-to-hdml-compute-class</code> compute class label. </p> 
+<pre data-language="">  apiVersion: cloud.google.com/v1
+  kind: ComputeClass
+  metadata:
+   name: gcs-to-hdml-compute-class
+  spec:
+   priorities:
+   - machineFamily: c3
+   - machineFamily: c3d
+   nodePoolAutoCreation:
+    enabled: true
+   whenUnsatisfiable: DoNotScaleUp
+  </pre> </section> <section> <p class="_code-tab"><strong>Without node auto-provisioning</strong></p> <p>For Standard clusters without node auto-provisioning enabled, define your compute class <em>without</em> the <code translate="no" dir="ltr">nodePoolAutoCreation</code> section as follows. Make sure that you've already created a <a href="#create-cluster">node pool</a> with the <code translate="no" dir="ltr">gcs-to-hdml-compute-class</code> compute class label.</p> 
+<pre data-language="">  apiVersion: cloud.google.com/v1
+  kind: ComputeClass
+  metadata:
+   name: gcs-to-hdml-compute-class
+  spec:
+   priorities:
+   - machineFamily: c3
+   - machineFamily: c3d
+   whenUnsatisfiable: DoNotScaleUp
+  </pre> </section>  </div> <p>You can specify any compatible <code translate="no" dir="ltr">machineFamily</code> to meet your data transfer needs. For more information about selecting a suitable machine type, see <a href="https://docs.cloud.google.com/compute/docs/disks/hyperdisks#machine-type-support">Machine series support for Hyperdisk ML</a>.</p> </li> <li>To create the compute class, apply the manifest: 
+<pre>kubectl apply -f computeclass.yaml</pre> </li> </ol> <h3 id="permissions">Set up necessary permissions</h3> <p>To transfer data from a Cloud Storage bucket, set up required permissions for Workload Identity Federation for GKE. With the appropriate permissions, the transfer Job created by GKE Volume Populator can access your Cloud Storage bucket. This guide assumes that you already have a Cloud Storage bucket populated with the model training data that you want to transfer.</p> <ol> <li>
+<p>Create a Kubernetes namespace:</p> 
+<pre>kubectl create namespace NAMESPACE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> with the namespace that you want your workloads to run on.</p> <p>Skip this step if you are using an existing namespace.</p> <aside class="note"><strong>Note:</strong><span> Make sure to use the same namespace to create all the resources in this guide.</span></aside>
+</li> <li>
+<p>Create a Kubernetes service account:</p> 
+<pre>kubectl create serviceaccount KSA_NAME \
+  --namespace=NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: the name of the Kubernetes service account that you'll specify in the <code translate="no" dir="ltr">GCPDataSource</code> resource. The transfer Job created by GKE Volume Populator uses this service account to authenticate to Google Cloud APIs.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the Kubernetes namespace you created in the previous step.</li> </ul> <aside class="caution"><strong>Caution:</strong><span> Re-using this Kubernetes service account in other workloads within the same namespace allows that Pod to access the Cloud Storage bucket that you are using in this guide. We don't recommend re-using this service account for other workloads in the namespace.</span></aside>
+</li> <li>
+<p>Grant your <a href="https://docs.cloud.google.com/iam/docs/service-account-overview#service-account-permissions">IAM service account</a>) the appropriate role to access your Cloud Storage bucket:</p> 
+<pre>gcloud storage buckets \
+  add-iam-policy-binding gs://GCS_BUCKET \
+  --member "principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA_NAME" \
+  --role "ROLE"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GCS_BUCKET</var></code>: your Cloud Storage bucket name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the numerical identifier of your Google Cloud project where you created the cluster. To find your project number, see <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">Identifying projects</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace you created earlier where your workloads will run.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: the name of the Kubernetes service account that you specified in the <code translate="no" dir="ltr">GCPDataSource</code> resource. The transfer Job created by GKE Volume Populator uses this service account to authenticate to Google Cloud APIs.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: the IAM role you want to grant to your service account. For the purpose of this guide, grant the <code translate="no" dir="ltr">roles/storage.objectViewer</code> role to allow reading from the bucket.</li> </ul> <p>The <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>, <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>, <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>, and <code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code> are used to construct the Workload Identity Federation for GKE principal identifier for your project.</p>
+</li> </ol> <h2 id="transfer-data">Create a Hyperdisk ML volume with preloaded data</h2> <p>Perform the following steps to set up the GKE infrastructure and configuration that's required to create a Hyperdisk ML volume, and to trigger and manage the automated data transfer process by using GKE Volume Populator:</p> <ol> <li>
+<a href="#gcpdatasource">Create a <code translate="no" dir="ltr">GCPDataSource</code> custom resource</a> to define the source of the data.</li> <li>
+<a href="#create-storageclass">Create a StorageClass</a> to define the type of persistent storage (a Hyperdisk ML volume) to be used.</li> <li>
+<a href="#create-pvc">Create a PersistentVolumeClaim</a> to enable dynamic provisioning of the storage, and enable access to the newly provisioned Hyperdisk ML volume.</li> <li>(Optional) <a href="#view-data-transfer">View the data transfer progress</a>.</li> <li>
+<a href="#create-pod">Create and deploy a Pod</a> that consumes the Hyperdisk ML volume.</li> </ol> <h3 id="gcpdatasource">Create a <code translate="no" dir="ltr">GCPDataSource</code> custom resource</h3> <p>Create a <code translate="no" dir="ltr">GCPDataSource</code> custom resource in GKE to specify the location of the source Cloud Storage bucket and the service account with the necessary permissions to access that bucket. This custom resource definition (CRD) is specific to the GKE Volume Populator.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">gcpdatasource.yaml</code>.</p> 
+<pre>apiVersion: datalayer.gke.io/v1
+kind: GCPDataSource
+metadata:
+ name: GCP_DATA_SOURCE
+ namespace: NAMESPACE
+spec:
+ cloudStorage:
+  serviceAccountName: KSA_NAME
+  uri: gs://GCS_BUCKET/
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">GCP_DATA_SOURCE</var>: the name of the <code translate="no" dir="ltr">GCPDataSource</code> CRD that holds a reference to your Cloud Storage bucket. For more information, se<a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/gcpdatasource"><code translate="no" dir="ltr">GCPDataSource</code> CRD reference</a>.</li> <li>
+<var translate="no">NAMESPACE</var>: the same namespace in which your workloads run. The <code translate="no" dir="ltr">GCPDataSource</code> custom resource is created in this namespace.</li> <li>
+<var translate="no">KSA_NAME</var>: the name of the Kubernetes service account that you specified in the <code translate="no" dir="ltr">GCPDataSource</code> resource. The transfer Job created by GKE Volume Populator uses this service account to authenticate to Google Cloud APIs. The <code translate="no" dir="ltr">cloudStorage.serviceAccountName</code> value is the Kubernetes service account you set up for Workload Identity Federation for GKE in the <a href="#permissions">Set up necessary permissions</a> section.</li> <li>
+<var translate="no">GCS_BUCKET</var>: your Cloud Storage bucket name. The <code translate="no" dir="ltr">uri</code> field specifies the source data.</li> <li>To copy the entire bucket, use <code translate="no" dir="ltr">gs://<var translate="no">GCS_BUCKET</var>/</code>.</li> <li>To copy data from a specific folder within the bucket, use the format <code translate="no" dir="ltr">gs://<var translate="no">GCS_BUCKET</var>/<var translate="no">PATH_INSIDE_BUCKET</var>/</code>. For example, to copy data from the <code translate="no" dir="ltr">gemma/v1.0/weights/</code> folder inside the <code translate="no" dir="ltr">my-project-llm-models</code> bucket, the URI would be <code translate="no" dir="ltr">gs://my-project-llm-models/gemma/v1.0/weights/</code>. Ensure that the path ends with a trailing slash to indicate a folder.</li> </ul>
+</li> <li>
+<p>To create the <code translate="no" dir="ltr">GCPDataSource</code> resource, apply the manifest:</p> 
+<pre>kubectl apply -f gcpdatasource.yaml
+</pre>
+</li> </ol> <aside class="caution"><strong>Caution:</strong><span> When cleaning up the resources, don't delete the <code translate="no" dir="ltr">GCPDataSource</code> custom resource before you delete the <code translate="no" dir="ltr">PersistentVolumeClaim</code> that refers to it. Deleting the <code translate="no" dir="ltr">GCPDataSource</code> resource first will cause the <code translate="no" dir="ltr">PersistentVolumeClaim</code> deletion to get stuck.</span></aside> <h3 id="create-storageclass">Create a Hyperdisk ML StorageClass</h3> <p>Create a StorageClass that uses the <a href="https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver">pd.csi.storage.gke.io</a> provisioner to provision a Hyperdisk ML volume in your chosen zone. If you want copies of your data to be accessible in more than one zone, you can create a multi-zone StorageClass. Here's an <a href="hyperdisk-ml#storage-class">example of a multi-zone StorageClass</a>.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">hdml-class.yaml</code>.</p> 
+<pre>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+ name: hyperdisk-ml-single-zone
+parameters:
+ type: hyperdisk-ml
+ provisioned-throughput-on-create: "2400Mi"
+provisioner: pd.csi.storage.gke.io
+allowVolumeExpansion: false
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowedTopologies:
+- matchLabelExpressions:
+ - key: topology.gke.io/zone
+  values:
+  - ZONE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ZONE</var></code> with the target zone where you want the Hyperdisk ML volume to be created:</p> <ul> <li>For GKE Standard cluster without node auto-provisioning, the value for <code translate="no" dir="ltr">ZONE</code> must be the location where you created your nodes.</li> <li>For GKE Autopilot or Standard clusters with node auto-provisioning, the value for <code translate="no" dir="ltr">ZONE</code> must be the location where your cluster can scale up and create new nodes if required.</li> </ul>
+</li> <li>
+<p>(Optional) To list the node locations of your cluster, run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME --location=LOCATION --format="value(locations)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute zone or region for your cluster. For example, <code translate="no" dir="ltr">us-central1-a</code> or <code translate="no" dir="ltr">us-central1</code>.</li> </ul>
+</li> <li>
+<p>To create the StorageClass, apply the manifest :</p> 
+<pre>kubectl apply -f hdml-class.yaml
+</pre>
+</li> </ol> <h3 id="create-pvc">Create a PersistentVolumeClaim to access the volume</h3> <p>The following manifest shows an example of how to create a PersistentVolumeClaim in <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes">ReadOnlyMany access mode</a> that references the StorageClass you created earlier.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">volume-populator-pvc.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+ name: PVC_NAME
+ namespace: NAMESPACE
+spec:
+ accessModes:
+ - ReadOnlyMany
+ storageClassName: hyperdisk-ml-single-zone
+ resources:
+  requests:
+   storage: DISK_SIZE
+ dataSourceRef:
+  apiGroup: datalayer.gke.io
+  kind: GCPDataSource
+  name: GCP_DATA_SOURCE
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of the PersistentVolumeClaim where you want to transfer your data.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace where your workloads will run.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISK_SIZE</var></code>: the size of the disk, in gigabytes, that will be created to populate data. To successfully populate data, make sure that the requested disk size is greater than the size of your model's data that's in the Cloud Storage bucket. To conform to the supported range for the Hyperdisk ML volumes, the value of <code translate="no" dir="ltr">DISK_SIZE</code> must be larger than 4 Gi. For more information, see <a href="https://docs.cloud.google.com/compute/docs/disks/add-hyperdisk#size_limits">Hyperdisk volume size limits</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GCP_DATA_SOURCE</var></code>: the name of the <a href="#gcpdatasource"><code translate="no" dir="ltr">GCPDataSource</code> CRD</a> that holds a reference to your Cloud Storage bucket.</li> </ul> <p>You can customize the data transfer by adding optional annotations to your PVC. These annotations influence the behavior of the underlying transfer Job that copies data to your Hyperdisk ML volume.</p> <ul> <li><p><code translate="no" dir="ltr">volume-populator.datalayer.gke.io/cpu-request</code>: Use this annotation to specify a different CPU resource request for the transfer <code translate="no" dir="ltr">Job</code>. If you don't specify a different CPU resource request, the PVC requests 24 vCPUs by default to optimize for transfer performance.</p></li> <li><p><code translate="no" dir="ltr">volume-populator.datalayer.gke.io/transfer-path</code>: Use this annotation to specify the destination path inside the new volume that will store the data copied from your <code translate="no" dir="ltr">GCPDataSource</code> resource. If you don't specify a different path, the data is copied to the root path within the Hyperdisk ML volume.</p></li> </ul>
+</li> <li>
+<p>To create the PVC, apply the manifest:</p> 
+<pre>kubectl apply -f volume-populator-pvc.yaml
+</pre>
+</li> </ol> <p>Note the following points:</p> <ul> <li>If you set the <code translate="no" dir="ltr">volumeBindingMode</code> field in your StorageClass to <code translate="no" dir="ltr">immediate</code>, the data transfer is triggered immediately upon deploying the PVC.</li> <li>If you set the <code translate="no" dir="ltr">volumeBindingMode</code> field in your StorageClass to <code translate="no" dir="ltr">WaitForFirstConsumer</code>, the data transfer is triggered only after you <a href="#create-pod">deploy a Pod</a> that requests the PVC and that Pod is successfully scheduled to a node. Although your Pod can be scheduled, its containers will wait to start until the data transfer completes and the volume is ready for use.</li> </ul> <p>To check the progress of your data transfer, see <a href="#view-data-transfer">View the data transfer progress</a>. If you encounter errors during resource provisioning or data transfer, see <a href="../../troubleshooting/troubleshooting-gke-volume-populator">Troubleshooting GKE Volume Populator data transfer issues</a>.</p> <h3 id="view-data-transfer">(Optional) View the data transfer progress</h3> <p>This section shows how you can track the progress and success of your data transfers from a Cloud Storage bucket to a Hyperdisk ML volume.</p> <ol> <li>
+<p>To verify the status of your PersistentVolumeClaim, run the following command. You can also run this command if your PersistentVolumeClaim binding operation takes too long to complete.</p> 
+<pre>kubectl describe pvc PVC_NAME -n NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of your PVC that you created in the <a href="#create-pvc">Create a PersistentVolumeClaim to access the volume</a> section.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace used throughout this guide, which you created in the <a href="#permissions">Set up Necessary permissions</a> section.</li> </ul>
+</li> <li>
+<p>In the output, review the PersistentVolumeClaim events to monitor the data transfer progress. GKE logs the events approximately once a minute. The output is similar to the following:</p> 
+<pre>Name:     vp-pvc
+Namespace:   default
+StorageClass: hyperdisk-ml-single-zone
+Status:    Bound
+Volume:    pvc-f7ae2ee2-106d-4b87-b458-481a3ff82b62
+Labels:    &lt;none&gt;
+Annotations:  pv.kubernetes.io/bind-completed: yes
+       pv.kubernetes.io/bound-by-controller: yes
+       volume.beta.kubernetes.io/storage-provisioner: pd.csi.storage.gke.io
+       volume.kubernetes.io/storage-provisioner: pd.csi.storage.gke.io
+Finalizers:  [kubernetes.io/pvc-protection]
+Capacity:   200Gi
+Access Modes: ROX
+VolumeMode:  Filesystem
+DataSource:
+ APIGroup: datalayer.gke.io
+ Kind:   GCPDataSource
+ Name:   vp-gds
+Used By:   verify-data-665cfd4dbf-mwc7t
+      verify-data-665cfd4dbf-n7xw9
+Events:
+ Type   Reason             Age           From                                               Message
+ ----   ------             ----          ----                                               -------
+ Warning ProvisioningFailed       9m8s          persistentvolume-controller                                    Error saving claim: Operation cannot be fulfilled on persistentvolumeclaims "vp-pvc": the object has been modified; please apply your changes to the latest version and try again
+ Normal  Provisioning          9m5s          pd.csi.storage.gke.io_gke-f110123a1cbd44cdaa7a-921b-b1f4-vm_1a100bd9-5231-4f20-8e65-1f8e995a03c0 External provisioner is provisioning volume for claim "default/vp-pvc"
+ Normal  Provisioning          9m5s          external-provisioner                                       Assuming an external populator will provision the volume
+ Normal  PopulateOperationStartSuccess 8m58s          gkevolumepopulator-populator                                   populateFn: Populate operation started for zone us-central1-c
+ Normal  TransferInProgress       8m58s (x2 over 8m58s)  gkevolumepopulator-populator                                   populateCompleteFn: For PVC vp-pvc in namespace default, transfer job with request ID populator-job-2304531e-4937-4534-a1a4-3eb11e5cb39f in zone us-central1-c waiting for pod to get created
+ Normal  TransferInProgress       6m10s (x14 over 8m57s) gkevolumepopulator-populator                                   populateCompleteFn: For PVC vp-pvc in namespace default, transfer job in zone us-central1-c with request ID populator-job-2304531e-4937-4534-a1a4-3eb11e5cb39f is still active with pod status as - Phase: Pending
+ Normal  ExternalProvisioning      3m35s (x24 over 9m5s)  persistentvolume-controller                                    Waiting for a volume to be created either by the external provisioner 'pd.csi.storage.gke.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+ Normal  TransferJobCompleted      3m24s (x2 over 3m26s)  gkevolumepopulator-populator                                   populateCompleteFn: For PVC vp-pvc in namespace default, job with request ID populator-job-2304531e-4937-4534-a1a4-3eb11e5cb39f for zone us-central1-c completed successfully
+ Normal  TransferJobCompleted      3m24s (x2 over 3m26s)  gkevolumepopulator-populator                                   populateCompleteFn: For PVC vp-pvc in namespace default, transfer job for all zones have completed successfully
+ Normal  PopulateOperationFinished   3m24s (x2 over 3m26s)  gkevolumepopulator-populator                                   Populate operation finished
+ Normal  PopulatorFinished       3m19s (x3 over 3m20s)  gkevolumepopulator-populator                                   Populator finished
+</pre>
+</li> </ol> <p>It can take several minutes for the populate operation to start, depending on the data size. If you don't see any data transfer progress after several minutes, see <a href="../../troubleshooting/troubleshooting-gke-volume-populator">Troubleshooting GKE Volume Populator data transfer issues</a> for help.</p> <p>For multi-zone Hyperdisk ML volume data transfers, the Job is marked complete only if the data is successfully transferred to <em>all</em> the zones specified in the StorageClass. If the transfer Job fails for one or more zones, the GKE Volume Populator retries transferring the data indefinitely as long as the PVC exists.</p> <h3 id="create-pod">Create and deploy a Pod that consumes the volume</h3> <p>To create a Pod to verify the contents of a PVC that has been populated with data:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">verify-data.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+ name: verify-data
+ namespace: NAMESPACE
+spec:
+ nodeSelector:
+  cloud.google.com/compute-class: gcs-to-hdml-compute-class
+ containers:
+ - name: verify-data
+  image: busybox
+  command:
+  - sleep
+  - infinity
+  volumeMounts:
+   - mountPath: /models
+    name: mypvc
+ volumes:
+ - name: mypvc
+  persistentVolumeClaim:
+   claimName: PVC_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace where your PVC is located and where you want to create the <code translate="no" dir="ltr">verify-data</code> Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of the PVC you created for data population in the <a href="#create-pvc">Create a PersistentVolumeClaim to access the volume</a> section.</li> </ul>
+</li> <li>
+<p>Create the Pod with the following command:</p> 
+<pre>kubectl create -f verify-data.yaml
+</pre>
+</li> <li>
+<p>To list the files, run the following command:</p> 
+<pre>kubectl exec -it verify-data -- /bin/sh
+# cd /models &amp;&amp; ls
+</pre>
+</li> </ol> <p>If the command is successful, you can find the populated data in the <code translate="no" dir="ltr">/models</code> directory within your Cloud Storage bucket.</p> <h2 id="clean-up">Clean up</h2> <p>To avoid unnecessary costs and remove any misconfigured or orphaned resources, follow the steps to gracefully delete the PersistentVolumeClaim.</p> <h3 id="delete-pvc">Delete the PersistentVolumeClaim during dynamic provisioning</h3> <p>If you need to delete your PersistentVolumeClaim while data is still being transferred during dynamic provisioning, use the following steps for graceful deletion. Graceful deletion can take some time to complete.</p> <p>Replace the following relevant variables during the deletion process:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: the name of the Pod you created in the <a href="#create-pod">Create and deploy a Pod that consumes the volume</a> section.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace where your PVC is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of the PVC you created in the <a href="#create-pvc">Create a PersistentVolumeClaim to access the volume</a> section.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GCP_DATA_SOURCE</var></code>: the name of the <code translate="no" dir="ltr">GCPDataSource</code> custom resource you created in the <a href="#gcpdatasource">Create a <code translate="no" dir="ltr">GCPDataSource</code> custom resource</a> section.</li> </ul> <ol> <li>
+<p>Delete the workload Pod:</p> 
+<pre>kubectl delete pod POD_NAME -n NAMESPACE
+</pre>
+</li> <li>
+<p>Find the name of the temporary PersistentVolumeClaim:</p> 
+<pre># Store the relevant environment variables
+export PVC_NAME=PVC_NAME
+export NAMESPACE=NAMESPACE
+</pre>
+
+<pre># Check the status
+export PVC_UID=$(kubectl get pvc ${PVC_NAME} -n ${NAMESPACE} -o jsonpath='{.metadata.uid}')
+export TEMP_PVC=prime-${PVC_UID}
+echo ${TEMP_PVC}
+</pre>
+</li> <li>
+<p>Delete the PVC that was created in the namespace:</p> 
+<pre>kubectl delete pvc PVC_NAME -n NAMESPACE
+</pre>
+</li> <li>
+<p>The PVC might be stuck in the <code translate="no" dir="ltr">Terminating</code> state:</p> 
+<pre>NAME      STATUS    VOLUME  CAPACITY  ACCESS MODES  STORAGECLASS        VOLUMEATTRIBUTESCLASS  AGE
+vp-pvc  Terminating                   hyperdisk-ml  &lt;unset&gt;         7m23s
+</pre> <p>If so, manually clean up the PVC by removing its finalizers:</p> 
+<pre>kubectl patch pvc PVC_NAME -n NAMESPACE -p '{"metadata":{"finalizers":null}}'
+</pre>
+</li> <li>
+<p>Delete the <code translate="no" dir="ltr">GCPDataSource</code> resource only after the PVC is deleted. Deleting the <code translate="no" dir="ltr">GCPDataSource</code> resource first will cause the PVC deletion to get stuck.</p> 
+<pre>kubectl delete gcpdatasource GCP_DATA_SOURCE -n NAMESPACE
+</pre>
+</li> <li><p>Check that the <a href="../../troubleshooting/troubleshooting-gke-volume-populator#inspect_temporary_kubernetes_resources">temporary resources are deleted</a>.</p></li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn <a href="../../concepts/about-volume-populator">About GKE Volume Populator</a>.</li> <li>For help with data transfer issues, see <a href="../../troubleshooting/troubleshooting-gke-volume-populator">Troubleshooting GKE Volume Populator data transfer issues</a>.</li> <li>For an advanced Hyperdisk ML workload example, see <a href="hyperdisk-ml">Accelerate AI/ML data loading with Hyperdisk ML</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/volume-populator-hdml" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/volume-populator-hdml</a>
+  </p>
+</div>

@@ -1,0 +1,402 @@
+<h1>Optimize AI training on TPUs with DWS and Kueue</h1>  <p>This document teaches you how to configure a GKE cluster to maximize AI training availability on Tensor Processing Units (TPUs). You configure an automated fallback system using an open-source job queueing tool called <a href="https://kueue.sigs.k8s.io/">Kueue</a>, and <a href="https://cloud.google.com/blog/products/compute/introducing-dynamic-workload-scheduler">Google Cloud's Dynamic Workload Scheduler</a> (DWS).</p> <p>The configuration that you define in this document sets up a primary node pool and a backup pool of nodes:</p> <ul> <li>
+<strong>On-demand (Plan A):</strong> This node pool is your first choice for nodes. The system first attempts to schedule jobs on these on-demand machines. The term <em>on-demand</em> means that once these machines start running, you have reliable, uninterrupted access to them.</li> <li>
+<strong>DWS flex-start (Plan B):</strong> This is your backup node pool. When Plan A machines aren't available, the Kueue scheduling program automatically assigns your job to this Plan B pool. DWS then searches for the Plan B hardware, but it doesn't guarantee immediate access because that hardware might also be unavailable. DWS doesn't give up though: it holds your request in line for up to 7 days and automatically provides the machines as soon as they're available.</li> </ul> <p>This approach minimizes the time jobs spend waiting in line. It means that you don't have to manually check for available resources or rewrite your script for different machines.</p> <h2 id="overview-configuration-steps">Overview of configuration steps</h2> <p>To configure the automated fallback system, you must complete several configuration steps. It helps to divide this configuration into two categories:</p> <ul> <li>
+<strong>Cluster Administrator tasks:</strong> One-time infrastructure configuration, such as creating the GKE cluster, provisioning node pools, and installing the Kueue scheduling controller.</li> <li>
+<strong>AI Developer tasks:</strong> Repetitive, daily workflows, such as defining the training job requirements and submitting the workload.</li> </ul> <p>Even if you perform all of these steps yourself, keeping this distinction in mind helps clarify the overall process.</p> <p>Before you configure the system, review the configuration steps that you'll perform.</p> <table> <thead> <tr> <th style="text-align: left">Topic</th> <th style="text-align: left">Task</th> </tr> </thead> <tbody> <tr> <td style="text-align: left"><a href="#configure-infrastructure"><strong>Configure the infrastructure (Cluster Administrator)</strong></a></td> <td style="text-align: left">1. <a href="#create-cluster">Create a GKE cluster</a><br>2. <a href="#create-node-pools">Create the node pools</a><br>3. <a href="#verify-status">Verify the status of flex-start in the node pool</a>
+</td> </tr> <tr> <td style="text-align: left"><a href="#install-kueue"><strong>Install and configure Kueue (Cluster Administrator)</strong></a></td> <td style="text-align: left">1. <a href="#install-kueue-controller">Install Kueue</a><br>2. <a href="#define-rules">Define the configuration rules</a>
+</td> </tr> <tr> <td style="text-align: left"><a href="#run-training-job"><strong>Run a training job (AI Developer)</strong></a></td> <td style="text-align: left">1. <a href="#create-configmap">Create the ConfigMap</a><br>2. <a href="#define-rayjob">Define the RayJob manifest</a><br>3. <a href="#submit-workload">Submit the workload</a><br>4. <a href="#connect-rayjob">Connect to the RayJob</a><br>5. <a href="#check-logs">Check the logs</a>
+</td> </tr> </tbody> </table> <h3 id="key-concepts">Key concepts</h3> <ul> <li>
+<strong>On-demand (Plan A) node pool:</strong> The primary, high-priority node pool. Your job always tries to use this pool first.</li> <li>
+<strong>DWS flex-start (Plan B) node pool:</strong> The backup node pool. If machines in the primary pool aren't available, the system automatically uses this pool to search for available hardware.</li> <li>
+<strong>Kueue:</strong> A scheduling program that manages the job queue. It intercepts your job request and decides which node pool to use (Plan A or Plan B).</li> <li>
+<strong>Job:</strong> The AI training workload you want to run. In this document, you define it using a RayJob manifest.</li> </ul> <h2 id="before-begin">Before you begin</h2> <ol> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Google Kubernetes Engine, Cloud TPU API APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> <li> <p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> </li> <li> <p>Ensure that you have enough preemptible quota to use TPU flex-start VMs. If the default quota isn't enough for your needs, request a higher allocation. For details, see <a href="https://docs.cloud.google.com/tpu/docs/quota">Cloud TPU quotas</a>.</p> </li> </ol> <h2 id="define-variables">Define environment variables</h2> <p>To simplify the commands that you run in this document, you can set environment variables in <a href="https://docs.cloud.google.com/shell/docs/using-cloud-shell">Cloud Shell</a>. These variables store values such as the ID of your Google Cloud project, the names of your node pools, and the location of your GKE cluster.</p> <p>After you define these variables, you can reuse them in multiple commands by referencing the variable name (for example, <code translate="no" dir="ltr">$CLUSTER_NAME</code>) instead of retyping or replacing values each time. This approach makes the process easier to follow and reduces the risk of errors.</p> <p>To define the following useful environment variables in Cloud Shell, run the following commands:</p> 
+<pre>export PROJECT_ID=$(gcloud config get project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export ZONE="us-east5-b"
+export REGION="us-east5"
+export CLUSTER_NAME="tpu-cluster"
+export GKE_VERSION="1.34"
+export ONDEMAND_NODEPOOL="on-demand-pool"
+export DWS_NODEPOOL="dws-pool"
+</pre> <p>Here's an explanation of these environment variables:</p> <ul> <li>
+<code translate="no" dir="ltr">PROJECT_ID</code>: The ID of your Google Cloud project.</li> <li>
+<code translate="no" dir="ltr">PROJECT_NUMBER</code>: The unique identifier number for your project (for example, 123456789012).</li> <li>
+<code translate="no" dir="ltr">ZONE</code>: The compute zone for your cluster (for example, <code translate="no" dir="ltr">us-east5-b</code>). Select a zone with availability for your chosen accelerator type. See Cloud TPU quotas or GPU quotas for availability info.</li> <li>
+<code translate="no" dir="ltr">REGION</code>: The region where you create the cluster resources (for example, <code translate="no" dir="ltr">us-east5</code>).</li> <li>
+<code translate="no" dir="ltr">CLUSTER_NAME</code>: The name you choose for your GKE cluster.</li> <li>
+<code translate="no" dir="ltr">GKE_VERSION</code>: The GKE version of your cluster. Use version 1.34 or later.</li> <li>
+<code translate="no" dir="ltr">ONDEMAND_NODEPOOL</code>: The name of your standard on-demand node pool. (This is your Plan A node pool).</li> <li>
+<code translate="no" dir="ltr">DWS_NODEPOOL</code>: The name of your DWS flex-start node pool. (This is your Plan B node pool).</li> </ul> <h2 id="configure-infrastructure">Configure the infrastructure (Cluster Administrator)</h2> <p>As the Cluster Administrator, you configure the GKE cluster and node pools to support the fallback mechanism.</p> <h3 id="create-cluster">Create a GKE cluster</h3> <p>First, create the GKE cluster. This cluster is the environment in which you install the Kueue controller, configure your node pools, and run your AI training jobs. To create and connect to a cluster, perform these steps:</p> <ol> <li>
+<p>Create the cluster:</p> 
+<pre>gcloud container clusters create ${CLUSTER_NAME} \
+  --cluster-version=${GKE_VERSION} \
+  --machine-type=n2-standard-16 \
+  --location=${ZONE} \
+  --enable-image-streaming \
+  --addons=RayOperator \
+  --project=${PROJECT_ID}
+</pre> <p>This command uses the following key flags:</p> <ul> <li>
+<code translate="no" dir="ltr">--addons=RayOperator</code>: Installs the Ray Operator on your cluster. You need this operator to manage the RayJob workload that you submit later in this document.</li> <li>
+<code translate="no" dir="ltr">--enable-image-streaming</code>: Allows your cluster to pull container images faster. This feature significantly reduces the time it takes for large AI container images to start running.</li> </ul>
+</li> <li>
+<p>Retrieve the cluster's credentials so that the kubectl CLI can connect to it. This command updates your Kubernetes config file, which is stored by default in the <code translate="no" dir="ltr">~/.kube/config</code> directory:</p> 
+<pre>gcloud container clusters get-credentials ${CLUSTER_NAME} \
+  --location=${ZONE} \
+  --project=${PROJECT_ID}
+</pre>
+</li> </ol> <h3 id="create-node-pools">Create the node pools</h3> <p>Create the primary and backup node pools for your environment: the on-demand node pool (<strong>Plan A</strong>) and the DWS flex-start node pool (<strong>Plan B</strong>):</p> <ol> <li>
+<p><strong>Create the on-demand node pool</strong>: This pool serves as the primary resource for training jobs:</p> 
+<pre>gcloud container node-pools create ${ONDEMAND_NODEPOOL} \
+  --cluster=${CLUSTER_NAME} \
+  --location=${ZONE} \
+  --machine-type=ct6e-standard-4t \
+  --tpu-topology=4x4 \
+  --reservation-affinity=none \
+  --enable-autoscaling \
+  --num-nodes=0 \
+  --min-nodes=0 \
+  --max-nodes=4
+</pre> <p>In this example, your first choice machines are TPU v6e accelerators. You specify this hardware using the <code translate="no" dir="ltr">--machine-type=ct6e-standard-4t</code> flag. You can change this machine type to match the hardware, such as GPUs or different TPUs, that you want for your AI model.</p>
+</li> <li>
+<p><strong>Create the DWS flex-start node pool</strong>: In this example, you select the same machine type (<code translate="no" dir="ltr">--machine-type=ct6e-standard-4t</code>) that you chose for the primary on-demand pool. Your Plan B node pool doesn't have to use a different machine type. Because you really want this specific hardware, making it your Plan B choice just means you switch to a different method of acquiring it if it's not immediately available. This alternative method uses DWS, which continuously searches for the available hardware for up to 7 days:</p> 
+<pre>gcloud container node-pools create ${DWS_NODEPOOL} \
+  --cluster=${CLUSTER_NAME} \
+  --location=${ZONE} \
+  --machine-type=ct6e-standard-4t \
+  --tpu-topology=4x4 \
+  --enable-autoscaling \
+  --enable-queued-provisioning \
+  --flex-start \
+  --num-nodes=0 \
+  --min-nodes=0 \
+  --max-nodes=4
+</pre> <p>These commands use the following key flags:</p> <ul> <li>
+<code translate="no" dir="ltr">--num-nodes=0</code>, <code translate="no" dir="ltr">--min-nodes=0</code>, <code translate="no" dir="ltr">--max-nodes=4</code>, and <code translate="no" dir="ltr">--enable-autoscaling</code>: This combination allows the node pools to scale up from zero nodes when a job needs them and scale back down when idle, which helps save costs.</li> <li>
+<code translate="no" dir="ltr">--tpu-topology</code>: Defines the physical arrangement of the TPU chips. You specify this layout because the physical arrangement of the chips affects how fast your distributed training job runs.</li> <li>
+<code translate="no" dir="ltr">--reservation-affinity=none</code>: (Plan A pool only) This flag prevents the on-demand node pool from consuming your reserved capacity. The DWS flex-start node pool doesn't consume reservations.</li> <li>
+<code translate="no" dir="ltr">--enable-queued-provisioning</code> and <code translate="no" dir="ltr">--flex-start</code>: (Plan B pool only) These flags enable DWS to provision nodes for your Plan B pool from flexible capacity when it becomes available.</li> </ul>
+</li> </ol> <h3 id="verify-status">Verify the status of flex-start in the node pool</h3> <p>Inspect the DWS flex-start node pool and verify that flex-start is enabled:</p> 
+<pre>gcloud container node-pools describe ${DWS_NODEPOOL} \
+  --cluster=${CLUSTER_NAME} \
+  --location=${ZONE} \
+  --format="get(config.flexStart)"
+</pre> <p>If flex-start is enabled, the output is <code translate="no" dir="ltr">True</code>.</p> <h2 id="install-kueue">Install and configure Kueue (Cluster Administrator)</h2> <p>In this section, you install the Kueue controller on your cluster. Recall that Kueue is a scheduling program that manages the job queue. It intercepts your job request, decides which node pool to use (on-demand or DWS flex-start), and then assigns the job.</p> <h3 id="install-kueue-controller">Install Kueue</h3> <p>Run the following command to install Kueue. This command downloads the installation manifests from the official repository and applies them to your cluster:</p> 
+<pre>helm install kueue oci://registry.k8s.io/kueue/charts/kueue \
+  --namespace kueue-system \
+  --create-namespace \
+  --set "controllerManager.featureGates[0].name=ElasticJobsViaWorkloadSlices" \
+  --set "controllerManager.featureGates[0].enabled=true"
+</pre> <h3 id="define-rules">Define the configuration rules</h3> <p>Create a YAML manifest that defines the priority rules. These rules tell Kueue to use the on-demand pool first and the DWS flex-start pool second:</p> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">dws-tpu-queue.yaml</code> with the following content. This file defines two <em>flavors</em> of resources (on-demand and DWS flex-start) and a cluster queue that prioritizes them. This configuration file defines the logic that Kueue uses to handle your jobs:</p> <ul> <li>
+<code translate="no" dir="ltr">ResourceFlavor</code>: At the beginning of this document, you created two node pools and assigned them names using the environment variables <code translate="no" dir="ltr">${ONDEMAND_NODEPOOL}</code> and <code translate="no" dir="ltr">${DWS_NODEPOOL}</code>. When it created those node pools, GKE automatically labeled every node in those pools with the name you chose for those environment variables. The <code translate="no" dir="ltr">ResourceFlavor</code> section tells Kueue to look for nodes with those labels.</li> <li>
+<code translate="no" dir="ltr">ClusterQueue</code>: This section of the manifest defines the priority rule. It lists the on-demand flavor first, so Kueue tries to provision on-demand machines first. If Kueue can't get those machines, it tries to provision DWS flex-start machines instead.</li> <li>
+<code translate="no" dir="ltr">Quotas</code>: The file sets a <em>quota</em>, which is a limit on the total resources (such as CPU, memory, and TPU chips) your jobs can use at any given time in the on-demand node pool. When your jobs reach this limit, Kueue automatically tries to provision DWS flex-start machines (your Plan B machines), which you configured in <code translate="no" dir="ltr">dws-tpu-queue.yaml</code> with a much higher quota limit. <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: "default-cpu"
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: default-pool
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: "on-demand"
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: ${ONDEMAND_NODEPOOL}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: "dws"
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: ${DWS_NODEPOOL}
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: "cluster-queue"
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "google.com/tpu"]
+      flavors:
+        - name: "default-cpu" # Used for Ray Head Pod.
+          resources:
+            - name: "cpu"
+              nominalQuota: 10
+            - name: "memory"
+              nominalQuota: 20Gi
+            - name: "google.com/tpu"
+              nominalQuota: 0
+        - name: "on-demand" # First choice: on-demand node-pool.
+          resources:
+            - name: "cpu"
+              nominalQuota: 40
+            - name: "memory"
+              nominalQuota: 75Gi
+            - name: "google.com/tpu"
+              nominalQuota: 16
+        - name: "dws" # If on-demand is unavailable, fallback to DWS.
+          resources:
+            - name: "cpu"
+              nominalQuota: 1000000000
+            - name: "memory"
+              nominalQuota: 1000000000Gi
+            - name: "google.com/tpu"
+              nominalQuota: 1000000000 # "Infinite" quota
+  admissionChecksStrategy:
+    admissionChecks:
+      - name: "dws-prov"
+        onFlavors: [dws]
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  namespace: "default"
+  name: "user-queue"
+spec:
+  clusterQueue: "cluster-queue"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: AdmissionCheck
+metadata:
+  name: dws-prov
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: dws-config
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ProvisioningRequestConfig
+metadata:
+  name: dws-config
+spec:
+  provisioningClassName: queued-provisioning.gke.io
+  managedResources:
+    - google.com/tpu</pre> </div> </li> </ul>
+</li> <li>
+<p>Apply the configuration to your cluster. The following command uses a command-line tool called <code translate="no" dir="ltr">envsubst</code> to replace placeholder variables that appear in the file <code translate="no" dir="ltr">dws-tpu-queue.yaml</code>. <code translate="no" dir="ltr">envsubst</code> replaces the placeholders with the values of the environment variables that you defined earlier:</p> 
+<pre>envsubst &lt; dws-tpu-queue.yaml | kubectl apply -f -
+</pre>
+</li> </ol> <h2 id="run-training-job">Run a training job (AI Developer)</h2> <p>As the AI Developer, you define and submit a training workload by creating a RayJob manifest. You specify your resource requirements in this manifest, and the automated fallback system, which the Cluster administrator configured earlier with Kueue and DWS, handles the underlying node pools for you.</p> <p>In this section, you perform the following steps:</p> <ul> <li>Create a Python training script.</li> <li>Store that script in a Kubernetes ConfigMap.</li> <li>Deploy a RayJob that mounts the ConfigMap as a volume so that the training script can be executed on the nodes.</li> </ul> <p>After performing these steps, Ray Train automatically distributes the JAX workload across the nodes, and Kueue handles getting the machines you need.</p> <h3 id="training-script">The training script</h3> <p>Copy and paste the following Python script into a file called <code translate="no" dir="ltr">train.py</code>:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>import time
+import ray
+from ray import train
+from ray.train import ScalingConfig
+from ray.train.v2.jax import JaxTrainer
+import jax
+import jax.numpy as jnp
+
+def train_func():
+    # JaxTrainer handles JAX distributed setup.
+    print(f"Local Devices: {jax.local_devices()}")
+
+    # Simple Linear Regression Training Loop.
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (1000, 10))
+    w_true = jax.random.normal(key, (10, 1))
+    y = jnp.dot(x, w_true)
+
+    # Initialize weights
+    w = jnp.zeros((10, 1))
+    learning_rate = 0.1
+
+    @jax.jit
+    def update(w, x, y):
+        y_pred = jnp.dot(x, w)
+        loss = jnp.mean((y_pred - y) ** 2)
+        grad = jax.grad(lambda w: jnp.mean((jnp.dot(x, w) - y) ** 2))(w)
+        return w - learning_rate * grad, loss
+
+    # Training loop
+    print("Starting training...")
+    for epoch in range(50):
+        w, loss = update(w, x, y)
+        if epoch % 10 == 0:
+            train.report({"loss": loss.item(), "epoch": epoch})
+            print(f"Epoch {epoch}: Loss {loss:.4f}")
+
+    print("Training Complete!")
+    # Allow metrics to sync before closing
+    time.sleep(3)
+
+def main():
+    scaling_config = ScalingConfig(
+        num_workers=4,
+        resources_per_worker={"TPU": 4},
+        use_tpu=True,
+        topology="4x4",
+        accelerator_type="TPU-V6E"
+    )
+
+    trainer = JaxTrainer(
+        train_loop_per_worker=train_func,
+        scaling_config=scaling_config
+    )
+
+    result = trainer.fit()
+    print(f"Run Result: {result.metrics}")
+
+if __name__ == "__main__":
+    main()</pre> </div> <p>The training script uses <a href="https://github.com/google/jax">JAX</a>, a Python library for high-performance numerical computing, to train a linear regression model. This script is a simplified example designed to demonstrate how to use DWS and Kueue for automated fallback, and doesn't perform <a href="https://docs.ray.io/en/latest/train/api/doc/ray.train.data_parallel_trainer.DataParallelTrainer.html">data parallelism</a> or <a href="https://docs.ray.io/en/latest/data/working-with-llms.html#model-parallelism">model parallelism</a>.</p> <p>Notice that the <code translate="no" dir="ltr">ScalingConfig</code> section of the training script defines the hardware requirements for the training job. That section requests a 4x4 TPU topology, which matches the physical layout of the node pools you configured earlier.</p> <h3 id="create-configmap">Create the ConfigMap</h3> <p>Upload the contents of your <code translate="no" dir="ltr">train.py</code> script into a Kubernetes ConfigMap object. This allows the cluster to store the script and make it available to your RayJob:</p> 
+<pre>kubectl create configmap jax-train-script --from-file=train.py
+</pre> <p>The RayJob that you define in the next section mounts this ConfigMap as a volume. This makes the script file appear inside the Ray containers so that the Ray software can find and execute it.</p> <h3 id="define-rayjob">Apply the RayJob manifest</h3> <p>Create a file named <code translate="no" dir="ltr">rayjob-tpu-v6e-dws.yaml</code> with the following content. This manifest defines your training job and tells the system how to route it:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: rayjob-tpu-v6e-dws-${JOB_ID}
+  labels:
+    kueue.x-k8s.io/queue-name: user-queue
+  annotations:
+    kueue.x-k8s.io/elastic-job: "true"
+spec:
+  shutdownAfterJobFinishes: true
+  entrypoint: python /app/train.py
+  runtimeEnvYAML: |
+    pip:
+      - jax[tpu]==0.8.2
+      - pandas==2.3.3
+  rayClusterSpec:
+    enableInTreeAutoscaling: true
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          nodeSelector:
+            cloud.google.com/gke-nodepool: default-pool
+          containers:
+            - name: ray-head
+              image: rayproject/ray:2.53.0-py311
+              ports:
+                - containerPort: 6379
+                  name: gcs-server
+                - containerPort: 8265
+                  name: dashboard
+                - containerPort: 10001
+                  name: client
+              resources:
+                limits:
+                  cpu: "2"
+                  memory: "4Gi"
+                requests:
+                  cpu: "2"
+                  memory: "4Gi"
+              volumeMounts:
+                - mountPath: /app
+                  name: train-script-volume
+          volumes:
+            - name: train-script-volume
+              configMap:
+                name: jax-train-script
+    workerGroupSpecs:
+      - replicas: 1
+        minReplicas: 1
+        maxReplicas: 2
+        numOfHosts: 4
+        groupName: tpu-group
+        rayStartParams: {}
+        template:
+          spec:
+            tolerations:
+              - key: "google.com/tpu"
+                operator: "Exists"
+                effect: "NoSchedule"
+              - key: "cloud.google.com/gke-queued"
+                operator: "Exists"
+                effect: "NoSchedule"
+            containers:
+              - name: ray-worker
+                image: rayproject/ray:2.53.0-py311
+                resources:
+                  limits:
+                    cpu: "8"
+                    google.com/tpu: "4"
+                    memory: "16Gi"
+                  requests:
+                    cpu: "8"
+                    google.com/tpu: "4"
+                    memory: "16Gi"
+                volumeMounts:
+                  - mountPath: /app
+                    name: train-script-volume
+            volumes:
+              - name: train-script-volume
+                configMap:
+                  name: jax-train-script
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+              cloud.google.com/gke-tpu-topology: 4x4</pre> </div> <p>This manifest includes three configurations that make the fallback system work:</p> <ul> <li>
+<strong>Requests specific hardware:</strong> The <code translate="no" dir="ltr">nodeSelector</code> section specifies the hardware that your script requires (in this example, a <code translate="no" dir="ltr">tpu-v6e-slice</code> with a 4x4 topology).</li> <li>
+<strong>Selects the queue:</strong> The <code translate="no" dir="ltr">kueue.x-k8s.io/queue-name</code> label routes your job directly to Kueue. This enables the automated fallback logic.</li> <li>
+<strong>Tolerates DWS flex-start nodes:</strong> The <code translate="no" dir="ltr">tolerations</code> section allows the job to run on your Plan B node pool. Because DWS flex-start nodes are specially marked (tainted) by GKE so that normal workloads don't accidentally run on them, your job must explicitly tolerate the <code translate="no" dir="ltr">cloud.google.com/gke-queued</code> taint.</li> </ul> <h3 id="submit-workload">Submit the workload</h3> <p>To prove that the fallback system works, you need to submit two jobs. The first job consumes the Plan A on-demand capacity, which forces the second job to fall back to the Plan B DWS flex-start capacity.</p> <p>Run the following command to submit the two jobs. The command uses a <code translate="no" dir="ltr">for</code> loop and <code translate="no" dir="ltr">envsubst</code> to inject a unique job ID into the manifest for each run:</p> 
+<pre>for i in 1 2; do
+  export JOB_ID=$i
+  envsubst &lt; rayjob-tpu-v6e-dws.yaml | kubectl apply -f -
+  echo "Submitted Job $i"
+  sleep 2
+done
+</pre> <p>After you submit the jobs, the system handles the workload as follows:</p> <ol> <li>
+<strong>Intercept:</strong> Kueue detects the jobs by using the queue label and temporarily suspends them.</li> <li>
+<strong>Decision:</strong> Kueue evaluates resource availability against the administrator's rules. It checks the Plan A pool first.</li> <li>
+<strong>Assignment:</strong> <ul> <li>Because Plan A resources are available for the first job, Kueue assigns Job 1 there.</li> <li>Because Job 1 consumes the Plan A resources, Kueue automatically assigns Job 2 to the Plan B (DWS flex-start) pool.</li> </ul>
+</li> <li>
+<strong>Launch:</strong> Kueue unsuspends the jobs. This action triggers the GKE cluster autoscaler to provision the nodes and start the training scripts.</li> </ol> <h3 id="connect-rayjob">Connect to the RayJob</h3> <p>As a final verification step, you can use the <code translate="no" dir="ltr">kubectl port-forward</code> command to connect to the Ray Dashboard and watch your jobs run.</p> <p>To check the status of your first job, run the following command:</p> 
+<pre>kubectl port-forward service/rayjob-tpu-v6e-dws-1-head-svc 8265:8265 &amp;
+</pre> <p>After you run this command, open a web browser and go to <code translate="no" dir="ltr">http://localhost:8265</code>. In the Ray Dashboard, you can view the job status and reported metrics to verify that both jobs complete successfully on their respective node pools.</p> <p>You can also view the logs for the first job by running the following command:</p> 
+<pre>kubectl logs job/rayjob-tpu-v6e-dws-1
+</pre> <p>The truncated output of the training script should resemble the following. You should see the messages <code translate="no" dir="ltr">Training Complete!</code> and <code translate="no" dir="ltr">Job
+'rayjob-tpu-v6e-dws-1-498t6' succeeded</code> near the end of the output:</p> 
+<pre>(pid=, ip=10.68.3.4) 5] XLA::TPU program HBM usage: 52.5K / 31.25G
+(pid=, ip=10.68.9.4) :2152] XLA::TPU program VMEM usage: 141.0K / 128.00M [repeated 5x across cluster]
+(pid=, ip=10.68.9.4) I0320 03:59:34.722540     855 deepsea_compiler_backend.cc:2163] Total hbm usage &gt;= 260.14M: [repeated 5x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777634     888 deepsea_compiler_backend.cc:2167]     reserved           204B [repeated 19x across cluster]
+(pid=, ip=10.68.9.4) I0320 03:59:34.722542     855 deepsea_compiler_backend.cc:2163]     program           70.0K  [repeated 5x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777626     888 deepsea_compiler_backend.cc:2163]     arguments            0B  [repeated 12x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777627     888 deepsea_compiler_backend.cc:2163] Output size 0B; shares 0B with arguments. [repeated 14x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777625     888 deepsea_compiler_backend.cc:2163] Total host usage &gt;= 0B: [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777626     888 deepsea_compiler_backend.cc:2163]     program         unknown size  [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777634     888 deepsea_compiler_backend.cc:2167] Program sflag requirement 224B: [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777637     888 deepsea_compiler_backend.cc:2167]     scoped              40B [repeated 21x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777636     888 deepsea_compiler_backend.cc:2167] Program vmem requirement 141.0K: [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777637     888 deepsea_compiler_backend.cc:2167] Program smem requirement 40B: [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777637     888 deepsea_compiler_backend.cc:2167] Program host requirement 0B: [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777637     888 deepsea_compiler_backend.cc:2167] Program hbm requirement 70.0K: [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777638     888 deepsea_compiler_backend.cc:2167]     overlays          70.0K [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777638     888 deepsea_compiler_backend.cc:2175] XLA::TPU program SMEM usage: 1.9K / 1.00M (3 parameters) [repeated 7x across cluster]
+(pid=, ip=10.68.6.4) I0320 03:59:34.777636     888 deepsea_compiler_backend.cc:2167]     HLO temp          76.0K (0.0% utilization: Unpadded (0B) Padded (0B), 100.0% fragmentation (76.0K)) [repeated 14x across cluster]
+(RayTrainWorker pid=542, ip=10.68.6.4) Training Complete! [repeated 3x across cluster]
+(RayTrainWorker pid=542, ip=10.68.6.4) Epoch 40: Loss 0.0000 [repeated 3x across cluster]
+2026-03-20 03:59:51,008 SUCC cli.py:65 -- ------------------------------------------
+2026-03-20 03:59:51,008 SUCC cli.py:66 -- Job 'rayjob-tpu-v6e-dws-1-498t6' succeeded
+2026-03-20 03:59:51,008 SUCC cli.py:67 -- ------------------------------------------
+</pre> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used in this document, either delete the project that contains the resources, or keep the project and delete the individual resources.</p> <h3 id="delete-project">Delete the project</h3> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> <h3 id="delete-resources">Delete the individual resources</h3> <p>If you want to keep the GGoogle Cloud project you used in this document, run the following command to delete the cluster:</p> 
+<pre>gcloud container clusters delete ${CLUSTER_NAME} \
+    --location=${ZONE} \
+    --project=${PROJECT_ID} \
+    --quiet
+</pre> <h2 id="summary">Summary</h2> <p>In this document, you configured and tested a Ray training environment. This environment uses a primary node pool and a backup DWS pool to maximize hardware availability. By automatically falling back to DWS when primary machines are unavailable, you minimized the time your training jobs spend waiting in line.</p> <p>To get this working, you performed the following steps:</p> <ol> <li>
+<strong>Created a GKE cluster:</strong> Established the environment to host the node pools and scheduling tools.</li> <li>
+<strong>Configured the node pools:</strong> Created an on-demand node pool (Plan A) and a DWS node pool (Plan B).</li> <li>
+<strong>Installed and configured Kueue:</strong> Deployed the Kueue controller and applied priority rules instructing the system to try Plan A first and fall back to Plan B.</li> <li>
+<strong>Created a ConfigMap:</strong> Deployed a simplified JAX training script to the cluster to serve as the test workload.</li> <li>
+<strong>Defined a RayJob manifest:</strong> Configured the job to request specific hardware, route to the Kueue controller, and tolerate DWS nodes.</li> <li>
+<strong>Submitted the workload:</strong> Submitted two jobs to force Kueue to automatically route the second job to Plan B when Plan A resources are consumed.</li> <li>
+<strong>Verified the results:</strong> Used port forwarding to connect to the Ray Dashboard and confirmed that both jobs ran successfully.</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="../add-on/ray-on-gke/how-to/collect-view-logs-metrics">Learn how to view logs and metrics for your Ray clusters and jobs</a>.</li> <li>
+<a href="tpu-multislice-kueue">Learn how to manage larger, distributed TPU workloads that span multiple slices</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/ray-kueue-dws" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/ray-kueue-dws</a>
+  </p>
+</div>

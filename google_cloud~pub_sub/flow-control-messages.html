@@ -1,0 +1,350 @@
+<h1>Flow control</h1> <p>This document provides information about using flow control with messages published to a topic.</p> <h2 id="about_flow_control">About flow control</h2> <p>A publisher client may attempt to publish messages faster than that client is capable of sending data to the Pub/Sub service. Clients are limited by many factors, including:</p> <ul> <li>Machine CPU, RAM, and network capacity</li> <li>Network settings, such as the number of outstanding requests and available bandwidth</li> <li>The latency of each publish request, largely determined by the network connections between the Pub/Sub service, the client, and Google Cloud</li> </ul> <p>If the publish request rate exceeds these limits, requests accumulate in memory until they fail with a <code translate="no" dir="ltr">DEADLINE_EXCEEDED</code> error. This is especially likely when tens of thousands of messages are published in a loop, generating thousands of requests in milliseconds.</p> <p>You can diagnose this issue by checking the server-side metrics in Monitoring. You won't be able to see the requests that have failed with <code translate="no" dir="ltr">DEADLINE_EXCEEDED</code>, only the successful requests. The rate of successful requests tells you the throughput capacity of your client machines, providing a baseline for configuring flow control.</p> <p><a href="https://console.cloud.google.com/monitoring" track-type="task" track-name="consoleLink" class="button button-primary">Go to the Monitoring page</a> </p> <p>To mitigate flow rate issues, configure your publisher client with flow control to limit the rate of publish requests. You can configure the maximum number of bytes allocated for outstanding requests, and the maximum number of outstanding messages permitted. Set these limits according to the throughput capacity of your client machines.</p> <aside class="note"><strong>Note:</strong><span> Use flow control if messages are periodically published at a higher rate than they can be sent. If this is a persistent problem rather than a transient spike in messages, consider increasing the number of publisher client instances.</span></aside> <h2 id="before_you_begin">Before you begin</h2> <p>Before configuring the publish workflow, ensure you have completed the following tasks:</p> <ul> <li>Learn about <a href="pubsub-basics">topics and the publishing workflow</a>.</li> <li>
+<a href="create-topic">Create a topic</a>.</li> </ul> <h3 id="required_roles">Required roles</h3> <p> To get the permissions that you need to use flow control, ask your administrator to grant you the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/pubsub#pubsub.publisher">Pub/Sub Publisher </a> (<code translate="no" dir="ltr">roles/pubsub.publisher</code>) IAM role on your topic. For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>You need <a href="access-control">additional permissions</a> to create or update topics and subscriptions.</p> <h2 id="use_flow_control_with_messages">Use flow control with messages</h2> <p>Publisher flow control is available using the <a href="https://docs.cloud.google.com/pubsub/docs/reference/libraries" track-type="article" track-name="internalLink" track-metadata-position="body">Pub/Sub client libraries</a> in the following languages:</p> <div> <section><p class="_code-tab"><strong>C++</strong></p> <p>Before trying this sample, follow the C++ setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/cpp/google-cloud-pubsub/latest/" class="external">Pub/Sub C++ API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace pubsub = ::google::cloud::pubsub;
+using ::google::cloud::future;
+using ::google::cloud::Options;
+using ::google::cloud::StatusOr;
+[](std::string project_id, std::string topic_id) {
+  auto topic = pubsub::Topic(std::move(project_id), std::move(topic_id));
+  // Configure the publisher to block if either (1) 100 or more messages, or
+  // (2) messages with 100MiB worth of data have not been acknowledged by the
+  // service. By default the publisher never blocks, and its capacity is only
+  // limited by the system's memory.
+  auto publisher = pubsub::Publisher(pubsub::MakePublisherConnection(
+      std::move(topic),
+      Options{}
+          .set&lt;pubsub::MaxPendingMessagesOption&gt;(100)
+          .set&lt;pubsub::MaxPendingBytesOption&gt;(100 * 1024 * 1024L)
+          .set&lt;pubsub::FullPublisherActionOption&gt;(
+              pubsub::FullPublisherAction::kBlocks)));
+
+  std::vector&lt;future&lt;void&gt;&gt; ids;
+  for (char const* data : {"a", "b", "c"}) {
+    ids.push_back(
+        publisher.Publish(pubsub::MessageBuilder().SetData(data).Build())
+            .then([data](future&lt;StatusOr&lt;std::string&gt;&gt; f) {
+              auto s = f.get();
+              if (!s) return;
+              std::cout &lt;&lt; "Sent '" &lt;&lt; data &lt;&lt; "' (" &lt;&lt; *s &lt;&lt; ")\n";
+            }));
+  }
+  publisher.Flush();
+  // Block until they are actually sent.
+  for (auto&amp; id : ids) id.get();
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Go</strong></p>
+
+<p>The following sample uses the major version of the Go Pub/Sub client library (v2). If you are still using the v1 library, see <a href="https://github.com/googleapis/google-cloud-go/blob/main/pubsub/MIGRATING.md">the migration guide to v2</a>. To see a list of v1 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Go setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/pubsub/v2" class="external">Pub/Sub Go API reference documentation</a>.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+	"strconv"
+	"sync"
+	"sync/atomic"
+
+	"cloud.google.com/go/pubsub/v2"
+)
+
+func publishWithFlowControlSettings(w io.Writer, projectID, topicID string) error {
+	// projectID := "my-project-id"
+	// topicID := "my-topic"
+	ctx := context.Background()
+	client, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("pubsub.NewClient: %w", err)
+	}
+	defer client.Close()
+
+	// client.Publisher can be passed a topic ID (e.g. "my-topic") or
+	// a fully qualified name (e.g. "projects/my-project/topics/my-topic").
+	// If a topic ID is provided, the project ID from the client is used.
+	// Reuse this publisher for all publish calls to send messages in batches.
+	publisher := client.Publisher(topicID)
+	publisher.PublishSettings.FlowControlSettings = pubsub.FlowControlSettings{
+		MaxOutstandingMessages: 100,                     // default 1000
+		MaxOutstandingBytes:    10 * 1024 * 1024,        // default 0 (unlimited)
+		LimitExceededBehavior:  pubsub.FlowControlBlock, // default Ignore, other options: Block and SignalError
+	}
+
+	var wg sync.WaitGroup
+	var totalErrors uint64
+
+	numMsgs := 1000
+	// Rapidly publishing 1000 messages in a loop may be constrained by flow control.
+	for i := 0; i &lt; numMsgs; i++ {
+		wg.Add(1)
+		result := publisher.Publish(ctx, &amp;pubsub.Message{
+			Data: []byte("message #" + strconv.Itoa(i)),
+		})
+		go func(i int, res *pubsub.PublishResult) {
+			fmt.Fprintf(w, "Publishing message %d\n", i)
+			defer wg.Done()
+			// The Get method blocks until a server-generated ID or
+			// an error is returned for the published message.
+			_, err := res.Get(ctx)
+			if err != nil {
+				// Error handling code can be added here.
+				fmt.Fprintf(w, "Failed to publish: %v", err)
+				atomic.AddUint64(&amp;totalErrors, 1)
+				return
+			}
+		}(i, result)
+	}
+
+	wg.Wait()
+
+	if totalErrors &gt; 0 {
+		return fmt.Errorf("%d of %d messages did not publish successfully", totalErrors, numMsgs)
+	}
+	return nil
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Java</strong></p>
+
+<p>Before trying this sample, follow the Java setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-pubsub/latest/overview" class="external">Pub/Sub Java API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutures;
+import com.google.api.gax.batching.BatchingSettings;
+import com.google.api.gax.batching.FlowControlSettings;
+import com.google.api.gax.batching.FlowController.LimitExceededBehavior;
+import com.google.cloud.pubsub.v1.Publisher;
+import com.google.protobuf.ByteString;
+import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.TopicName;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+
+public class PublishWithFlowControlExample {
+  public static void main(String... args) throws Exception {
+    // TODO(developer): Replace these variables before running the sample.
+    String projectId = "your-project-id";
+    String topicId = "your-topic-id";
+
+    publishWithFlowControlExample(projectId, topicId);
+  }
+
+  public static void publishWithFlowControlExample(String projectId, String topicId)
+      throws IOException, ExecutionException, InterruptedException {
+    TopicName topicName = TopicName.of(projectId, topicId);
+    Publisher publisher = null;
+    List&lt;ApiFuture&lt;String&gt;&gt; messageIdFutures = new ArrayList&lt;&gt;();
+
+    try {
+      // Configure how many messages the publisher client can hold in memory
+      // and what to do when messages exceed the limit.
+      FlowControlSettings flowControlSettings =
+          FlowControlSettings.newBuilder()
+              // Block more messages from being published when the limit is reached. The other
+              // options are Ignore (or continue publishing) and ThrowException (or error out).
+              .setLimitExceededBehavior(LimitExceededBehavior.Block)
+              .setMaxOutstandingRequestBytes(10 * 1024 * 1024L) // 10 MiB
+              .setMaxOutstandingElementCount(100L) // 100 messages
+              .build();
+
+      // By default, messages are not batched.
+      BatchingSettings batchingSettings =
+          BatchingSettings.newBuilder().setFlowControlSettings(flowControlSettings).build();
+
+      publisher = Publisher.newBuilder(topicName).setBatchingSettings(batchingSettings).build();
+
+      // Publish 1000 messages in quick succession may be constrained by publisher flow control.
+      for (int i = 0; i &lt; 1000; i++) {
+        String message = "message " + i;
+        ByteString data = ByteString.copyFromUtf8(message);
+        PubsubMessage pubsubMessage = PubsubMessage.newBuilder().setData(data).build();
+
+        // Once published, returns a server-assigned message id (unique within the topic)
+        ApiFuture&lt;String&gt; messageIdFuture = publisher.publish(pubsubMessage);
+        messageIdFutures.add(messageIdFuture);
+      }
+    } finally {
+      // Wait on any pending publish requests.
+      List&lt;String&gt; messageIds = ApiFutures.allAsList(messageIdFutures).get();
+
+      System.out.println(
+          "Published " + messageIds.size() + " messages with flow control settings.");
+
+      if (publisher != null) {
+        // When finished with the publisher, shut down to free up resources.
+        publisher.shutdown();
+        publisher.awaitTermination(1, TimeUnit.MINUTES);
+      }
+    }
+  }
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Node.js (JavaScript)</strong></p>
+
+<p>Before trying this sample, follow the Node.js setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/nodejs/pubsub/latest" class="external">Pub/Sub Node.js API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">/**
+ * TODO(developer): Uncomment this variable before running the sample.
+ */
+// const topicNameOrId = 'YOUR_TOPIC_NAME_OR_ID';
+
+// Imports the Google Cloud client library
+const {PubSub} = require('@google-cloud/pubsub');
+
+// Creates a client; cache this for further use
+const pubSubClient = new PubSub();
+
+async function publishWithFlowControl(topicNameOrId) {
+  // Create publisher options
+  const options = {
+    flowControlOptions: {
+      maxOutstandingMessages: 50,
+      maxOutstandingBytes: 10 * 1024 * 1024, // 10 MB
+    },
+  };
+
+  // Get a publisher. Cache topic objects (publishers) and reuse them.
+  const topic = pubSubClient.topic(topicNameOrId, options);
+
+  // For flow controlled publishing, we'll use a publisher flow controller
+  // instead of `topic.publish()`.
+  const flow = topic.flowControlled();
+
+  // Publish messages in a fast loop.
+  const testMessage = {data: Buffer.from('test!')};
+  for (let i = 0; i &lt; 1000; i++) {
+    // You can also just `await` on `publish()` unconditionally, but if
+    // you want to avoid pausing to the event loop on each iteration,
+    // you can manually check the return value before doing so.
+    const wait = flow.publish(testMessage);
+    if (wait) {
+      await wait;
+    }
+  }
+
+  // Wait on any pending publish requests. Note that you can call `all()`
+  // earlier if you like, and it will return a Promise for all messages
+  // that have been sent to `flowController.publish()` so far.
+  const messageIds = await flow.all();
+  console.log(`Published ${messageIds.length} with flow control settings.`);
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Node.js (TypeScript)</strong></p>
+
+<p>Before trying this sample, follow the Node.js setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/nodejs/pubsub/latest" class="external">Pub/Sub Node.js API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">/**
+ * TODO(developer): Uncomment this variable before running the sample.
+ */
+// const topicNameOrId = 'YOUR_TOPIC_NAME_OR_ID';
+
+// Imports the Google Cloud client library
+import {PubSub, PublishOptions} from '@google-cloud/pubsub';
+
+// Creates a client; cache this for further use
+const pubSubClient = new PubSub();
+
+async function publishWithFlowControl(topicNameOrId: string) {
+  // Create publisher options
+  const options: PublishOptions = {
+    flowControlOptions: {
+      maxOutstandingMessages: 50,
+      maxOutstandingBytes: 10 * 1024 * 1024, // 10 MB
+    },
+  };
+
+  // Get a publisher. Cache topic objects (publishers) and reuse them.
+  const topic = pubSubClient.topic(topicNameOrId, options);
+
+  // For flow controlled publishing, we'll use a publisher flow controller
+  // instead of `topic.publish()`.
+  const flow = topic.flowControlled();
+
+  // Publish messages in a fast loop.
+  const testMessage = {data: Buffer.from('test!')};
+  for (let i = 0; i &lt; 1000; i++) {
+    // You can also just `await` on `publish()` unconditionally, but if
+    // you want to avoid pausing to the event loop on each iteration,
+    // you can manually check the return value before doing so.
+    const wait = flow.publish(testMessage);
+    if (wait) {
+      await wait;
+    }
+  }
+
+  // Wait on any pending publish requests. Note that you can call `all()`
+  // earlier if you like, and it will return a Promise for all messages
+  // that have been sent to `flowController.publish()` so far.
+  const messageIds = await flow.all();
+  console.log(`Published ${messageIds.length} with flow control settings.`);
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<p>Before trying this sample, follow the Python setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://docs.cloud.google.com/python/docs/reference/pubsub/latest">Pub/Sub Python API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">from concurrent import futures
+from google.cloud import pubsub_v1
+from google.cloud.pubsub_v1.types import (
+    LimitExceededBehavior,
+    PublisherOptions,
+    PublishFlowControl,
+)
+
+# TODO(developer)
+# project_id = "your-project-id"
+# topic_id = "your-topic-id"
+
+# Configure how many messages the publisher client can hold in memory
+# and what to do when messages exceed the limit.
+flow_control_settings = PublishFlowControl(
+    message_limit=100,  # 100 messages
+    byte_limit=10 * 1024 * 1024,  # 10 MiB
+    limit_exceeded_behavior=LimitExceededBehavior.BLOCK,
+)
+publisher = pubsub_v1.PublisherClient(
+    publisher_options=PublisherOptions(flow_control=flow_control_settings)
+)
+topic_path = publisher.topic_path(project_id, topic_id)
+publish_futures = []
+
+# Resolve the publish future in a separate thread.
+def callback(publish_future: pubsub_v1.publisher.futures.Future) -&gt; None:
+    message_id = publish_future.result()
+    print(message_id)
+
+# Publish 1000 messages in quick succession may be constrained by
+# publisher flow control.
+for n in range(1, 1000):
+    data_str = f"Message number {n}"
+    # Data must be a bytestring
+    data = data_str.encode("utf-8")
+    publish_future = publisher.publish(topic_path, data)
+    # Non-blocking. Allow the publisher client to batch messages.
+    publish_future.add_done_callback(callback)
+    publish_futures.append(publish_future)
+
+futures.wait(publish_futures, return_when=futures.ALL_COMPLETED)
+
+print(f"Published messages with flow control settings to {topic_path}.")</pre> </div> </section> <section><p class="_code-tab"><strong>Ruby</strong></p>
+
+<p>The following sample uses Ruby Pub/Sub client library v3. If you are still using the v2 library, see <a href="https://github.com/googleapis/google-cloud-ruby/blob/main/google-cloud-pubsub/MIGRATION_GUIDE.md"> the migration guide to v3</a>. To see a list of Ruby v2 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Ruby setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/ruby/google-cloud-pubsub/latest/Google/Cloud/PubSub.html" class="external">Pub/Sub Ruby API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="ruby"># topic_id = "your-topic-id"
+
+pubsub = Google::Cloud::PubSub.new
+publisher = pubsub.publisher topic_id, async: {
+  # Configure how many messages the publisher client can hold in memory
+  # and what to do when messages exceed the limit.
+  flow_control: {
+    message_limit: 100,
+    byte_limit: 10 * 1024 * 1024, # 10 MiB
+    # Block more messages from being published when the limit is reached. The
+    # other options are :ignore and :error.
+    limit_exceeded_behavior: :block
+  }
+}
+
+# Rapidly publishing 1000 messages in a loop may be constrained by flow
+# control.
+1000.times do |i|
+  publisher.publish_async "message #{i}" do |result|
+    raise "Failed to publish the message." unless result.succeeded?
+  end
+end
+
+# Stop the async_publisher to send all queued messages immediately.
+publisher.async_publisher.stop.wait!
+puts "Published messages with flow control settings to #{topic_id}."</pre> </div> </section> </div> <h2 id="whats_next">What's next</h2> <ul> <li><p><a href="compress-messages">Compress messages</a></p></li> <li><p><a href="retry-requests">Retry requests</a></p></li> <li><p><a href="publish-hedging">Publish hedging</a></p></li> <li><p><a href="concurrency-control-messages">Concurrency control</a></p></li> <li><p><a href="batch-messaging">Batch messaging</a></p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/pubsub/docs/flow-control-messages" class="_attribution-link">https://docs.cloud.google.com/pubsub/docs/flow-control-messages</a>
+  </p>
+</div>

@@ -1,0 +1,639 @@
+<h1>Optimize GKE resource utilization for mixed AI/ML training and inference workloads</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial shows you how to efficiently share accelerator resources between training- and inference-serving workloads within a single Google Kubernetes Engine (GKE) cluster. By distributing your mixed workloads across a single cluster, you improve resource utilization, simplify cluster management, reduce issues from accelerator quantity limitations, and enhance overall cost-effectiveness.</p> <p>In this tutorial, you create a high-priority serving Deployment using the <a href="https://huggingface.co/google/gemma-2-9b-it">Gemma 2</a> large language model (LLM) for inference and the <a href="https://huggingface.co/docs/text-generation-inference/en/index">Hugging Face TGI</a> (Text Generation Interface) serving framework, along with a low-priority LLM fine-tuning Job. Both workloads run on a single cluster that uses NVIDIA L4 GPUs. You use <a href="https://kueue.sigs.k8s.io/">Kueue</a>, an open source Kubernetes-native Job queueing system, to manage and schedule your workloads. Kueue lets you prioritize serving tasks and preempt lower-priority training Jobs to optimize resource utilization. As serving demands decrease, you reallocate the freed-up accelerators to resume training Jobs. You use Kueue and priority classes to manage resource quotas throughout the process.</p> <p>This tutorial is intended for Machine learning (ML) engineers, Platform admins and operators, and Data and AI specialists who want to train and host a machine learning (ML) model on a GKE cluster, and who also want to reduce costs and management overhead, especially when dealing with a limited number of accelerators. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li><a href="https://docs.cloud.google.com/compute/docs/gpus">Current GPU version availability</a></li> <li><a href="../concepts/gpus">GPUs in GKE</a></li> </ul> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <p>By the end of this guide, you should be able to perform the following steps:</p> <ul> <li>Configure a high-priority serving Deployment.</li> <li>Set up lower-priority training Jobs.</li> <li>Implement preemption strategies to address varying demand.</li> <li>Manage resource allocation between training and serving tasks using Kueue.</li> </ul> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ul> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> </cloud-free-trial> <li> <p> Make sure that you have the following role or roles on the project: <code translate="no" dir="ltr">roles/container.admin</code>, <code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code> </p>  <h4 class="showalways" id="check-for-the-roles">Check for the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> <p> In the <b>Principal</b> column, find all rows that identify you or a group that you're included in. To learn which groups you're included in, contact your administrator. </p> </li> <li> For all rows that specify or include you, check the <b>Role</b> column to see whether the list of roles includes the required roles. </li> </ol>   <h4 class="showalways" id="grant-the-roles">Grant the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> Click <span class="material-icons" aria-hidden="true" translate="no">person_add</span> <b>Grant access</b>. </li> <li> <p> In the <b>New principals</b> field, enter your user identifier. This is typically the email address for a Google Account.</p> </li> <li> Click <b>Select a role</b>, then search for the role. </li>
+<li> To grant additional roles, click <span class="material-icons" aria-hidden="true" translate="no">add</span> <b>Add another role</b> and add each additional role. </li> <li> Click <b>Save</b>. </li> </ol>  </li> </ul> <ul> <li>Create a <a href="https://huggingface.co/">Hugging Face</a> account, if you don't already have one.</li> <li>Ensure your project has sufficient quota for L4 GPUs. To learn more, see <a href="../concepts/gpus#gpu-quota">About GPUs</a> and <a href="https://docs.cloud.google.com/compute/resource-usage#gpu_quota">Allocation quotas</a>.</li> </ul> </section> <div id="tutorial-content"> <h2 id="prepare-environment">Prepare the environment</h2> <p>In this section, you provision the resources that you need to deploy TGI and the model for your inference and training workloads.</p> <h3 id="model-access">Get access to the model</h3> <p>To get access to the Gemma models for deployment to GKE, you must first sign the license consent agreement, then generate a Hugging Face access token.</p> <ol> <li>
+<strong>Sign the license consent agreement</strong>. Access the <a href="https://www.kaggle.com/models/google/gemma">model consent page</a>, verify consent using your Hugging Face account, and accept the model terms.</li> <li>
+<p><strong>Generate an access token</strong>. To access the model through Hugging Face, you need a <a href="https://huggingface.co/docs/hub/security-tokens">Hugging Face token</a>. Follow these steps to generate a new token if you don't have one already:</p> <ol> <li>Click <strong>Your Profile &gt; Settings &gt; Access Tokens</strong>.</li> <li>Select <strong>New Token</strong>.</li> <li>Specify a Name of your choice and a Role of at least <code translate="no" dir="ltr">Read</code>.</li> <li>Select <strong>Generate a token</strong>.</li> <li>Copy the generated token to your clipboard.</li> </ol>
+</li> </ol> <h3 id="launch-shell">Launch Cloud Shell</h3> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell">Cloud Shell</a> to manage resources hosted on Google Cloud. Cloud Shell comes preinstalled with the software you need for this tutorial, including <a href="https://kubernetes.io/docs/reference/kubectl/"><code translate="no" dir="ltr">kubectl</code></a>, <a href="https://docs.cloud.google.com/sdk/gcloud"> gcloud CLI</a>, and <a href="https://docs.cloud.google.com/docs/terraform">Terraform</a>.</p> <p>To set up your environment with Cloud Shell, follow these steps:</p> <ol> <li><p>In the Google Cloud console, launch a Cloud Shell session by clicking <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Cloud Shell activation icon"> <strong>Activate Cloud Shell</strong> in the <a href="http://console.cloud.google.com">Google Cloud console</a>. This launches a session in the bottom pane of Google Cloud console.</p></li> <li>
+<p>Set the default environment variables:</p> 
+<pre>gcloud config set project PROJECT_ID
+export PROJECT_ID=$(gcloud config get project)
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</p>
+</li> <li>
+<p>Clone the sample code from GitHub. In Cloud Shell, run the following commands:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/
+cd kubernetes-engine-samples/ai-ml/mix-train-and-inference
+export EXAMPLE_HOME=$(pwd)
+</pre>
+</li> </ol> <h3 id="create-cluster">Create a GKE cluster</h3> <p>You can use an Autopilot or Standard cluster for your mixed workloads. We recommend that you use an Autopilot cluster for a fully managed Kubernetes experience. To choose the GKE mode of operation that's the best fit for your workloads, see <a href="../concepts/choose-cluster-mode">Choose a GKE mode of operation</a>.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ol> <li>
+<p>Set the default environment variables in Cloud Shell:</p> 
+<pre data-language="">export HF_TOKEN=HF_TOKEN
+export REGION=REGION
+export CLUSTER_NAME="llm-cluster"
+export PROJECT_NUMBER=$(gcloud projects list \
+    --filter="$(gcloud config get-value project)" \
+    --format="value(PROJECT_NUMBER)")
+export MODEL_BUCKET="model-bucket-$PROJECT_ID"
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">HF_TOKEN</var>: the Hugging Face token you generated earlier.</li> <li>
+<var translate="no">REGION</var>: a region that supports the accelerator type you want to use, for example, <code translate="no" dir="ltr">us-central1</code> for the L4 GPU.</li> </ul> <p>You can adjust the <var translate="no">MODEL_BUCKET</var> variable—this represents the Cloud Storage bucket where you store your trained model weights.</p>
+</li> <li>
+<p>Create an Autopilot cluster:</p> 
+<pre data-language="">gcloud container clusters create-auto ${CLUSTER_NAME} \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --release-channel=rapid
+</pre>
+</li> <li>
+<p>Create the Cloud Storage bucket for the fine-tuning job:</p> 
+<pre data-language="">gcloud storage buckets create gs://${MODEL_BUCKET} \
+    --location ${REGION} \
+    --uniform-bucket-level-access
+</pre>
+</li> <li>
+<p>To grant access to the Cloud Storage bucket, run this command:</p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding "gs://$MODEL_BUCKET" \
+    --role=roles/storage.objectAdmin \
+    --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/llm/sa/default \
+    --condition=None
+</pre>
+</li> <li>
+<p>To get authentication credentials for the cluster, run this command:</p> 
+<pre data-language="">gcloud container clusters get-credentials llm-cluster \
+    --location=$REGION \
+    --project=$PROJECT_ID
+</pre>
+</li> <li>
+<p>Create a namespace for your Deployments. In Cloud Shell, run the following command:</p> 
+<pre data-language="">kubectl create ns llm
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>Set the default environment variables in Cloud Shell:</p> 
+<pre data-language="">export HF_TOKEN=HF_TOKEN
+export REGION=REGION
+export CLUSTER_NAME="llm-cluster"
+export GPU_POOL_MACHINE_TYPE="g2-standard-24"
+export GPU_POOL_ACCELERATOR_TYPE="nvidia-l4"
+export PROJECT_NUMBER=$(gcloud projects list \
+    --filter="$(gcloud config get-value project)" \
+    --format="value(PROJECT_NUMBER)")
+export MODEL_BUCKET="model-bucket-$PROJECT_ID"
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">HF_TOKEN</var>: the Hugging Face token you generated earlier.</li> <li>
+<var translate="no">REGION</var>: the region that supports the accelerator type you want to use, for example, <code translate="no" dir="ltr">us-central1</code> for the L4 GPU.</li> </ul> <p>You can adjust these variables:</p> <ul> <li>
+<var translate="no">GPU_POOL_MACHINE_TYPE</var>: the node pool machine series that you want to use in your selected region. This value depends on the accelerator type you selected. To learn more, see <a href="../how-to/gpus#limitations">Limitations of using GPUs on GKE</a>. For example, this tutorial uses <code translate="no" dir="ltr">g2-standard-24</code> with two GPUs attached per node. For the most up-to-date list of available GPUs, see <a href="https://docs.cloud.google.com/compute/docs/gpus#gpus_for_compute_workloads">GPUs for Compute Workloads</a>.</li> <li>
+<var translate="no">GPU_POOL_ACCELERATOR_TYPE</var>: the accelerator type that's supported in your selected region. For example, this tutorial uses <code translate="no" dir="ltr">nvidia-l4</code>. For the latest list of available GPUs, see <a href="https://docs.cloud.google.com/compute/docs/gpus#gpus_for_compute_workloads">GPUs for Compute Workloads</a>.</li> <li>
+<var translate="no">MODEL_BUCKET</var>: the Cloud Storage bucket where you store your trained model weights.</li> </ul>
+</li> <li>
+<p>Create a Standard cluster:</p> 
+<pre data-language="">gcloud container clusters create ${CLUSTER_NAME} \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --workload-pool=${PROJECT_ID}.svc.id.goog \
+    --release-channel=rapid \
+    --machine-type=e2-standard-4 \
+    --addons GcsFuseCsiDriver \
+    --num-nodes=1
+</pre>
+</li> <li>
+<p>Create the GPU node pool for inference and fine-tuning workloads:</p> 
+<pre data-language="">gcloud container node-pools create gpupool \
+    --accelerator type=${GPU_POOL_ACCELERATOR_TYPE},count=2,gpu-driver-version=latest \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --node-locations=${REGION}-a \
+    --cluster=${CLUSTER_NAME} \
+    --machine-type=${GPU_POOL_MACHINE_TYPE} \
+    --num-nodes=3
+</pre>
+</li> <li>
+<p>Create the Cloud Storage bucket for the fine-tuning job:</p> 
+<pre data-language="">gcloud storage buckets create gs://${MODEL_BUCKET} \
+    --location ${REGION} \
+    --uniform-bucket-level-access
+</pre>
+</li> <li>
+<p>To grant access to the Cloud Storage bucket, run this command:</p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding "gs://$MODEL_BUCKET" \
+    --role=roles/storage.objectAdmin \
+    --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/llm/sa/default \
+    --condition=None
+</pre>
+</li> <li>
+<p>To get authentication credentials for the cluster, run this command:</p> 
+<pre data-language="">gcloud container clusters get-credentials llm-cluster \
+    --location=$REGION \
+    --project=$PROJECT_ID
+</pre>
+</li> <li>
+<p>Create a namespace for your Deployments. In Cloud Shell, run the following command:</p> 
+<pre data-language="">kubectl create ns llm
+</pre>
+</li> </ol></section> </div> <h3 id="create-secret">Create a Kubernetes Secret for Hugging Face credentials</h3> <p>To create a Kubernetes Secret that contains the Hugging Face token, run the following command:</p> 
+<pre>kubectl create secret generic hf-secret \
+    --from-literal=hf_api_token=$HF_TOKEN \
+    --dry-run=client -o yaml | kubectl apply --namespace=llm --filename=-
+</pre> <h2 id="configure-kueue">Configure Kueue</h2> <p>In this tutorial, Kueue is the central resource manager, enabling efficient sharing of GPUs between your training and serving workloads. Kueue achieves this by defining resource requirements ("flavors"), prioritizing workloads through queues (with serving tasks prioritized over training), and dynamically allocating resources based on demand and priority. This tutorial uses the <a href="https://kueue.sigs.k8s.io/docs/concepts/workload/">Workload</a> resource type to group the inference and fine-tuning workloads, respectively.</p> <p>Kueue's preemption feature ensures that high-priority serving workloads always have the necessary resources by pausing or evicting lower-priority training Jobs when resources are scarce.</p> <p>To control the inference server Deployment with Kueue, you enable <code translate="no" dir="ltr">pod</code> integration and configure <code translate="no" dir="ltr">managedJobsNamespaceSelector</code> to exclude the <code translate="no" dir="ltr">kube-system</code> and <code translate="no" dir="ltr">kueue-system</code> namespaces.</p> <ol> <li>
+<p>In the <code translate="no" dir="ltr">/kueue</code> directory, view the code in <code translate="no" dir="ltr">kustomization.yaml</code>. This manifest installs the Kueue resource manager with custom configurations.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- https://github.com/kubernetes-sigs/kueue/releases/download/v0.12.3/manifests.yaml
+patches:
+- path: patch.yaml
+  target:
+    version: v1
+    kind: ConfigMap
+    name: kueue-manager-config
+</pre> </div> </li> <li>
+<p>In the <code translate="no" dir="ltr">/kueue</code> directory, view the code in <code translate="no" dir="ltr">patch.yaml</code>. This ConfigMap customizes Kueue to exclude management of Pods in the <code translate="no" dir="ltr">kube-system</code> and <code translate="no" dir="ltr">kueue-system</code> namespaces.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kueue-manager-config
+data:
+  controller_manager_config.yaml: |
+    apiVersion: config.kueue.x-k8s.io/v1beta1
+    kind: Configuration
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8080
+    # enableClusterQueueResources: true
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    controller:
+      groupKindConcurrency:
+        Job.batch: 5
+        Pod: 5
+        Workload.kueue.x-k8s.io: 5
+        LocalQueue.kueue.x-k8s.io: 1
+        ClusterQueue.kueue.x-k8s.io: 1
+        ResourceFlavor.kueue.x-k8s.io: 1
+    clientConnection:
+      qps: 50
+      burst: 100
+    #pprofBindAddress: :8083
+    #waitForPodsReady:
+    #  enable: false
+    #  timeout: 5m
+    #  blockAdmission: false
+    #  requeuingStrategy:
+    #    timestamp: Eviction
+    #    backoffLimitCount: null # null indicates infinite requeuing
+    #    backoffBaseSeconds: 60
+    #    backoffMaxSeconds: 3600
+    #manageJobsWithoutQueueName: true
+    managedJobsNamespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: [ kube-system, kueue-system ]
+    #internalCertManagement:
+    #  enable: false
+    #  webhookServiceName: ""
+    #  webhookSecretName: ""
+    integrations:
+      frameworks:
+      - "batch/job"
+      - "kubeflow.org/mpijob"
+      - "ray.io/rayjob"
+      - "ray.io/raycluster"
+      - "jobset.x-k8s.io/jobset"
+      - "kubeflow.org/paddlejob"
+      - "kubeflow.org/pytorchjob"
+      - "kubeflow.org/tfjob"
+      - "kubeflow.org/xgboostjob"
+      - "kubeflow.org/jaxjob"
+      - "workload.codeflare.dev/appwrapper"
+      - "pod"
+    #  - "deployment" # requires enabling pod integration
+    #  - "statefulset" # requires enabling pod integration
+    #  - "leaderworkerset.x-k8s.io/leaderworkerset" # requires enabling pod integration
+    #  externalFrameworks:
+    #  - "Foo.v1.example.com"
+    #fairSharing:
+    #  enable: true
+    #  preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]
+    #admissionFairSharing:
+    #  usageHalfLifeTime: "168h" # 7 days
+    #  usageSamplingInterval: "5m"
+    #  resourceWeights: # optional, defaults to 1 for all resources if not specified
+    #    cpu: 0    # if you want to completely ignore cpu usage
+    #    memory: 0 # ignore completely memory usage
+    #    example.com/gpu: 100 # and you care only about GPUs usage
+    #resources:
+    #  excludeResourcePrefixes: []
+    #  transformations:
+    #  - input: nvidia.com/mig-4g.5gb
+    #    strategy: Replace | Retain
+    #    outputs:
+    #      example.com/accelerator-memory: 5Gi
+    #      example.com/accelerator-gpc: 4
+    #objectRetentionPolicies:
+    #  workloads:
+    #    afterFinished: null # null indicates infinite retention, 0s means no retention at all
+    #    afterDeactivatedByKueue: null # null indicates infinite retention, 0s means no retention at all
+</pre> </div> </li> <li>
+<p>In Cloud Shell, run the following command to install Kueue:</p> 
+<pre>cd ${EXAMPLE_HOME}
+kubectl kustomize kueue |kubectl apply --server-side --filename=-
+</pre> <p>Wait until the Kueue Pods are ready:</p> 
+<pre>watch kubectl --namespace=kueue-system get pods
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                                        READY   STATUS    RESTARTS   AGE
+kueue-controller-manager-bdc956fc4-vhcmx    1/1     Running   0          3m15s
+</pre>
+</li> <li>
+<p>In the <code translate="no" dir="ltr">/workloads</code> directory, view the <code translate="no" dir="ltr">flavors.yaml</code>, <code translate="no" dir="ltr">cluster-queue.yaml</code>, and <code translate="no" dir="ltr">local-queue.yaml</code> files. These manifests specify how Kueue manages resource quotas:</p> <div> <section><p class="_code-tab"><strong>ResourceFlavor</strong></p>
+<p>This manifest defines a default <a href="https://kueue.sigs.k8s.io/docs/concepts/resource_flavor/">ResourceFlavor</a> in Kueue for resource management.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: default-flavor
+</pre> </div> </section> <section><p class="_code-tab"><strong>ClusterQueue</strong></p>
+<p>This manifest sets up a Kueue <a href="https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/">ClusterQueue</a> with resource limits for CPU, memory, and GPU.</p> <p>This tutorial uses nodes with two Nvidia L4 GPUs attached, with the corresponding node type of <code translate="no" dir="ltr">g2-standard-24</code>, offering 24 vCPU and 96 GB RAM. The example code shows how to limit your workload's resource usage to a maximum of six GPUs.</p> <p>The <code translate="no" dir="ltr">preemption</code> field in the ClusterQueue configuration references the PriorityClasses to determine which Pods can be preempted when resources are scarce.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: "cluster-queue"
+spec:
+  namespaceSelector: {} # match all.
+  preemption:
+    reclaimWithinCohort: LowerPriority
+    withinClusterQueue: LowerPriority
+  resourceGroups:
+  - coveredResources: [ "cpu", "memory", "nvidia.com/gpu", "ephemeral-storage" ]
+    flavors:
+    - name: default-flavor
+      resources:
+      - name: "cpu"
+        nominalQuota: 72
+      - name: "memory"
+        nominalQuota: 288Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 6
+      - name: "ephemeral-storage"
+        nominalQuota: 200Gi
+</pre> </div> </section> <section><p class="_code-tab"><strong>LocalQueue</strong></p>
+<p>This manifest creates a Kueue <a href="https://kueue.sigs.k8s.io/docs/concepts/local_queue/">LocalQueue</a> named <code translate="no" dir="ltr">lq</code> in the <code translate="no" dir="ltr">llm</code> namespace.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  namespace: llm # LocalQueue under llm namespace 
+  name: lq
+spec:
+  clusterQueue: cluster-queue # Point to the ClusterQueue
+</pre> </div> </section> </div>
+</li> <li>
+<p>View the <code translate="no" dir="ltr">default-priorityclass.yaml</code>, <code translate="no" dir="ltr">low-priorityclass.yaml</code>, and <code translate="no" dir="ltr">high-priorityclass.yaml</code> files. These manifests define the <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/#priorityclass">PriorityClass</a> objects for Kubernetes scheduling.</p> <div> <section><p class="_code-tab"><strong>Default priority</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: default-priority-nonpreempting
+value: 10
+preemptionPolicy: Never
+globalDefault: true
+description: "This priority class will not cause other pods to be preempted."
+</pre> </div> </section> <section><p class="_code-tab"><strong>Low priority</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority-preempting
+value: 20
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: "This priority class will cause pods with lower priority to be preempted."
+</pre> </div> </section> <section><p class="_code-tab"><strong>High priority</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority-preempting
+value: 30
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: "This high priority class will cause other pods to be preempted."
+</pre> </div> </section> </div>
+</li> <li>
+<p>Create the Kueue and Kubernetes objects by running these commands to apply the corresponding manifests.</p> 
+<pre>cd ${EXAMPLE_HOME}/workloads
+kubectl apply --filename=flavors.yaml
+kubectl apply --filename=default-priorityclass.yaml
+kubectl apply --filename=high-priorityclass.yaml
+kubectl apply --filename=low-priorityclass.yaml
+kubectl apply --filename=cluster-queue.yaml
+kubectl apply --filename=local-queue.yaml --namespace=llm
+</pre>
+</li> </ol> <h2 id="deploy-tgi">Deploy the TGI inference server</h2> <p>In this section, you deploy the TGI container to serve the Gemma 2 model.</p> <ol> <li>
+<p>In the <code translate="no" dir="ltr">/workloads</code> directory, view the <code translate="no" dir="ltr">tgi-gemma-2-9b-it-hp.yaml</code> file. This manifest defines a Kubernetes Deployment to deploy the TGI serving runtime and <code translate="no" dir="ltr">gemma-2-9B-it</code> model. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster..</p> <p>The Deployment prioritizes inference tasks and uses two GPUs for the model. It uses <a href="../best-practices/machine-learning/inference/llm-optimization#tensor-parallelism">tensor parallelism</a>, by setting the <code translate="no" dir="ltr">NUM_SHARD</code> environment variable, to fit the model into GPU memory.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tgi-gemma-deployment
+  labels:
+    app: gemma-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemma-server
+  template:
+    metadata:
+      labels:
+        app: gemma-server
+        ai.gke.io/model: gemma-2-9b-it
+        ai.gke.io/inference-server: text-generation-inference
+        examples.ai.gke.io/source: user-guide
+        kueue.x-k8s.io/queue-name: lq
+    spec:
+      priorityClassName: high-priority-preempting
+      containers:
+      - name: inference-server
+        image: us-docker.pkg.dev/deeplearning-platform-release/gcr.io/huggingface-text-generation-inference-cu121.2-1.ubuntu2204.py310
+        resources:
+          requests:
+            cpu: "4"
+            memory: "30Gi"
+            ephemeral-storage: "30Gi"
+            nvidia.com/gpu: "2"
+          limits:
+            cpu: "4"
+            memory: "30Gi"
+            ephemeral-storage: "30Gi"
+            nvidia.com/gpu: "2"
+        env:
+        - name: AIP_HTTP_PORT
+          value: '8000'
+        - name: NUM_SHARD
+          value: '2'
+        - name: MODEL_ID
+          value: google/gemma-2-9b-it
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-service
+spec:
+  selector:
+    app: gemma-server
+  type: ClusterIP
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+</pre> </div> </li> <li>
+<p>Apply the manifest by running the following command:</p> 
+<pre>kubectl apply --filename=tgi-gemma-2-9b-it-hp.yaml --namespace=llm
+</pre> <p>The deployment operation will take a few minutes to complete.</p>
+</li> <li>
+<p>To check if GKE successfully created the Deployment, run the following command:</p> 
+<pre>kubectl --namespace=llm get deployment
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                   READY   UP-TO-DATE   AVAILABLE   AGE
+tgi-gemma-deployment   1/1     1            1           5m13s
+</pre>
+</li> </ol> <h2 id="kueue-quota">Verify Kueue quota management</h2> <p>In this section, you confirm that Kueue is correctly enforcing the GPU quota for your Deployment.</p> <ol> <li>
+<p>To check if Kueue is aware of your Deployment, run this command to retrieve the status of the Workload objects:</p> 
+<pre>kubectl --namespace=llm get workloads
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                                              QUEUE   RESERVED IN     ADMITTED   FINISHED   AGE
+pod-tgi-gemma-deployment-6bf9ffdc9b-zcfrh-84f19   lq      cluster-queue   True                  8m23s
+</pre>
+</li> <li>
+<p>To test overriding the quota limits, scale the Deployment to four replicas:</p> 
+<pre>kubectl scale --replicas=4 deployment/tgi-gemma-deployment --namespace=llm
+</pre>
+</li> <li>
+<p>Run the following command to see the number of replicas that GKE deploys:</p> 
+<pre>kubectl get workloads --namespace=llm
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                                              QUEUE   RESERVED IN     ADMITTED   FINISHED   AGE
+pod-tgi-gemma-deployment-6cb95cc7f5-5thgr-3f7d4   lq      cluster-queue   True                  14s
+pod-tgi-gemma-deployment-6cb95cc7f5-cbxg2-d9fe7   lq      cluster-queue   True                  5m41s
+pod-tgi-gemma-deployment-6cb95cc7f5-tznkl-80f6b   lq                                            13s
+pod-tgi-gemma-deployment-6cb95cc7f5-wd4q9-e4302   lq      cluster-queue   True                  13s
+</pre> <p>The output shows that only three Pods are admitted due to the resource quota that Kueue enforces.</p>
+</li> <li>
+<p>Run the following to display the Pods in the <code translate="no" dir="ltr">llm</code> namespace:</p> 
+<pre>kubectl get pod --namespace=llm
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                                    READY   STATUS            RESTARTS   AGE
+tgi-gemma-deployment-7649884d64-6j256   1/1     Running           0          4m45s
+tgi-gemma-deployment-7649884d64-drpvc   0/1     SchedulingGated   0          7s
+tgi-gemma-deployment-7649884d64-thdkq   0/1     Pending           0          7s
+tgi-gemma-deployment-7649884d64-znvpb   0/1     Pending           0          7s
+</pre>
+</li> <li>
+<p>Now, scale down the Deployment back to 1. This step is required before deploying the fine-tuning job, otherwise it won't get admitted due to the inference job having priority.</p> 
+<pre>kubectl scale --replicas=1 deployment/tgi-gemma-deployment --namespace=llm
+</pre>
+</li> </ol> <h3 id="scaling-behavior">Explanation of the behavior</h3> <p>The scaling example results in only three replicas (despite scaling to four) because of the GPU quota limit that you set in the ClusterQueue configuration. The ClusterQueue's <code translate="no" dir="ltr">spec.resourceGroups</code> section defines a nominalQuota of "6" for <code translate="no" dir="ltr">nvidia.com/gpu</code>. The Deployment specifies that each Pod requires "2" GPUs. Therefore, the ClusterQueue can only accommodate a maximum of three replicas of the Deployment at a time (since 3 replicas * 2 GPUs per replica = 6 GPUs, which is the total quota).</p> <p>When you attempt to scale to four replicas, Kueue recognizes that this action would exceed the GPU quota and it prevents the fourth replica from being scheduled. This is indicated by the <code translate="no" dir="ltr">SchedulingGated</code> status of the fourth Pod. This behavior demonstrates Kueue's resource quota enforcement.</p> <h2 id="deploy_the_training_job">Deploy the training Job</h2> <p>In this section, you deploy a lower-priority fine-tuning Job for a Gemma 2 model that requires four GPUs across two Pods. A Job controller in Kubernetes creates one or more Pods and helps ensure that they successfully execute a specific task.</p> <p>This Job will use the remaining GPU quota in the ClusterQueue. The Job uses a prebuilt image and saves checkpoints to allow restarting from intermediate results.</p> <p>The fine-tuning Job uses the <a href="https://huggingface.co/datasets/b-mc2/sql-create-context"><code translate="no" dir="ltr">b-mc2/sql-create-context</code></a> dataset. The source for the fine-tuning job can be found in the <a href="https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/tree/main/ai-ml/mix-train-and-inference/src">repository</a>.</p> <ol> <li>
+<p>View the <code translate="no" dir="ltr">fine-tune-l4.yaml</code> file. This manifest defines the fine-tuning Job.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  name: headless-svc-l4
+spec:
+  clusterIP: None # clusterIP must be None to create a headless service
+  selector:
+    job-name: finetune-gemma-l4 # must match Job name
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: finetune-gemma-l4
+  labels:
+    kueue.x-k8s.io/queue-name: lq
+spec:
+  backoffLimit: 4
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  suspend: true # Set to true to allow Kueue to control the Job when it starts
+  template:
+    metadata:
+      labels:
+        app: finetune-job
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/memory-limit: "35Gi"
+    spec:
+      priorityClassName: low-priority-preempting
+      containers:
+      - name: gpu-job
+        imagePullPolicy: Always
+        image: us-docker.pkg.dev/google-samples/containers/gke/gemma-fine-tuning:v1.1.0
+        ports:
+        - containerPort: 29500
+        resources:
+          requests:
+            nvidia.com/gpu: "2"
+          limits:
+            nvidia.com/gpu: "2"
+        command:
+        - bash
+        - -c
+        - |
+          accelerate launch \
+          --config_file fsdp_config.yaml \
+          --debug \
+          --main_process_ip finetune-gemma-l4-0.headless-svc-l4 \
+          --main_process_port 29500 \
+          --machine_rank ${JOB_COMPLETION_INDEX} \
+          --num_processes 4 \
+          --num_machines 2 \
+          fine_tune.py
+        env:
+        - name: "EXPERIMENT"
+          value: "finetune-experiment"
+        - name: MODEL_NAME
+          value: "google/gemma-2-2b"
+        - name: NEW_MODEL
+          value: "gemma-ft"
+        - name: MODEL_PATH
+          value: "/model-data/model-gemma2/experiment"
+        - name: DATASET_NAME
+          value: "b-mc2/sql-create-context"
+        - name: DATASET_LIMIT
+          value: "5000"
+        - name: EPOCHS
+          value: "1"
+        - name: GRADIENT_ACCUMULATION_STEPS
+          value: "2"
+        - name: CHECKPOINT_SAVE_STEPS
+          value: "10"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - name: gcs-fuse-csi-ephemeral
+          mountPath: /model-data
+          readOnly: false
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      restartPolicy: OnFailure
+      serviceAccountName: default
+      subdomain: headless-svc-l4
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: gcs-fuse-csi-ephemeral
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: &lt;MODEL_BUCKET&gt;
+            mountOptions: "implicit-dirs"
+            gcsfuseLoggingSeverity: warning
+</pre> </div> </li> <li>
+<p>Apply the manifest to create the fine-tuning Job:</p> 
+<pre>cd ${EXAMPLE_HOME}/workloads
+
+sed -e "s/&lt;MODEL_BUCKET&gt;/$MODEL_BUCKET/g" \
+    -e "s/&lt;PROJECT_ID&gt;/$PROJECT_ID/g" \
+    -e "s/&lt;REGION&gt;/$REGION/g" \
+    fine-tune-l4.yaml |kubectl apply --filename=- --namespace=llm
+</pre>
+</li> <li>
+<p>Verify that your Deployments are running. To check the status of the Workload objects, run the following command:</p> 
+<pre>kubectl get workloads --namespace=llm
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                                              QUEUE   RESERVED IN     ADMITTED   FINISHED   AGE
+job-finetune-gemma-l4-3316f                       lq      cluster-queue   True                  29m
+pod-tgi-gemma-deployment-6cb95cc7f5-cbxg2-d9fe7   lq      cluster-queue   True                  68m
+</pre> <p>Next, view the Pods in the <code translate="no" dir="ltr">llm</code> namespace by running this command:</p> 
+<pre>kubectl get pod --namespace=llm
+</pre> <p>The output should look similar to the following:</p> 
+<pre>NAME                                    READY   STATUS    RESTARTS   AGE
+finetune-gemma-l4-0-vcxpz               2/2     Running   0          31m
+finetune-gemma-l4-1-9ppt9               2/2     Running   0          31m
+tgi-gemma-deployment-6cb95cc7f5-cbxg2   1/1     Running   0          70m
+</pre> <p>The output shows that Kueue admits both your fine-tune Job and inference server Pods to run, reserving the correct resources based on your specified quota limits.</p>
+</li> <li>
+<p>View the output logs to verify that your fine-tuning Job saves checkpoints to the Cloud Storage bucket. The fine-tuning Job takes around 10 minutes before it starts saving the first checkpoint.</p> 
+<pre>kubectl logs --namespace=llm --follow --selector=app=finetune-job
+</pre> <p>The output for the first saved checkpoint looks similar to the following:</p> 
+<pre>{"name": "finetune", "thread": 133763559483200, "threadName": "MainThread", "processName": "MainProcess", "process": 33, "message": "Fine tuning started", "timestamp": 1731002351.0016131, "level": "INFO", "runtime": 451579.89835739136}
+…
+{"name": "accelerate.utils.fsdp_utils", "thread": 136658669348672, "threadName": "MainThread", "processName": "MainProcess", "process": 32, "message": "Saving model to /model-data/model-gemma2/experiment/checkpoint-10/pytorch_model_fsdp_0", "timestamp": 1731002386.1763802, "level": "INFO", "runtime": 486753.8924217224}
+</pre>
+</li> </ol> <h2 id="preemption">Test Kueue preemption and dynamic allocation on your mixed workload</h2> <p>In this section, you simulate a scenario where the inference server's load increases, requiring it to scale up. This scenario demonstrates how Kueue prioritizes the high-priority inference server by suspending and preempting the lower-priority fine-tuning Job when resources are constrained.</p> <ol> <li>
+<p>Run the following command to scale the inference server's replicas to two:</p> 
+<pre>kubectl scale --replicas=2 deployment/tgi-gemma-deployment --namespace=llm
+</pre>
+</li> <li>
+<p>Check the status of the Workload objects:</p> 
+<pre>kubectl get workloads --namespace=llm
+</pre> <p>The output looks similar to the following:</p> 
+<pre>NAME                                              QUEUE   RESERVED IN     ADMITTED   FINISHED   AGE
+job-finetune-gemma-l4-3316f                       lq                      False                 32m
+pod-tgi-gemma-deployment-6cb95cc7f5-cbxg2-d9fe7   lq      cluster-queue   True                  70m
+pod-tgi-gemma-deployment-6cb95cc7f5-p49sh-167de   lq      cluster-queue   True                  14s
+</pre> <p>The output shows that the fine-tuning Job is no longer admitted because the increased inference server replicas are using the available GPU quota.</p>
+</li> <li>
+<p>Check the status of the fine-tune Job:</p> 
+<pre>kubectl get job --namespace=llm
+</pre> <p>The output looks similar to the following, indicating that the fine-tune Job status is now suspended:</p> 
+<pre>NAME                STATUS      COMPLETIONS   DURATION   AGE
+finetune-gemma-l4   Suspended   0/2                      33m
+</pre>
+</li> <li>
+<p>Run the following command to inspect your Pods:</p> 
+<pre>kubectl get pod --namespace=llm
+</pre> <p>The output looks similar to the following, indicating that Kueue terminated the fine-tune Job Pods to free resources for the higher priority inference server Deployment.</p> 
+<pre>NAME                                    READY   STATUS              RESTARTS   AGE
+tgi-gemma-deployment-6cb95cc7f5-cbxg2   1/1     Running             0          72m
+tgi-gemma-deployment-6cb95cc7f5-p49sh   0/1     ContainerCreating   0          91s
+</pre>
+</li> <li>
+<p>Next, test the scenario where the inference server load decreases and its Pods scale down. Run the following command:</p> 
+<pre>kubectl scale --replicas=1 deployment/tgi-gemma-deployment --namespace=llm
+</pre> <p>Run the following command to display the Workload objects:</p> 
+<pre>kubectl get workloads --namespace=llm
+</pre> <p>The output looks similar to the following, indicating that one of the inference server Deployments is terminated, and the fine-tune Job is re-admitted.</p> 
+<pre>NAME                                              QUEUE   RESERVED IN     ADMITTED   FINISHED   AGE
+job-finetune-gemma-l4-3316f                       lq      cluster-queue   True                  37m
+pod-tgi-gemma-deployment-6cb95cc7f5-cbxg2-d9fe7   lq      cluster-queue   True                  75m
+</pre>
+</li> <li>
+<p>Run this command to display the Jobs:</p> 
+<pre>kubectl get job --namespace=llm
+</pre> <p>The output looks similar to the following, indicating that the fine-tune Job is running again, resuming from the latest available checkpoint.</p> 
+<pre>NAME                STATUS    COMPLETIONS   DURATION   AGE
+finetune-gemma-l4   Running   0/2           2m11s      38m
+</pre>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete">Delete the deployed resources</h3> <p>To avoid incurring charges to your Google Cloud account for the resources that you created in this guide, run the following commands:</p> 
+<pre>gcloud storage rm --recursive gs://${MODEL_BUCKET}
+gcloud container clusters delete ${CLUSTER_NAME} --location ${REGION}
+</pre> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="../best-practices/machine-learning/inference/autoscaling">Learn the best practices for autoscaling LLM inference workloads with GPUs on GKE</a>.</li> <li>
+<a href="../best-practices/machine-learning/inference/llm-optimization#tensor-parallelism">Learn the best practices for optimizing LLM inference serving with GPUs on GKE</a>.</li> <li>
+<a href="../best-practices/batch-platform-on-gke">Learn best practices for running batch workloads on GKE</a>.</li> <li>
+<a href="../best-practices/optimize-ai-utilization">Learn best practices for optimizing AI/ML workload prioritization on GKE</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/mixed-workloads" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/mixed-workloads</a>
+  </p>
+</div>

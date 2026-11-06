@@ -1,0 +1,144 @@
+<h1>Perform host maintenance for nodes running training and inference workloads</h1>  <p>This document explains how to perform host maintenance of the underlying Compute Engine instances for nodes in Google Kubernetes Engine (GKE) clusters. You only need to actively manage this maintenance for certain types of Compute Engine instances that don't live migrate, including instances with GPUs and TPUs. The strategies described in this document work well for training and inference workloads. If you only need to manually perform host maintenance for an individual node, or your workloads can tolerate automatic host maintenance, see <a href="../concepts/handle-disruption-gpu-tpu">Understand how to do host maintenance on GKE</a>.</p> <p>These strategies perform host maintenance for groups of nodes, and, optionally, initiate GKE cluster upgrades.</p> <p>Use the parallel strategy for the nodes of workloads where you can have one single period of downtime, such as for the nodes of training workloads. Use the rolling strategy for the nodes of workloads where you can have batches of downtime while maintaining availability of the majority of resources, such as for the nodes of inference workloads.</p> <aside class="note"><strong>Note:</strong><span> For <a href="../concepts/tpus#multi-host">TPU multi-host slice node pools</a> and GPU node pools that use the <a href="https://docs.nvidia.com/multi-node-nvlink-systems/mnnvl-user-guide/overview.html">NVIDIA Multi-Node NVLink (MNNVL) system</a>, nodes have a shared lifecycle and articulate together. Plan your update strategy to perform updates for these groups of nodes at the same time.</span></aside> <h2 id="parallel-strategy">Use a parallel strategy to update the nodes of training workloads</h2> <p>This strategy performs changes simultaneously for a group of nodes that use accelerators. You can use this strategy for training workloads. Or, you can use it for other types of workloads where the least disruptive method of performing changes is to have a single window of complete downtime for all nodes in the group and the workloads that run on them.</p> <p>The strategy follows these high-level steps:</p> <ol> <li>
+<strong>Stop workloads</strong>: select the node pools and either stop the workloads running on them or move the workloads to other nodes that remain available.</li> <li>
+<strong>Trigger host maintenance</strong>: apply the maintenance label to all selected nodes at the same time and wait for the process to complete on all nodes.</li> <li>
+<strong>Upgrade the GKE version</strong>: change the GKE version of the nodes.</li> <li>
+<strong>Restart workloads</strong>: after all host maintenance and upgrades finish, restart your workloads.</li> </ol> <p>The provided instructions perform changes for a single node pool. However, you can adapt the steps to perform changes for multiple node pools at the same time. Ensure that, before you begin these steps, you have at least a few hours where this workload doesn't need to run on these nodes.</p> <p>To minimize disruption while receiving critical changes for both the underlying Compute Engine instances and the GKE nodes, use this period of downtime to perform both the host maintenance and GKE version upgrades. However, you can perform only host maintenance if you don't want to upgrade the version of your GKE nodes.</p> <h3 id="considerations_before_you_begin">Considerations before you begin</h3> <p>Review the following considerations before you begin:</p> <ul> <li>
+<strong>Avoid redeploying workloads</strong>: to avoid unnecessary delays due to <a href="https://kubernetes.io/docs/concepts/workloads/pods/disruptions/">PodDisruptionBudgets</a>, don't redeploy any workloads until you've completed all steps.</li> <li>
+<strong>Plan for disruption</strong>: ensure that your workloads can be disrupted for a period of time. These steps take multiple hours to complete, primarily due to the time required for host maintenance.</li> </ul> <h3 id="perform_updates_for_all_nodes_simultaneously">Perform updates for all nodes simultaneously</h3> <p>To perform host maintenance and, optionally, GKE version upgrades, complete the following steps:</p> <ol> <li>
+<strong>Prepare your workloads</strong>: stop your workloads, or ensure that they have taken a recent snapshot or checkpoint.</li> <li>
+<p><strong>Start and monitor host maintenance</strong>:</p> <ul> <li>
+<p><strong>Sub-blocks from reservations that use grouped maintenance scheduling</strong>: trigger maintenance across reservations, reservation blocks, or reservation sub-blocks by using the corresponding <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/manage/host-events-reservations"><code translate="no" dir="ltr">gcloud compute
+reservations</code></a> sub-command. For example, the following command starts maintenance for a sub-block:</p> 
+<pre>gcloud compute reservations sub-blocks perform-maintenance RESERVATION_NAME \
+    --block-name=BLOCK_NAME \
+    --sub-block-name=SUB_BLOCK_NAME \
+    --zone=ZONE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BLOCK_NAME</var></code>: the name of the reservation block.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUB_BLOCK_NAME</var></code>: the name of the reservation sub-block.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the reservation exists.</li> </ul> <p>Compute Engine begins draining and updating any instances in the sub-block simultaneously. This process might take a few hours.</p> <p>To monitor, view the state of the maintenance by checking the <code translate="no" dir="ltr">upcomingGroupMaintenance</code> metadata field in the reservation resources. For more information, see <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/manage/host-events-reservations#view-maintenance">View maintenance state</a>.</p>
+</li> <li>
+<p><strong>Instances that use independent maintenance scheduling</strong>: trigger maintenance for on-demand instances or for reservations that don't use sub-blocks by applying the <code translate="no" dir="ltr">cloud.google.com/perform-maintenance=true</code> label to the nodes in your node pool:</p> <aside class="warning"><strong>Warning:</strong><span> Instances that have been configured to use grouped maintenance scheduling (such as A4X, A4X Max, TPU v6e and TPU7x), are tightly coupled and must be maintained together as a single unit. You must use <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/manage/host-events-reservations#start-maintenance">sub-block level maintenance</a>.</span></aside>
+<pre>kubectl label nodes -l cloud.google.com/gke-nodepool=NODE_POOL_NAME cloud.google.com/perform-maintenance=true --overwrite
+</pre> <p>Compute Engine begins draining and updating the underlying instances simultaneously. This process might take a few hours. For more information, see <a href="../concepts/handle-disruption-gpu-tpu#process-termination">Process of graceful termination</a>.</p> <p>To monitor the status of the maintenance, check the nodes. GKE removes the maintenance label when maintenance completes, if it was applied. When maintenance finishes, you can find a log with the following message in Cloud Logging:</p> 
+<pre>Maintenance window has completed for this instance. All maintenance
+notifications on the instance have been removed.
+</pre>
+</li> </ul>
+</li> <li><p><strong>Optional: Upgrade the version of the GKE nodes</strong>: follow the instructions to <a href="#upgrade">upgrade the GKE version of the nodes</a>.</p></li> </ol> <h2 id="rolling-strategy">Use a rolling strategy to update the nodes of inference workloads</h2> <p>This strategy outlines a manual approach to performing maintenance on GKE nodes running inference workloads. It involves updating nodes in batches to maintain service availability. This method is best suited for workloads that can tolerate a certain percentage of replicas being temporarily offline.</p> <p>The strategy follows these high-level steps:</p> <ol> <li>
+<strong>Identify and batch nodes</strong>: choose the node pools to update. Group the nodes into batches sized according to your workload's failure tolerance.</li> <li>
+<strong>Iterate through batches</strong>: for each batch, apply the maintenance label and monitor the batch of nodes until the label is removed.</li> <li>
+<strong>Upgrade the GKE version</strong>: after all batches complete host maintenance, change the version of the GKE nodes.</li> </ol> <h3 id="considerations_before_you_begin_2">Considerations before you begin</h3> <p>Review the following considerations before you begin:</p> <ul> <li>
+<strong>Understand your deployment</strong>: success requires detailed knowledge of your workload distribution, replica placement, and failure domains. Ensure that you maintain sufficient serving capacity throughout the process.</li> <li>
+<strong>Plan batch sizes</strong>: update nodes in batches. The size of each batch is determined by your workload's fault tolerance. Factors to consider include the following: <ul> <li>The number of replicas per serving model.</li> <li>The distribution of replicas across nodes and failure domains.</li> <li>
+<a href="https://kubernetes.io/docs/concepts/workloads/pods/disruptions/">PodDisruptionBudgets</a> can help enforce the maximum number of Pods that are down simultaneously.</li> <li>
+<strong>Recommendation</strong>: to simplify management, consider dedicating different node pools to different sets of replicas, which lets you isolate failure domains at the node pool level.</li> </ul>
+</li> <li>
+<strong>Calculate time constraints</strong>: consider the following timing factors: <ul> <li>Each batch can take several hours to complete the host maintenance step.</li> <li>Calculate the minimum batch size to help ensure that all maintenance finishes within required deadlines: <ol> <li>
+<code translate="no" dir="ltr">MAINTENANCE_BLOCKS = floor(HOURS_TO_MAINTENANCE / 4)</code> (where <code translate="no" dir="ltr">HOURS_TO_MAINTENANCE</code> is the total time available).</li> <li><code translate="no" dir="ltr">MIN_PER_BATCH = TOTAL_NODE_COUNT / MAINTENANCE_BLOCKS</code></li> </ol>
+</li> <li>Your chosen batch size must be equal to or greater than <code translate="no" dir="ltr">MIN_PER_BATCH</code>.</li> </ul>
+</li> <li>
+<strong>Review specific workload types</strong>: consider the following for the respective configuration types: <ul> <li>
+<strong>Mixture of Experts (MOE)</strong>: ensure that your batching strategy maintains the minimum required number of replicas for each model.</li> <li>
+<strong>Disaggregated serving</strong>: ensure that you track all replicas involved in the disaggregated setup when planning batches.</li> <li>
+<strong>Multi-host node pools (TPU, MNNVL)</strong>: for these configurations, you'll likely take down an entire node pool at a time. Plan your failure domains across multiple node pools accordingly.</li> </ul>
+</li> </ul> <h3 id="perform_rolling_updates_in_batches">Perform rolling updates in batches</h3> <p>To perform rolling host maintenance updates, you can update your capacity from reservations that use grouped maintenance scheduling in batches of one or more sub-blocks, or you can update specific sets of nodes in the cluster by name with independent maintenance scheduling.</p> <p>Choose the appropriate strategy for your resources:</p> <h4 id="update_reservations_in_batches_of_sub-blocks">Update reservations in batches of sub-blocks</h4> <p>To perform rolling host maintenance for capacity reservations in batches of sub-blocks, complete the following steps:</p> <ol> <li>
+<p><strong>Identify reservations for maintenance</strong>: Identify the capacity reservation name, and the reservation blocks or reservation sub-blocks used by the GKE cluster. To do this, perform a lookup using GKE node labels and the <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/manage/host-events-reservations"><code translate="no" dir="ltr">gcloud
+compute
+reservations</code></a> command:</p> <ol> <li>
+<p>List the reservation name and the physical block and sub-block topology IDs from the nodes in your node pool:</p> 
+<pre>kubectl get nodes -l cloud.google.com/gke-nodepool=NODE_POOL_NAME \
+    -o custom-columns='NAME:.metadata.name,RESERVATION:.metadata.labels.cloud\.google\.com/reservation-name,BLOCK_ID:.metadata.labels.cloud\.google\.com/gce-topology-block,SUBBLOCK_ID:.metadata.labels.cloud\.google\.com/gce-topology-subblock'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code> with the name of the node pool.</p> <p>Note the output values: the reservation name (for example, <code translate="no" dir="ltr">nvidia-gb300-m7kp2xq9vd4j1</code>), the block ID (for example, <code translate="no" dir="ltr">3f2a8c9b1d4e0756f8a2b3c1d9e4f0a5</code>), and the sub-block ID (for example, <code translate="no" dir="ltr">e7b91f4a3c2d58069e1a4b7f3d2c8056</code>).</p>
+</li> <li>
+<p>To identify the reservation block resource name, query the Compute Engine reservation blocks list using the reservation name and filter by the block ID:</p> 
+<pre>gcloud compute reservations blocks list RESERVATION_NAME \
+    --zone=ZONE \
+    --project=PROJECT_ID \
+    --filter="physicalTopology.block=BLOCK_ID"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the reservation exists.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the project ID where the reservation exists.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BLOCK_ID</var></code>: the block ID retrieved from the node labels.</li> </ul> <p>Record the name of the block from the output.</p>
+</li> <li>
+<p>To identify the reservation sub-block resource name, query the reservation sub-blocks list using the reservation name and block name, and filter by the sub-block ID:</p> 
+<pre>gcloud compute reservations sub-blocks list RESERVATION_NAME \
+    --block-name=BLOCK_NAME \
+    --zone=ZONE \
+    --project=PROJECT_ID \
+    --filter="physicalTopology.subBlock=SUBBLOCK_ID"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BLOCK_NAME</var></code>: the reservation block resource name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the reservation exists.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the project ID where the reservation exists.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBBLOCK_ID</var></code>: the sub-block ID retrieved from the node labels.</li> </ul> <p>The output displays details about the matching reservation sub-block, including its resource name.</p>
+</li> </ol>
+</li> <li><p><strong>Divide reservations into batches</strong>: Divide the identified capacity reservation sub-blocks into equal batches. Determine the batch size using the formula described in the <strong>Calculate time constraints</strong> list item in the earlier <a href="#considerations_before_you_begin_2">Considerations before you begin</a> section. Each batch corresponds to one or more reservation sub-blocks, and each batch must be at least the size of a sub-block.</p></li> <li>
+<p><strong>Perform host maintenance</strong>: For each batch, complete the following steps:</p> <ol> <li>
+<p>Select a batch of reservation sub-blocks and trigger host maintenance. You can trigger maintenance across your reservations, reservation blocks, or reservation sub-blocks. For machine types such as A4X, A4X Max, TPU v6e and TPU7x, you must trigger maintenance in this manner. Maintenance is performed in groups of sub-blocks. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/reservations/sub-blocks/perform-maintenance"><code translate="no" dir="ltr">gcloud compute reservations sub-blocks perform-maintenance</code></a> command:</p> 
+<pre>gcloud compute reservations sub-blocks perform-maintenance RESERVATION_NAME \
+    --block-name=BLOCK_NAME \
+    --sub-block-name=SUB_BLOCK_NAME \
+    --zone=ZONE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BLOCK_NAME</var></code>: the name of the reservation block.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUB_BLOCK_NAME</var></code>: the name of the reservation sub-block.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the reservation exists.</li> </ul> <p>Compute Engine begins draining and updating any instances in the sub-block simultaneously. This process might take a few hours.</p>
+</li> <li><p>Monitor the status of the maintenance by viewing the state of the maintenance by checking the <code translate="no" dir="ltr">upcomingGroupMaintenance</code> metadata field in the reservation resources. For more information, see <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/manage/host-events-reservations#view-maintenance">View reservation maintenance state</a>.</p></li> <li><p>Repeat the previous steps for each remaining batch until you've completed host maintenance for all batches.</p></li> </ol>
+</li> <li><p><strong>Optional: Upgrade the version of the GKE nodes</strong>: perform this step only after host maintenance completes for all reservation sub-blocks, to avoid scenarios where the GKE nodes are deployed on hosts that haven't finished maintenance yet. Follow the instructions to <a href="#upgrade">upgrade the GKE version of the nodes</a>.</p></li> </ol> <h4 id="update_nodes_in_batches">Update nodes in batches</h4> <p>To perform rolling host maintenance for on-demand instances or reservations that don't support sub-blocks in batches, complete the following steps:</p> <ol> <li>
+<p><strong>Identify nodes for maintenance</strong>: Identify all nodes where you want to perform maintenance, and save this list. To identify nodes, use any of the following methods or manually select them:</p> <ul> <li>
+<p>Get all nodes in the cluster that use accelerators (TPUs or GPUs):</p> 
+<pre>kubectl get nodes -o json | jq -r '.items[] | select(.spec.taints[]? | select(.key=="nvidia.com/gpu" or .key=="google.com/tpu")) | .metadata.name'
+</pre>
+</li> <li>
+<p>Get all nodes in a specific node pool:</p> 
+<pre>kubectl get nodes -l cloud.google.com/gke-nodepool=NODE_POOL_NAME --no-headers -o custom-columns=":metadata.name"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code> with the name of the node pool.</p>
+</li> <li>
+<p>Get all nodes with a specific label:</p> 
+<pre>kubectl get nodes -l LABEL -o jsonpath='{.items[*].metadata.name}'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LABEL</var></code> with the node label.</p>
+</li> </ul>
+</li> <li><p><strong>Divide nodes into batches</strong>: Divide the identified nodes into equal batches. Determine the batch size using the formula described in the <strong>Calculate time constraints</strong> list item in the earlier <a href="#considerations_before_you_begin_2">Considerations before you begin</a> section.</p></li> <li>
+<p><strong>Perform host maintenance</strong>: For each batch, complete the following steps:</p> <ol> <li>
+<p>Select a batch of nodes and trigger maintenance at the instance layer using the <code translate="no" dir="ltr">instances</code> API by applying the maintenance label:</p> <aside class="warning"><strong>Warning:</strong><span> Instances that have been configured to use grouped maintenance scheduling (such as A4X, A4X Max, TPU v6e and TPU7x), are tightly coupled and must be maintained together as a single unit. You must use <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/manage/host-events-reservations#start-maintenance">sub-block level maintenance</a>.</span></aside>
+<pre>kubectl label nodes LIST_OF_NODES_IN_BATCH cloud.google.com/perform-maintenance=true --overwrite
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LIST_OF_NODES_IN_BATCH</var></code> with a space-separated list of nodes from the batch. For example, <code translate="no" dir="ltr">node-1 node-2 node-3</code>.</p> <p>Compute Engine begins draining and updating the underlying instances simultaneously. This process might take a few hours. For more information, see <a href="../concepts/handle-disruption-gpu-tpu#process-termination">Process of graceful termination</a>.</p>
+</li> <li>
+<p>Monitor the status of host maintenance. GKE removes the maintenance label when maintenance completes, if it was applied. When maintenance finishes, you can find a log with the following message in Logging:</p> 
+<pre>Maintenance window has completed for this instance. All maintenance
+notifications on the instance have been removed.
+</pre>
+</li> <li><p>Repeat the previous steps for each remaining batch until you've completed host maintenance for all batches.</p></li> </ol>
+</li> <li><p><strong>Optional: Upgrade the version of the GKE nodes</strong>: perform this step only after host maintenance completes for all nodes, to avoid scenarios where the GKE nodes are deployed on hosts that haven't finished maintenance yet. Follow the instructions to <a href="#upgrade">upgrade the GKE version of the nodes</a>.</p></li> </ol> <h2 id="upgrade">Upgrade the GKE version of the nodes</h2> <p>Consider the number of nodes that you want to upgrade at the same time. With the parallel strategy, you performed host maintenance for your entire node pool or multiple node pools at the same time. With the rolling strategy, you performed host maintenance in batches. Determine which upgrade method that you'll use based on the size of the groups of nodes:</p> <ul> <li>
+<strong>Parallel strategy</strong>: if your node pools each have 100 or fewer nodes per zone, use surge upgrades. If your node pools each have greater than 100 nodes per zone, delete and re-create the node pools.</li> <li>
+<strong>Rolling strategy</strong>: if your batches have 100 nodes, per zone, per node pool, or less, use surge upgrades. If your batches have greater than 100 nodes, per zone, per node pool, delete and re-create the nodes.</li> </ul> <h3 id="use_surge_upgrades">Use surge upgrades</h3> <ol> <li>
+<p><a href="node-pool-upgrade-strategies#surge">Configure surge upgrades</a>, using the <a href="../concepts/node-pool-upgrade-strategies#max-unavailable"><code translate="no" dir="ltr">maxUnavailable</code></a> setting to determine how many nodes can be unavailable at the same time, per zone, in a node pool. For example, if you have 18 nodes in one zone in a node pool, set the value of the <code translate="no" dir="ltr">maxUnavailable</code> field to <code translate="no" dir="ltr">18</code>.</p> <p>This setting works best when using capacity from a reservation where you don't have excess capacity. For more information about why to use this setting, see <a href="node-upgrades-quota#upgrade-resource-constrained">Upgrade in a resource-constrained environment</a>.</p>
+</li> <li>
+<p>Upgrade the node pool by running the following command. If you want to upgrade multiple node pools, run this command for each node pool:</p> 
+<pre>gcloud container clusters upgrade CLUSTER_NAME \
+    --node-pool NODE_POOL_NAME \
+    --cluster-version VERSION \
+    --location CONTROL_PLANE_LOCATION \
+    --quiet
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VERSION</var></code>: a recommended auto-upgrade target for the node pool. For more information, see <a href="upgrade-assist#get-info-nodes">Get upgrades information for Standard cluster node pools</a>. If your cluster doesn't have a recommended auto-upgrade target, check the latest <em>Version updates</em> entries in the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/release-notes">GKE release notes</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the location of the control plane of your cluster.</li> </ul>
+</li> </ol> <h3 id="delete_and_re-create_the_nodes">Delete and re-create the nodes</h3> <p>Delete the node pool and re-create it using the later version:</p> <ol> <li>
+<p>Delete the node pool:</p> 
+<pre>gcloud container node-pools delete NODE_POOL_NAME \
+    --cluster CLUSTER_NAME \
+    --location CONTROL_PLANE_LOCATION
+</pre>
+</li> <li><p>Re-create the node pool, passing the new version by using the <code translate="no" dir="ltr">--cluster-version</code> flag. Pass the recommended auto-upgrade target for the node pool. For more information, see <a href="upgrade-assist#get-info-nodes">Get upgrades information for Standard cluster node pools</a>. If your cluster doesn't have a recommended auto-upgrade target, check the latest <em>Version updates</em> entries in the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/release-notes">GKE release notes</a>.</p></li> </ol><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/perform-host-maintenance-accelerators" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/perform-host-maintenance-accelerators</a>
+  </p>
+</div>

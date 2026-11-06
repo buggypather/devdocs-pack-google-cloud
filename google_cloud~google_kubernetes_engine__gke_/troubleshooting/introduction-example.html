@@ -1,0 +1,68 @@
+<h1>Put it all together: Example troubleshooting scenario</h1>  <p>Understanding the individual troubleshooting tools for Google Kubernetes Engine (GKE) is helpful, but seeing them used together to solve a real-world problem can help solidify your knowledge.</p> <p>Follow a guided example that combines using the Google Cloud console, the <code translate="no" dir="ltr">kubectl</code> command-line tool, Cloud Logging, and Cloud Monitoring together to identify the root cause of an <code translate="no" dir="ltr">OutOfMemory</code> (<code translate="no" dir="ltr">OOMKilled</code>) error.</p> <p>This example is beneficial for anyone wanting to see a practical application of the troubleshooting techniques described in this series, particularly Platform admins and operators and Application developers. For more information about the common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="scenario">The scenario</h2> <p>You are the on-call engineer for a web app named <code translate="no" dir="ltr">product-catalog</code> that runs in GKE.</p> <p>Your investigation begins when you receive an automated alert from Cloud Monitoring:</p> 
+<pre>Alert: High memory utilization for container 'product-catalog' in 'prod' cluster.
+</pre> <p>This alert tells you that a problem exists and indicates that the problem has something to do with the <code translate="no" dir="ltr">product-catalog</code> workload.</p> <h2 id="confirm-problem">Confirm the problem in the Google Cloud console</h2> <p>You start with a high-level view of your workloads to confirm the issue.</p> <ol> <li>In the Google Cloud console, you navigate to the <strong>Workloads</strong> page and filter for your <code translate="no" dir="ltr">product-catalog</code> workload.</li> <li>You look at the <strong>Pods</strong> status column. Instead of the healthy <code translate="no" dir="ltr">3/3</code>, you see the value steadily showing an unhealthy status: <code translate="no" dir="ltr">2/3</code>. This value tells you that one of your app's Pods doesn't have a status of <code translate="no" dir="ltr">Ready</code>.</li> <li>You want to investigate further, so you click the name of the <code translate="no" dir="ltr">product-catalog</code> workload to go to its details page.</li> <li>On the details page, you view the <strong>Managed Pods</strong> section. You immediately identify a problem: the <code translate="no" dir="ltr">Restarts</code> column for your Pod shows <code translate="no" dir="ltr">14</code>, an unusually high number.</li> </ol> <p>This high restart count confirms the issue is causing app instability, and suggests that a container is failing its health checks or crashing.</p> <h2 id="find-reason">Find the reason with <code translate="no" dir="ltr">kubectl</code> commands</h2> <p>Now that you know that your app is repeatedly restarting, you need to find out why. The <code translate="no" dir="ltr">kubectl describe</code> command is a good tool for this.</p> <ol> <li>
+<p>You get the exact name of the unstable Pod:</p> 
+<pre>kubectl get pods -n prod
+</pre> <p>The output is the following:</p> 
+<pre>NAME                             READY  STATUS            RESTARTS  AGE
+product-catalog-d84857dcf-g7v2x  0/1    CrashLoopBackOff  14        25m
+product-catalog-d84857dcf-lq8m4  1/1    Running           0         2h30m
+product-catalog-d84857dcf-wz9p1  1/1    Running           0         2h30m
+</pre>
+</li> <li>
+<p>You describe the unstable Pod to get the detailed event history:</p> 
+<pre>kubectl describe pod product-catalog-d84857dcf-g7v2x -n prod
+</pre>
+</li> <li>
+<p>You review the output and find clues under the <code translate="no" dir="ltr">Last State</code> and <code translate="no" dir="ltr">Events</code> sections:</p> 
+<pre>Containers:
+  product-catalog-api:
+    ...
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       OOMKilled
+      Exit Code:    137
+      Started:      Mon, 23 Jun 2025 10:50:15 -0700
+      Finished:     Mon, 23 Jun 2025 10:54:58 -0700
+    Ready:          False
+    Restart Count:  14
+...
+Events:
+  Type     Reason     Age                           From                Message
+  ----     ------     ----                          ----                -------
+  Normal   Scheduled  25m                           default-scheduler   Successfully assigned prod/product-catalog-d84857dcf-g7v2x to gke-cs-cluster-default-pool-8b8a777f-224a
+  Normal   Pulled     8m (x14 over 25m)             kubelet             Container image "us-central1-docker.pkg.dev/my-project/product-catalog/api:v1.2" already present on machine
+  Normal   Created    8m (x14 over 25m)             kubelet             Created container product-catalog-api
+  Normal   Started    8m (x14 over 25m)             kubelet             Started container product-catalog-api
+  Warning  BackOff    3m (x68 over 22m)             kubelet             Back-off restarting failed container
+</pre> <p>The output gives you two critical clues:</p> <ul> <li>First, the <code translate="no" dir="ltr">Last State</code> section shows that the container was terminated with <code translate="no" dir="ltr">Reason: OOMKilled</code>, which tells you it ran out of memory. This reason is confirmed by the <code translate="no" dir="ltr">Exit Code: 137</code>, which is the standard Linux exit code for a process that has been killed due to excessive memory consumption.</li> <li>Second, the <code translate="no" dir="ltr">Events</code> section shows a <code translate="no" dir="ltr">Warning: BackOff</code> event with the message <code translate="no" dir="ltr">Back-off restarting failed container</code>. This message confirms that the container is in a failure loop, which is the direct cause of the <code translate="no" dir="ltr">CrashLoopBackOff</code> status that you saw earlier.</li> </ul>
+</li> </ol> <h2 id="visualize-behavior">Visualize the behavior with metrics</h2> <p>The <code translate="no" dir="ltr">kubectl describe</code> command told you what happened, but Cloud Monitoring can show you the behavior of your environment over time.</p> <ol> <li>In the Google Cloud console, you go to <strong>Metrics Explorer</strong>.</li> <li>You select the <code translate="no" dir="ltr">container/memory/used_bytes</code> metric.</li> <li>You filter the output down to your specific cluster, namespace, and Pod name.</li> </ol> <p>The chart shows a distinct pattern: the memory usage climbs steadily, then abruptly drops to zero when the container is OOM killed and restarts. This visual evidence confirms either a memory leak or insufficient memory limit.</p> <h2 id="find-root-cause">Find the root cause in logs</h2> <p>You now know the container is running out of memory, but you still don't know exactly why. To discover the root cause, use Logs Explorer.</p> <ol> <li>In the Google Cloud console, you navigate to <strong>Logs Explorer</strong>.</li> <li>
+<p>You write a query to filter for your specific container's logs from just before the time of the last crash (which you saw in the output of the <code translate="no" dir="ltr">kubectl describe</code> command):</p> 
+<pre>resource.type="k8s_container"
+resource.labels.cluster_name="example-cluster"
+resource.labels.namespace_name="prod"
+resource.labels.pod_name="product-catalog-d84857dcf-g7v2x"
+timestamp &gt;= "2025-06-23T17:50:00Z"
+timestamp &lt; "2025-06-23T17:55:00Z"
+</pre>
+</li> <li>
+<p>In the logs, you find a repeating pattern of messages right before each crash:</p> 
+<pre>{
+  "message": "Processing large image file product-image-large.jpg",
+  "severity": "INFO"
+},
+{
+  "message": "WARN: Memory cache size now at 248MB, nearing limit.",
+  "severity": "WARNING"
+}
+</pre>
+</li> </ol> <p>These log entries tell you that the app is trying to process large image files by loading them entirely into memory, which eventually exhausts the container's memory limit.</p> <h2 id="findings">The findings</h2> <p>By using the tools together, you have a complete picture of the problem:</p> <ul> <li>The monitoring alert notified you that there was a problem.</li> <li>The Google Cloud console showed you that the issue was affecting users (restarts).</li> <li>
+<code translate="no" dir="ltr">kubectl</code> commands pinpointed the exact reason for the restarts (<code translate="no" dir="ltr">OOMKilled</code>).</li> <li>Metrics Explorer visualized the memory leak pattern over time.</li> <li>Logs Explorer revealed the specific behavior causing the memory issue.</li> </ul> <p>You're now ready to implement a solution. You can either optimize the app code to handle large files more efficiently or, as a short-term fix, increase the container's memory limit (specifically, the <code translate="no" dir="ltr">spec.containers.resources.limits.memory</code> value) in the workload's YAML manifest.</p> <h2 id="whats-next">What's next</h2> <ul> <li><p>For advice about resolving specific problems, review <a href="../troubleshooting">GKE's troubleshooting guides</a>.</p></li> <li>
+<p>If you can't find a solution to your problem in the documentation, see <a href="../getting-support" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Get support</a> for further help, including advice on the following topics:</p> <ul> <li>Opening a support case by contacting <a href="https://cloud.google.com/support-hub" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Cloud Customer Care</a>.</li> <li>Getting support from the community by <a href="http://stackoverflow.com/questions/tagged/google-kubernetes-engine" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">asking questions on StackOverflow</a> and using the <code translate="no" dir="ltr">google-kubernetes-engine</code> tag to search for similar issues. You can also join the <a href="https://googlecloud-community.slack.com/messages/C0B9GKTKJ/" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">#kubernetes-engine</code> Slack channel</a> for more community support.</li> <li>Opening issues or feature requests by using the <a href="https://docs.cloud.google.com/support/docs/issue-trackers" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">public issue tracker</a>.</li> </ul>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/introduction-example" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/introduction-example</a>
+  </p>
+</div>

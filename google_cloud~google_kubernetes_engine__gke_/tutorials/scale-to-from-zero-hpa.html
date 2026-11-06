@@ -1,0 +1,201 @@
+<h1>Scale GKE workloads to and from zero using HPA</h1>  <p>This tutorial shows you how to optimize resource utilization in Google Kubernetes Engine (GKE) by configuring workloads to automatically scale to zero replicas when idle, and scale back up as demand increases. This approach integrates the <a href="../concepts/horizontalpodautoscaler">horizontal Pod autoscaler (HPA)</a> with GKE's managed autoscaling infrastructure to manage scaling based on external metrics.</p> <p>Configure your deployment to scale to zero by setting the value of the <code translate="no" dir="ltr">minReplicas</code> field to <code translate="no" dir="ltr">0</code> and defining a metric with the <code translate="no" dir="ltr">External</code> or <code translate="no" dir="ltr">Object</code> type within your HPA manifest. GKE monitors these metrics through the <a href="../how-to/autoscale-using-metrics">AutoscalingMetric</a> custom resource, which helps ensure efficient resource management for your applications.</p> <p>With this configuration, you don't need to use third-party metrics adapters, such as KEDA, to scale GKE workloads. This solution manages metric ingestion and scaling recommendations directly in the GKE control plane, reducing cluster management overhead.</p> <p>In this tutorial, you deploy an example asynchronous worker application that processes messages from a <a href="https://docs.cloud.google.com/pubsub/docs/overview">Pub/Sub</a> queue. You configure a horizontal Pod autoscaler to monitor the queue depth (<code translate="no" dir="ltr">pubsub.googleapis.com:num_undelivered_messages</code>) using an <code translate="no" dir="ltr">AutoscalingMetric</code> custom resource:</p> <ul> <li>
+<strong>When messages arrive in the subscription:</strong> GKE scales up worker Pods to process the queue.</li> <li>
+<strong>When the queue is empty:</strong> GKE automatically scales the worker Deployment down to zero replicas.</li> </ul> <p>This tutorial is for Application developers, Platform admins and operators, and DevOps who want to optimize resource usage in GKE by scaling workloads to zero when they are idle.</p> <h2 id="considerations">Considerations</h2> <p>Before configuring workloads to scale to zero, review the following considerations:</p> <ul> <li>Scaling workloads to and from zero using HPA requires GKE cluster control plane and nodes to run version 1.37 or later in both new and upgraded existing clusters. If you use an existing cluster, verify its version or <a href="../how-to/upgrading-a-cluster">upgrade your cluster or its nodes</a> to version 1.37 or later.</li> <li>Your HPA manifest must use the <code translate="no" dir="ltr">apiVersion: autoscaling/v2</code> configuration to support the <code translate="no" dir="ltr">minReplicas: 0</code> setting and external metrics.</li> <li>Before <a href="../how-to/upgrading-a-cluster#downgrading_nodes">downgrading node pools</a> to a version earlier than 1.37, update any HPA manifests configured to scale to and from zero by setting the <code translate="no" dir="ltr">minReplicas</code> field to <code translate="no" dir="ltr">1</code> or greater. Versions earlier than 1.37 don't support the <code translate="no" dir="ltr">minReplicas: 0</code> setting, which can cause workloads to remain stuck at zero replicas.</li> <li>You must configure at least one <code translate="no" dir="ltr">External</code> or <code translate="no" dir="ltr">Object</code> metric (such as a queue depth) in your horizontal Pod autoscaler. GKE cannot collect CPU or memory (<code translate="no" dir="ltr">Resource</code>) metrics when a workload has zero Pods, so resource metrics alone cannot trigger scaling up from zero.</li> <li>The AutoscalingMetric, HorizontalPodAutoscaler, and target Deployment must reside in the same Kubernetes namespace.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE and Pub/Sub APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com pubsub.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE and Pub/Sub APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com pubsub.googleapis.com</pre>
+</li> </div> </cloud-free-trial> </ol> <h3 id="required_roles">Required roles</h3> <p> To get the permissions that you need to complete this tutorial, ask your administrator to grant you the following IAM roles on your project: </p> <ul> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.clusterAdmin">GKE Cluster Admin </a> (<code translate="no" dir="ltr">roles/container.clusterAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/pubsub#pubsub.admin">Pub/Sub Admin </a> (<code translate="no" dir="ltr">roles/pubsub.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/resourcemanager#resourcemanager.projectIamAdmin">Project IAM Admin </a> (<code translate="no" dir="ltr">roles/resourcemanager.projectIamAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountUser">Service Account User </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountUser</code>)</li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <h3 id="setup-env">Set up your environment</h3> <p>For simplicity, the commands in this tutorial create all resources (the GKE cluster, and the Pub/Sub topic and subscription) within a single Google Cloud project (<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>).</p> <p>To set up your environment, follow these steps:</p> <ol> <li>
+<p>Set environment variables:</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format 'get(projectNumber)')
+export LOCATION=LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones">region or zone</a> where you want to create your GKE cluster, such as <code translate="no" dir="ltr">us-central1</code>. For Autopilot clusters, specify a region.</li> </ul> <aside class="note"><strong>Note:</strong><span> These environment variables are used throughout this tutorial. If you open a new shell session or disconnect, run these commands again to set the variables.</span></aside>
+</li> <li>
+<p>Create a GKE cluster running version 1.37 or later with <a href="../concepts/workload-identity">Workload Identity Federation for GKE</a> enabled. We recommend that you use an Autopilot cluster for a fully managed Kubernetes experience and to maximize cost savings when workloads scale to zero. To choose the mode of operation that's the best fit for your workloads, see <a href="../concepts/choose-cluster-mode">Choose a GKE mode of operation</a>:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>Create an Autopilot cluster:</p> 
+<pre data-language="">gcloud container clusters create-auto scale-to-zero \
+    --project=${PROJECT_ID} \
+    --location=${LOCATION}
+</pre> <p>Workload Identity Federation for GKE is enabled by default on Autopilot clusters.</p></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>Create a Standard cluster with Workload Identity Federation for GKE enabled:</p> 
+<pre data-language="">gcloud container clusters create scale-to-zero \
+    --project=${PROJECT_ID} \
+    --location=${LOCATION} \
+    --workload-pool=${PROJECT_ID}.svc.id.goog
+</pre></section> </div>
+</li> <li>
+<p>Configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster:</p> 
+<pre>gcloud container clusters get-credentials scale-to-zero \
+    --project=${PROJECT_ID} \
+    --location=${LOCATION}
+</pre>
+</li> </ol> <h3 id="create-pubsub-resources">Create Pub/Sub resources</h3> <p>This tutorial uses Pub/Sub queue depth as an example external metric source.</p> <p>To create a Pub/Sub topic and subscription, follow these steps:</p> <ol> <li>
+<p>Create a Pub/Sub topic:</p> 
+<pre>gcloud pubsub topics create my-worker-topic \
+    --project=${PROJECT_ID}
+</pre>
+</li> <li>
+<p>Create a subscription attached to the topic:</p> 
+<pre>gcloud pubsub subscriptions create my-worker-subscription \
+    --topic=my-worker-topic \
+    --project=${PROJECT_ID}
+</pre>
+</li> </ol> <h3 id="setup-wi">Set up Workload Identity Federation for GKE</h3> <p>Configure Workload Identity Federation for GKE to allow your worker application to authenticate with Google Cloud APIs and consume messages from Pub/Sub.</p> <p>GKE automatically handles authentication with Cloud Monitoring for AutoscalingMetric resources in the same project. To learn more about defining metrics for autoscaling, see <a href="../how-to/autoscale-using-metrics#define-custom-metrics-promql">Fetch custom or external metrics from Cloud Monitoring</a>.</p> <p>To configure Workload Identity Federation for GKE for your worker workload, follow these steps:</p> <ol> <li>
+<p>Create a Kubernetes service account for your worker application in the <code translate="no" dir="ltr">default</code> namespace:</p> 
+<pre>kubectl create serviceaccount async-worker-sa \
+    --namespace default
+</pre>
+</li> <li>
+<p>Grant the <code translate="no" dir="ltr">roles/pubsub.subscriber</code> role to the Kubernetes service account so the application can receive messages from your Pub/Sub subscription:</p> 
+<pre>gcloud projects add-iam-policy-binding projects/${PROJECT_ID} \
+    --role=roles/pubsub.subscriber \
+    --member=principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/default/sa/async-worker-sa
+</pre>
+</li> </ol> <p>For more information, see <a href="../how-to/workload-identity#authenticating_to">Configure applications to use Workload Identity Federation for GKE</a>.</p> <h3 id="create_the_example_deployment">Create the example Deployment</h3> <p>Before you can create an HPA object, you must create the workload it will monitor.</p> <p>To create the example Deployment, follow these steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">async-worker.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: async-worker
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: async-worker
+  template:
+    metadata:
+      labels:
+        app: async-worker
+    spec:
+      containers:
+      - name: async-worker
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            memory: 100Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+</pre>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">async-worker.yaml</code> Deployment:</p> 
+<pre>kubectl apply -f async-worker.yaml
+</pre>
+</li> </ol> <h2 id="configure_a_workload_to_scale_to_and_from_zero">Configure a workload to scale to and from zero</h2> <p>In this section, you configure the <code translate="no" dir="ltr">async-worker</code> Deployment to scale down to zero when the Pub/Sub queue is empty, and scale back up as new messages arrive.</p> <h3 id="create_the_autoscalingmetric_resource">Create the AutoscalingMetric resource</h3> <p>To define the external signal monitored by GKE, create the AutoscalingMetric custom resource. In the following example manifest, the metric queries Cloud Monitoring for the number of undelivered Pub/Sub messages on the <code translate="no" dir="ltr">my-worker-subscription</code> subscription.</p> <p>To create the AutoscalingMetric resource, follow these steps:</p> <ol> <li>
+<p>Save the following manifest as the <code translate="no" dir="ltr">pubsub-metric.yaml</code> file:</p> 
+<pre>apiVersion: autoscaling.gke.io/v1beta1
+kind: AutoscalingMetric
+metadata:
+  name: pubsub-queue-depth
+  namespace: default
+spec:
+  metrics:
+  - promql:
+      name: pubsub-undelivered
+      query: &gt;
+          {
+            "pubsub.googleapis.com/subscription/num_undelivered_messages",
+            subscription_id="my-worker-subscription"
+          }
+</pre>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">pubsub-metric.yaml</code> manifest:</p> 
+<pre>kubectl apply -f pubsub-metric.yaml
+</pre>
+</li> <li>
+<p>Verify the metric status and retrieve the metric identifier:</p> 
+<pre>kubectl describe autoscalingmetric pubsub-queue-depth
+</pre> <p>In the <code translate="no" dir="ltr">Status</code> section of the output, verify that no errors are listed and note the <code translate="no" dir="ltr">Hpa Name</code> value that's in the <code translate="no" dir="ltr">autoscaling.gke.io|<var translate="no">CUSTOM_RESOURCE_NAME</var>|<var translate="no">METRIC_NAME</var></code> format. You'll reference this external metric identifier when you create the HorizontalPodAutoscaler object in the next section. If the <code translate="no" dir="ltr">Status</code> section reports configuration errors or metrics are not retrieved as expected, see <a href="../how-to/autoscale-using-metrics#troubleshoot">Troubleshoot metrics that are fetched for autoscaling</a>.</p>
+</li> </ol> <h3 id="configure_the_horizontal_pod_autoscaler">Configure the horizontal Pod autoscaler</h3> <p>To configure autoscaling behavior, create a HorizontalPodAutoscaler resource targeting the Deployment.</p> <p>To configure the horizontal Pod autoscaler, follow these steps:</p> <ol> <li>
+<p>Save the following manifest as the <code translate="no" dir="ltr">worker-hpa.yaml</code> file:</p> 
+<pre>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: async-worker-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: async-worker
+  minReplicas: 0
+  maxReplicas: 20
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: autoscaling.gke.io|pubsub-queue-depth|pubsub-undelivered
+      target:
+        type: AverageValue
+        averageValue: "10"
+</pre> <p>This manifest configures the following key fields:</p> <ul> <li>
+<code translate="no" dir="ltr">minReplicas: 0</code>: enables scale-to-zero by allowing the controller to scale the Deployment down to <code translate="no" dir="ltr">0</code> replicas when demand drops to zero.</li> <li>
+<code translate="no" dir="ltr">type: External</code>: configures an external metric source so the HPA can trigger scale-up when the workload has zero Pods.</li> <li>
+<code translate="no" dir="ltr">name: autoscaling.gke.io|pubsub-queue-depth|pubsub-undelivered</code>: maps the HPA directly to the AutoscalingMetric resource created in the previous step by using the <code translate="no" dir="ltr">autoscaling.gke.io|<var translate="no">CUSTOM_RESOURCE_NAME</var>|<var translate="no">METRIC_NAME</var></code> identifier format.</li> </ul>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">worker-hpa.yaml</code> manifest:</p> 
+<pre>kubectl apply -f worker-hpa.yaml
+</pre>
+</li> </ol> <h2 id="verify_zero-scale_behavior_and_conditions">Verify zero-scale behavior and conditions</h2> <p>When all messages in the Pub/Sub subscription are processed, the horizontal Pod autoscaler evaluates the zero demand and scales the Deployment down to <code translate="no" dir="ltr">0</code> replicas.</p> <p>To verify that the horizontal Pod autoscaler actuated the zero state, inspect the status conditions of the <code translate="no" dir="ltr">async-worker-hpa</code> resource by running the following command:</p> 
+<pre>kubectl describe hpa async-worker-hpa
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:             async-worker-hpa
+Namespace:        default
+Reference:        Deployment/async-worker
+Metrics:          ( current / target )
+  "autoscaling.gke.io|pubsub-queue-depth|pubsub-undelivered" (external metric):  0 / 10
+Min replicas:     0
+Max replicas:     20
+Deployment pods:  0 current / 0 desired
+Conditions:
+  Type            Status  Reason               Message
+  ----            ------  ------               -------
+  AbleToScale     True    SucceededGetScale    the HPA controller was able to get the target's current scale
+  ScalingActive   True    ValidMetricFound     the HPA was able to successfully calculate a replica count from external metric
+  ScaledToZero    True    ScaledToZero         the HPA has scaled the target resource to 0 replicas due to zero metric demand
+</pre> <h3 id="understand_the_scaledtozero_condition">Understand the <code translate="no" dir="ltr">ScaledToZero</code> condition</h3> <p>The <code translate="no" dir="ltr">ScaledToZero</code> condition indicates whether the horizontal Pod autoscaler has scaled the workload to zero replicas:</p> <ul> <li>
+<strong><code translate="no" dir="ltr">ScaledToZero: True</code> (<code translate="no" dir="ltr">Reason: ScaledToZero</code>)</strong>: indicates that the HPA controller successfully scaled your workload to <code translate="no" dir="ltr">0</code> replicas because external metric demand dropped to zero. The HPA remains active (<code translate="no" dir="ltr">ScalingActive: True</code>) and continuously polls GKE to detect when workload demand increases.</li> <li>
+<strong><code translate="no" dir="ltr">ScaledToZero: False</code></strong>: indicates that the workload has scaled up to one or more replicas.</li> </ul> <p>If you manually scale a Deployment to zero replicas, for example, with the <code translate="no" dir="ltr">kubectl scale --replicas=0</code> command, the HPA pauses autoscaling (<code translate="no" dir="ltr">ScalingActive:
+False</code>) to prevent conflicting changes. To resume autoscaling, scale the deployment back to one or more replicas (<code translate="no" dir="ltr">kubectl scale deployment
+async-worker --replicas=1</code>).</p> <p>For troubleshooting scenarios where workloads fail to scale to zero or fail to scale up from zero, see <a href="../troubleshooting/horizontal-pod-autoscaling#troubleshoot-scale-to-from-zero-hpa">Troubleshoot scaling GKE workloads to and from zero using HPA</a>. If the horizontal Pod autoscaler reports missing or invalid external metrics, see <a href="../how-to/autoscale-using-metrics#troubleshoot">Troubleshoot metrics that are fetched for autoscaling</a>.</p> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, follow these steps:</p> <ol> <li>
+<p>Delete the GKE cluster:</p> 
+<pre>gcloud container clusters delete scale-to-zero \
+    --project=${PROJECT_ID} \
+    --location=${LOCATION}
+</pre>
+</li> <li>
+<p>Delete the Pub/Sub subscription and topic:</p> 
+<pre>gcloud pubsub subscriptions delete my-worker-subscription \
+    --project=${PROJECT_ID}
+gcloud pubsub topics delete my-worker-topic \
+    --project=${PROJECT_ID}
+</pre>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to mitigate cold-start latency by using <a href="../concepts/capacity-buffer">GKE Capacity buffers</a>.</li> <li>Learn how to <a href="../troubleshooting/horizontal-pod-autoscaling#troubleshoot-scale-to-from-zero-hpa">diagnose scaling issues when scaling to and from zero using HPA</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/scale-to-from-zero-hpa" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/scale-to-from-zero-hpa</a>
+  </p>
+</div>

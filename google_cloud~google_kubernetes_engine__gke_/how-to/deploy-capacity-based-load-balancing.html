@@ -1,0 +1,274 @@
+<h1>Deploy a multi-cluster Gateway for capacity-based load balancing</h1>  <p>This document guides you through deploying a sample application across two GKE clusters in different regions, and shows how multi-cluster Gateway intelligently routes traffic when it exceeds Service capacity limits.</p> <p>Capacity-based load balancing is a feature of multi-cluster Gateways that helps you build highly reliable and resilient applications. By defining the capacity of your Services, you can protect them from being overloaded and help ensure a consistent experience for your users. When a Service in one cluster reaches its capacity, the load balancer automatically redirects traffic to another cluster with available capacity. For more information about traffic management, see <a href="../concepts/traffic-management">GKE traffic management</a>.</p> <p>In this tutorial, you use a sample <code translate="no" dir="ltr">store</code> application to simulate a real-world scenario where an online shopping service is owned and operated by separate teams and deployed across a <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs">fleet</a> of shared GKE clusters.</p> <h2 id="before_you_begin">Before you begin</h2> <p>Multi-cluster Gateways require some environmental preparation before they can be deployed. Before you proceed, follow the steps in <a href="prepare-environment-multi-cluster-gateways">Prepare your environment for multi-cluster Gateways</a>:</p> <ol> <li><p><a href="prepare-environment-multi-cluster-gateways#deploy-clusters">Deploy</a> GKE clusters.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke#register_your_cluster_on">Register</a> your clusters to a fleet (if they aren't already).</p></li> <li><p><a href="prepare-environment-multi-cluster-gateways#enable_multi-cluster_services_in_the_fleet">Enable</a> the multi-cluster Service and multi-cluster Gateway controllers.</p></li> </ol> <p>Finally, review the GKE Gateway controller <a href="deploying-gateways#limitations">limitations and known issues</a> before you use the controller in your environment.</p> <h2 id="capacity-load-balancing">Deploy capacity-based load balancing</h2> <p>The exercise in this section demonstrates global load balancing and Service capacity concepts by deploying an application across two GKE clusters in different regions. Generated traffic is sent at various request per second (RPS) levels to show how traffic is load balanced across clusters and regions.</p> <p>The following diagram shows the topology that you will deploy and how traffic overflows between clusters and regions when traffic has exceeded Service capacity:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/traffic-overflow-3-v2.svg" alt="Traffic overflowing from one cluster to another"></p> <h3 id="prepare_your_environment">Prepare your environment</h3> <ol> <li><p>Follow <a href="prepare-environment-multi-cluster-gateways#deploy-clusters">Prepare your environment for multi-cluster Gateways</a> to prepare your environment.</p></li> <li>
+<p>Confirm that the GatewayClass resources are installed on the config cluster:</p> 
+<pre>kubectl get gatewayclasses --context=gke-west-1
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                  CONTROLLER                  ACCEPTED   AGE
+gke-l7-global-external-managed        networking.gke.io/gateway   True       16h
+gke-l7-global-external-managed-mc     networking.gke.io/gateway   True       14h
+gke-l7-gxlb                           networking.gke.io/gateway   True       16h
+gke-l7-gxlb-mc                        networking.gke.io/gateway   True       14h
+gke-l7-regional-external-managed      networking.gke.io/gateway   True       16h
+gke-l7-regional-external-managed-mc   networking.gke.io/gateway   True       14h
+gke-l7-rilb                           networking.gke.io/gateway   True       16h
+gke-l7-rilb-mc                        networking.gke.io/gateway   True       14h
+</pre>
+</li> </ol> <h3 id="deploy_an_application">Deploy an application</h3> <p>Deploy the sample web application server to both clusters:</p> 
+<pre>kubectl apply --context gke-west-1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/master/gateway/docs/store-traffic-deploy.yaml
+kubectl apply --context gke-east-1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/master/gateway/docs/store-traffic-deploy.yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>namespace/store created
+deployment.apps/store created
+</pre> <h3 id="deploy_a_service_gateway_and_httproute">Deploy a Service, Gateway, and HTTPRoute</h3> <ol> <li>
+<p>Apply the following <code translate="no" dir="ltr">Service</code> manifest to both <code translate="no" dir="ltr">gke-west-1</code> and <code translate="no" dir="ltr">gke-east-1</code> clusters:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: traffic-test
+  annotations:
+    networking.gke.io/max-rate-per-endpoint: "10"
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  selector:
+    app: store
+  type: ClusterIP
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: traffic-test
+EOF
+</pre>
+
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-east-1 -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: traffic-test
+  annotations:
+    networking.gke.io/max-rate-per-endpoint: "10"
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  selector:
+    app: store
+  type: ClusterIP
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: traffic-test
+EOF
+</pre> <p>The Service is annotated with <code translate="no" dir="ltr">max-rate-per-endpoint</code> set to 10 requests per seconds. With 2 replicas per cluster, each Service has 20 RPS of capacity per cluster.</p> <p>For more information on how to choose a Service capacity level for your Service, see <a href="../concepts/traffic-management#capacity">Determine your Service's capacity</a>.</p>
+</li> <li>
+<p>Apply the following <code translate="no" dir="ltr">Gateway</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store
+  namespace: traffic-test
+spec:
+  gatewayClassName: gke-l7-global-external-managed-mc
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      kinds:
+      - kind: HTTPRoute
+EOF
+</pre> <p>The manifest describes an external, global, multi-cluster Gateway that deploys an external Application Load Balancer with a publicly accessible IP address.</p>
+</li> <li>
+<p>Apply the following <code translate="no" dir="ltr">HTTPRoute</code> manifest to the config cluster, <code translate="no" dir="ltr">gke-west-1</code> in this example:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west-1 -f -
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store
+  namespace: traffic-test
+  labels:
+    gateway: store
+spec:
+  parentRefs:
+  - kind: Gateway
+    namespace: traffic-test
+    name: store
+  rules:
+  - backendRefs:
+    - name: store
+      group: net.gke.io
+      kind: ServiceImport
+      port: 8080
+EOF
+</pre> <p>The manifest describes an HTTPRoute that configures the Gateway with a routing rule that directs all traffic to the store ServiceImport. The <code translate="no" dir="ltr">store</code> ServiceImport groups the <code translate="no" dir="ltr">store</code> Service Pods across both clusters and allows them to be addressed by the load balancer as a single Service.</p> <aside class="note"><strong>Note:</strong><span> It might take several minutes (up to 10) for the Gateway to fully deploy and serve traffic.</span></aside> <p>You can check the Gateway's events after a few minutes to see if it has finished deploying:</p> 
+<pre>kubectl describe gateway store -n traffic-test --context gke-west-1
+</pre> <p>The output is similar to the following:</p> 
+<pre>...
+Status:
+  Addresses:
+    Type:   IPAddress
+    Value:  34.102.159.147
+  Conditions:
+    Last Transition Time:  2023-10-12T21:40:59Z
+    Message:               The OSS Gateway API has deprecated this condition, do not depend on it.
+    Observed Generation:   1
+    Reason:                Scheduled
+    Status:                True
+    Type:                  Scheduled
+    Last Transition Time:  2023-10-12T21:40:59Z
+    Message:
+    Observed Generation:   1
+    Reason:                Accepted
+    Status:                True
+    Type:                  Accepted
+    Last Transition Time:  2023-10-12T21:40:59Z
+    Message:
+    Observed Generation:   1
+    Reason:                Programmed
+    Status:                True
+    Type:                  Programmed
+    Last Transition Time:  2023-10-12T21:40:59Z
+    Message:               The OSS Gateway API has altered the "Ready" condition semantics and reservedit for future use.  GKE Gateway will stop emitting it in a future update, use "Programmed" instead.
+    Observed Generation:   1
+    Reason:                Ready
+    Status:                True
+    Type:                  Ready
+  Listeners:
+    Attached Routes:  1
+    Conditions:
+      Last Transition Time:  2023-10-12T21:40:59Z
+      Message:
+      Observed Generation:   1
+      Reason:                Programmed
+      Status:                True
+      Type:                  Programmed
+      Last Transition Time:  2023-10-12T21:40:59Z
+      Message:               The OSS Gateway API has altered the "Ready" condition semantics and reservedit for future use.  GKE Gateway will stop emitting it in a future update, use "Programmed" instead.
+      Observed Generation:   1
+      Reason:                Ready
+      Status:                True
+      Type:                  Ready
+    Name:                    http
+    Supported Kinds:
+      Group:  gateway.networking.k8s.io
+      Kind:   HTTPRoute
+Events:
+  Type    Reason  Age                  From                   Message
+  ----    ------  ----                 ----                   -------
+  Normal  ADD     12m                  mc-gateway-controller  traffic-test/store
+  Normal  SYNC    6m43s                mc-gateway-controller  traffic-test/store
+  Normal  UPDATE  5m40s (x4 over 12m)  mc-gateway-controller  traffic-test/store
+  Normal  SYNC    118s (x6 over 10m)   mc-gateway-controller  SYNC on traffic-test/store was a success
+</pre> <p>This output shows that the Gateway has deployed successfully. It might still take a few minutes for traffic to start passing after the Gateway has deployed. Take note of the IP address in this output, as it is used in a following step.</p>
+</li> </ol> <h3 id="confirm_traffic">Confirm traffic</h3> <p>Confirm that traffic is passing to the application by testing the Gateway IP address with a curl command:</p> 
+<pre>curl GATEWAY_IP_ADDRESS
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+  "cluster_name": "gke-west-1",
+  "host_header": "34.117.182.69",
+  "pod_name": "store-54785664b5-mxstv",
+  "pod_name_emoji": "👳🏿",
+  "project_id": "project",
+  "timestamp": "2021-11-01T14:06:38",
+  "zone": "us-west1-a"
+}
+</pre> <p>This output shows the Pod metadata, which indicates the region where the request was served from.</p> <h3 id="verify_traffic_using_load_testing">Verify traffic using load testing</h3> <p>To verify the load balancer is working, you can deploy a traffic generator in your <code translate="no" dir="ltr">gke-west-1</code> cluster. The traffic generator generates traffic at different levels of load to demonstrate the capacity and overflow capabilities of the load balancer. The following steps demonstrate three levels of load:</p> <ul> <li>10 RPS, which is under the capacity for the store Service in <code translate="no" dir="ltr">gke-west-1</code>.</li> <li>30 RPS, which is over capacity for the <code translate="no" dir="ltr">gke-west-1</code> store Service and causes traffic overflow to <code translate="no" dir="ltr">gke-east-1</code>.</li> <li>60 RPS, which is over capacity for the Services in both clusters.</li> </ul> <h4 id="configure_dashboard">Configure dashboard</h4> <ol> <li>
+<p>Get the name of the underying URLmap for your Gateway:</p> 
+<pre>kubectl get gateway store -n traffic-test --context=gke-west-1 -o=jsonpath="{.metadata.annotations.networking\.gke\.io/url-maps}"
+</pre> <p>The output is similar to the following:</p> 
+<pre>/projects/PROJECT_NUMBER/global/urlMaps/gkemcg1-traffic-test-store-armvfyupay1t
+</pre>
+</li> <li>
+<p>In the Google Cloud console, go to the <strong>Metrics explorer</strong> page.</p> <p><a href="https://console.cloud.google.com/monitoring/metrics-explorer" target="console" track-name="consoleLink" track-type="tasks" class="button button-primary">Go to Metrics explorer</a> </p>
+</li> <li><p>Under <strong>Select a metric</strong>, click <strong>CODE: MQL</strong>.</p></li> <li>
+<p>Enter the following query to observe traffic metrics for the store Service across your two clusters:</p> 
+<pre>fetch https_lb_rule
+| metric 'loadbalancing.googleapis.com/https/backend_request_count'
+| filter (resource.url_map_name == 'GATEWAY_URL_MAP')
+| align rate(1m)
+| every 1m
+| group_by [resource.backend_scope],
+    [value_backend_request_count_aggregate:
+        aggregate(value.backend_request_count)]
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_URL_MAP</var></code> with the URLmap name from the previous step.</p>
+</li> <li><p>Click <strong>Run query</strong>. Wait at least 5 minutes after deploying the load generator in the next section for the metrics to display in the chart.</p></li> </ol> <h4 id="test_with_10_rps">Test with 10 RPS</h4> <ol> <li>
+<p>Deploy a Pod to your <code translate="no" dir="ltr">gke-west-1</code> cluster:</p> 
+<pre>kubectl run --context gke-west-1 -i --tty --rm loadgen  \
+    --image=cyrilbkr/httperf  \
+    --restart=Never  \
+    -- /bin/sh -c 'httperf  \
+    --server=GATEWAY_IP_ADDRESS  \
+    --hog --uri="/zone" --port 80  --wsess=100000,1,1 --rate 10'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code> with the Gateway IP address from the previous step.</p> <p>The output is similar to the following, indicating that the traffic generator is sending traffic:</p> 
+<pre>If you don't see a command prompt, try pressing enter.
+</pre> <p>The load generator continuously sends 10 RPS to the Gateway. Even though traffic is coming from inside a Google Cloud region, the load balancer treats it as client traffic coming from the US West Coast. To simulate a realistic client diversity, the load generator sends each HTTP request as a new TCP connection, which means traffic is distributed across backend Pods more evenly.</p> <p>The generator takes up to 5 minutes to generate traffic for the dashboard.</p>
+</li> <li>
+<p>View your Metrics explorer dashboard. Two lines appear, indiciating how much traffic is load balanced to each of the clusters:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/traffic-management-graph-1.png" alt="Graph showing traffic load balanced to clusters"></p> <p>You should see that <code translate="no" dir="ltr">us-west1-a</code> is receiving approximately 10 RPS of traffic while <code translate="no" dir="ltr">us-east1-b</code> is not receiving any traffic. Because the traffic generator is running in <code translate="no" dir="ltr">us-west1</code>, all traffic is sent to the Service in the <code translate="no" dir="ltr">gke-west-1</code> cluster.</p>
+</li> <li>
+<p>Stop the load generator using <strong>Ctrl+C</strong>, then delete the pod:</p> 
+<pre>kubectl delete pod loadgen --context gke-west-1
+</pre>
+</li> </ol> <h4 id="test_with_30_rps">Test with 30 RPS</h4> <ol> <li>
+<p>Deploy the load generator again, but configured to send 30 RPS:</p> 
+<pre>kubectl run --context gke-west-1 -i --tty --rm loadgen  \
+    --image=cyrilbkr/httperf  \
+    --restart=Never  \
+    -- /bin/sh -c 'httperf  \
+    --server=GATEWAY_IP_ADDRESS  \
+    --hog --uri="/zone" --port 80  --wsess=100000,1,1 --rate 30'
+</pre> <p>The generator takes up to 5 minutes to generate traffic for the dashboard.</p>
+</li> <li>
+<p>View your Cloud Ops dashboard.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/traffic-management-graph-2.png" alt="Graph showing traffic overflowing to gke-east-1"></p> <p>You should see that approximately 20 RPS is being sent to <code translate="no" dir="ltr">us-west1-a</code> and 10 RPS to <code translate="no" dir="ltr">us-east1-b</code>. This indicates that the Service in <code translate="no" dir="ltr">gke-west-1</code> is fully utilized and is overflowing 10 RPS of traffic to the Service in <code translate="no" dir="ltr">gke-east-1</code>.</p>
+</li> <li>
+<p>Stop the load generator using <strong>Ctrl+C</strong>, then delete the Pod:</p> 
+<pre>kubectl delete pod loadgen --context gke-west-1
+</pre>
+</li> </ol> <h4 id="test_with_60_rps">Test with 60 RPS</h4> <ol> <li>
+<p>Deploy the load generator configured to send 60 RPS:</p> 
+<pre>kubectl run --context gke-west-1 -i --tty --rm loadgen  \
+    --image=cyrilbkr/httperf  \
+    --restart=Never  \
+    -- /bin/sh -c 'httperf  \
+    --server=GATEWAY_IP_ADDRESS  \
+    --hog --uri="/zone" --port 80  --wsess=100000,1,1 --rate 60'
+</pre>
+</li> <li>
+<p>Wait 5 minutes and view your Cloud Ops dashboard. It should now show that both clusters are receiving roughly 30 RPS. Since all Services are overutilized globally, there is no traffic spillover and Services absorb all the traffic they can.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/traffic-management-graph-3.png" alt="Graph showing Services overutilized"></p>
+</li> <li>
+<p>Stop the load generator using <strong>Ctrl+C</strong>, then delete the Pod:</p> 
+<pre>kubectl delete pod loadgen --context gke-west-1
+</pre>
+</li> </ol> <h2 id="clean_up">Clean up</h2> <p>After completing the exercises on this document, follow these steps to remove resources and prevent unwanted charges incurring on your account:</p> <ol> <li><p><a href="deleting-a-cluster">Delete the clusters</a>.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/unregister">Unregister the clusters</a> from the fleet if they don't need to be registered for another purpose.</p></li> <li>
+<p>Disable the <code translate="no" dir="ltr">multiclusterservicediscovery</code> feature:</p> 
+<pre>gcloud container fleet multi-cluster-services disable
+</pre>
+</li> <li>
+<p>Disable Multi Cluster Ingress:</p> 
+<pre>gcloud container fleet ingress disable
+</pre>
+</li> <li>
+<p>Disable the APIs:</p> 
+<pre>gcloud services disable \
+    multiclusterservicediscovery.googleapis.com \
+    multiclusteringress.googleapis.com \
+    trafficdirector.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+</li> </ol> <h2 id="troubleshooting">Troubleshooting</h2> <h3 id="no-healthy-upstream">No healthy upstream</h3> <p><strong>Symptom:</strong></p> <p>The following issue might occur when you create a Gateway but cannot access the backend services (503 response code):</p> 
+<pre>no healthy upstream
+</pre> <p><strong>Reason:</strong></p> <p>This error message indicates that the health check prober cannot find healthy backend services. It is possible that your backend services are healthy but you might need to customize the health checks.</p> <p><strong>Workaround:</strong></p> <p>To resolve this issue, <a href="configure-gateway-resources#configure_health_check">customize your health check</a> based on your application's requirements (for example, <code translate="no" dir="ltr">/health</code>) using a <code translate="no" dir="ltr">HealthCheckPolicy</code>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about the <a href="../concepts/gateway-api">Gateway controller</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-capacity-based-load-balancing" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-capacity-based-load-balancing</a>
+  </p>
+</div>

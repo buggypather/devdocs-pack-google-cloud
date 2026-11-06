@@ -1,0 +1,346 @@
+<h1>Optimize Pod autoscaling based on metrics</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> This tutorial demonstrates how to automatically scale your Google Kubernetes Engine (GKE) workloads based on metrics available in <a href="https://docs.cloud.google.com/monitoring">Cloud Monitoring</a>. <p>In this tutorial, you can set up autoscaling based on one of the following metrics:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p><strong>Pub/Sub backlog</strong></p> <p>Scale based on an external metric reporting the number of unacknowledged messages remaining in a <a href="https://docs.cloud.google.com/pubsub/docs/subscriber">Pub/Sub subscription</a>. This can effectively reduce latency before it becomes a problem, but might use relatively more resources than autoscaling based on CPU utilization.</p></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+<p><strong>Custom Prometheus Metric</strong></p> <p>Scale based on a custom user-defined metric, exported in the <a href="https://prometheus.io/docs/instrumenting/exposition_formats/" class="external">Prometheus</a> format via Google Managed Prometheus. Your Prometheus metric must be of type <a href="https://prometheus.io/docs/concepts/metric_types/#gauge" class="external">Gauge</a>.</p></section> </div> <p>Autoscaling is fundamentally about finding an acceptable balance between cost and latency. You might want to experiment with a combination of these metrics <a href="https://docs.cloud.google.com/monitoring/api/metrics_kubernetes">and others</a> to find a policy that works for you.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> This tutorial covers the following tasks: <ol> <li>How to deploy the <a href="https://github.com/GoogleCloudPlatform/k8s-stackdriver/tree/master/custom-metrics-stackdriver-adapter" class="external">Custom Metrics Adapter</a>.</li> <li>How to export metrics from within your application code.</li> <li>How to view your metrics on the Cloud Monitoring interface.</li> <li>How to deploy a <a href="../concepts/horizontalpodautoscaler">HorizontalPodAutoscaler (HPA)</a> resource to scale your application based on Cloud Monitoring metrics.</li> </ol> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing/">GKE</a></li> <li><a href="https://cloud.google.com/pubsub/pricing">Pub/Sub</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> Take the following steps to enable the Kubernetes Engine API: <ol> <li> Visit the <a href="https://console.cloud.google.com/projectselector/kubernetes" target="console" track-type="gettingStarted" track-name="consoleLink" track-metadata-position="prereqs" track-metadata-end-goal="enableApi"> Kubernetes Engine page</a> in the Google Cloud console. </li> <li> Create or select a project. </li> <li> Wait for the API and related services to be enabled. This can take several minutes. </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </ol> <p>You can follow this tutorial using <a href="https://docs.cloud.google.com/shell">Cloud Shell</a>, which comes preinstalled with the <code translate="no" dir="ltr">gcloud</code> and <code translate="no" dir="ltr">kubectl</code> command-line tools used in this tutorial. If you use Cloud Shell, you don't need to install these command-line tools on your workstation.</p> <p>To use Cloud Shell:</p> <ol> <li>Go to the <a href="https://console.cloud.google.com/" target="_blank">Google Cloud console</a>.</li> <li>
+<p>Click the <strong>Activate Cloud Shell</strong> <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Activate Shell Button"> button at the top of the Google Cloud console window.</p> <p>A Cloud Shell session opens inside a new frame at the bottom of the Google Cloud console and displays a command-line prompt.</p> <p><img src="https://docs.cloud.google.com/static/shell/docs/images/new-console.png" alt="Cloud Shell session" class="screenshot"> </p>
+</li> </ol> <h3 id="setting_up_your_environment">Setting up your environment</h3> <ol> <li>
+<p>Set the default zone for the Google Cloud CLI:</p> 
+<pre>
+gcloud config set compute/zone zone
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">zone</var></code>: Choose a zone that's closest to you. For more information, see <a href="https://docs.cloud.google.com/compute/docs/regions-zones" track-type="solution" track-name="internalLink" track-metadata-position="body">Regions and Zones</a>.</li> </ul>
+</li> <li>
+<p>Set the <code translate="no" dir="ltr">PROJECT_ID</code> and <code translate="no" dir="ltr">PROJECT_NUMBER</code> environment variables to your <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">Google Cloud project ID and project number</a>:</p> 
+<pre>
+export PROJECT_ID=project-id
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format 'get(projectNumber)')
+</pre>
+</li> <li>
+<p>Set the default zone for the Google Cloud CLI:</p> 
+<pre>gcloud config set project $PROJECT_ID
+</pre>
+</li> <li>
+<p id="cluster-create">Create a GKE <a href="../clusters" track-type="solution" track-name="internalLink" track-metadata-position="body">cluster</a> </p> <section class="key-point"> <b>Best practice</b>: <p>For enhanced security when accessing Google Cloud services, enable <a href="../how-to/workload-identity" track-type="concept" track-name="aurora-bp">Workload Identity Federation for GKE</a> on your cluster. Although this page includes examples using the legacy method (with Workload Identity Federation for GKE disabled), enabling it improves protection.</p> </section> <div> <section><p class="_code-tab"><strong>Workload Identity</strong></p>
+<p>To create a cluster with Workload Identity Federation for GKE enabled, run the following command:</p> 
+<pre data-language="">gcloud container clusters create metrics-autoscaling --workload-pool=$PROJECT_ID.svc.id.goog
+</pre></section> <section><p class="_code-tab"><strong>Legacy authentication</strong></p>
+<p>To create a cluster with Workload Identity Federation for GKE <em>disabled</em>, run the following command:</p> 
+<pre data-language="">gcloud container clusters create metrics-autoscaling
+</pre></section> </div>
+</li> </ol> </section> <div id="tutorial-content"> <h2 id="step1">Deploying the Custom Metrics Adapter</h2> <p>The <a href="https://github.com/GoogleCloudPlatform/k8s-stackdriver/tree/master/custom-metrics-stackdriver-adapter" class="external">Custom Metrics Adapter</a> lets your cluster send and receive metrics with Cloud Monitoring.</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p> The procedure to install the Custom Metrics Adapter differs for clusters with or without Workload Identity Federation for GKE enabled. Select the option matching the setup you chose when you <a href="#cluster-create">created your cluster</a>. </p> <div> <section><p class="_code-tab"><strong>Workload Identity</strong></p>
+<p> Grant your user the ability to create required authorization roles:</p> 
+<pre data-language="">kubectl create clusterrolebinding cluster-admin-binding \
+    --clusterrole cluster-admin --user "$(gcloud config get-value account)"
+</pre> <p>Deploy the custom metrics adapter on your cluster:</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre> <p>The adapter uses the <code translate="no" dir="ltr">custom-metrics-stackdriver-adapter</code> Kubernetes service account in the <code translate="no" dir="ltr">custom-metrics</code> namespace. Allow this service account to read Cloud Monitoring metrics by assigning the <em>Monitoring Viewer</em> role:</p> 
+<pre data-language="">gcloud projects add-iam-policy-binding projects/$PROJECT_ID \
+  --role roles/monitoring.viewer \
+  --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter
+</pre> </section> <section><p class="_code-tab"><strong>Legacy Authentication</strong></p>
+ <p>Grant your user the ability to create required authorization roles:</p> 
+<pre data-language="">kubectl create clusterrolebinding cluster-admin-binding \
+    --clusterrole cluster-admin --user "$(gcloud config get-value account)"
+</pre> <p>Deploy the custom metrics adapter on your cluster:</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre> </section> </div></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+<p> The procedure to install the Custom Metrics Adapter differs for clusters with or without Workload Identity Federation for GKE enabled. Select the option matching the setup you chose when you <a href="#cluster-create">created your cluster</a>. </p> <div> <section><p class="_code-tab"><strong>Workload Identity</strong></p>
+<p> Grant your user the ability to create required authorization roles:</p> 
+<pre data-language="">kubectl create clusterrolebinding cluster-admin-binding \
+    --clusterrole cluster-admin --user "$(gcloud config get-value account)"
+</pre> <p>Deploy the custom metrics adapter on your cluster:</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre> <p>The adapter uses the <code translate="no" dir="ltr">custom-metrics-stackdriver-adapter</code> Kubernetes service account in the <code translate="no" dir="ltr">custom-metrics</code> namespace. Allow this service account to read Cloud Monitoring metrics by assigning the <em>Monitoring Viewer</em> role:</p> 
+<pre data-language="">gcloud projects add-iam-policy-binding projects/$PROJECT_ID \
+  --role roles/monitoring.viewer \
+  --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter
+</pre> </section> <section><p class="_code-tab"><strong>Legacy Authentication</strong></p>
+ <p>Grant your user the ability to create required authorization roles:</p> 
+<pre data-language="">kubectl create clusterrolebinding cluster-admin-binding \
+    --clusterrole cluster-admin --user "$(gcloud config get-value account)"
+</pre> <p>Deploy the custom metrics adapter on your cluster:</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+</pre> </section> </div></section> </div> <h2 id="step2">Deploying an application with metrics</h2> <p>Download the repository containing the application code for this tutorial:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+
+<pre data-language="">git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples.git
+cd kubernetes-engine-samples/databases/cloud-pubsub
+</pre></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+
+<pre data-language="">git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples.git
+cd kubernetes-engine-samples/observability/custom-metrics-autoscaling/google-managed-prometheus
+</pre></section> </div> <p>The repository contains code that exports metrics to Cloud Monitoring:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p>This application polls a <a href="https://docs.cloud.google.com/pubsub/docs/subscriber">Pub/Sub subscription</a> for new messages, acknowledging them as they arrive. Pub/Sub subscription metrics are automatically collected by Cloud Monitoring.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">from google import auth
+from google.cloud import pubsub_v1
+
+
+def main():
+    """Continuously pull messages from subsciption"""
+
+    # read default project ID
+    _, project_id = auth.default()
+    subscription_id = 'echo-read'
+
+    subscriber = pubsub_v1.SubscriberClient()
+    subscription_path = subscriber.subscription_path(
+        project_id, subscription_id)
+
+    def callback(message: pubsub_v1.subscriber.message.Message) -&gt; None:
+        """Process received message"""
+        print(f"Received message: ID={message.message_id} Data={message.data}")
+        print(f"[{datetime.datetime.now()}] Processing: {message.message_id}")
+        time.sleep(3)
+        print(f"[{datetime.datetime.now()}] Processed: {message.message_id}")
+        message.ack()
+
+    streaming_pull_future = subscriber.subscribe(
+        subscription_path, callback=callback)
+    print(f"Pulling messages from {subscription_path}...")
+
+    with subscriber:
+        try:
+            streaming_pull_future.result()
+        except Exception as e:
+            print(e)</pre> </div> </section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+<p>This application responds to any web request to the <code translate="no" dir="ltr">/metrics</code> path with a constant value metric using the <a href="https://prometheus.io/docs/instrumenting/exposition_formats/">Prometheus</a> format.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">metric := prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: *metricName,
+		Help: "Custom metric",
+	},
+)
+prometheus.MustRegister(metric)
+metric.Set(float64(*metricValue))
+
+http.Handle("/metrics", promhttp.Handler())
+log.Printf("Starting to listen on :%d", *port)
+err := http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)</pre> </div> </section> </div> <p>The repository also contains a Kubernetes manifest to deploy the application to your cluster. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster.:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p>The manifest differs for clusters with or without Workload Identity Federation for GKE enabled. Select the option matching the setup chose when you <a href="#cluster-create">created your cluster</a>.</p> <div> <section><p class="_code-tab"><strong>Workload Identity</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pubsub
+spec:
+  selector:
+    matchLabels:
+      app: pubsub
+  template:
+    metadata:
+      labels:
+        app: pubsub
+    spec:
+      serviceAccountName: pubsub-sa
+      containers:
+      - name: subscriber
+        image: us-docker.pkg.dev/google-samples/containers/gke/pubsub-sample:v2</pre> </div> </section> <section><p class="_code-tab"><strong>Legacy authentication</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pubsub
+spec:
+  selector:
+    matchLabels:
+      app: pubsub
+  template:
+    metadata:
+      labels:
+        app: pubsub
+    spec:
+      volumes:
+      - name: google-cloud-key
+        secret:
+          secretName: pubsub-key
+      containers:
+      - name: subscriber
+        image: us-docker.pkg.dev/google-samples/containers/gke/pubsub-sample:v2
+        volumeMounts:
+        - name: google-cloud-key
+          mountPath: /var/secrets/google
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /var/secrets/google/key.json</pre> </div> </section> </div></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    run: custom-metrics-gmp
+  name: custom-metrics-gmp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: custom-metrics-gmp
+  template:
+    metadata:
+      labels:
+        run: custom-metrics-gmp
+    spec:
+      containers:
+      # sample container generating custom metrics
+      - name: prometheus-dummy-exporter
+        image: us-docker.pkg.dev/google-samples/containers/gke/prometheus-dummy-exporter:v0.2.0
+        command: ["./prometheus-dummy-exporter"]
+        args:
+        - --metric-name=custom_prometheus
+        - --metric-value=40
+        - --port=8080</pre> </div> <p>With the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring">PodMonitoring resource</a>, the Google Cloud Managed Service for Prometheus exports the <a href="https://prometheus.io/docs/instrumenting/exposition_formats/">Prometheus</a> metrics to Cloud Monitoring:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: "custom-metrics-exporter"
+spec:
+  selector:
+    matchLabels:
+      run: custom-metrics-gmp
+  endpoints:
+  - port: 8080
+    path: /metrics
+    interval: 15s</pre> </div> <p>Starting in GKE Standard version 1.27 or GKE Autopilot version 1.25, Google Cloud Managed Service for Prometheus is enabled. To enable Google Cloud Managed Service for Prometheus in clusters in earlier versions, see <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#enable-mgdcoll-gke">Enable managed collection</a>.</p></section> </div> <p>Deploy the application to your cluster:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p>The procedure to deploy your application differs for clusters with or without Workload Identity Federation for GKE enabled. Select the option matching the setup you chose when you <a href="#cluster-create">created your cluster</a>.</p> <div> <section><p class="_code-tab"><strong>Workload Identity</strong></p>
+<ol> <li>
+<p>Enable the Pub/Sub API on your project:</p> 
+<pre data-language="">gcloud services enable cloudresourcemanager.googleapis.com pubsub.googleapis.com
+</pre>
+</li> <li>
+<p>Create a Pub/Sub topic and subscription:</p> 
+<pre data-language="">gcloud pubsub topics create echo
+gcloud pubsub subscriptions create echo-read --topic=echo
+</pre>
+</li> <li>
+<p>Deploy the application to your cluster:</p> 
+<pre data-language="">kubectl apply -f deployment/pubsub-with-workload-identity.yaml
+</pre>
+</li> <li>
+<p>This application defines a <code translate="no" dir="ltr">pubsub-sa</code> Kubernetes service account. Assign it the <em>Pub/Sub subscriber</em> role so that the application can publish messages to the Pub/Sub topic.</p> 
+<pre data-language="">gcloud projects add-iam-policy-binding projects/$PROJECT_ID \
+  --role=roles/pubsub.subscriber \
+  --member=principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/default/sa/pubsub-sa
+</pre> <p>The preceding command uses a <a href="../how-to/workload-identity#configure-authz-principals">Principal Identifier</a>, which allows IAM to directly refer to a Kubernetes service account.</p> <section class="key-point"> <b>Best practice</b>: <p>Use Principal identifiers, but consider the limitation in <a href="../how-to/workload-identity#kubernetes-sa-to-iam" track-type="concept" track-name="aurora-bp">the description of an alternative method</a>.</p> </section>
+</li> </ol></section> <section><p class="_code-tab"><strong>Legacy authentication</strong></p>
+<ol> <li>
+<p>Enable the Pub/Sub API on your project:</p> 
+<pre data-language="">gcloud services enable cloudresourcemanager.googleapis.com pubsub.googleapis.com
+</pre>
+</li> <li>
+<p>Create a Pub/Sub topic and subscription:</p> 
+<pre data-language="">gcloud pubsub topics create echo
+gcloud pubsub subscriptions create echo-read --topic=echo
+</pre>
+</li> <li>
+<p>Create a service account with access to Pub/Sub:</p> 
+<pre data-language="">gcloud iam service-accounts create autoscaling-pubsub-sa
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member "serviceAccount:autoscaling-pubsub-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role "roles/pubsub.subscriber"
+</pre>
+</li> <li>
+<p>Download the service account key file:</p> 
+<pre data-language="">gcloud iam service-accounts keys create key.json \
+  --iam-account autoscaling-pubsub-sa@$PROJECT_ID.iam.gserviceaccount.com
+</pre>
+</li> <li>
+<p>Import the service account key to your cluster as a <a href="https://kubernetes.io/docs/concepts/configuration/secret/">Secret</a>:</p> 
+<pre data-language="">kubectl create secret generic pubsub-key --from-file=key.json=./key.json
+</pre>
+</li> <li>
+<p>Deploy the application to your cluster:</p> 
+<pre data-language="">kubectl apply -f deployment/pubsub-with-secret.yaml
+</pre>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+
+<pre data-language="">kubectl apply -f custom-metrics-gmp.yaml
+</pre></section> </div> <p>After waiting a moment for the application to deploy, all Pods reach the <code translate="no" dir="ltr">Ready</code> state:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+
+<pre data-language="">kubectl get pods
+</pre> <p>Output:</p> 
+<pre data-language="">NAME                     READY   STATUS    RESTARTS   AGE
+pubsub-8cd995d7c-bdhqz   1/1     Running   0          58s
+</pre></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+
+<pre data-language="">kubectl get pods
+</pre> <p>Output:</p> 
+<pre data-language="">NAME                                  READY   STATUS    RESTARTS   AGE
+custom-metrics-gmp-865dffdff9-x2cg9   1/1     Running   0          49s
+</pre></section> </div> <h2 id="step3">Viewing metrics on Cloud Monitoring</h2> <p>As your application runs, it writes your metrics to Cloud Monitoring.</p> <p>To view the metrics for a monitored resource by using the Metrics Explorer, do the following:</p> <ol> <li> <p>In the Google Cloud console, go to the <i class="material-icons" aria-hidden="true" translate="no">leaderboard</i> <b>Metrics explorer</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/metrics-explorer" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="monitoring/metrics-explorer">Go to <b>Metrics explorer</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Monitoring</b>.</p>
+</li> <li>In the <b>Metric</b> element, expand the <b>Select a metric</b> menu, and then select a resource type and metric type. For example, to chart the CPU utilization of a virtual machine, do the following: <ol> <li>(Optional) To reduce the menu's options, enter part of the metric name in the <b>Filter bar</b>. For this example, enter <code translate="no" dir="ltr">utilization</code>.</li> <li>In the <b>Active resources</b> menu, select <b>VM instance</b>.</li> <li>In the <b>Active metric categories</b> menu, select <b>Instance</b>.</li> <li>In the <b>Active metrics</b> menu, select <b>CPU utilization</b> and then click <b>Apply</b>.</li> </ol> </li>
+<li>
+<p>To filter which time series are displayed, use the <a href="https://docs.cloud.google.com/monitoring/charts/metrics-selector#filter-option"><b>Filter</b> element</a>.</p> </li> <li>
+<p>To combine time series, use the menus on the <a href="https://docs.cloud.google.com/monitoring/charts/metrics-selector#select_display"><b>Aggregation</b> element</a>. For example, to display the CPU utilization for your VMs, based on their zone, set the first menu to <b>Mean</b> and the second menu to <b>zone</b>.</p> <p>All time series are displayed when the first menu of the <b>Aggregation</b> element is set to <b>Unaggregated</b>. The default settings for the <b>Aggregation</b> element are determined by the metric type you selected.</p> </li> </ol> <p>The resource type and metrics are the following:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p><a href="https://console.cloud.google.com/monitoring/metrics-explorer">Metrics Explorer</a></p> <p>Resource type: <code translate="no" dir="ltr">pubsub_subscription</code></p> <p>Metric: <code translate="no" dir="ltr">pubsub.googleapis.com/subscription/num_undelivered_messages</code></p></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+<p><a href="#">Metrics Explorer</a></p> <p>Resource type: <code translate="no" dir="ltr">prometheus_target</code></p> <p>Metric: <code translate="no" dir="ltr">prometheus.googleapis.com/custom_prometheus/gauge</code></p></section> </div> <p>Depending on the metric, you might not see much activity on the Cloud Monitoring Metrics Explorer yet. Don't be surprised if your metric isn't updating.</p> <h2 id="step4">Creating a HorizontalPodAutoscaler object</h2> <p>When you see your metric in Cloud Monitoring, you can deploy a <code translate="no" dir="ltr">HorizontalPodAutoscaler</code> to resize your Deployment based on your metric.</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pubsub
+spec:
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - external:
+      metric:
+       name: pubsub.googleapis.com|subscription|num_undelivered_messages
+       selector:
+         matchLabels:
+           resource.labels.subscription_id: echo-read
+      target:
+        type: AverageValue
+        averageValue: 2
+    type: External
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pubsub</pre> </div> </section> <section><p class="_code-tab"><strong>Custom Metric</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: custom-metrics-gmp-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: custom-metrics-gmp
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: prometheus.googleapis.com|custom_prometheus|gauge
+      target:
+        type: AverageValue
+        averageValue: 20</pre> </div> </section> </div> <p>Deploy the <code translate="no" dir="ltr">HorizontalPodAutoscaler</code> to your cluster:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+
+<pre data-language="">kubectl apply -f deployment/pubsub-hpa.yaml
+</pre></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+
+<pre data-language="">kubectl apply -f custom-metrics-gmp-hpa.yaml
+</pre></section> </div> <h2 id="step5">Generating load</h2> <p>For some metrics, you might need to generate load to watch the autoscaling:</p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<p>Publish 200 messages to the Pub/Sub topic:</p> 
+<pre data-language="">for i in {1..200}; do gcloud pubsub topics publish echo --message="Autoscaling #${i}"; done
+</pre></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+<p>Not Applicable: The code used in this sample exports a constant value of <code translate="no" dir="ltr">40</code> for the custom metric. The HorizontalPodAutoscaler is set with a target value of <code translate="no" dir="ltr">20</code>, so it attempts to scale up the Deployment automatically.</p></section> </div> <p>You might need to wait a couple minutes for the HorizontalPodAutoscaler to respond to the metric changes.</p> <h2 id="step6">Observing HorizontalPodAutoscaler scaling up</h2> <p>You can check the current number of replicas of your Deployment by running:</p> 
+<pre>kubectl get deployments
+</pre> <p>After giving some time for the metric to propagate, the Deployment creates five Pods to handle the backlog.</p> <p>You can also inspect the state and recent activity of the HorizontalPodAutoscaler by running:</p> 
+<pre>kubectl describe hpa
+</pre> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <div> <section><p class="_code-tab"><strong>Pub/Sub</strong></p>
+<ol> <li>
+<p>Clean up the Pub/Sub subscription and topic:</p> 
+<pre data-language="">gcloud pubsub subscriptions delete echo-read
+gcloud pubsub topics delete echo
+</pre>
+</li> <li>
+<p>Delete your GKE cluster:</p> 
+<pre data-language="">gcloud container clusters delete metrics-autoscaling
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Custom Metric</strong></p>
+<p>Delete your GKE cluster:</p> 
+<pre data-language=""> gcloud container clusters delete metrics-autoscaling
+</pre></section> </div> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn more about <a href="../concepts/horizontalpodautoscaler">horizontal Pod autoscaling</a>.</li> <li>Learn more about <a href="../concepts/custom-and-external-metrics">autoscaling workloads based on metrics</a>.</li> <li>Learn how to <a href="../how-to/horizontal-pod-autoscaling">configure horizontal Pod autoscaling</a>.</li> <li>Learn how to <a href="https://docs.cloud.google.com/kubernetes-engine/docs/samples/container-pubsub-horizontal-pod-autoscaler">use the horizontal Pod autoscaler on Pub/Sub</a>.</li> <li> Explore other <a href="../tutorials">Kubernetes Engine tutorials</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/autoscaling-metrics" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/autoscaling-metrics</a>
+  </p>
+</div>

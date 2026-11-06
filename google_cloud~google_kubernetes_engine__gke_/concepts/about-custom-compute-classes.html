@@ -1,0 +1,555 @@
+<h1>About custom ComputeClasses</h1>  <p>You can create your own ComputeClasses to control the properties of the nodes that Google Kubernetes Engine (GKE) provisions when autoscaling your cluster. This document is for platform administrators who want to declaratively define autoscaling profiles for nodes, so that specific workloads run on hardware that meets their requirements. For more information about what ComputeClasses are, see <a href="about-compute-classes">About GKE ComputeClasses</a>.</p> <h2 id="overview">ComputeClasses overview</h2> <p>In GKE, a <em>ComputeClass</em> is a profile that consists of a set of node attributes that GKE uses to provision the nodes that run your workloads during autoscaling events. ComputeClasses can target specific optimizations, like provisioning high-performance nodes or prioritizing cost-optimized configurations for cheaper running costs. <em>Custom</em> ComputeClasses let you define profiles that GKE then uses to autoscale nodes to closely meet the requirements of specific workloads.</p> <p>ComputeClasses are available to use in GKE Autopilot mode and GKE Standard mode in version 1.30.3-gke.1451000 and later, and offer a declarative approach to defining node attributes and autoscaling priorities. ComputeClasses are available to configure and use in all eligible GKE clusters by default.</p> <h3 id="benefits">Benefits of custom ComputeClasses</h3> <p>Custom ComputeClasses offer the following benefits:</p> <ul> <li>
+<strong>Fallback compute priorities</strong>: define a hierarchy of node configurations in each ComputeClass for GKE to prioritize. If the most preferred configuration is unavailable, GKE automatically chooses the next configuration in the hierarchy. This fallback model helps ensure that even when compute resources are unavailable, your workloads still run on optimized hardware with minimal scheduling delays.</li> <li>
+<strong>Granular autoscaling control</strong>: define node configurations that are best suited for specific workloads. GKE prioritizes those configurations when creating nodes during scaling.</li> <li>
+<strong>Declarative infrastructure configuration</strong>: adopt a declarative approach to infrastructure management so that GKE automatically creates nodes for you that match your specific workload requirements.</li> <li>
+<strong>Active migration</strong>: if compute resources for a more preferred machine configuration become available in your location, GKE automatically migrates your workloads to new nodes that use the preferred configuration.</li> <li>
+<strong>Cost optimization</strong>: prioritize cost-efficient node types like Spot VMs to reduce your cluster expenses.</li> <li>
+<strong>Default custom ComputeClasses</strong>: set a custom ComputeClass as the default for an entire cluster or for specific Kubernetes namespaces, so that workloads run on optimized hardware even if they don't request a specific ComputeClass.</li> <li>
+<strong>Custom node consolidation thresholds</strong>: define custom resource usage thresholds for nodes. If a specific node's resource usage falls below your threshold, GKE attempts to consolidate the workloads into a similar, available node and scales down the underutilized node.</li> <li>
+<strong>Declarative minimum capacity</strong>: maintain a minimum number of nodes of this ComputeClass in your cluster proactively, which helps to ensure that capacity is available for critical workloads.</li> </ul> <h3 id="use-cases">Use cases for custom ComputeClasses</h3> <p>Consider using custom ComputeClasses in scenarios like the following:</p> <ul> <li>You want to run your AI/ML workloads on specific GPU or TPU configurations.</li> <li>You want to set default hardware configurations for the workloads that specific teams run, taking the overhead off of the application operators.</li> <li>You run workloads that perform optimally on specific Compute Engine machine series or hardware configurations.</li> <li>You want to declare hardware configurations that meet specific business requirements, like high performance, cost optimized, or high availability.</li> <li>You want GKE to hierarchically fallback to using specific hardware configurations during compute resource unavailability, so that your workloads always run on machines that suit their requirements.</li> <li>You want to centrally decide on the optimal configurations across your enterprise's fleet, so that your costs are more predictable and your workloads run more reliably.</li> <li>You want to centrally specify which of your Compute Engine capacity reservations GKE should use to provision new nodes for specific workloads.</li> <li>You want to specify a compact placement policy to use with GKE Autopilot. For details, see: <a href="#request-placement-policy">compact placement</a>.</li> </ul> <h2 id="how-custom">How custom ComputeClasses work</h2> <p>Custom ComputeClasses are Kubernetes custom resources that provision Google Cloud infrastructure. You define a <code translate="no" dir="ltr">ComputeClass</code> object in the cluster, and then request that ComputeClass in workloads or set that ComputeClass as the default for a Kubernetes namespace. When a matching workload demands new infrastructure, GKE provisions new nodes in line with the priorities that you set in your ComputeClass definition.</p> <p>The attributes that you set in your ComputeClasses define how GKE configures new nodes to run workloads. When you modify an existing ComputeClass, all future nodes that GKE creates for that ComputeClass use the modified configuration. GKE doesn't retroactively change the configuration of existing nodes to match your modifications.</p> <p>Custom ComputeClasses influence autoscaling decisions but are not considered by kube-scheduler. During Pod scheduling, the scheduler might not prioritize nodes with higher custom ComputeClass priorities, even when existing nodes are available across various priorities.</p> <p>To ensure that your custom ComputeClasses are optimized for your fleet, consider the following guidelines:</p> <ul> <li>Understand the compute requirements of your fleet, including any application-specific hardware requirements.</li> <li>Decide on a theme that guides the design of each ComputeClass. For example, a performance-optimized ComputeClass might have a fallback strategy that uses only high-CPU machine types.</li> <li>Decide on the Compute Engine machine family and machine series that most closely fit your workloads. For details, see <a href="https://docs.cloud.google.com/compute/docs/machine-resource">Machine families resource and comparison guide</a>.</li> <li>Plan a fallback strategy within each ComputeClass so that workloads always run on nodes that use similar machine configurations. For example, if the N4 machine series isn't available, you can fall back to C3 machines.</li> </ul> <h2 id="view-crd">View the complete custom resource definition</h2> <p>To view the latest custom resource definition (CRD) for the <code translate="no" dir="ltr">ComputeClass</code> custom resource, including all fields and their relationships, refer to the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass">ComputeClass reference documentation</a>.</p> <p>You can also view the CRD in your cluster by running the following command:</p> 
+<pre>kubectl describe crd computeclasses.cloud.google.com
+</pre> <h2 id="plan-custom-compute-class">Plan a custom ComputeClass</h2> <p>To effectively plan, deploy, and use a custom ComputeClass in your cluster, you do the following steps:</p> <ol> <li>
+<a href="#choose-priorities">Choose your fallback compute priorities</a>: Define a series of rules that govern the properties of the nodes that GKE creates for the ComputeClass.</li> <li>
+<a href="#gke-standard-pools-compute-classes">Configure GKE Standard node pools and ComputeClasses</a>: For Standard mode clusters, perform <em>required configuration steps</em> to use the ComputeClass with your node pools.</li> <li>
+<a href="#define-scaling-no-rules">Define scaling behavior when no priority rules apply</a>: optionally, tell GKE what to do if nodes that meet your priority rules can't be provisioned.</li> <li>
+<a href="#set-autoscaling">Set autoscaling parameters for node consolidation</a>: tell GKE when to consolidate workloads and remove underutilized nodes.</li> <li>
+<a href="#active-migration">Configure active migration to higher priority nodes</a>: optionally, tell GKE to move workloads to more preferred nodes as hardware becomes available.</li> <li>
+<a href="#reservations">Consume Compute Engine reservations</a>: optionally, tell GKE to consume existing Compute Engine zonal reservations when creating new nodes.</li> <li>
+<a href="#minimum-capacity">Provision a minimum number of nodes</a>: optionally, tell GKE to maintain a minimum node count in your cluster.</li> </ol> <h2 id="choose-priorities">Choose your fallback compute priorities</h2> <p>The primary advantage of using a custom ComputeClass is to have control over the fallback strategy when your preferred nodes are unavailable due to factors like zonal resource exhaustion (such as seeing <code translate="no" dir="ltr">ZONE_RESOURCE_POOL_EXHAUSTED</code> or <code translate="no" dir="ltr">GCE out of resources</code> messages during <code translate="no" dir="ltr">FailedScaleUp</code> events) and quota limitations. By defining a prioritized list of alternative machine series or provisioning models, your cluster can automatically provision available capacity instead of leaving Pods in a <code translate="no" dir="ltr">Pending</code> state. For more information about troubleshooting insufficient compute capacity, see <a href="../troubleshooting/node-pools#insufficient-resources">Node pool creation fails due to insufficient resources</a> and <a href="../troubleshooting/autopilot-clusters#scaleup-failed-out-of-resources">Node scale up failed: Compute Engine out of resources</a>.</p> <p>You create a fallback strategy by defining a list of <em>priority rules</em> in the <code translate="no" dir="ltr">priorities</code> field in the ComputeClass specification. Each priority rule can request nodes in one of the following ways:</p> <ul> <li><p><strong>Node properties</strong>: define the properties of the nodes that you want Pods to run on, such as machine families to use. When a Pod triggers a scale-up operation, GKE tries to create a node that has those properties. Each priority rule must specify a type of hardware to provision, as described in the <a href="#priority-rules">Top-level node properties for priority rules</a> section.</p></li> <li><p><strong>Node pool selection</strong>: in GKE Standard clusters, specify the names of existing node pools to associate with the ComputeClass. When a Pod triggers a scale-up operation, GKE tries to place the Pod in those node pools. Priority rules that select node pools don't support any other fields. For more information, see the <a href="#gke-standard-pools-compute-classes">GKE Standard node pools and ComputeClasses</a> section.</p></li> </ul> <p>By default, when a new node is needed for an incoming Pod that selects a ComputeClass, GKE attempts to create nodes in the order in which the priority rules appear in the ComputeClass manifest. In GKE version 1.35.2-gke.1842000 and later, you can also explicitly set a <a href="#priority-rule-scores">score for every priority rule</a> in a ComputeClass by using the <code translate="no" dir="ltr">priorityScore</code> field, in which case GKE processes rules in order from the highest score to the lowest score.</p> <p>In both cases, GKE stops evaluating rules at the first rule that satisfies the Pod's requirements and can provision nodes. GKE doesn't evaluate lower-priority rules to find a closer resource fit for the workload. If all of the priority rules in a ComputeClass are exhausted, then GKE creates nodes based on the behavior described in <a href="#define-scaling-no-rules">Define scaling behavior when no priority rules apply</a>.</p> <h3 id="priority-rule-scores">Priority rule scores</h3> <p><em>Requires GKE version 1.35.2-gke.1842000 or later.</em></p> <p>For granular control over the order in which GKE processes priority rules for a ComputeClass, use the <code translate="no" dir="ltr">priorityScore</code> field in your rules. During scaling, GKE processes your priority rules based on the score, with larger score values having a higher priority than smaller values.</p> <p>The <code translate="no" dir="ltr">priorityScore</code> field has the following properties:</p> <ul> <li>The field accepts an integer value with a minimum value of <code translate="no" dir="ltr">1</code> and a maximum value of <code translate="no" dir="ltr">1000</code>.</li> <li>You must use the <code translate="no" dir="ltr">priorityScore</code> field in all of your priority rules or in none of your priority rules.</li> <li>
+<p>You can set the same priority score for up to three separate rules. During scaling, GKE processes rules that have the same score together. GKE chooses a specific rule to use based on the <a href="cluster-autoscaler#operating_criteria">operating criteria of the cluster autoscaler</a>.</p> <p>Grouped rules might increase the latency of autoscaling, because GKE must run more simulations to determine the optimal node configuration. The probability of you noticing a latency increase depends on how broad the hardware selection in the rule is, as follows:</p> <ul> <li>Rules that have a broad scope, such as the <code translate="no" dir="ltr">machineFamily</code> property, are more likely to contribute to a slight increase in autoscaling latency. However, GKE is more likely to find available hardware that meets the requirements of those rules.</li> <li>Rules that have a narrow scope, such as the <code translate="no" dir="ltr">machineType</code> property, are less likely to contribute to a latency increase. However, GKE is more likely to be unable to find available hardware that meets the requirements of those rules.</li> </ul>
+</li> </ul> <p>The following example shows a ComputeClass that sets priority rule scores:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: priority-rule-score-class
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  # Highest priority score in the ComputeClass
+  - machineFamily: e2
+    spot: true
+    priorityScore: 30
+  # Grouped priority rules that have the same score.
+  - machineFamily: n2
+    spot: true
+    priorityScore: 20
+  - machineFamily: t2d
+    spot: true
+    priorityScore: 20
+  # Lowest priority score in the ComputeClass.
+  - machineFamily: n1
+    spot: true
+    priorityScore: 10
+  whenUnsatisfiable: ScaleUpAnyway
+</pre> <p>During a scale-up event for this example ComputeClass, GKE does the following:</p> <ol> <li>GKE tries to create E2 instances.</li> <li>If E2 instances aren't available, GKE creates either N2 or T2D instances, depending on the result of the cluster autoscaler.</li> <li>If N2 and T2D instances aren't available, GKE tries to create N1 instances.</li> <li>If N1 instances aren't available, GKE falls back to the default machine series for the cluster.</li> </ol> <h2 id="priority-rules">Top-level node properties for priority rules</h2> <p>When you specify priority rules that define node properties, you must select a top-level hardware type that you want for the nodes. The other properties that you can specify for a rule depend on the top-level property of that rule.</p> <p>You can use any of the following top-level properties for a rule:</p> <ul> <li>
+<a href="#machinefamily-rule"><code translate="no" dir="ltr">machineFamily</code></a>: a Compute Engine machine series, such as <code translate="no" dir="ltr">n4</code>.</li> <li>
+<a href="#machinetype-rule"><code translate="no" dir="ltr">machineType</code></a>: a specific Compute Engine machine type, such as <code translate="no" dir="ltr">n4-standard-32</code>.</li> <li>
+<a href="#gpu-rule"><code translate="no" dir="ltr">gpu</code></a>: a GPU configuration, which might include a GPU type, a specific number of GPUs, and driver configuration.</li> <li>
+<a href="#tpu_configuration"><code translate="no" dir="ltr">tpu</code></a>: a Cloud TPU configuration, which might include a TPU version, topology, and number of chips.</li> </ul> <p>Accelerator configurations don't require the <code translate="no" dir="ltr">machineType</code> or <code translate="no" dir="ltr">machineFamily</code> field to be explicitly specified unless you use them in combination with <a href="#reservations">reservations</a>.</p> <p>Each Compute Engine machine series generation supports specific disk types. For example, the N4 machine series supports Hyperdisk ML disk types, but the N2 machine series doesn't. In ComputeClasses that span multiple generations, stateful workloads that request a specific disk type might not be able to access persistent data if the machine type doesn't support that disk type. Depending on how you create and use disks in your workloads, use any of the following methods to reduce the risk of inaccessible persistent data:</p> <ul> <li><p><strong>Dynamic volume provisioning</strong>: in GKE version 1.35.3-gke.1290000 and later, use a StorageClass that configures <a href="hyperdisk#automated_disk_type_selection">automated disk type selection</a>. GKE creates a disk type that's compatible with the machine type of the node that runs your workload. In earlier GKE versions, verify that all of the machine series in your ComputeClass support the disk type that your StorageClasses provision.</p></li> <li><p><strong>Pre-existing persistent disks</strong>: verify that all of the machine series in your ComputeClass support the disk types of your pre-existing persistent disks.</p></li> </ul> <p>For more information about the supported disk types for each machine series, see the <a href="https://docs.cloud.google.com/compute/docs/machine-resource#machine_type_comparison">machine series comparison table</a>.</p> <h3 id="machinefamily-rule">machineFamily configurations</h3> <p>The <code translate="no" dir="ltr">machineFamily</code> field accepts any <a href="machine-support#machine-support">Compute Engine machine series that GKE supports</a>, like <code translate="no" dir="ltr">n2</code> or <code translate="no" dir="ltr">c3</code>. If unspecified, the default is <code translate="no" dir="ltr">e2</code>. When you use the <code translate="no" dir="ltr">machineFamily</code> field, GKE provisions nodes from that series with a machine type that is large enough to run your Pods. The autoscaler algorithm determines the most appropriate size based on the aggregate resource requests of all pending Pods. For more control over the exact machine size, use the <code translate="no" dir="ltr">machineType</code> field instead.</p> <p>Requesting a broader machine family doesn't provision bare metal machine types. For example, requesting <code translate="no" dir="ltr">c3</code> or <code translate="no" dir="ltr">c4a</code> doesn't provision machine types such as <code translate="no" dir="ltr">c3-standard-192-metal</code> or <code translate="no" dir="ltr">c4a-standard-72-metal</code> respectively. Because bare metal node types require requesting an exact machine type, you cannot use the predefined Autopilot <code translate="no" dir="ltr">Performance</code> ComputeClass either.</p> <p>To provision bare metal machine types, you create a custom ComputeClass and specify the exact machine type in the <a href="#machinetype-rule"><code translate="no" dir="ltr">machineType</code></a> field. Bare metal machine types have the following version requirements:</p> <ul> <li>
+<code translate="no" dir="ltr">c3</code> and <code translate="no" dir="ltr">c4a</code> bare metal machine types with ComputeClasses, node pool auto-creation, or Autopilot mode require GKE version 1.35.3-gke.1389000 or later.</li> <li>
+<code translate="no" dir="ltr">c4d</code> bare metal machine types with ComputeClasses, node pool auto-creation, or Autopilot mode require GKE version 1.37.0-gke.4713000 or later. Node pools in Standard mode that use <code translate="no" dir="ltr">c4d</code> bare metal machine types require GKE version 1.36 or later. In versions earlier than 1.37.0-gke.4713000, you must manually create and scale these Standard node pools.</li> </ul> <p>You can use other <code translate="no" dir="ltr">spec.priorities</code> fields alongside the <code translate="no" dir="ltr">machineFamily</code> field to declaratively define your compute requirements. For example:</p> <ul> <li>
+<code translate="no" dir="ltr">spot</code>: Spot VMs. The default value is <code translate="no" dir="ltr">false</code>.</li> <li>
+<code translate="no" dir="ltr">minCores</code>: minimum vCPUs per node. The default value is <code translate="no" dir="ltr">0</code>. This field is useful for preventing the creation of nodes that are too small for your needs.</li> <li>
+<code translate="no" dir="ltr">minMemoryGb</code>: minimum memory per node. The default value is <code translate="no" dir="ltr">0</code>.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskType</code>: boot disk type. On Autopilot clusters, only the <code translate="no" dir="ltr">pd-balanced</code> type of <code translate="no" dir="ltr">bootDiskType</code> is supported. Requires GKE version 1.34.1-gke.1431000 or later.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskSize</code>: size in GB for the node boot disk. Requires GKE version 1.34.1-gke.1431000 or later.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskKMSKey</code>: path to Cloud Key Management Service key to use for boot disk encryption.</li> <li>
+<code translate="no" dir="ltr">storage.secondaryBootDisks</code>: Persistent Disks that are used to preload GKE nodes with data, such as a machine learning (ML) model or a container image. Requires GKE version 1.31.2-gke.1105000 or later. To set up a secondary boot disk for your cluster to use, see <a href="../how-to/data-container-image-preloading#configure">configure secondary boot disks</a>. <ul> <li>
+<code translate="no" dir="ltr">storage.secondaryBootDisks.diskImageName</code>: the name of the disk image to preload.</li> <li>
+<code translate="no" dir="ltr">storage.secondaryBootDisks.project</code>: the name of the project to which the disk image belongs. If this value is unspecified, the default is your cluster project.</li> <li>
+<code translate="no" dir="ltr">storage.secondaryBootDisks.mode</code>: the mode in which the secondary boot disk should be used. If this value is set to <code translate="no" dir="ltr">CONTAINER_IMAGE_CACHE</code>, the secondary boot disk is used as a container image cache. The value must be equal to either <code translate="no" dir="ltr">CONTAINER_IMAGE_CACHE</code> or <code translate="no" dir="ltr">MODE_UNSPECIFIED</code>. If this value is unspecified, the default is <code translate="no" dir="ltr">MODE_UNSPECIFIED</code>.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">placement</code>: the specifics of machine placement: <ul> <li>
+<code translate="no" dir="ltr">policyName</code>: the name of either a GKE Autopilot <a href="../how-to/compact-placement#compact-placement-autopilot">compact placement policy</a> or a <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/placement-policy-and-workload-policy">workload policy</a>.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">enableNestedVirtualization</code>: whether to enable <a href="../how-to/nested-virtualization">nested virtualization</a> on the nodes. The default value is <code translate="no" dir="ltr">false</code>.</li> </ul> <p>The following example shows a priority rule that uses <code translate="no" dir="ltr">machineFamily</code>:</p> 
+<pre>priorities:
+- machineFamily: n4
+  spot: true
+  minCores: 16
+  minMemoryGb: 64
+  storage:
+    bootDiskType: hyperdisk-balanced
+    bootDiskSize: 100
+    bootDiskKMSKey: projects/example/locations/us-central1/keyRings/example/cryptoKeys/key-1
+    secondaryBootDisks:
+    - diskImageName: pytorch-mnist
+      project: k8s-staging-jobset
+</pre> <h3 id="machinetype-rule">machineType configurations</h3> <p>The <code translate="no" dir="ltr">machineType</code> field accepts a Compute Engine predefined machine type, like <code translate="no" dir="ltr">n4-standard-32</code>, or a <a href="https://docs.cloud.google.com/compute/docs/instances/creating-instance-with-custom-machine-type#create">custom machine type string</a>, like <code translate="no" dir="ltr">n4-custom-8-20480</code>. Using custom machine types requires GKE version 1.33.2-gke.1111000 or later. You can specify machine types from any <a href="machine-support#machine-support">machine series that GKE supports</a>.</p> <p>You can specify other <code translate="no" dir="ltr">spec.priorities</code> fields alongside the <code translate="no" dir="ltr">machineType</code> field to declaratively define your compute requirements, for example:</p> <ul> <li>
+<code translate="no" dir="ltr">spot</code>: use Spot VMs. Default is <code translate="no" dir="ltr">false</code>.</li> <li>
+<code translate="no" dir="ltr">storage</code>: configure node storage. <ul> <li>
+<code translate="no" dir="ltr">storage.bootDiskType</code>: boot disk type. On Autopilot, only the <code translate="no" dir="ltr">pd-balanced</code> type of <code translate="no" dir="ltr">bootDiskType</code> is supported.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskKMSKey</code>: path to Cloud KMS key to use for boot disk encryption.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskSize</code>: size in GB for the node boot disk.</li> <li>
+<code translate="no" dir="ltr">storage.localSSDCount</code>: number of local SSDs to attach to the node. If specified, must be at least <code translate="no" dir="ltr">1</code>.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">enableNestedVirtualization</code>: whether to enable <a href="../how-to/nested-virtualization">nested virtualization</a> on the nodes. The default value is <code translate="no" dir="ltr">false</code>.</li> </ul> <p>The following example shows a priority rule that uses <code translate="no" dir="ltr">machineType</code> to provision <code translate="no" dir="ltr">n4-standard-32</code> machine types:</p> 
+<pre>priorities:
+- machineType: n4-standard-32
+  spot: true
+  storage:
+    bootDiskType: hyperdisk-balanced
+    bootDiskSize: 250
+    localSSDCount: 2
+    bootDiskKMSKey: projects/example/locations/us-central1/keyRings/example/cryptoKeys/key-1
+</pre> <h3 id="gpu-rule">GPU configuration</h3> <p>To select GPUs in your priority rules, specify the type, count, and driverVersion (optional) of the GPU in the <code translate="no" dir="ltr">gpu</code> field of a priority rule. The following fields are supported:</p> <ul> <li>
+<code translate="no" dir="ltr">gpu.type</code>: a GPU type, like <code translate="no" dir="ltr">nvidia-l4</code>. For details, see <a href="gpus#autopilot-standard-gpus">Choose GPU support using Autopilot or Standard</a>.</li> <li>
+<code translate="no" dir="ltr">gpu.count</code>: the number of GPUs to attach. For supported quantities by GPU type, see <a href="../how-to/autopilot-gpus#supported-quantities">Supported GPU quantities</a>.</li> <li>
+<code translate="no" dir="ltr">gpu.driverVersion</code>: the NVIDIA driver version to install. Must be <code translate="no" dir="ltr">default</code> or <code translate="no" dir="ltr">latest</code>. Requires GKE version 1.31.1-gke.1858000 or later.</li> <li>
+<code translate="no" dir="ltr">acceleratorNetworkProfile</code>: The accelerator network profile for the GPU, such as <code translate="no" dir="ltr">auto</code>. <em>Requires GKE version 1.35.2-gke.1842000 or later.</em>
+</li> </ul> <p>You can also specify other <code translate="no" dir="ltr">spec.priorities</code> <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorities">fields</a> such as Spot VMs, <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#storage">storage options</a>, and <a href="#reservations">reservations</a> in combination with the <code translate="no" dir="ltr">gpu</code> fields.</p> <p>The following example shows a rule for GPUs:</p> 
+<pre>priorities:
+- gpu:
+    type: nvidia-l4
+    count: 1
+  storage:
+    secondaryBootDisks:
+    - diskImageName: big-llm
+      project: k8s-llm
+  spot: true
+</pre> <h3 id="tpu_configuration">TPU configuration</h3> <p><em>Requires GKE version 1.31.2-gke.1518000 or later</em></p> <p>To select TPUs in your priority rules, specify the type, count, and topology of the TPU in the <code translate="no" dir="ltr">tpu</code> field of a priority rule. The following fields are required:</p> <ul> <li>
+<code translate="no" dir="ltr">tpu.type</code>: the TPU type, like <code translate="no" dir="ltr">tpu-v5p-slice</code>. For details, see <a href="tpus#availability-autopilot">TPU availability in GKE Autopilot</a>.</li> <li>
+<code translate="no" dir="ltr">tpu.count</code>: the number of TPUs to attach.</li> <li>
+<code translate="no" dir="ltr">tpu.topology</code>: the TPU topology to use, like <code translate="no" dir="ltr">"2x2x1"</code>. For details, see <a href="tpus#autopilot-tpu-topology">Choose a topology for Autopilot</a>.</li> </ul> <p>You can also specify other <code translate="no" dir="ltr">spec.priorities</code> <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorities">fields</a> alongside the <code translate="no" dir="ltr">tpu</code> field in your priority rule, for example:</p> <ul> <li>
+<code translate="no" dir="ltr">spot</code>: use Spot VMs. Default is <code translate="no" dir="ltr">false</code>.</li> <li>
+<code translate="no" dir="ltr">storage</code>: configure node storage. <ul> <li>
+<code translate="no" dir="ltr">storage.bootDiskType</code>: boot disk type.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskKMSKey</code>: path to Cloud KMS key to use for boot disk encryption.</li> <li>
+<code translate="no" dir="ltr">storage.bootDiskSize</code>: size in GB for the node boot disk.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">reservations</code>: use a Compute Engine reservation. For details, see the <a href="#reservations">Consume Compute Engine reservations</a> section.</li> <li>
+<code translate="no" dir="ltr">location</code>: <ul> <li>
+<code translate="no" dir="ltr">zones</code>: a list of Google Cloud zones where GKE can provision nodes. If unspecified, GKE provisions nodes in the zones configured in the cluster's <a href="../how-to/node-auto-provisioning#locations">node auto-provisioning settings</a>. If no zones are configured for node auto-provisioning, GKE provisions nodes in any of the standard zones that the control plane uses. <p>Optional: use an <a href="https://docs.cloud.google.com/compute/docs/regions-zones/ai-zones">AI zone</a>, like <code translate="no" dir="ltr">us-central1-ai1a</code>. AI zones are specialized locations that are optimized for AI/ML workloads within Google Cloud regions.</p>
+</li> <li>
+<code translate="no" dir="ltr">zoneTypes</code>: a list of zone types that specifies a set of Google Cloud zones where GKE can provision nodes. The supported values are <code translate="no" dir="ltr">CLUSTER_DEFAULT</code> (default), <code translate="no" dir="ltr">STANDARD</code>, and <code translate="no" dir="ltr">AI</code>. For more information, see <a href="../how-to/gke-zonal-topology#using-zone-types">Using location zoneTypes priority</a>.</li> </ul>
+</li> </ul> <p>The following example shows a rule for TPUs:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-class
+spec:
+  priorities:
+  - tpu:
+      type: tpu-v5p-slice
+      count: 4
+      topology: 4x4x4
+    reservations:
+      specific:
+      - name: tpu-reservation
+        project: reservation-project
+      affinity: Specific
+  - spot: true
+    tpu:
+      type: tpu-v5p-slice
+      count: 4
+      topology: 4x4x4
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <p>This example defines the following fallback behavior:</p> <ol> <li>GKE attempts to provision a 16-node multi-host TPU v5p slice by consuming a shared Compute Engine reservation named <code translate="no" dir="ltr">tpu-reservation</code> from the <code translate="no" dir="ltr">reservation-project</code> project.</li> <li>If the reservation has no available TPUs, GKE attempts to provision a 16-node multi-host TPU v5p slice running on Spot VMs.</li> <li>If none of the preceding rules can be satisfied, GKE follows the logic in the <a href="#define-scaling-no-rules">Define scaling behavior when no priority rules apply</a> section.</li> </ol> <p>After you deploy a TPU custom ComputeClass to your cluster, select that custom ComputeClass in your workload:</p> <ul> <li>
+<strong>Autopilot workloads</strong>: see the "Provision TPUs by using custom ComputeClasses" section in <a href="../how-to/tpus-autopilot#custom-compute-classes">Deploy TPU workloads on GKE Autopilot</a>
+</li> <li>
+<strong>Standard workloads</strong>: see the "Provision TPUs by using custom ComputeClasses" section in <a href="../how-to/tpus#custom-compute-classes">Deploy TPU workloads on GKE Standard</a>.</li> </ul> <p>Additionally, for TPU workloads you can do the following:</p> <ul> <li><a href="#use-grouping">Define workload type</a></li> <li><a href="#tpu-use-slo">Define SLO</a></li> <li>Group in collections in TPU Trillium (v6e)</li> <li><a href="#ai-zones">Target AI zones</a></li> </ul> <h4 id="ai-zones">Target AI zones</h4> <p>You can also use a compute class to specify AI zones for your Pods. <a href="https://docs.cloud.google.com/compute/docs/regions-zones/ai-zones">AI zones</a> are specialized locations within Google Cloud regions optimized for AI/ML workloads. The following compute class sets a prioritized list of zones that includes AI zones:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: accelerator-ai-preferred
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+    # --- Priority 1: TPU in a specific AI zone (On-Demand) ---
+    - tpu:
+        type: tpu-v5p-slice
+        count: 4
+        topology: 4x4x4
+      location:
+        zones:
+          - "us-central1-ai1a" # Specify your target AI zone
+      # machineFamily: a3 # Optional
+
+    # --- Priority 2: TPU in any AI zone (On-Demand)  ---
+    - tpu:
+        type: tpu-v5p-slice
+        count: 4
+        topology: 4x4x4
+      location:
+        zoneTypes:
+          - "AI" # All AI zones in the cluster's region
+
+    # --- Priority 3: GPU in a specific Standard zone (On-Demand) ---
+    - gpu:
+        type: nvidia-tesla-a100
+        count: 1
+      location:
+        zones:
+          - "us-central1-a" # Fallback to a standard zone
+          - "us-central1-b"
+  whenUnsatisfiable: DoNotScaleUp</pre> <p>This ComputeClass configures GKE to provision nodes with v5p TPUs or A100 GPUs for the workload. The nodes have the following preferences:</p> <ul> <li>
+<b>Priority 1:</b> attempt to provision the TPU in the <code translate="no" dir="ltr">us-central1-ai1a</code> AI zone.</li> <li>
+<b>Priority 2:</b> if the TPU is not available in the specific AI zone, attempt to provision it in any AI zone of the cluster's region.</li> <li>
+<b>Priority 3:</b> if the TPU is not available in AI zones, attempt to provision the GPU in the <code translate="no" dir="ltr">us-central1-a</code> or <code translate="no" dir="ltr">us-central1-b</code> standard zones.</li> <li>If A100 GPUs are not available in any of the specified zones, GKE will not scale up the node pool.</li> </ul> <h3 id="dranet_network_configuration">DRANET network configuration</h3> <p><em>Requires GKE version 1.35.2-gke.1842000 or later</em></p> <p>To use GKE managed DRANET to request and allocate network interfaces for Pods, you must enable the feature in your <code translate="no" dir="ltr">ComputeClass</code>. You need to:</p> <ul> <li>Enable the DRANET networking driver by setting <code translate="no" dir="ltr">nodePoolConfig.dra.networking.enabled</code> to <code translate="no" dir="ltr">true</code>.</li> <li>Set the <code translate="no" dir="ltr">acceleratorNetworkProfile</code> to <code translate="no" dir="ltr">auto</code> in the <code translate="no" dir="ltr">priorities</code> list.</li> </ul> <p>For more information about how to use DRANET, see <a href="../how-to/allocate-network-resources-dra">Allocate network resources by using GKE managed DRANET</a>.</p> <h2 id="how-gke-uses-priority-rules">How GKE creates nodes using priority rules</h2> <p>When you deploy a workload that requests a ComputeClass and a new node is needed, GKE processes the list of rules in the <code translate="no" dir="ltr">priorities</code> field of the <code translate="no" dir="ltr">ComputeClass</code> specification in order of appearance or, if the <code translate="no" dir="ltr">priorityScore</code> field is set, from the highest to the lowest score.</p> <p>For example, consider the following specification:</p> 
+<pre>spec:
+  ...
+  priorities:
+  - machineFamily: n4
+    spot: true
+    minCores: 64
+  - machineFamily: n4
+    spot: true
+  - machineFamily: n4
+    spot: false
+</pre> <p>When you deploy a workload that requests a ComputeClass with these priority rules, GKE matches nodes as follows:</p> <ol> <li>GKE places Pods on any existing nodes that are associated with this ComputeClass.</li> <li>If existing nodes can't accommodate the Pods, GKE provisions new nodes that use the N4 machine series, are Spot VMs, and have at least 64 vCPU.</li> <li>If N4 Spot VMs with at least 64 vCPU aren't available in the region, GKE provisions new nodes that use N4 Spot VMs that can fit the Pods, regardless of the number of cores.</li> <li>If no N4 Spot VMs are available in the region, GKE provisions new on-demand N4 VMs.</li> <li>If none of the preceding rules can be satisfied, GKE follows the logic in the <a href="#define-scaling-no-rules">Define scaling behavior when no priority rules apply</a> section.</li> </ol> <h2 id="default-values-priority-rules">Default values for priority rules</h2> <p>You can set default values for some of the fields in the priority rules of your ComputeClass specification. These default values apply if the corresponding fields in a specific rule are omitted. You can set these default values by using the <code translate="no" dir="ltr">priorityDefaults</code> field in your ComputeClass specification.</p> <p>The <code translate="no" dir="ltr">priorityDefaults</code> field has the following limitations:</p> <ul> <li>Requires GKE version 1.32.1-gke.1729000 or later.</li> <li>Isn't compatible with the <code translate="no" dir="ltr">nodepools</code> priority rule, which doesn't contain any fields.</li> </ul> <p>For details about the types of default values that you can set, see the <code translate="no" dir="ltr">priorityDefaults</code> section in the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorityDefaults">ComputeClass CustomResourceDefinition</a>.</p> <h2 id="gke-standard-pools-compute-classes">GKE Standard node pools and ComputeClasses</h2> <p>If you use GKE Standard mode, you might have to perform manual configuration to ensure that your ComputeClass Pods schedule as expected.</p> <ul> <li>
+<strong>Auto-created node pools</strong>: no manual configuration required. GKE automatically performs ComputeClass configuration steps for you. For details, see <a href="#autoprovisioning-and-compute-classes">Node pool auto-creation and ComputeClasses</a>.</li> <li>
+<strong>Manually-created node pools</strong>: manual configuration is required. You must add node labels and node taints to your manually created node pools to associate the nodes with a specific ComputeClass. For details, see <a href="#manual-node-pools">Configure manually-created node pools for ComputeClass use</a>.</li> </ul> <h3 id="manual-node-pools">Configure manually-created node pools for ComputeClass use</h3> <p>If your GKE Standard clusters have node pools that you manually created, you must configure those node pools to associate them with specific ComputeClasses. GKE only schedules Pods that request a specific ComputeClass on nodes in node pools that you associate with that ComputeClass. This requirement doesn't apply to a ComputeClass that you configure as the <a href="../how-to/run-pods-default-compute-classes#cluster-default-computeclass">cluster-level default</a>.</p> <p>GKE Autopilot mode and auto-created node pools in GKE Standard mode perform this configuration for you.</p> <p>To associate a manually created node pool with a ComputeClass, you add <em>node labels</em> and <em>node taints</em> to the node pool during creation or during an update by specifying the <code translate="no" dir="ltr">--node-labels</code> flag and the <code translate="no" dir="ltr">--node-taints</code> flag, as follows:</p> <ul> <li>
+<strong>Node label</strong>: <code translate="no" dir="ltr">cloud.google.com/compute-class=<var translate="no">COMPUTE_CLASS</var></code>
+</li> <li>
+<strong>Taint</strong>: <code translate="no" dir="ltr">cloud.google.com/compute-class=<var translate="no">COMPUTE_CLASS</var>:NoSchedule</code>
+</li> </ul> <p>In these attributes, <code translate="no" dir="ltr"><var translate="no">COMPUTE_CLASS</var></code> is the name of your custom ComputeClass.</p> <p>For example, the following commands together update an existing node pool and associate the node pool with the <code translate="no" dir="ltr">dev-class</code> ComputeClass:</p> 
+<pre>gcloud container node-pools update dev-pool \
+    --cluster=example-cluster \
+    --node-labels="cloud.google.com/compute-class=dev-class"
+
+gcloud container node-pools update dev-pool \
+    --cluster=example-cluster \
+    --node-taints="cloud.google.com/compute-class=dev-class:NoSchedule"
+</pre> <p>You can associate each node pool in your cluster with one custom ComputeClass. Pods that GKE schedules on these manually-created node pools only trigger node creation inside those node pools during autoscaling events.</p> <h3 id="autoprovisioning-and-compute-classes">Node pool auto-creation and ComputeClasses</h3> <p>You can use node pool auto-creation with a custom ComputeClass to let GKE automatically create and delete node pools based on your priority rules.</p> <p>To let GKE automatically create node pools for a ComputeClass, you must do the following:</p> <ol> <li>Add the <code translate="no" dir="ltr">nodePoolAutoCreation</code> field with the <code translate="no" dir="ltr">enabled: true</code> value to your <code translate="no" dir="ltr">ComputeClass</code> specification.</li> <li>If your cluster is running a version earlier than GKE version 1.33.3-gke.1136000, you must also <a href="../how-to/node-auto-provisioning#enable-cluster-level">enable cluster-level node auto-provisioning</a>.</li> </ol> <p>GKE can then create new node pools for Pods that use your ComputeClass. GKE decides whether to scale up an existing node pool or create a new node pool based on factors like the size of the clusters and Pod requirements. Pods with ComputeClasses that don't configure node pool auto-creation continue to only scale up existing node pools.</p> <p>You can use ComputeClasses that enable node pool auto-creation alongside ComputeClasses that interact with manually created node pools in the same cluster.</p> <p>Consider the following interactions with node pool auto-creation:</p> <ul> <li>You can't use the <a href="../how-to/node-auto-provisioning#custom_machine_family">machine family</a> or the <a href="spot-vms#spotvms-nap">Spot VMs</a> node selectors because these selectors conflict with ComputeClass behavior. GKE rejects any Pods that request a ComputeClass and also request Spot VMs or specific machine series.</li> <li>
+<p>If you <a href="../how-to/run-pods-default-compute-classes#cluster-default-computeclass">set a default ComputeClass for your cluster</a>, Pods that use a machine family node selector only trigger node creation for that default class in one of the following situations:</p> <ul> <li>The Pods select a machine family that matches one of the priority rules in the cluster-level default class. For example, a Pod that selects N4 instances triggers node creation if the cluster-level default class has a priority rule for N4 instances.</li> <li>The cluster-level default ComputeClass has a value of <code translate="no" dir="ltr">ScaleUpAnyway</code> in the <code translate="no" dir="ltr">spec.whenUnsatisfiable</code> field. Even if the Pods select a machine family that isn't in the ComputeClass priorities, GKE creates new nodes with that machine family.</li> </ul> <p>Pods that select a machine family that isn't in the cluster-level default class priorities won't trigger node creation if the ComputeClass has a value of <code translate="no" dir="ltr">DoNotScaleUp</code> in the <code translate="no" dir="ltr">whenUnsatisfiable</code> field.</p>
+</li> <li><p>You can configure node pool auto-creation for ComputeClasses that use the <code translate="no" dir="ltr">nodepools</code> field to reference existing node pools. GKE processes the priorities in order and attempts to scale the existing node pools up to place your Pods.</p></li> </ul> <p>Consider the following example for a cluster that has both manually-created node pools and node pool auto-creation:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: my-class
+spec:
+  priorities:
+  - nodepools: [manually-created-pool]
+  - machineFamily: n4
+  - machineFamily: c4
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <p>In this example, GKE attempts to do the following:</p> <ol> <li>Create new nodes in the <code translate="no" dir="ltr">manually-created-pool</code> node pool.</li> <li>Provision N4 nodes, either in existing N4 node pools or by creating a new node pool.</li> <li>If GKE can't create N4 nodes, it attempts to scale up existing C4 node pools or create new C4 node pools.</li> </ol> <h3 id="target-specific-node-pools">Target specific node pools in a ComputeClass definition</h3> <p>The <code translate="no" dir="ltr">priorities.nodepools</code> field lets you specify a list of manually created node pools on which GKE attempts to schedule Pods in no specific order in GKE Standard clusters that use cluster autoscaling. This field only supports a list of node pools; you can't specify additional machine properties like the machine series in the same priority rule. When you deploy a workload that requests a ComputeClass that has named node pools, GKE attempts to schedule the pending Pods in those node pools. GKE might create new nodes in those node pools to place the Pods.</p> <p>The node pools that you specify in the <code translate="no" dir="ltr">priorities.nodepools</code> field <em>must</em> be associated with that ComputeClass by using node labels and node taints, as described in the <a href="#manual-node-pools">Configure manually created node pools for ComputeClasses</a> section.</p> <p>The list of node pools that you specify in the <code translate="no" dir="ltr">nodepools</code> field has no priority. To configure a fallback order for named node pools, you must specify multiple separate <code translate="no" dir="ltr">priorities.nodepools</code> items. For example, consider the following specification:</p> 
+<pre>spec:
+  ...
+  priorities:
+  - nodepools: [pool1, pool2]
+  - nodepools: [pool3]
+</pre> <p>In this example, GKE first attempts to place pending Pods that request this ComputeClass on existing nodes in node pools that are labeled with the ComputeClass. If existing nodes aren't available, GKE tries to provision new nodes in <code translate="no" dir="ltr">pool1</code> or <code translate="no" dir="ltr">pool2</code>. If GKE can't provision new nodes in these node pools, GKE attempts to provision new Pods in <code translate="no" dir="ltr">pool3</code>.</p> <h2 id="define-scaling-no-rules">Define scaling behavior when no priority rules apply</h2> <p>The <code translate="no" dir="ltr">ComputeClass</code> custom resource lets you specify what GKE should do if there are no nodes that can meet any of the priority rules. The <code translate="no" dir="ltr">whenUnsatisfiable</code> field in the specification supports the following values.</p> <aside class="key-point"> <p><b>Best practice:</b> If you omit this field, the default behavior depends on the GKE version of your cluster. To avoid unexpected scaling behavior after a version upgrade, explicitly specify this field in your ComputeClass manifest.</p> </aside> <ul> <li>
+<p><code translate="no" dir="ltr">ScaleUpAnyway</code>: create a new node that uses the cluster's default machine configuration. In GKE versions earlier than 1.33, this is the default behavior if you omit this field.</p> <p>GKE takes one of the following actions:</p> <ul> <li>In Autopilot clusters, GKE places the Pod on a new or existing node, regardless of the node machine configuration.</li> <li>In Standard clusters that don't use node pool auto-creation, GKE tries to scale up any manually created node pool that defines a label and taint matching a given ComputeClass.</li> <li>In Standard clusters that use node pool auto-creation, GKE might create a new node pool that uses the default E2 machine series to place the Pod.</li> </ul>
+</li> <li><p><code translate="no" dir="ltr">DoNotScaleUp</code>: leave the Pod in the <code translate="no" dir="ltr">Pending</code> status until a node that meets the ComputeClass requirements is available. In GKE version 1.33 and later, this is the default behavior if you omit this field.</p></li> </ul> <h2 id="request-placement-policy">Request a placement policy</h2> <p>Starting with GKE version 1.33.2-gke.1335000, in GKE Autopilot clusters, you can use compact placement with a custom placement policy or workload policy. For more information, see <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/placement-policy-and-workload-policy#comparison">Comparison of compact placement policy and workload policy</a>.</p> <p>Both placement policy and workload policy place nodes physically close together to reduce network latency. To use a specific policy, you provide its name in a <code translate="no" dir="ltr">policyName</code> field. The policy must be a Compute Engine resource policy that already exists in the GKE project.</p> <p>Consider the following example:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: my-class
+spec:
+  priorities:
+  - machineFamily: n4
+    placement:
+      policyName: my-placement-policy
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <p>In this configuration, GKE applies the compact placement policy for all workloads that use this ComputeClass and provisions their nodes according to the existing resource policy named <code translate="no" dir="ltr">my-placement-policy</code>.</p> <h2 id="set-autoscaling">Set autoscaling parameters for node consolidation</h2> <p>By default, GKE removes nodes that are underutilized by running workloads, consolidating those workloads on other nodes that have capacity. For all ComputeClasses, this is the default behavior because all clusters that use ComputeClasses must use the cluster autoscaler or are Autopilot clusters. During a node consolidation, GKE drains an underutilized node, recreates the workloads on another node, and then deletes the drained node.</p> <p>The timing and criteria for node removal depends on the <a href="cluster-autoscaler#autoscaling_profiles">autoscaling profile</a>. You can fine-tune the resource underutilization thresholds that trigger node removal and workload consolidation by using the <code translate="no" dir="ltr">autoscalingPolicy</code> section in your custom ComputeClass definition. You can fine-tune the following parameters:</p> <ul> <li>
+<code translate="no" dir="ltr">consolidationDelayMinutes</code>: the number of minutes after which GKE removes underutilized nodes</li> <li>
+<code translate="no" dir="ltr">consolidationThreshold</code>: the utilization threshold for CPU and memory as a percentage of the node's available resources. GKE only considers nodes for removal if the resource utilization is less than this threshold.</li> <li>
+<code translate="no" dir="ltr">gpuConsolidationThreshold</code>: the utilization threshold for GPU as a percentage of the node's available resources. GKE only considers nodes for removal if the resource utilization is less than this threshold. Consider setting this to <code translate="no" dir="ltr">100</code> or to <code translate="no" dir="ltr">0</code> so that GKE consolidates any nodes that don't have 100% utilization of attached GPUs.</li> </ul> <p>Consider the following example:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: my-class
+spec:
+  priorities:
+  - machineFamily: n4
+  - machineFamily: c4
+  autoscalingPolicy:
+    consolidationDelayMinutes: 5
+    consolidationThreshold: 70
+</pre> <p>In this configuration, GKE removes unused nodes after five minutes, and nodes only become candidates for consolidation if both their CPU and memory utilization is less than 70%.</p> <h2 id="active-migration">Active migration</h2> <p>Active migration is an optional autoscaling feature in ComputeClasses that automatically replaces existing nodes with new nodes. The following types of active migration are supported:</p> <ul> <li>
+<a href="#optimize-rule-priority"><code translate="no" dir="ltr">optimizeRulePriority</code></a>: GKE replaces nodes that use a lower-priority configuration with nodes that use a higher-priority configuration. This option provides automatic recovery after a temporary zonal capacity shortage (<code translate="no" dir="ltr">ZONE_RESOURCE_POOL_EXHAUSTED</code>). This option helps ensure that your stateless or disruption-tolerant Pods eventually return to your most preferred node configuration even if GKE originally had to provision fallback hardware from a lower-priority rule.</li> <li>
+<a href="#ensure-daemonset-pods-running"><code translate="no" dir="ltr">ensureAllDaemonSetPodsRunning</code></a>: GKE replaces nodes that have unschedulable DaemonSet Pods with larger nodes that can run all of the required DaemonSet Pods. This option helps you to ensure that all of your DaemonSets eventually run on your nodes.</li> </ul> <p>During an active migration, GKE does the following:</p> <ol> <li>GKE creates a new node with a configuration that meets the requirements of the active migration type.</li> <li>GKE cordons the existing node so that new Pods don't run on that node.</li> <li>
+<p>GKE drains the existing node, which evicts Pods from the node. The following factors affect how quickly the node is drained:</p> <ul> <li><a href="https://kubernetes.io/docs/tasks/run-application/configure-pdb/">PodDisruptionBudgets</a></li> <li><a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination-flow"><code translate="no" dir="ltr">terminationGracePeriodSeconds</code></a></li> </ul> <p>Kubernetes controllers, such as Deployments or Jobs, create Pods to replace evicted Pods. GKE schedules these new Pods on the new node.</p>
+</li> <li><p>After the existing node is drained, GKE deletes the node.</p></li> </ol> <p>Active migration doesn't affect Pods and nodes in the following scenarios:</p> <ul> <li>Active migration doesn't evict Pods that have the <code translate="no" dir="ltr">cluster-autoscaler.kubernetes.io/safe-to-evict: "false"</code> annotation.</li> <li>Active migration doesn't evict Pods if the eviction would violate a PodDisruptionBudget.</li> <li>Active migration doesn't replace nodes that can't be removed. For example, active migration doesn't replace a node if doing so violates the <code translate="no" dir="ltr">--min-nodes</code> node pool setting.</li> </ul> <p>Before you enable active migration for a ComputeClass, consider the following potential effects:</p> <ul> <li>Active migration doesn't migrate data that's stored in persistent storage, such as Compute Engine Persistent Disks. To minimize the risk of data loss, don't enable active migration in ComputeClasses that stateful workloads use.</li> <li>In Standard clusters, if you use node pool auto-creation, active migration might trigger the creation of new node pools if existing node pools don't meet the criteria defined in your ComputeClass.</li> <li>Workloads using persistent volumes with zonal resources such as Hyperdisk might not work well with active migration. Zonal restrictions and the machine type restrictions of some Hyperdisk products can reduce the effectiveness of active migration. Also, some stateful workloads might not tolerate the disruption caused by active migration.</li> <li>If you update an existing ComputeClass to enable active migration, GKE migrates existing Pods to new nodes when compute resources become available.</li> </ul> <h3 id="optimize-rule-priority">Active migration to higher priority nodes</h3> <p>The <code translate="no" dir="ltr">optimizeRulePriority</code> active migration type lets GKE replace existing nodes that use a lower-priority configuration with nodes that use a higher-priority configuration.</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: my-class
+spec:
+  priorities:
+  - machineFamily: n4
+  - machineFamily: c4
+  activeMigration:
+    optimizeRulePriority: true
+</pre> <p>If N4 nodes were unavailable when you deployed a Pod with this ComputeClass—for example, because of a temporary zonal resource shortage (<code translate="no" dir="ltr">ZONE_RESOURCE_POOL_EXHAUSTED</code>)—GKE would have used C4 nodes as a fallback option. When N4 capacity recovers in your location or your quota increases, GKE automatically migrates your workloads back to N4 nodes:</p> <ol> <li>GKE creates a new N4 node.</li> <li>GKE cordons and drains the existing C4 node. Your Pods are evicted, respecting any PodDisruptionBudgets and graceful termination configurations.</li> <li>Kubernetes controllers create Pods to replace your evicted Pods. These new Pods run on the N4 node.</li> <li>After the C4 node is drained, GKE deletes the node.</li> </ol> <p>Similarly, if you use the <code translate="no" dir="ltr">priorityScore</code> field to <a href="#priority-rule-scores">set explicit scores for your priority rules</a>, GKE replaces nodes that have a lower score with nodes that have a higher score.</p> <h3 id="ensure-daemonset-pods-running">Active migration to run unschedulable DaemonSet Pods</h3> <p>The <code translate="no" dir="ltr">ensureAllDaemonSetPodsRunning</code> active migration type lets GKE automatically replace existing nodes that have unschedulable DaemonSet Pods with larger nodes that can run those DaemonSet Pods.</p> <p>For example, the following ComputeClass specification configures the N4 machine family:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: my-class
+spec:
+  priorities:
+  - machineFamily: n4
+  activeMigration:
+    ensureAllDaemonSetPodsRunning: true
+</pre> <p>Consider a scenario in which you created a single-Pod Deployment that used this ComputeClass and requested two vCPUs. To run this Pod, GKE created an <code translate="no" dir="ltr">n4-standard-2</code> node. Later, you create a DaemonSet that also requests two vCPUs. The DaemonSet Pod can't run on the <code translate="no" dir="ltr">n4-standard-2</code> node. In this scenario, GKE does the following:</p> <ol> <li>GKE creates a node that uses a larger N4 machine type, such as <code translate="no" dir="ltr">n4-standard-4</code>, which can run your Pod and the DaemonSet Pod. The pending DaemonSet Pod gets scheduled on this new node.</li> <li>GKE cordons and drains the <code translate="no" dir="ltr">n4-standard-2</code> node.</li> <li>When your Pod is evicted, the Deployment creates a replacement Pod. GKE schedules this Pod on the <code translate="no" dir="ltr">n4-standard-4</code> node, alongside the DaemonSet Pod.</li> <li>After the <code translate="no" dir="ltr">n4-standard-2</code> node is drained, GKE deletes the node.</li> </ol> <h2 id="reservations">Consume Compute Engine reservations</h2> <p><em>Available in GKE version 1.31.1-gke.2105000 and later</em></p> <p>If you use Compute Engine <a href="https://docs.cloud.google.com/compute/docs/instances/reservations-overview"><em>capacity reservations</em></a> to get a higher level of assurance of hardware availability in specific Google Cloud zones, you can configure each fallback priority in your custom ComputeClass so that GKE consumes reservations when creating new nodes.</p> <p>To consume Compute Engine reservations by using a custom ComputeClass, you can use the following methods:</p> <ul> <li>
+<strong>Node pool auto-creation</strong>: GKE automatically creates new node pools to consume your specified reservations. For more information, see <a href="#autoprovisioning-and-compute-classes">Node pool auto-creation and ComputeClasses</a>.</li> <li>
+<strong>Manually created node pools</strong>: on Standard mode clusters, you can route workloads to manually created node pools by specifying the <code translate="no" dir="ltr">spec.priorities.nodepools</code> field in your ComputeClass.</li> </ul> <p>Starting in GKE version 1.36.0-gke.3204000, you can configure your workloads to consume any matching reservation without falling back to on-demand capacity by using the <code translate="no" dir="ltr">AnyThenFail</code> affinity setting.</p> <h3 id="reservations-manual">Consume reservations in manually created node pools</h3> <p>To consume reservations in manually created node pools in Standard clusters by using ComputeClasses, follow these steps:</p> <ol> <li><p>Bind the reservations to the node pools by following the steps in <a href="../how-to/consuming-reservations#consuming_reserved_instances_in">Consuming reserved instances in GKE Standard</a>.</p></li> <li><p>Create a ComputeClass that uses the <code translate="no" dir="ltr">nodepools</code> priority rule to select your manually created node pools.</p></li> </ol> <p>For example, consider a scenario in which you have two node pools, each of which you linked to a separate capacity reservation. You prefer that Pods use the reserved capacity in the <code translate="no" dir="ltr">reservation-pool-1</code> node pool instead of the <code translate="no" dir="ltr">reservation-pool-2</code> node pool. The ComputeClass that implements these preferences is similar to the following example:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: manual-pool-reservations
+spec:
+  priorities:
+  - nodepools: ['reservation-pool-1']
+  - nodepools: ['reservation-pool-2']
+</pre> <p>In this example, GKE tries to place Pods in the <code translate="no" dir="ltr">reservation-pool-1</code> first, because that priority rule appears first in the <code translate="no" dir="ltr">priorities</code> field.</p> <h3 id="auto-create-node-pools-reservations">Auto-create node pools to consume reservations</h3> <p>If you use node pool auto-creation, you can request that GKE uses capacity reservations to create node pools for specific priority rules. To consume reservations in auto-created node pools, you must meet the following requirements:</p> <ul> <li>The ComputeClass must <a href="#autoprovisioning-and-compute-classes">enable node pool auto-creation</a>.</li> <li>Non-TPU reservations can be used only when either the <code translate="no" dir="ltr">machineType</code> or <code translate="no" dir="ltr">machineFamily</code> is defined.</li> <li>ComputeClasses that configure local SSDs must use the <code translate="no" dir="ltr">machineType</code> priority rule, not <code translate="no" dir="ltr">machineFamily</code>. For details, see the <a href="#machinetype-rule">machineType rule type</a> section.</li> <li>ComputeClasses that specify reservations for a <code translate="no" dir="ltr">machineType</code> that has attached local SSDs must include a <code translate="no" dir="ltr">localSSDCount:</code> field explicitly.</li> </ul> <p>Consider the following example ComputeClass specification, which prioritizes a specific shared reservation for use when provisioning <code translate="no" dir="ltr">a3-highgpu-1g</code> instances. If the prioritized instance types aren't available, GKE then falls back to any matching reservations in the specification:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: accelerator-reservations
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  - machineType: a3-highgpu-1g
+    storage:
+      localSSDCount: 2
+    gpu:
+      type: nvidia-h100-80gb
+      count: 1
+    reservations:
+      specific:
+      - name: a3-shared-reservation
+        project: reservation-project
+      affinity: Specific
+  - machineType: a3-highgpu-1g
+    storage:
+      localSSDCount: 2
+    gpu:
+      type: nvidia-h100-80gb
+      count: 1
+    reservations:
+      affinity: AnyBestEffort
+  whenUnsatisfiable: DoNotScaleUp
+</pre> <p>If you deploy a Pod that uses the <code translate="no" dir="ltr">accelerator-reservations</code> ComputeClass, GKE first attempts to use the <code translate="no" dir="ltr">a3-shared-reservation</code> reservation when creating new <code translate="no" dir="ltr">a3-highgpu-1g</code> instances to run the Pod. If this specific reservation doesn't have available capacity, GKE tries to scale up <code translate="no" dir="ltr">a3-highgpu-1g</code> instances by using any matching reservation. If no reservations are accessible, GKE falls back to <code translate="no" dir="ltr">a3-highgpu-1g</code> Spot VMs. Finally, if no Spot VMs are available, the scale operation fails.</p> <p>In this example, both priority rules with reservation references explicitly require the <code translate="no" dir="ltr">localSSDCount:</code> field because the <code translate="no" dir="ltr">a3-highgpu-1g</code> machine shape includes local SSDs.</p> <p>The following example shows a shared specific reservation, which falls back to Spot VMs, and then finally to on-demand VMs:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: shared-specific-reservations
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  - machineFamily: n4
+    reservations:
+      specific:
+      - name: n4-shared-reservation
+        project: reservation-project
+      affinity: Specific
+  - machineFamily: n4
+    spot: true
+  - machineFamily: n4
+  whenUnsatisfiable: DoNotScaleUp
+</pre> <p>You can consume the following types of reservations:</p> <ul> <li>
+<p><strong>Specific single-project reservations</strong>: configure the following fields:</p> <ul> <li>Specify the reservation name in the <code translate="no" dir="ltr">reservations.specific.name</code> field.</li> <li>Ensure that the value of the <code translate="no" dir="ltr">reservations.affinity</code> field is <code translate="no" dir="ltr">Specific</code>.</li> </ul>
+</li> <li>
+<p><strong>Specific shared reservations</strong>: configure the following fields:</p> <ul> <li>Specify the reservation name in the <code translate="no" dir="ltr">reservations.specific.name</code> field.</li> <li>Specify the project ID of the project that owns the reservation in the <code translate="no" dir="ltr">reservations.specific.project</code> field.</li> <li>Ensure that the value of the <code translate="no" dir="ltr">reservations.affinity</code> field is <code translate="no" dir="ltr">Specific</code>.</li> </ul>
+</li> <li>
+<p><strong>Any matching reservations with fallback</strong>: configure the following fields:</p> <ul> <li>Ensure that the value of the <code translate="no" dir="ltr">reservations.affinity</code> field is <code translate="no" dir="ltr">AnyBestEffort</code>.</li> <li>Don't set a reservation name or project.</li> </ul>
+</li> <li>
+<p><strong>Any matching reservations without fallback</strong>: configure the following fields:</p> <ul> <li>Ensure that the value of the <code translate="no" dir="ltr">reservations.affinity</code> field is <code translate="no" dir="ltr">AnyThenFail</code>.</li> <li>Don't set a reservation name or project.</li> <li>Optional. To strictly enforce the failure if any matching reservations are exhausted, configure the <code translate="no" dir="ltr">whenUnsatisfiable: DoNotScaleUp</code> setting at the <code translate="no" dir="ltr">spec</code> level of the ComputeClass.</li> </ul>
+</li> </ul> <p>TPU reservations require Specific affinity. The <code translate="no" dir="ltr">reservations.affinity: AnyBestEffort</code> and <code translate="no" dir="ltr">reservations.affinity: AnyThenFail</code> settings are not supported.</p> <p>If GKE can't find available capacity in a reservation, the resulting behavior depends on the type of reservation being selected in the ComputeClass priority rule, as follows:</p> <ul> <li>
+<strong>Specific reservations</strong>: GKE tries the next priority rule in the ComputeClass.</li> <li>
+<strong>Any matching reservations with fallback (<code translate="no" dir="ltr">AnyBestEffort</code>)</strong>: GKE tries to provision an on-demand node that meets the requirements of that priority rule. If GKE can't provision an on-demand node, GKE tries the next priority rule in the ComputeClass.</li> <li>
+<strong>Any matching reservations without fallback (<code translate="no" dir="ltr">AnyThenFail</code>)</strong>: GKE skips provisioning an on-demand node and tries the next priority rule in the ComputeClass. If no other rules apply, the scale operation fails depending on the value of <code translate="no" dir="ltr">whenUnsatisfiable</code> setting.</li> </ul> <p>If GKE can't meet the requirements of any of the priority rules for the ComputeClass, the <a href="#define-scaling-no-rules">behavior when no rules apply</a> occurs.</p> <h3 id="specific-reservations">Consume specific reservation blocks</h3> <p>Starting with GKE version 1.31.4-gke.1072000, you can target a specific reservation block within a hardware-backed reservation. This feature is available for the <strong>A3 Ultra</strong> and <strong>A4</strong> machine types.</p> <p>To consume a specific reservation block, configure your ComputeClass resource as shown in this example:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: specific-reservations
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  - machineFamily: a3
+    gpu:
+      type: nvidia-h200-141gb
+      count: 8
+    reservations:
+      specific:
+      - name: a3ultra-specific-reservation
+        reservationBlock:
+          name: RESERVATION_BLOCK_NAME
+      affinity: Specific
+</pre> <p>Replace <var translate="no">RESERVATION_BLOCK_NAME</var> with the target reservation block name.</p> <p>Starting with GKE version 1.33.1-gke.1788000, you can target a specific reservation sub-block within a reservation block. This feature is available for the <strong>A4X</strong> machine type.</p> <p>To consume a specific reservation sub-block, configure your ComputeClass resource as shown in the example in <a href="../how-to/consuming-reservations#autopilot-reservation-sub-block">Consume specific reservation sub-blocks</a>.</p> <p>When you use this feature, be aware of these considerations:</p> <ul> <li>These features apply only to <em>specific reservations</em> in either a single or a shared project.</li> </ul> <h2 id="minimum-capacity">Minimum node counts</h2> <p><em>Available in GKE version 1.36.3-gke.1253000 and later.</em></p> <p>You can specify a minimum number of nodes for GKE to maintain for either an entire ComputeClass or for specific priority rules by using the <code translate="no" dir="ltr">minimumCapacity.targetNodeCount</code> field. GKE maintains at least the specified number of nodes, even if that capacity is idle. Specifying a minimum capacity works well for workloads that need a baseline amount of compute capacity, such as large AI/ML training or low-latency serving workloads. GKE continues to autoscale nodes above the minimum when your workloads need more capacity.</p> <p>When you specify a minimum capacity for a ComputeClass or priority rule, consider the following behavior:</p> <ul> <li>If the capacity is for the entire ComputeClass, then GKE maintains at least that number of nodes across all of the priority rules in the ComputeClass. If the capacity is for a specific priority rule, then GKE maintains at least that number of nodes for that priority rule.</li> <li>If the number of nodes is less than the specified minimum number, then GKE automatically creates new nodes to maintain the minimum capacity, even if those additional nodes don't run any of your Pods.</li> <li>GKE doesn't scale down the nodes that make up the minimum capacity, even if those nodes are empty.</li> <li>The specified capacity is a <em>minimum</em> value. During scale-up events, GKE can exceed the minimum number of nodes to run pending Pods.</li> <li>If you enable <a href="#optimize-rule-priority">active migration to higher priority nodes</a>, then GKE can replace the nodes for the minimum capacity with nodes from a higher-priority rule. However, GKE doesn't replace a node if the replacement puts a priority rule below its minimum capacity.</li> <li>Resource availability or quotas might prevent GKE from creating nodes for the minimum capacity requirement.</li> <li>If GKE can't create enough nodes for the minimum capacity of a priority rule, then GKE doesn't fall back to other priority rules. Instead, GKE creates the missing nodes for that priority rule when capacity becomes available.</li> <li>Nodes might still be deleted and replaced to maintain cluster health (for example, to fix an unhealthy node or to preempt a Spot VMs). GKE automatically creates new nodes to maintain the minimum capacity.</li> </ul> <p>Depending on whether you configure a minimum capacity for an entire ComputeClass or for specific priority rules, the following requirements apply:</p> <ul> <li>
+<p><strong>Minimum capacity for the ComputeClass</strong>: if you specify the <code translate="no" dir="ltr">minimumCapacity.targetNodeCount</code> field for the entire ComputeClass, then all of the priority rules must directly or indirectly request a specific machine type. Every priority rule must use at least one of the following configurations:</p> <ul> <li><code translate="no" dir="ltr">machineType</code></li> <li><code translate="no" dir="ltr">gpu</code></li> <li><code translate="no" dir="ltr">tpu</code></li> <li>A specific capacity reservation</li> </ul> <p>GKE rejects ComputeClasses that use flexible configurations in a priority rule, such as the <code translate="no" dir="ltr">machineFamily</code> field, and that also specify a minimum capacity for the entire ComputeClass.</p>
+</li> <li>
+<p><strong>Minimum capacity for a priority rule</strong>: if you specify the <code translate="no" dir="ltr">minimumCapacity.targetNodeCount</code> field for a specific priority rule, then that priority rule must directly or indirectly request a specific machine type by using at least one of the following configurations:</p> <ul> <li><code translate="no" dir="ltr">machineType</code></li> <li><code translate="no" dir="ltr">gpu</code></li> <li><code translate="no" dir="ltr">tpu</code></li> <li>A specific capacity reservation</li> </ul>
+</li> </ul> <p>The following examples show the minimum capacity configuration for a ComputeClass and for a priority rule:</p> <ul> <li>
+<p><strong>ComputeClass</strong>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: gpu-class-min-nodes
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  # Define a global minimum capacity of 5 nodes for this ComputeClass
+  minimumCapacity:
+    targetNodeCount: 5
+  priorities:
+  - gpu:
+      type: "nvidia-tesla-a100"
+      count: 1
+    machineType: "a2-highgpu-1g"
+  - gpu:
+      type: "nvidia-l4"
+      count: 1
+    machineType: "g2-standard-8"
+</pre>
+</li> <li>
+<p><strong>Priority rule</strong>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tiered-compute-class
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  - machineType: "n2-standard-16"
+    # Maintain at least three nodes of this specific configuration
+    minimumCapacity:
+      targetNodeCount: 3
+  - machineType: "e2-standard-4"
+</pre>
+</li> </ul> <h3 id="minimum-capacity-combined">Minimum capacity for both a ComputeClass and its priority rules</h3> <p>If you specify a minimum capacity for a ComputeClass and for some of its priority rules, then the priority rule minimums count toward the ComputeClass minimum. The following behavior applies:</p> <ul> <li>If the priority rule minimums add up to at least the ComputeClass minimum, then the nodes for the priority rules also meet the ComputeClass minimum. GKE doesn't create additional nodes for the ComputeClass minimum, even in higher-priority rules that don't specify a minimum capacity.</li> <li>The ComputeClass minimum doesn't limit the priority rule minimums. GKE creates all of the nodes for each priority rule minimum, even if the total exceeds the ComputeClass minimum.</li> <li>If the priority rule minimums add up to less than the ComputeClass minimum, then GKE creates the remaining nodes by using the priority rules in order. If needed, GKE falls back to lower-priority rules for these remaining nodes.</li> </ul> <p>For example, consider the following ComputeClass, which specifies a minimum capacity for the ComputeClass and for the second priority rule:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: combined-min-nodes
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  minimumCapacity:
+    targetNodeCount: 5
+  priorities:
+  - machineType: "n2-standard-16"
+  - machineType: "e2-standard-16"
+    minimumCapacity:
+      targetNodeCount: 3
+</pre> <p>For this ComputeClass, GKE creates three <code translate="no" dir="ltr">e2-standard-16</code> nodes for the second priority rule. These nodes count toward the ComputeClass minimum of five nodes. For the two remaining nodes, GKE tries to create <code translate="no" dir="ltr">n2-standard-16</code> nodes first. If <code translate="no" dir="ltr">n2-standard-16</code> nodes aren't available, then GKE falls back to <code translate="no" dir="ltr">e2-standard-16</code> nodes.</p> <p>If you enable <a href="#optimize-rule-priority">active migration to higher priority nodes</a>, then GKE can later replace up to two <code translate="no" dir="ltr">e2-standard-16</code> nodes with <code translate="no" dir="ltr">n2-standard-16</code> nodes. However, GKE keeps at least three <code translate="no" dir="ltr">e2-standard-16</code> nodes for the minimum capacity of the second priority rule.</p> <p>If you set the <code translate="no" dir="ltr">targetNodeCount</code> field in the second priority rule to <code translate="no" dir="ltr">6</code> instead, then GKE creates six <code translate="no" dir="ltr">e2-standard-16</code> nodes. These six nodes meet the ComputeClass minimum of five nodes, so GKE doesn't create any <code translate="no" dir="ltr">n2-standard-16</code> nodes for the minimum capacity.</p> <h2 id="customize-node-system-config">Customize the node system configuration</h2> <p>You can customize certain parameters in the kubelet and the Linux kernel by using the <code translate="no" dir="ltr">nodeSystemConfig</code> field in your ComputeClass specification. You can specify this field in any priority rule that defines a Compute Engine machine series or machine type. You can also set default global values for any node system configuration fields that are omitted in priority rules by adding the <code translate="no" dir="ltr">nodeSystemConfig</code> field to the <a href="#default-values-priority-rules"><code translate="no" dir="ltr">priorityDefaults</code> field</a> in your ComputeClass.</p> <p>This feature is available in GKE version 1.32.1-gke.1729000 and later.</p> <p>For more information, see the following:</p> <ul> <li><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#nodeSystemConfig">ComputeClass CustomResourceDefinition</a></li> <li><a href="../how-to/node-system-config">Customizing node system configuration</a></li> </ul> <h2 id="node-labels-and-taints">Specify node labels and taints</h2> <p>In your ComputeClass specification, the <code translate="no" dir="ltr">nodeLabels</code> and <code translate="no" dir="ltr">taints</code> fields let you define configurations that both match existing node pools and govern the creation of new ones. These configurations can be applied globally within the <code translate="no" dir="ltr">nodePoolConfig</code> field for the entire ComputeClass or scoped to a specific priority using the <code translate="no" dir="ltr">priority</code> field; however, you must ensure that labels and taints defined at the priority level don't overlap with those that were set globally.</p> <p>These features are available in the following:</p> <ul> <li>Priority node labels in GKE version 1.33.2-gke.1111000 and later.</li> <li>Priority taints in GKE version 1.33.4-gke.1350000 and later.</li> <li>Global node labels and taints in GKE version 1.34.1-gke.3084002 and later.</li> </ul> <p>In addition to custom labels, GKE automatically assigns the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> system label to all nodes provisioned for or associated with a ComputeClass. You can filter and list nodes by ComputeClass:</p> 
+<pre>kubectl get nodes -l cloud.google.com/compute-class=COMPUTECLASS_NAME
+</pre> <p>For more information, see <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass">ComputeClass CustomResourceDefinition</a>.</p> <h3 id="architecture-taint">Configure the default Arm architecture taint</h3> <p>By default, GKE adds the <code translate="no" dir="ltr">kubernetes.io/arch=arm64:NoSchedule</code> taint to all Arm nodes, including nodes created for custom ComputeClasses. GKE schedules only workloads that have a toleration for this taint on the Arm nodes, which helps to prevent x86 workloads from running on incompatible architecture. If your workloads are compatible with both x86 and Arm, then you can disable this default taint. Any workload that selects the ComputeClass can run on the Arm nodes, even if those workloads don't have the toleration for Arm architecture.</p> <p>You can update the default taint behavior in Standard node pools, and with nodes created for custom ComputeClasses. For more information about configuring the behavior for Standard node pools, see <a href="../how-to/prepare-arm-workloads-for-deployment#configure-default-taint">Configure the default Arm architecture taint</a>.</p> <p>To change the default behavior and let GKE schedule workloads that don't have a corresponding toleration to Arm nodes that are created for a custom ComputeClass, configure your ComputeClass as shown in this example:</p> 
+<pre>taintConfig:
+  architectureTaintBehavior: NONE
+</pre> <p>This field requires a cluster running GKE version 1.36.2-gke.1498000 or later.</p> <h2 id="default-computeclasses">Default ComputeClasses for clusters and namespaces</h2> <p>You can configure GKE to apply a ComputeClass by default to Pods that don't select a specific ComputeClass. You can define a default ComputeClass for specific namespaces or for an entire cluster. For more information about how to configure your clusters or namespaces with a default class, see <a href="../how-to/run-pods-default-compute-classes">Apply ComputeClasses to Pods by default</a>.</p> <h2 id="use-grouping">Group node pools</h2> <p>Starting with GKE version 1.32.2-gke.1359000, you can group multiple node pools into a single logical unit called a <em>collection</em> by using the <code translate="no" dir="ltr">nodePoolGroup</code> field in your ComputeClass specification. This grouping lets you apply shared configurations across many node pools.</p> <h3 id="tpu-multi-host-collection">TPU multi-host collection</h3> <p><em>Requires GKE version 1.31.2-gke.1518000 or later. Only available in TPU Trillium (v6e)</em></p> <p>You can group your TPU multi-host deployment to set a Service Level Objective (SLO) across all node pools within the collection. To group node pools, specify the name of the group in the <code translate="no" dir="ltr">nodePoolGroup</code> field. All node pools provisioned using this ComputeClass belong to the same group.</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-multi-host-collection
+spec:
+  nodePoolGroup:
+    name: my-tpu-collection
+  ...
+</pre> <p>For more information, see the following:</p> <ul> <li><a href="plan-tpus">Plan TPUs in GKE</a></li> <li><a href="tpus#multi-host">Multi-host TPU slice node pools</a></li> <li><a href="https://docs.cloud.google.com/tpu/docs/collection-scheduling">Schedule TPU collections for inference workloads</a></li> </ul> <h2 id="node_pool_configuration">Node pool configuration</h2> <p>The <code translate="no" dir="ltr">nodePoolConfig</code> field in your ComputeClass specification lets you apply configuration that is reflected in all nodes within the node pools created using that class.</p> <h3 id="specify_image_type">Specify image type</h3> <p>You can specify the base operating system for the nodes in the node pool by using the <code translate="no" dir="ltr">imageType</code> field. This field lets you choose an image type for the node pools that will run on the nodes. If you omit this field, the default value is <code translate="no" dir="ltr">cos_containerd</code>. The following example shows how to specify the <code translate="no" dir="ltr">imageType</code> in your ComputeClass:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: my-node-pool-config
+spec:
+  nodePoolConfig:
+    imageType: cos_containerd
+</pre> <p>For more information, see the <a href="node-images">Node images</a>.</p> <h3 id="service_account">Service account</h3> <p>The <code translate="no" dir="ltr">serviceAccount</code> field specifies the Google Cloud service account used by the nodes within node pools that are managed by the ComputeClass. The following example shows how to specify the <code translate="no" dir="ltr">serviceAccount</code> in your ComputeClass:</p> 
+<pre>spec:
+  nodePoolConfig:
+    serviceAccount: my-service-account@my-project.iam.gserviceaccount.com
+</pre> <p>For more information, see <a href="../how-to/service-accounts">About service accounts in GKE</a>.</p> <h3 id="tpu-use-slo">Define workload type for TPU SLO</h3> <p>Starting with GKE version 1.32.2-gke.1359000, you can define the Service Level Objective (SLO) for your TPU workloads by using the <code translate="no" dir="ltr">workloadType</code> field within <code translate="no" dir="ltr">nodePoolConfig</code>. The value in this field tells GKE the intended use for the TPU resources. The <code translate="no" dir="ltr">workloadType</code> field supports the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">HIGH_AVAILABILITY</code>: use this value for availability-focused workloads, such as inference serving, to limit and streamline interruptions.</li> <li>
+<code translate="no" dir="ltr">HIGH_THROUGHPUT</code>: use this value for batch or training jobs that require all underlying infrastructure to run most of the time to make progress. This value can be used only when <code translate="no" dir="ltr">nodePoolGroup</code> is also specified.</li> </ul> <p>The following example defines a ComputeClass for a multi-host TPU collection optimized for high-availability inference workloads.</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: multi-host-inference
+spec:
+  nodePoolGroup:
+    name: my-inference-collection
+  nodePoolConfig:
+    workloadType: HIGH_AVAILABILITY
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  - tpu:
+      type: tpu-v6e-slice
+      topology: 2x4
+</pre> <p>For more information, see the following:</p> <ul> <li><a href="tpus">About TPUs in GKE</a></li> <li><a href="plan-tpus">Plan TPUs in GKE</a></li> </ul> <h3 id="sandbox_configuration">Sandbox configuration</h3> <p><em>Requires GKE version 1.36.2-gke.1368000 or later</em></p> <p>You can isolate workloads from the host kernel of nodes by running the Pods in <em>sandboxes</em> by using <a href="sandbox-pods">GKE Sandbox</a>. In ComputeClasses, you can enable GKE Sandbox and select a sandbox type for the nodes by using the <code translate="no" dir="ltr">nodePoolConfig.sandbox</code> field. The following sandbox types are supported:</p> <ul> <li>
+<code translate="no" dir="ltr">gvisor</code>: requires GKE version 1.36.2-gke.1368000 or later.</li> <li>
+<code translate="no" dir="ltr">microvm</code>: requires GKE version 1.37.0-gke.4713000 or later and nodes that use nested virtualization.</li> </ul> <p>For more information about the features, limitations, and requirements of these sandbox types, see <a href="sandbox-pods">About GKE Sandbox</a>.</p> <p>To use a ComputeClass to enable and request sandboxes, see <a href="../how-to/sandbox-pods">Isolate workloads by using GKE Sandbox</a>.</p> <h3 id="instance-metadata">Instance metadata configuration</h3> <p><em>Requires GKE version 1.36.2-gke.1498000 or later.</em></p> <p>The <code translate="no" dir="ltr">instanceMetadata</code> field in a ComputeClass specification lets you add custom metadata key-value pairs directly into the Compute Engine VM instances provisioned for your node pools by Cluster Autoscaler or Node Auto-provisioning. This is analogous to specifying the <code translate="no" dir="ltr">--metadata</code> flag when creating node pools manually with the Google Cloud CLI.</p> <p>Custom instance metadata configuration using ComputeClasses is supported only on GKE Standard mode clusters (<code translate="no" dir="ltr">spec.autopilot.enabled: false</code>).</p> <p>You can specify <code translate="no" dir="ltr">instanceMetadata</code> in two places within a ComputeClass:</p> <ul> <li>
+<strong>Global configuration (<code translate="no" dir="ltr">spec.nodePoolConfig.instanceMetadata</code>)</strong>: applies custom metadata key-value pairs globally to all new node pools and VMs created by the ComputeClass.</li> <li>
+<strong>Priority-specific overrides (<code translate="no" dir="ltr">spec.priorities[].instanceMetadata</code>)</strong>: applies custom metadata key-value pairs only when GKE provisions nodes using that specific priority in the hierarchy.</li> </ul> <p>If the same metadata key is defined in both <code translate="no" dir="ltr">nodePoolConfig.instanceMetadata</code> and <code translate="no" dir="ltr">priorities[].instanceMetadata</code>, the value specified in <code translate="no" dir="ltr">priorities[].instanceMetadata</code> overrides the global value.</p> <h4 id="schema-and-validation-rules">Schema and validation rules</h4> <p>When defining <code translate="no" dir="ltr">instanceMetadata</code>, adhere to the following validation constraints:</p> <ul> <li>
+<strong>Type</strong>: key-value pairs structured as a <code translate="no" dir="ltr">map</code> (<code translate="no" dir="ltr">map[string]string</code>).</li> <li>
+<strong>Size limits</strong>: <ul> <li>The maximum size of an individual metadata value is 32 KB (32,768 bytes).</li> <li>The maximum combined size of all metadata key-value pairs across the entire <code translate="no" dir="ltr">ComputeClass</code> resource cannot exceed 512 KB (524,288 bytes).</li> </ul>
+</li> <li>
+<strong>Key limits and formatting</strong>: <ul> <li>You can define a maximum of 32 custom metadata key-value pairs per <code translate="no" dir="ltr">ComputeClass</code>.</li> <li>Keys must be fewer than 128 characters long and can contain only alphanumeric characters, hyphens (<code translate="no" dir="ltr">-</code>), and underscores (<code translate="no" dir="ltr">_</code>).</li> </ul>
+</li> <li>
+<strong>Reserved keys</strong>: GKE and Compute Engine reserve specific system metadata keys required to manage cluster operations (such as <code translate="no" dir="ltr">kube-env</code>, <code translate="no" dir="ltr">user-data</code>, <code translate="no" dir="ltr">startup-script</code>, and <code translate="no" dir="ltr">cluster-name</code>). You cannot override or specify reserved system metadata keys.</li> <li>
+<strong>Immutability on existing node pools</strong>: modifying <code translate="no" dir="ltr">instanceMetadata</code> on an existing <code translate="no" dir="ltr">ComputeClass</code> applies only when GKE provisions new node pools (when <code translate="no" dir="ltr">nodePoolAutoCreation</code> is enabled). Existing node pools and VMs are not retroactively modified.</li> </ul> <p>The following example shows how to configure both global instance metadata across all node pools and a priority-specific metadata override:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: metadata-example-class
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  nodePoolConfig:
+    instanceMetadata:
+      environment: "production"
+      team: "backend-platform"
+  priorities:
+  - machineFamily: n4
+    instanceMetadata:
+      workload-tier: "high-performance"
+  - machineFamily: e2
+    instanceMetadata:
+      workload-tier: "fallback-general"
+      team: "shared-infra"
+</pre> <h2 id="configure-limits">Configure autoscaling limits</h2> <p><em>Available in GKE version 1.36.2-gke.2064000 and later.</em></p> <p>By default, GKE provisions new nodes for a ComputeClass up to the overall cluster <a href="cluster-autoscaler#autoscaling_limits">autoscaling limits</a>. To enforce stricter resource boundaries for a specific ComputeClass, such as limiting the maximum number of GPUs, CPUs, or total nodes that can be provisioned for the ComputeClass, you can apply a CapacityQuota custom resource.</p> <p>For more information, see <a href="../how-to/configure-capacity-quotas">Configure granular resource limits</a>.</p> <h3 id="shielded-instance-config">Shielded GKE Nodes configuration</h3> <p><em>Requires GKE version 1.36.3-gke.1244000 or later</em></p> <p>To configure <a href="../how-to/shielded-gke-nodes">Shielded GKE Nodes</a> features, such as Secure Boot and Integrity Monitoring, for auto-created node pools managed by a ComputeClass, specify <code translate="no" dir="ltr">shieldedInstanceConfig</code> field under <code translate="no" dir="ltr">nodePoolAutoCreation</code> block (<a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#shieldedInstanceConfig"><code translate="no" dir="ltr">spec.nodePoolAutoCreation.shieldedInstanceConfig</code></a>).</p> <p>The default values for <code translate="no" dir="ltr">shieldedInstanceConfig</code> depend on your cluster mode and ComputeClass configuration:</p> <ul> <li>
+<strong>In Standard mode clusters</strong>: when <code translate="no" dir="ltr">shieldedInstanceConfig</code> is initialized during <code translate="no" dir="ltr">nodePoolAutoCreation</code> reconciliation, <code translate="no" dir="ltr">enableIntegrityMonitoring</code> field defaults to <code translate="no" dir="ltr">true</code> and <code translate="no" dir="ltr">enableSecureBoot</code> field defaults to <code translate="no" dir="ltr">false</code> unless you explicitly configure them.</li> <li>
+<strong>In Autopilot clusters</strong> (or when <code translate="no" dir="ltr">spec.autopilot.enabled</code> is <code translate="no" dir="ltr">true</code> in a ComputeClass): both <code translate="no" dir="ltr">enableSecureBoot</code>and <code translate="no" dir="ltr">enableIntegrityMonitoring</code> fields default to <code translate="no" dir="ltr">true</code> and can't be disabled.</li> </ul> <p>The following example demonstrates how to configure <code translate="no" dir="ltr">shieldedInstanceConfig</code> field inside <code translate="no" dir="ltr">nodePoolAutoCreation</code> block to enable Shielded GKE Nodes features across auto-created node pools:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: shielded-ccc
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+    shieldedInstanceConfig:
+      enableSecureBoot: true
+      enableIntegrityMonitoring: true
+</pre> <h2 id="using-compute">Request ComputeClasses in workloads</h2> <p>To use a custom ComputeClass, your Pod must explicitly request that ComputeClass by using a <code translate="no" dir="ltr">nodeSelector</code> in the Pod specification. You can optionally set a ComputeClass as the default for a specific Kubernetes namespace. Pods in that namespace use that ComputeClass unless the Pods request a different ComputeClass.</p> <p>For example, the following manifest requests the <code translate="no" dir="ltr">cost-optimized</code> ComputeClass:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-workload
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: custom-workload
+  template:
+    metadata:
+      labels:
+        app: custom-workload
+    spec:
+      nodeSelector:
+        cloud.google.com/compute-class: cost-optimized
+      containers:
+      - name: test
+        image: registry.k8s.io/pause
+        resources:
+          requests:
+            cpu: 1.5
+            memory: "4Gi"
+</pre> <h3 id="system-label-selectors">Node selectors for system node labels</h3> <p>GKE adds system labels to nodes to identify nodes by criteria like the machine type, attached hardware accelerators, or the boot disk type. These system labels have one of the following prefixes in the label key:</p> <ul> <li><code translate="no" dir="ltr">k8s.io</code></li> <li><code translate="no" dir="ltr">cloud.google.com</code></li> <li><code translate="no" dir="ltr">gke.io</code></li> <li><code translate="no" dir="ltr">node.kubernetes.io/instance-type</code></li> </ul> <p>In GKE version 1.32.3-gke.1499000 and later, you can deploy workloads that use a node selector to select system labels and a ComputeClass at the same time. If you select system labels in Pods that select ComputeClasses, verify that those Pods schedule as expected. A conflict between the configuration of a ComputeClass and the node selectors in a Pod might result in issues like the following:</p> <ul> <li>GKE can't create nodes that use the highest-priority configuration for the ComputeClass.</li> <li>The Pod remains in the <code translate="no" dir="ltr">Pending</code> status.</li> </ul> <p>GKE also rejects any Pods that select system labels that have a corresponding field in the <code translate="no" dir="ltr">ComputeClass</code> specification. When you use ComputeClasses, update your workloads to remove the following labels from node selectors and configure the corresponding field in the ComputeClasses that you create:</p> <div>  <input type="text" placeholder="Search for a node label"> <table> <thead> <tr> <th>Node label</th> <th>
+<code translate="no" dir="ltr">ComputeClass</code> field</th> </tr> </thead> <tbody class="list"> <tr> <td><code translate="no" dir="ltr">cloud.google.com/machine-family</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorities"><code translate="no" dir="ltr">priorities.machineFamily</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/machine-type</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorities"><code translate="no" dir="ltr">priorities.machineType</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-spot</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorities"><code translate="no" dir="ltr">priorities.spot</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-accelerator</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#gpu"><code translate="no" dir="ltr">priorities.gpu.type</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-gpu-driver-version</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#gpu"><code translate="no" dir="ltr">priorities.gpu.driverVersion</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/reservation-name</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#specific"><code translate="no" dir="ltr">priorities.reservations.specific.name</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/reservation-project</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#specific"><code translate="no" dir="ltr">priorities.reservations.specific.project</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/reservation-affinity</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#reservations"><code translate="no" dir="ltr">priorities.reservations.affinity</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-ephemeral-storage-local-ssd</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#storage"><code translate="no" dir="ltr">priorities.storage.localSSDCount</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-boot-disk</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#storage"><code translate="no" dir="ltr">priorities.storage.bootDiskType</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-boot-disk-size</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#storage"><code translate="no" dir="ltr">priorities.storage.bootDiskSize</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-node-pool-group-name</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#nodepoolgroup"><code translate="no" dir="ltr">nodePoolGroup.name</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">cloud.google.com/gke-workload-type</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#nodepoolconfig"><code translate="no" dir="ltr">nodePoolConfig.workloadType</code></a></td> </tr> <tr> <td><code translate="no" dir="ltr">node.kubernetes.io/instance-type</code></td> <td><a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#priorities"><code translate="no" dir="ltr">priorities.machineType</code></a></td> </tr> </tbody> </table>  </div> <h2 id="monitoring">Monitoring ComputeClass usage</h2> <p>You can monitor how the cluster autoscaler interacts with ComputeClasses by using Cloud Monitoring metrics. Metrics such as <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_pending_pods_per_ccc</code>, <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_node_provisioning_attempts_count_per_ccc</code>, and <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_node_provisioning_failed_attempts_count_per_ccc</code> track pending Pods, node provisioning attempts, and provisioning failures. These metrics are available on GKE version 1.37 and later.</p> <p>For detailed information about querying these metrics and interpreting labels, see <a href="../how-to/cluster-autoscaler-visibility">View cluster autoscaler events and metrics</a>.</p> <h2 id="limitations">Limitations</h2> <ul> <li>ComputeClass name can't begin with <code translate="no" dir="ltr">gke</code> or <code translate="no" dir="ltr">autopilot</code> (reserved for system ComputeClasses).</li> <li>Certain clusters have high rates of Pod creation and deletion, which increases the evaluation time for the cluster autoscaler. During a scaling operation, the cluster autoscaler might not have time to evaluate subsequent priority rules in a ComputeClass before the backoff period for preceding priority rules expires. As a result, Pods might remain in a Pending state. To mitigate this issue, reduce the rate of Pod creation and deletion, for example by disabling active migration for the ComputeClass.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="../best-practices/computeclasses">best practices for ComputeClasses</a>.</li> <li>Learn how to <a href="../how-to/node-attributes-compute-classes">control autoscaled node attributes with custom ComputeClasses</a>.</li> <li>Learn more about <a href="autopilot-compute-classes">Balanced and Scale-Out ComputeClasses in Autopilot clusters</a>.</li> <li>Learn how to <a href="../how-to/node-auto-provisioning">configure node pool auto-creation</a>.</li> <li>Learn more about <a href="cluster-autoscaler">about GKE cluster autoscaling</a>.</li> <li>Learn how to <a href="../how-to/autopilot-compute-classes">choose compute classes for Autopilot Pods</a>.</li> <li>
+<a href="../troubleshooting/custom-computeclass">Troubleshoot custom ComputeClass issues</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-custom-compute-classes" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-custom-compute-classes</a>
+  </p>
+</div>

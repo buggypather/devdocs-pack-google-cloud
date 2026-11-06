@@ -1,0 +1,141 @@
+<h1>Optimize high CPU usage in instances</h1>  <p>High CPU utilization adversely affects the performance of your instance. Any activity that's performed on the instance uses CPU. Hence, if there's a high CPU utilization notice, you should first identify the root cause of the issue, whether that's poorly written queries, long running transactions, or any other database activity.</p> <p>This document describes the ways to identify CPU bottlenecks in an instance and mitigate the CPU utilization issues in the instance.</p> <h2 id="identify_the_cpu_bottlenecks">Identify the CPU bottlenecks</h2> <p>The following sections discuss different CPU scenarios.</p> <h3 id="use_query_insights_to_identify_queries_that_have_high_cpu_consumption_2">Use query insights to identify queries that have high CPU consumption</h3> <p><a href="using-query-insights">Query insights</a> helps you detect, diagnose, and prevent query performance problems for Cloud SQL databases.</p> <h3 id="use_the_pg_proctab_extension">Use the <code translate="no" dir="ltr">pg_proctab</code> extension</h3> <p>Use the <a href="extensions#pg_proctab">pg_proctab</a> extension with the combination of the <code translate="no" dir="ltr">pg_top</code> utility to get operating system outputs that give per process CPU utilization information.</p> <h3 id="use_queries">Use queries</h3> <p>The following sections discuss different queries you can use.</p> <h4 id="identify_the_active_connections_by_state">Identify the active connections by state</h4> <p>Each active connection to the database takes some amount of CPU, so if the instance has a high number of connections, cumulative utilization could be high. Use the following query to get the information about the number of connections by state.</p> 
+<pre>SELECT
+  state,
+  usename,
+  count(1)
+FROM
+  pg_stat_activity
+WHERE
+  pid &lt;&gt; pg_backend_pid()
+group by
+  state,
+  usename
+order by
+  1;
+</pre> <p>The output looks similar to the following:</p> 
+<pre>
+        state        |    usename    | count
+---------------------+---------------+-------
+ active              | ltest         |   318
+ active              | sbtest        |    95
+ active              |               |     2
+ idle                | cloudsqladmin |     2
+ idle in transaction | ltest         |    32
+ idle in transaction | sbtest        |     5
+                     | cloudsqladmin |     3
+                     |               |     4
+(8 rows)
+
+</pre> <p>If the active connections count is high, check for long running queries or wait events that are blocking the queries from executing.</p> <p>If the idle connection count is high, execute the following query to terminate the connections, after taking the necessary approvals.</p> 
+<pre>SELECT
+  pg_terminate_backend(pid)
+FROM
+  pg_stat_activity
+WHERE
+  usename = 'sbtest'
+  and pid &lt;&gt; pg_backend_pid()
+  and state in ('idle');
+</pre> <p>You can also terminate the connections individually with <code translate="no" dir="ltr">pg_terminate_backend</code> using the following query:</p> 
+<pre>SELECT pg_terminate_backend (&lt;pid&gt;);
+</pre> <p>Here, you can obtain the PID from <code translate="no" dir="ltr">pg_stat_activity</code>.</p> <h4 id="identify_the_long_running_connections">Identify the long running connections</h4> <p>Here's an example of a query that returns long running queries. In this case, you can identify the queries that have been active for more than 5 minutes.</p> 
+<pre>SELECT
+  pid,
+  query_start,
+  xact_start,
+  now() - pg_stat_activity.query_start AS duration,
+  query,
+  state
+FROM
+  pg_stat_activity
+WHERE
+  (
+    now() - pg_stat_activity.query_start
+  ) &gt; interval '5 minutes' order by 4 desc;
+
+</pre> <h4 id="review_the_explain_plan_to_identify_poorly_written_queries">Review the explain plan to identify poorly written queries</h4> <p>Use the EXPLAIN PLAN to investigate a poorly written query and rewrite the query, if necessary. Optionally, consider cancelling the long running query with the following command with necessary approvals.</p> 
+<pre>SELECT pg_cancel_backend(&lt;pid&gt;);
+</pre> <h4 id="monitor_vacuum_activity">Monitor VACUUM activity</h4> <p>The AUTOVACUUM activity that clears the dead tuples is a CPU-intensive operation. If your instance uses PostgreSQL version 11 or later, use the following query to check if there's any active AUTOVACUUM or VACUUM activity in progress.</p> 
+<pre>SELECT
+  relid :: regclass,
+  pid,
+  phase,
+  heap_blks_total,
+  heap_blks_scanned,
+  heap_blks_vacuumed,
+  index_vacuum_count,
+  max_dead_tuples,
+  num_dead_tuples
+FROM
+  pg_stat_progress_vacuum;
+</pre> <p>Check if there's an ongoing VACUUM activity in an instance using the following query:</p> 
+<pre>SELECT
+  pid,
+  datname,
+  usename,
+  query
+FROM
+  pg_stat_activity
+WHERE
+  query like '%vacuum%';
+</pre> <p>Additonally, you can <a href="https://docs.cloud.google.com/solutions/optimizing-monitoring-troubleshooting-vacuum-operations-postgresql">optimize and troubleshoot VACUUM operations in PostgreSQL</a>.</p> <h4 id="add_pg_stat_statements_extension">Add pg_stat_statements extension</h4> <p>Set up the <code translate="no" dir="ltr">pg_stat_statements</code> extension to get enhanced dictionary information about instance activity.</p> <h4 id="frequent_checkpoints">Frequent checkpoints</h4> <p>Frequent checkpoints degrade performance. Consider adjusting the <code translate="no" dir="ltr">checkpoint_timeout</code> flag if the PostgreSQL alert log reports the <code translate="no" dir="ltr">checkpoint occurring too frequently</code> warning.</p> <h4 id="gather_statistics">Gather statistics</h4> <p>Ensure that the query planner has the latest statistics about tables to choose the best plan for queries. The ANALYZE operation collects statistics about the contents of tables in the database, and stores the results in the pg_statistic system catalog. Subsequently, the query planner uses these statistics to help determine the most efficient execution plans for queries. The AUTOVACUUM process automatically analyzes the tables periodically, so run the following command to check if all the tables have been analyzed and have the latest metadata available to the planner.</p> 
+<pre>SELECT
+  relname,
+  last_autovacuum,
+  last_autoanalyze
+FROM
+  pg_stat_user_tables;
+
+</pre> <h4 id="inadequate_system_settings">Inadequate system settings</h4> <p>There are other factors and flag settings or system factors that influence the performance of your query. Run the following query to check the wait events and wait event type to get the insights about the performance of other system settings.</p> 
+<pre>SELECT
+  datname,
+  usename,
+  (
+    case when usename is not null then state else query end
+  ) AS what,
+  wait_event_type,
+  wait_event,
+  backend_type,
+  count(*)
+FROM
+  pg_stat_activity
+GROUP BY
+  1,
+  2,
+  3,
+  4,
+  5,
+  6
+ORDER BY
+  1,
+  2,
+  3,
+  4 nulls first,
+  5,
+  6;
+</pre> <p>The output looks similar to this:</p> 
+<pre>
+ ..  | .. | what           | wait_event_type |      wait_event      | ..    | count
+-..--+-..-+----------------+-----------------+----------------------+-..----+------
+ ..
+ ..  | .. | active         | IO              | CommitWaitFlush      | ..    |   750
+ ..  | .. | idle           | IO              | CommitWaitFlush      | ..    |   360
+ ..  | .. | active         | LWLock          | BufferMapping        | ..    |   191
+
+</pre> <h4 id="monitor_sequential_scans">Monitor sequential scans</h4> <p>Frequent sequential scans over tables of more than a few tens of rows usually indicate a missing index. When the scans touch thousands or even hundreds of thousands of rows, it can cause excessive CPU usage.</p> <p>Frequent sequential scans on tables with hundreds of thousands of rows can cause excessive CPU usage. Avoid sequential scans on such tables by creating necessary indexes.</p> <p>Run the following query to check the number of times sequential scans are initiated on any table.</p> 
+<pre>SELECT
+  relname,
+  idx_scan,
+  seq_scan,
+  n_live_tup
+FROM
+  pg_stat_user_tables
+WHERE
+  seq_scan &gt; 0
+ORDER BY
+  n_live_tup desc;
+</pre> <p>Lastly, if the CPU is still high and you feel those queries are legitimate traffic then consider increasing the CPU resources in your instance to avoid database crash or downtime.</p> <h2 id="whats_next">What's next</h2> <ul> <li><a href="https://docs.cloud.google.com/recommender/docs/recommenders">Google Cloud recommenders</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/postgres/optimize-cpu-usage" class="_attribution-link">https://docs.cloud.google.com/sql/docs/postgres/optimize-cpu-usage</a>
+  </p>
+</div>

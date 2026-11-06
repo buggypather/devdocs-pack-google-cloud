@@ -1,0 +1,557 @@
+<h1>Configure SQL Server Always On availability groups with synchronous commit using an internal load balancer</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <p>Microsoft SQL Server <a href="https://docs.microsoft.com/en-us/sql/database-engine/availability-groups/windows/overview-of-always-on-availability-groups-sql-server" track-type="tutorial" track-metadata-position="prereqs" track-metadata-end-goal="ag">Always On availability groups</a> let you replicate databases across multiple SQL Server Enterprise instances.</p> <p>Similar to <a href="configure-failover-cluster-instance">SQL Server Failover Cluster Instances</a>, Always On availability groups use Windows Server Failover Clustering (WSFC) to implement high availability. However, the two features differ in the following ways:</p> <table> <tr> <th></th> <th>Always On availability groups</th> <th>Failover cluster instances</th> </tr> <tr> <td>Scope of fail-over</td> <td>Group of databases</td> <td>Instance</td> </tr> <tr> <td>Storage</td> <td>Not shared</td> <td>Shared</td> </tr> </table> <p>For a more detailed comparison, see <a href="https://docs.microsoft.com/en-us/sql/database-engine/availability-groups/windows/failover-clustering-and-always-on-availability-groups-sql-server#comparison-of-failover-cluster-instances-and-availability-groups" track-type="tutorial" track-metadata-position="prereqs" track-metadata-end-goal="ag">Comparison of failover cluster instances and availability groups</a>.</p> <p>Always On availability groups support <a href="https://docs.microsoft.com/en-us/sql/database-engine/availability-groups/windows/availability-modes-always-on-availability-groups#SupportedAvModes" track-type="tutorial" track-metadata-position="prereqs" track-metadata-end-goal="ag">multiple availability modes</a>. This tutorial shows how you can deploy Always On availability groups in <em>synchronous commit mode</em> to implement high availability for one or more databases.</p> <p>In the setup, you will create three VM instances. Two VM instances, <code translate="no" dir="ltr">node-1</code> and <code translate="no" dir="ltr">node-2</code> serve as cluster nodes and run SQL Server. A third VM instance, <code translate="no" dir="ltr">witness</code>, is used to achieve a <a href="https://learn.microsoft.com/en-us/sql/sql-server/failover-clusters/windows/wsfc-quorum-modes-and-voting-configuration-sql-server">quorum</a> in a failover scenario. The three VM instances are distributed over three zones and share a common subnet.</p> <p>Using a SQL Server Always On availability group, an example database, <code translate="no" dir="ltr">bookshelf</code>, is synchronously replicated across the two SQL Server instances.</p> <p>In an on-premises Windows cluster environment, <a href="https://en.wikipedia.org/wiki/Address_Resolution_Protocol#ARP_announcements">Address Resolution Protocol (ARP) announcements</a> trigger <a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/virtualization/mac-address-changes-for-virtual-server">IP address failover</a>. Google Cloud, however, disregards ARP announcements. Consequently, you must implement one of the following two options: using an internal load balancer and a distributed network name (DNN).</p> <p>The article assumes that you have already deployed Active Directory on Google Cloud and that you have basic knowledge of SQL Server, Active Directory, and Compute Engine. For more information about Active Directory on Google Cloud, see section <a href="#before-you-begin">Before you begin</a>.</p> <p>Using a SQL Server Always On availability group, an example database, <code translate="no" dir="ltr">bookshelf</code>, is synchronously replicated across the two SQL Server instances. An internal load balancer ensures that traffic is directed to the active node.</p> <p>For more information about Windows Server Failover Clustering with an internal load balancer, see <a href="../../tutorials/running-windows-server-failover-clustering#understanding_the_network_routing" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">failover clustering</a>.</p> <p><img src="https://docs.cloud.google.com/static/compute/images/sqlserver-ag-architecture.svg" alt="Architecture"></p> <p>This diagram includes the following:</p> <ul> <li>Two VM instances in the same region and different zones for the failover cluster called <code translate="no" dir="ltr">node-1</code> and <code translate="no" dir="ltr">node-2</code>. One hosts the primary replica of the SQL Server database while the other node hosts the secondary replica.</li> <li>A third VM called <code translate="no" dir="ltr">witness</code> serves as a file share witness to provide a tie-breaking vote and achieve a quorum for failover.</li> <li>An internal load balancer in front of the cluster provides a single endpoint for SQL Server clients and uses a health check to ensure that traffic is directed to the active node.</li> </ul> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <p>This tutorial aims to achieve the following objectives:</p> <ul> <li>Deploy a <a href="#deploying_the_failover_cluster" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">WSFC comprising two SQL Server VM instances, and a third VM instance that acts as a file share witness</a> </li> <li>Create an <a href="#creating_an_availability_group" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">availability group with synchronous commit</a> </li> <li>Configure a <a href="#create_internal_load_balancers_and_health_checks" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">load balancer</a> </li> <li>Verify that the <a href="#test_the_failover" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">setup is working by simulating a failover</a> </li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p>This tutorial uses billable components of Google Cloud, including:</p> <ul> <li><a href="https://cloud.google.com/compute/vm-instance-pricing">Compute Engine</a></li> <li><a href="https://docs.cloud.google.com/vpc/network-pricing#lb">Cloud Load Balancing</a></li> </ul> <p>Use the <a href="https://cloud.google.com/products/calculator/" track-type="tutorial" track-name="pricingCalculator" track-metadata-position="costs" track-metadata-end-goal="estimateCosts">pricing calculator</a> to generate a cost estimate based on your projected usage.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>To complete the tasks in this tutorial, ensure the following: </p>
+<ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> </cloud-free-trial> <li> You have an Active Directory domain with at least one domain controller. You can create an <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/create-domain">Active Directory domain using Managed Microsoft AD</a>. Alternatively, you can deploy a <a href="https://docs.cloud.google.com/solutions/deploy-fault-tolerant-active-directory-environment">custom Active Directory environment on Compute Engine</a> and set up a <a href="../windows/best-practices#use_cloud_dns_private_forwarding_zones">private DNS forwarding zone</a> that forwards DNS queries to your domain controllers. </li> <li> You have an Active Directory user that has permission to join computers to the domain and can sign in by using RDP. If you're using Managed Microsoft AD, you can use the <code translate="no" dir="ltr">setupadmin</code> user. For more information about Active Directory user account provisioning, see <a href="https://cloud.google.com/architecture/identity/federating-gcp-with-active-directory-synchronizing-user-accounts">Active Directory user account provisioning</a> </li> <li> A Google Cloud project and a Virtual Private Cloud (VPC) with connectivity to your Active Directory domain controllers. </li> <li> A subnet to use for the Windows Server Failover Cluster VM instances. </li> </ol> When you finish this tutorial, you can avoid continued billing by deleting the resources you created. For more information, see <a href="#clean-up">Cleaning up</a>. </section> <div id="tutorial-content"> <h2 id="prepare_your_project_and_network">Prepare your project and network</h2> <p>To deploy your SQL Server Always On availability groups, you must prepare your Google Cloud project and VPC for the deployment. The following sections discuss how you can do this in detail.</p> <h3 id="configure_your_project_and_region">Configure your project and region</h3> <p>To prepare your Google Cloud project for the deployment of SQL Server Always On availability groups, do the following:</p> <ol> <li>
+<p>In the Google Cloud console, open <a href="https://docs.cloud.google.com/shell/docs/starting-cloud-shell" track-type="tutorial" track-name="usingCloudShell" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="launchCloudShell">Cloud Shell</a> by clicking the <strong>Activate Cloud Shell</strong> <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Activate Cloud Shell."> button.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="useConsole" class="button button-primary">Go to the Google Cloud console</a> </p>
+</li> <li>
+<p>Initialize the following variables.</p> 
+<pre>
+VPC_NAME=VPC_NAME
+SUBNET_NAME=SUBNET_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">VPC_NAME</var></code>: name of your VPC</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: name of your subnet</li> </ul>
+</li> <li>
+<p>Set your default <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project ID</a>.</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the ID of your Google Cloud project.</p>
+</li> <li>
+<p>Set your default region.</p> 
+<pre>
+gcloud config set compute/region REGION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> with the ID of the <a href="https://docs.cloud.google.com/docs/geography-and-regions#regions_and_zones" track-type="solution" track-name="internalLink" track-metadata-position="body">region</a> you want to deploy in.</p>
+</li> </ol> <h3 id="create_firewall_rules">Create firewall rules</h3> <p>To allow clients to connect to the SQL Server and the communication between the cluster nodes you need to create several firewall rules. You can use <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">network tags</a> to simplify the creation of these firewall rules, as follows:</p> <ul> <li>The two cluster nodes are annotated with the <code translate="no" dir="ltr">wsfc-node</code> tag.</li> <li>All servers (including the <code translate="no" dir="ltr">witness</code>) are annotated with the <code translate="no" dir="ltr">wsfc</code> tag.</li> </ul> <p>To create firewall rules that use these network tags, use the following steps:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create firewall rules to allow traffic between cluster nodes.</p> 
+<pre>
+SUBNET_CIDR=$(gcloud compute networks subnets describe $SUBNET_NAME --format=value\('ipCidrRange'\))
+
+gcloud compute firewall-rules create allow-all-between-wsfc-nodes \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp,udp,icmp \
+  --enable-logging \
+  --source-tags=wsfc \
+  --target-tags=wsfc \
+  --network=$VPC_NAME \
+  --priority 10000
+
+gcloud compute firewall-rules create allow-sql-to-wsfc-nodes \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:1433 \
+  --enable-logging \
+  --source-ranges=$SUBNET_CIDR \
+  --target-tags=wsfc-node \
+  --network=$VPC_NAME \
+  --priority 10000
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> Depending on how you've deployed the Active Directory, you might need to create additional firewall rules to allow servers to join the domain. For more information, see <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/firewalls#accessing_from_within_your_vpc">Accessing Managed Microsoft AD from within your VPC</a>.</span></aside> <h3 id="create_vm_instances">Create VM instances</h3> <p>Create and deploy two VM instances for the failover cluster. At any point in time, one of these VMs hosts the primary replica of the SQL Server database while the other node hosts the secondary replica. The two VM instances must:</p> <ul> <li>be located in the same region so that they can be accessed by an internal passthrough Network Load Balancer.</li> <li>have Windows Server Failover Cluster and SQL Server installed.</li> <li>have <a href="https://github.com/GoogleCloudPlatform/guest-agent#windows-failover-cluster-support">Compute Engine WSFC support</a> enabled.</li> </ul> <p>You use a <a href="../../images/os-details#sql_server">SQL Server premium image</a> which has SQL Server 2022 preinstalled.</p> <aside class="note"><strong>Note:</strong><span> If you plan to bring your own licenses for SQL Server by using the <a href="../windows/ms-licensing">License Mobility</a> program, select Windows Server base images for these nodes and install SQL Server using your own product keys.</span></aside> <p>To provide a tie-breaking vote and achieve a quorum for the failover scenario, deploy a third VM that serves as a <a href="https://docs.microsoft.com/en-us/windows-server/failover-clustering/manage-cluster-quorum#quorum-configuration-options" track-type="tutorial" track-name="externalLink" track-metadata-position="prereqs" track-metadata-end-goal="ag" class="external">file share witness</a> using the following steps:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a <a href="../../startupscript#providing_a_startup_script_for_windows_instances">specialized script</a> for the WSFC nodes. This script installs the necessary Windows features and creates firewall rules for WSFC and SQL Server.</p> 
+<pre>
+cat &lt;&lt; "EOF" &gt; specialize-node.ps1
+
+$ErrorActionPreference = "stop"
+
+# Install required Windows features
+Install-WindowsFeature Failover-Clustering -IncludeManagementTools
+Install-WindowsFeature RSAT-AD-PowerShell
+
+# Open firewall for WSFC
+netsh advfirewall firewall add rule name="Allow WSFC health check" dir=in action=allow protocol=TCP localport=59998
+
+# Open firewall for SQL Server
+netsh advfirewall firewall add rule name="Allow SQL Server" dir=in action=allow protocol=TCP localport=1433
+
+# Open firewall for SQL Server replication
+netsh advfirewall firewall add rule name="Allow SQL Server replication" dir=in action=allow protocol=TCP localport=5022
+
+# Format data disk
+Get-Disk |
+ Where partitionstyle -eq 'RAW' |
+ Initialize-Disk -PartitionStyle MBR -PassThru |
+ New-Partition -AssignDriveLetter -UseMaximumSize |
+ Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Data' -Confirm:$false
+
+# Create data and log folders for SQL Server
+md d:\Data
+md d:\Logs
+EOF
+</pre>
+</li> <li>
+<p>Create the VM instances. On the two cluster nodes, attach a data disk and set the <code translate="no" dir="ltr">enable-wsfc</code> metadata key to <code translate="no" dir="ltr">true</code>. This action enables <a href="../../images/guest-agent-functions#windows-failover">Windows Server Failover Clustering</a> and configures a local listener on the default port (59998).</p> 
+<pre>
+REGION=$(gcloud config get-value compute/region)
+ZONE1=ZONE1
+ZONE2=ZONE2
+ZONE3=ZONE3
+PD_SIZE=200
+MACHINE_TYPE=n2-standard-8
+
+gcloud compute instances create node-1 \
+  --zone $ZONE1 \
+  --machine-type $MACHINE_TYPE \
+  --subnet $SUBNET_NAME \
+  --image-family sql-ent-2022-win-2022 \
+  --image-project windows-sql-cloud \
+  --tags wsfc,wsfc-node \
+  --boot-disk-size 50 \
+  --boot-disk-type pd-ssd \
+  --boot-disk-device-name "node-1" \
+  --create-disk=name=node-1-datadisk,size=$PD_SIZE,type=pd-ssd,auto-delete=no \
+  --metadata enable-wsfc=true \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-node.ps1
+
+gcloud compute instances create node-2 \
+  --zone $ZONE2 \
+  --machine-type $MACHINE_TYPE \
+  --subnet $SUBNET_NAME \
+  --image-family sql-ent-2022-win-2022 \
+  --image-project windows-sql-cloud \
+  --tags wsfc,wsfc-node \
+  --boot-disk-size 50 \
+  --boot-disk-type pd-ssd \
+  --boot-disk-device-name "node-2" \
+  --create-disk=name=node-2-datadisk,size=$PD_SIZE,type=pd-ssd,auto-delete=no \
+  --metadata enable-wsfc=true \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-node.ps1
+
+gcloud compute instances create "witness" \
+  --zone $ZONE3 \
+  --machine-type e2-medium \
+  --subnet $SUBNET_NAME \
+  --image-family=windows-2022 \
+  --image-project=windows-cloud \
+  --tags wsfc \
+  --boot-disk-size 50 \
+  --boot-disk-type pd-ssd \
+  --metadata sysprep-specialize-script-ps1="add-windowsfeature FS-FileServer"
+</pre> <p>Replace <var translate="no">ZONE1</var>, <var translate="no">ZONE2</var>, <var translate="no">ZONE3</var> based on the zones you are using.</p> <aside class="note"><strong>Note:</strong><span> Depending on your <a href="../../disks/performance#optimize_disk_performance">performance requirements</a>, consider using a machine type larger than <code translate="no" dir="ltr">n2-standard-8</code> for the WSFC nodes. Consider <a href="../set-threads-per-core">disabling Simultaneous multithreading (SMT)</a> for potential savings on licensing costs.</span></aside><aside class="note"><strong>Note:</strong><span> For the purpose of this tutorial, and to fit within the default regional SSD Persistent Disk quota, the size of the disks attached to each VM is smaller than it would be in a production environment. For better performance and to accommodate a larger database, increase the size of each disk.</span></aside>
+</li> <li>
+<p>To join the three VM instances to Active Directory, do the following for each of the three VM instances:</p> <ol> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output.</p> 
+<pre>
+gcloud compute instances tail-serial-port-output NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAME</var></code> with the name of the VM instance.</p> <p>Wait for a few minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li><p><a href="../windows/creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance.</p></li> <li><p><a href="../connecting-to-windows">Connect to the VM by using Remote Desktop</a> and sign in using the username and password created in the previous step.</p></li> <li>
+<p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</p> <aside class="note"><strong>Note:</strong><span> In this guide, we used Powershell 5.1.</span></aside>
+</li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>Join the computer to your Active Directory domain and restart.</p> 
+<pre>
+Add-Computer -Domain DOMAIN -Restart
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DOMAIN</var></code> with the DNS name of your Active Directory domain.</p>
+</li> <li>
+<p>Enter the credentials of an account that has permissions to join a VM to the domain</p> <p>Wait for the VM to restart. You have now joined the VM instance to the Active Directory.</p>
+</li> </ol>
+</li> </ol> <h3 id="reserve_static_ip_addresses">Reserve static IP addresses</h3> <p>You now reserve two static IP addresses in your VPC. One IP address is used as the default WSFC cluster IP address, the other serves as the static IP for the SQL Server availability group listener.</p> <p>In a WSFC cluster, the cluster IP address primarily serves administrative purposes and accessing cluster resources. This virtual IP address is assigned to the cluster itself, enabling administrators to manage the cluster and perform tasks such as configuring cluster settings, monitoring the health of nodes, and managing failover processes.</p> <p>In the context of SQL Server availability group, a listener is a virtual network name (VNN) and IP address that allows clients to connect to the availability group without needing to know which specific server is the primary node.</p> <p>An internal load balancer needs an internal IP address to efficiently route internal traffic and support high availability and load balancing in the context of a WSFC cluster. The internal load balancer ensures that requests are always directed to the current primary replica of the cluster. During failover events, the load balancer detects changes in the primary replica and redirects client connections to the new primary without requiring manual intervention, minimizing downtime and ensuring continuous availability of the database services.</p> <p>In the context of a WSFC with SQL Server Always On availability groups, both reserved internal static IP addresses for the default WSFC cluster IP address and the availability group listener are also used by associated internal load balancers.</p> <ol> <li>
+<p>To reserve two static IP addresses in your VPC, use the following steps.</p> 
+<pre>
+gcloud compute addresses create wsfc-cluster-ip \
+  --subnet $SUBNET_NAME \
+  --region $(gcloud config get-value compute/region) &amp;&amp; \
+CLUSTER_IP=$(gcloud compute addresses describe wsfc-cluster-ip \
+    --region $(gcloud config get-value compute/region) \
+    --format=value\(address\)) &amp;&amp; \
+echo "cluster IP: $CLUSTER_IP"
+</pre>
+</li> <li>
+<p>Replace the cluster IP address in the <code translate="no" dir="ltr"><var translate="no">CLUSTER_IP</var></code> variable, you need it later to specify it as the cluster IP:</p> 
+<pre>
+CLUSTER_IP=CLUSTER_IP
+</pre>
+</li> <li>
+<p>Reserve another static IP for the availability group listener and capture the address in a new environment variable named <code translate="no" dir="ltr">LISTENER_IP</code>.</p> 
+<pre>
+gcloud compute addresses create wsfc-listener-ip \
+  --subnet $SUBNET_NAME \
+  --region $(gcloud config get-value compute/region)
+
+LISTENER_IP=$(gcloud compute addresses describe wsfc-listener-ip \
+  --region $(gcloud config get-value compute/region) \
+  --format=value\(address\)) &amp;&amp; \
+echo "Listener IP: $LISTENER_IP"
+</pre> <aside class="note"><strong>Note:</strong><span> Make sure that the IP address is in the same region as your SQL Server cluster.</span></aside>
+</li> <li>
+<p>Replace the load balancer's reserved IP address as the <code translate="no" dir="ltr"><var translate="no">LISTENER_IP</var></code> variable, you need it later to configure your availability group.</p> 
+<pre>
+LISTENER_IP=LISTENER_IP
+</pre>
+</li> </ol> <p>Your project and VPC are now ready for the deployment of the Windows Server Failover Cluster and SQL Server.</p> <h2 id="deploying_the_failover_cluster">Deploying the failover cluster</h2> <p>You can now use the VM instances to deploy a Windows Server Failover Cluster and SQL Server. The following sections discuss how you can do this in detail.</p> <h3 id="preparing_sql_server">Preparing SQL Server</h3> <p>Create a new user account in Active Directory for SQL Server using the following steps.</p> <ol> <li>Connect to <code translate="no" dir="ltr">node-1</code> <a href="../connecting-to-windows">by using Remote Desktop</a>. Sign in with your domain user account.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Create a domain user account for SQL server and the SQL agent and assign a password:</p> 
+<pre>
+$Credential = Get-Credential -UserName sql_server -Message 'Enter password'
+New-ADUser `
+  -Name "sql_server" `
+  -Description "SQL Admin account." `
+  -AccountPassword $Credential.Password `
+  -Enabled $true -PasswordNeverExpires $true
+</pre> <aside class="note"><strong>Note:</strong><span> If you use Managed AD, append <code translate="no" dir="ltr">-Path "OU=Cloud,DC=example,DC=org"</code> to the command to create the user in the <code translate="no" dir="ltr">Cloud</code> organizational units (OU). Ensure that the value of the path is the output of the following command: <code translate="no" dir="ltr">Get-ADOrganizationalUnit -Filter "Name -eq 'Cloud'" | Select-Object -ExpandProperty DistinguishedName</code></span></aside>
+</li> </ol> <p>To configure SQL Server, perform the following steps on both <code translate="no" dir="ltr">node-1</code> and <code translate="no" dir="ltr">node-2</code>, use the following steps:</p> <ol> <li>Open <strong>SQL Server Configuration Manager</strong>.</li> <li>In the navigation pane, select <strong>SQL Server Services</strong>.</li> <li>In the list of services, right-click <strong>SQL Server (MSSQLSERVER)</strong> and select <strong>Properties</strong>.</li> <li>
+<p>Under <strong>Log on as</strong>, change the account as follows:</p> <ul> <li>
+<strong>Account name:</strong> <code translate="no" dir="ltr"><var translate="no">DOMAIN</var>\sql_server</code> where <code translate="no" dir="ltr">DOMAIN</code> is the NetBIOS name of your Active Directory domain.</li> <li>
+<strong>Password:</strong> Enter the password you chose previously.</li> </ul>
+</li> <li><p>Click <strong>OK</strong>.</p></li> <li><p>When prompted to restart SQL Server, select <strong>Yes</strong>.</p></li> </ol> <p>SQL Server now runs under a domain user account.</p> <aside class="warning"><strong>Warning:</strong><span> Make sure you've completed the previous configuration steps on both VM instances, otherwise setting up the Always On availability group will fail.</span></aside> <h3 id="create_file_shares">Create file shares</h3> <p>Create two file shares on the VM instance <code translate="no" dir="ltr">witness</code> so that it can store SQL Server backups and act as a file share witness:</p> <ol> <li>Connect to <code translate="no" dir="ltr">witness</code> by <a href="../connecting-to-windows">using Remote Desktop</a>. Sign in with your domain user account.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Create a witness file share and grant yourself and the two cluster nodes access to the file share.</p> 
+<pre>
+New-Item "C:\QWitness" –type directory
+
+icacls C:\QWitness\ /grant 'node-1$:(OI)(CI)(M)'
+icacls C:\QWitness\ /grant 'node-2$:(OI)(CI)(M)'
+
+New-SmbShare `
+  -Name QWitness `
+  -Path "C:\QWitness" `
+  -Description "SQL File Share Witness" `
+  -FullAccess $env:username,node-1$,node-2$
+</pre>
+</li> <li>
+<p>Create another file share to store backups and grant SQL Server full access:</p> 
+<pre>
+New-Item "C:\Backup" –type directory
+New-SmbShare `
+  -Name Backup `
+  -Path "C:\Backup" `
+  -Description "SQL Backup" `
+  -FullAccess  $env:USERDOMAIN\sql_server
+</pre>
+</li> </ol> <h3 id="create_the_failover_cluster">Create the failover cluster</h3> <p>To create the failover cluster, use the following steps:</p> <ol> <li>Return to the Remote Desktop session on <code translate="no" dir="ltr">node-1</code>.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Create a new cluster.</p> 
+<pre>
+New-Cluster `
+  -Name sql-cluster `
+  -Node node-1,node-2 `
+  -NoStorage `
+  -StaticAddress CLUSTER_IP
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_IP</var></code> with the cluster IP address that you created earlier.</p> <aside class="note"><strong>Note:</strong><span> When <em>computer objects</em> are created outside the container <code translate="no" dir="ltr">Computers</code> (in an OU), the permission <code translate="no" dir="ltr">Create Computer objects</code> must be delegated to the cluster's computer account in the OU.</span></aside>
+</li> <li>
+<p>Return to the PowerShell session on <code translate="no" dir="ltr">witness</code> and grant the virtual computer object of the cluster permission to access the file share.</p> 
+<pre>
+icacls C:\QWitness\ /grant 'sql-cluster$:(OI)(CI)(M)'
+Grant-SmbShareAccess `
+  -Name QWitness `
+  -AccountName 'sql-cluster$' `
+  -AccessRight Full `
+  -Force
+</pre>
+</li> <li>
+<p>Return to the PowerShell session on <code translate="no" dir="ltr">node-1</code> and configure the cluster to use the file share on <code translate="no" dir="ltr">witness</code> as a cluster quorum.</p> 
+<pre>
+Set-ClusterQuorum -FileShareWitness \\witness\QWitness
+</pre>
+</li> <li>
+<p>Verify that the cluster was created successfully.</p> 
+<pre>
+Test-Cluster
+</pre> <p>You might see the following warnings that you can safely ignore.</p> 
+<pre>
+WARNING: System Configuration - Validate All Drivers Signed: The test reported some warnings..
+WARNING: Network - Validate Network Communication: The test reported some warnings..
+WARNING:
+Test Result:
+HadUnselectedTests, ClusterConditionallyApproved
+Testing has completed for the tests you selected. You should review the warnings in the Report.  A cluster solution is
+supported by Microsoft only if you run all cluster validation tests, and all tests succeed (with or without warnings).
+</pre> <p>You can also launch the Failover Cluster Manager MMC snap-in to review the cluster's health by running <code translate="no" dir="ltr">cluadmin.msc</code>.</p>
+</li> <li>
+<p>If you're using Managed AD, add the computer account used by the Windows cluster to the <em>Cloud Service Domain Join Accounts</em> group so that it can join computers to the domain.</p> 
+<pre>
+Add-ADGroupMember `
+  -Identity "Cloud Service Domain Join Accounts" `
+  -Members sql-cluster$
+</pre>
+</li> <li>
+<p>Enable Always On availability groups on both nodes.</p> 
+<pre>
+Enable-SqlAlwaysOn -ServerInstance node-1 -Force
+Enable-SqlAlwaysOn -ServerInstance node-2 -Force
+</pre>
+</li> </ol> <h2 id="creating_an_availability_group">Creating an availability group</h2> <p>You now create a sample database <code translate="no" dir="ltr">bookshelf</code>, include it in a new availability group named <code translate="no" dir="ltr">bookshelf-ag</code> and configure high availability.</p> <h3 id="creating_a_database">Creating a database</h3> <p>Create a new database. For the purpose of this tutorial, the database doesn't need to contain any data.</p> <ol> <li>Return to the Remote Desktop session on <code translate="no" dir="ltr">node-1</code>.</li> <li>Open the <strong>SQL Server Management Studio</strong>.</li> <li>In the <strong>Connect to server</strong> dialog, verify the server name is set to <code translate="no" dir="ltr">node-1</code> and select <strong>Connect</strong>.</li> <li>In the menu, select <strong>File &gt; New &gt; Query with current connection</strong>.</li> <li>
+<p>Paste the following SQL script into the editor:</p> 
+<pre>
+-- Create a sample database
+CREATE DATABASE bookshelf ON PRIMARY (
+  NAME = 'bookshelf',
+  FILENAME='d:\Data\bookshelf.mdf',
+  SIZE = 256MB,
+  MAXSIZE = UNLIMITED,
+  FILEGROWTH = 256MB)
+LOG ON (
+  NAME = 'bookshelf_log',
+  FILENAME='d:\Logs\bookshelf.ldf',
+  SIZE = 256MB,
+  MAXSIZE = UNLIMITED,
+  FILEGROWTH = 256MB)
+GO
+
+USE [bookshelf]
+SET ANSI_NULLS ON
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- Create sample table
+CREATE TABLE [dbo].[Books] (
+  [Id] [bigint] IDENTITY(1,1) NOT NULL,
+  [Title] [nvarchar](max) NOT NULL,
+  [Author] [nvarchar](max) NULL,
+  [PublishedDate] [datetime] NULL,
+  [ImageUrl] [nvarchar](max) NULL,
+  [Description] [nvarchar](max) NULL,
+  [CreatedById] [nvarchar](max) NULL,
+  CONSTRAINT [PK_dbo.Books] PRIMARY KEY CLUSTERED ([Id] ASC) WITH (
+    PAD_INDEX = OFF,
+    STATISTICS_NORECOMPUTE = OFF,
+    IGNORE_DUP_KEY = OFF,
+    ALLOW_ROW_LOCKS = ON,
+    ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+
+-- Create a backup
+EXEC dbo.sp_changedbowner @loginame = 'sa', @map = false;
+  ALTER DATABASE [bookshelf] SET RECOVERY FULL;
+  GO
+  BACKUP DATABASE bookshelf to disk = '\\witness\Backup\bookshelf.bak' WITH INIT
+GO
+</pre> <p>The script creates a new database with a single table and performs an initial backup to <code translate="no" dir="ltr">witness</code>.</p>
+</li> <li><p>Select <strong>Execute</strong> to run the SQL script.</p></li> </ol> <h3 id="configure_high_availability">Configure high availability</h3> <p>You can now configure high availability for the availability group using either T-SQL or SQL Server Management Studio.</p> <div> <section><p class="_code-tab"><strong>Using T-SQL</strong></p>
+<p> To configure high availability for the availability group using T-SQL, use the following steps:</p> <ol> <li>
+<p>Connect to <code translate="no" dir="ltr">node-1</code> and then execute the following script to create the bookshelf-ag availability group.</p> 
+<pre data-language="">
+CREATE LOGIN [NET_DOMAIN\sql_server] FROM WINDOWS;
+GO
+
+USE [bookshelf];
+CREATE USER [NET_DOMAIN\sql_server] FOR LOGIN [NET_DOMAIN\sql_server];
+GO
+
+USE [master];
+CREATE ENDPOINT bookshelf_endpoint
+  STATE=STARTED
+  AS TCP (LISTENER_PORT=5022)
+  FOR DATABASE_MIRRORING (ROLE=ALL);
+GO
+
+GRANT CONNECT ON ENDPOINT::[bookshelf_endpoint] TO [NET_DOMAIN\sql_server]
+GO
+</pre> <aside class="note"><strong>Note:</strong><span> In the <code translate="no" dir="ltr">NET_DOMAIN\sql_server</code> login and user, <code translate="no" dir="ltr">NET_DOMAIN</code> is the NetBIOS name of your Active Directory domain.</span></aside>
+</li> <li>
+<p>Connect to <code translate="no" dir="ltr">node-2</code> and execute the following script.</p> 
+<pre data-language="">
+CREATE LOGIN [NET_DOMAIN\sql_server] FROM WINDOWS;
+GO
+
+CREATE ENDPOINT bookshelf_endpoint
+  STATE=STARTED
+  AS TCP (LISTENER_PORT=5022)
+  FOR DATABASE_MIRRORING (ROLE=ALL);
+GO
+
+GRANT CONNECT ON ENDPOINT::[bookshelf_endpoint] TO [NET_DOMAIN\sql_server]
+GO
+</pre> <aside class="note"><strong>Note:</strong><span> In the <code translate="no" dir="ltr">NET_DOMAIN\sql_server</code> login and user, <code translate="no" dir="ltr">NET_DOMAIN</code> is the NetBIOS name of your Active Directory domain.</span></aside>
+</li> <li>
+<p>On <code translate="no" dir="ltr">node-1</code> and then execute the following script to create the <code translate="no" dir="ltr">bookshelf-ag</code> availability group.</p> 
+<pre data-language="">
+USE master;
+GO
+
+CREATE AVAILABILITY GROUP [bookshelf-ag]
+WITH (AUTOMATED_BACKUP_PREFERENCE = SECONDARY,
+CLUSTER_TYPE = WSFC,
+DB_FAILOVER = ON
+)
+FOR DATABASE [bookshelf]
+REPLICA ON
+  N'node-1' WITH (
+      ENDPOINT_URL = 'TCP://node-1:5022',
+      AVAILABILITY_MODE = SYNCHRONOUS_COMMIT,
+      FAILOVER_MODE = AUTOMATIC,
+      BACKUP_PRIORITY = 50,
+      SEEDING_MODE = AUTOMATIC,
+      SECONDARY_ROLE(ALLOW_CONNECTIONS = NO)
+  ),
+  N'node-2' WITH (
+      ENDPOINT_URL = 'TCP://node-2:5022',
+      AVAILABILITY_MODE = SYNCHRONOUS_COMMIT,
+      FAILOVER_MODE = AUTOMATIC,
+      BACKUP_PRIORITY = 50,
+      SEEDING_MODE = AUTOMATIC,
+      SECONDARY_ROLE(ALLOW_CONNECTIONS = NO)
+  );
+GO
+</pre>
+</li> <li>
+<p>In the following script, replace <code translate="no" dir="ltr">LISTENER_IP</code> with the IP address that you reserved earlier for the internal load balancer and execute it.</p> 
+<pre data-language="">
+USE master;
+GO
+
+ALTER AVAILABILITY GROUP [bookshelf-ag]
+ADD LISTENER N'bookshelf' (
+WITH IP (
+  (N'LISTENER_IP', N'255.255.255.0')
+),
+PORT = 1433);
+GO
+</pre>
+</li> <li>
+<p>Connect to <code translate="no" dir="ltr">node-2</code> and then execute the following script to join the secondary replica to the availability group and enable automatic seeding.</p> 
+<pre data-language="">
+USE master;
+GO
+
+ALTER AVAILABILITY GROUP [bookshelf-ag] JOIN;
+ALTER AVAILABILITY GROUP [bookshelf-ag] GRANT CREATE ANY DATABASE;
+
+</pre>
+</li> <li>
+<p>Check the status of the availability group.</p> 
+<pre data-language="">
+SELECT * FROM sys.dm_hadr_availability_group_states;
+GO
+</pre> <p>You should see <code translate="no" dir="ltr">synchronization_health_desc</code> as <code translate="no" dir="ltr">HEALTHY</code></p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Using SQL Server Management Studio</strong></p>
+<p> To configure high availability for the availability group using SQL Server Management Studio, use the following steps:</p> <ol> <li>In the <strong>Object Explorer</strong> window, right-click <strong>Always On High Availability</strong> and then select <strong>New Availability Group Wizard</strong>.</li> <li>On the <strong>Specify Options</strong> page, set the availability group name to <code translate="no" dir="ltr">bookshelf-ag</code>, then select <strong>Next</strong>.</li> <li>On the <strong>Select Databases</strong> page, select the <code translate="no" dir="ltr">bookshelf</code> database, then select <strong>Next</strong>.</li> <li>
+<p>On the <strong>Specify Replicas</strong> page, select the <strong>Replicas</strong> tab.</p> <ol> <li>Select <strong>Add replica</strong>.</li> <li>
+<p>In the <strong>Connect to server</strong> dialog, enter the server name <code translate="no" dir="ltr">node-2</code> and select <strong>Connect</strong>.</p> <p>The list of availability replicas now contains SQL Server instances, <code translate="no" dir="ltr">node-1</code> and <code translate="no" dir="ltr">node-2</code>.</p>
+</li> <li><p>Set the <strong>Availability mode</strong> to <strong>Synchronous commit</strong> for both instances.</p></li> <li><p>Set <strong>Automatic failover</strong> to <strong>Enabled</strong> for both instances.</p></li> <li>
+<p>Select the <strong>Listener</strong> tab</p> <ol> <li>Select <strong>Create an availability group listener</strong>.</li> <li>
+<p>Enter the following settings.</p> <ul> <li>
+<strong>Listener DNS name</strong>: <code translate="no" dir="ltr">bookshelf</code>
+</li> <li>
+<strong>Port</strong>: <code translate="no" dir="ltr">1433</code>
+</li> <li>
+<strong>Network mode</strong>: <strong>Static IP</strong>
+</li> </ul>
+</li> <li><p>Select <strong>Add</strong> and enter the listener IP address (<code translate="no" dir="ltr"><var translate="no"><code translate="no" dir="ltr"><var translate="no">LISTENER_IP</var></code></var></code>) that you reserved earlier for the internal load balancer. Then select <strong>OK</strong>.</p></li> </ol>
+</li> <li><p>Select <strong>Next</strong>.</p></li> </ol>
+</li> <li><p>On the <strong>Select Data Synchronization</strong> page, select <strong>Automatic Seeding</strong>.</p></li> <li><p>On the <strong>Validation</strong> page, verify that all checks are successful.</p></li> <li><p>On the <strong>Summary</strong> page, select <strong>Finish</strong>.</p></li> <li><p>On the <strong>Results</strong> page, select <strong>Close</strong>.</p></li> </ol></section> </div> <h3 id="create_internal_load_balancers_and_health_checks">Create internal load balancers and health checks</h3> <p>The cluster IP represents a single endpoint for the Windows failover cluster. You use it for administrative purposes and managing cluster resources. The cluster IP always points to the host (or primary) node of the cluster. You deploy an <a href="../../load-balancing/internal#deploying_internal_load_balancing">internal load balancer</a> that uses a health check that ensures that traffic is directed to the host node of the cluster. As WSFC tooling requires multiple protocols to be available for forwarding (ICMP, UDP, and TCP), we recommend deploying an internal load balancer with <a href="https://docs.cloud.google.com/load-balancing/docs/internal/setting-up-ilb-multiple-protocols">multiple protocols that support all ports</a>.</p> <p>To deploy an internal load balancer, use the following steps:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create two <a href="../../instance-groups/creating-groups-of-unmanaged-instances">unmanaged instance groups</a>, one per zone, and add the two nodes to the groups.</p> 
+<pre>
+REGION=$(gcloud config get-value compute/region)
+
+gcloud compute instance-groups unmanaged create wsfc-group-1 --zone $ZONE1
+gcloud compute instance-groups unmanaged add-instances wsfc-group-1 --zone $ZONE1 \
+  --instances node-1
+
+gcloud compute instance-groups unmanaged create wsfc-group-2 --zone $ZONE2
+gcloud compute instance-groups unmanaged add-instances wsfc-group-2 --zone $ZONE2 \
+  --instances node-2
+</pre>
+</li> <li>
+<p>Create health check for the cluster IP that the load balancer can use to determine which is the active node from the Windows cluster perspective. The default port which the <a href="https://github.com/GoogleCloudPlatform/guest-agent">Compute Engine guest agent</a> responds to health checks is <code translate="no" dir="ltr">59998</code>. The health check provides the cluster IP address in the request and it expects <em>1</em> as a response returned from the active node.</p> 
+<pre>
+gcloud compute health-checks create tcp wsfc-healthcheck \
+  --request=$CLUSTER_IP \
+  --response=1 \
+  --check-interval="2s" \
+  --healthy-threshold=2 \
+  --unhealthy-threshold=2 \
+  --port=59998 \
+  --timeout="1s"
+</pre>
+</li> <li>
+<p>Create a backend service and add the two existing instance groups.</p> 
+<pre>
+gcloud compute backend-services create wsfc-backend \
+  --load-balancing-scheme internal \
+  --region $REGION \
+  --health-checks wsfc-healthcheck \
+  --protocol UNSPECIFIED
+
+gcloud compute backend-services add-backend wsfc-backend \
+  --instance-group wsfc-group-1 \
+  --instance-group-zone $ZONE1 \
+  --region $REGION
+
+gcloud compute backend-services add-backend wsfc-backend \
+  --instance-group wsfc-group-2 \
+  --instance-group-zone $ZONE2 \
+  --region $REGION
+</pre>
+</li> <li>
+<p>Create the internal load balancer associated with the cluster IP.</p> 
+<pre>
+gcloud compute forwarding-rules create wsfc \
+  --load-balancing-scheme internal \
+  --address $CLUSTER_IP \
+  --ports ALL \
+  --network $VPC_NAME \
+  --subnet $SUBNET_NAME \
+  --region $REGION \
+  --ip-protocol L3_DEFAULT \
+  --backend-service wsfc-backend
+</pre>
+</li> </ol> <p>To provide a single endpoint for SQL Server clients that want to connect to any database in your <code translate="no" dir="ltr">bookshelf</code> availability group, deploy a new internal load balancer dedicated to that availability group, use the following steps:</p> <ol> <li>
+<p>Create a health check for the availability group listener that the load balancer can use to determine which is the primary node in the <code translate="no" dir="ltr">bookshelf</code> SQL Server availability group.</p> 
+<pre>
+gcloud compute health-checks create tcp wsfc-bookshelf-healthcheck \
+  --request=$LISTENER_IP \
+  --response=1 \
+  --check-interval="2s" \
+  --healthy-threshold=1 \
+  --unhealthy-threshold=2 \
+  --port=59998 \
+  --timeout="1s"
+</pre> <p>The health check uses the same Compute Engine guest agent port, but it provides in its request the listener IP address of the <code translate="no" dir="ltr">bookshelf</code> availability group.</p>
+</li> <li>
+<p>Create a new backend service and add the two instance groups.</p> 
+<pre>
+gcloud compute backend-services create wsfc-bookshelf-backend \
+  --load-balancing-scheme internal \
+  --region $REGION \
+  --health-checks wsfc-bookshelf-healthcheck \
+  --protocol UNSPECIFIED
+
+gcloud compute backend-services add-backend wsfc-bookshelf-backend \
+  --instance-group wsfc-group-1 \
+  --instance-group-zone $ZONE1 \
+  --region $REGION
+
+gcloud compute backend-services add-backend wsfc-bookshelf-backend \
+  --instance-group wsfc-group-2 \
+  --instance-group-zone $ZONE2 \
+  --region $REGION
+</pre>
+</li> <li>
+<p>Create the internal load balancer associated with the SQL Server <code translate="no" dir="ltr">bookshelf-ag</code> availability group listener.</p> 
+<pre>
+gcloud compute forwarding-rules create wsfc-bookshelf \
+  --load-balancing-scheme internal \
+  --address $LISTENER_IP \
+  --ports ALL \
+  --network $VPC_NAME \
+  --subnet $SUBNET_NAME \
+  --region $REGION \
+  --ip-protocol L3_DEFAULT \
+  --backend-service wsfc-bookshelf-backend
+</pre>
+</li> </ol> <p>You can now connect to SQL Server availability group listener by using the DNS name <code translate="no" dir="ltr">bookshelf</code> and its port defined in the bookshelf availability group listener. The internal load balancer directs traffic to the primary node of the <code translate="no" dir="ltr">bookshelf</code> availability group.</p> <p>To create multiple availability groups on a single failover cluster, you must use separate backend services and a separate load balancer with its own healthcheck per availability group.</p> <p>Each availability group might have different nodes designated as the primary, and they might be different than the host node of the Windows cluster. For multiple availability groups, you need the following:</p> <ul> <li><p>A reserved static IP address for the availability group listener that the internal load balancer uses. Reserve one address for each availability group.</p></li> <li><p>A separate health check rule for each availability group. The request of the health check provides the static IP address of the availability group listener ( which is also the reserved IP address at the previous step). The health check probes for response <code translate="no" dir="ltr">1</code> returned by the GCE agent. All health checks use port <code translate="no" dir="ltr">59998</code>.</p></li> <li><p>A separate backend service for each availability group to which you add the existing two compute instance groups. The backend service uses the health check defined at the previous step.</p></li> <li><p>An internal load balancer for each availability group for the backend service created at the previous step. The load balancer is associated with the availability group listener static IP address.</p></li> </ul> <h2 id="test_the_failover">Test the failover</h2> <p>You are now ready to test if the failover works as expected:</p> <ol> <li>Return to the PowerShell session on <code translate="no" dir="ltr">witness</code>.</li> <li>
+<p>Run the following script.</p> 
+<pre>
+while ($True){
+  $Conn = New-Object System.Data.SqlClient.SqlConnection
+  $Conn.ConnectionString = "Server=tcp:bookshelf,1433;Integrated Security=true;Initial Catalog=master"
+  $Conn.Open()
+
+  $Cmd = New-Object System.Data.SqlClient.SqlCommand
+  $Cmd.Connection = $Conn
+  $Cmd.CommandText = "SELECT SERVERPROPERTY('ServerName')"
+
+  $Adapter = New-Object System.Data.SqlClient.SqlDataAdapter $Cmd
+  $Data = New-Object System.Data.DataSet
+  $Adapter.Fill($Data) | Out-Null
+  $Data.Tables[0] + (Get-Date -Format "MM/dd/yyyy HH:mm:ss")
+
+  Start-Sleep -Seconds 2
+}
+</pre> <p>In this guide, we used the DNS name <code translate="no" dir="ltr">bookshelf</code> and the port value <code translate="no" dir="ltr">1433</code> for the availability group listener in the server definition <code translate="no" dir="ltr">tcp:bookshelf,1433</code>.</p> <p>Every 2 seconds, the script connects to SQL Server by using the availability group listener, and queries the server name.</p> <p>Leave the script running.</p>
+</li> <li>
+<p>Return to the Remote Desktop session on <code translate="no" dir="ltr">node-1</code> to trigger a failover.</p> <ol> <li>In <strong>SQL Server Management Studio</strong>, navigate to <strong>Always On High Availability &gt; Availability Groups &gt; bookshelf-ag (Primary)</strong> and right-click the node.</li> <li>Select <strong>Failover</strong>.</li> <li>On the <strong>Select new primary replica</strong> page, verify that <code translate="no" dir="ltr">node-2</code> is selected as new primary replica and that the <strong>Failover readiness</strong> column indicates <code translate="no" dir="ltr">No data loss</code>. Then select <strong>Next</strong>.</li> <li>On the <strong>Connect to replica</strong> page, select <strong>Connect</strong>.</li> <li>In the <strong>Connect to server</strong> dialog, verify that the server name is <code translate="no" dir="ltr">node-2</code> and click <strong>Connect</strong>.</li> <li>Select <strong>Next</strong> and then <strong>Finish</strong>.</li> <li>On the <strong>Results</strong> page, verify that the failover was successful.</li> </ol>
+</li> <li><p>Return to the PowerShell session on <code translate="no" dir="ltr">witness</code>.</p></li> <li><p>Observe the output of the running script and notice that the server name changes from <code translate="no" dir="ltr">node-1</code> to <code translate="no" dir="ltr">node-2</code> as a result of the failover.</p></li> <li><p>Stop the script by pressing <code translate="no" dir="ltr">Ctrl+C</code>.</p></li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> 
+<p> After you finish the tutorial, you can clean up the resources that you created so that they stop using quota and incurring charges. The following sections describe how to delete or turn off these resources. </p> <h3 id="deleting_the_project">Delete the project</h3> 
+<p> The easiest way to eliminate billing is to delete the project that you created for the tutorial. </p> <p>To delete the project: </p>
+<ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn how you can <a href="configure-failover-cluster-instance" track-type="tutorial" track-name="computeEngineLink" track-metadata-position="whatsNext" track-metadata-end-goal="windowsTutorials">configure a SQL Server failover cluster instance that uses Storage Spaces Direct</a>.</li> <li>Learn how you can <a href="configure-failover-cluster-instance-pd-multi-writer" track-type="tutorial" track-name="computeEngineLink" track-metadata-position="whatsNext" track-metadata-end-goal="windowsTutorials">configure a SQL Server failover cluster instance that uses Persistent Disk in multi-writer mode</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/instances/sql-server/configure-availability" class="_attribution-link">https://docs.cloud.google.com/compute/docs/instances/sql-server/configure-availability</a>
+  </p>
+</div>

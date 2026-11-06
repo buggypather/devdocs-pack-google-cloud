@@ -1,0 +1,325 @@
+<h1>GitOps-style continuous delivery with Cloud Build</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <aside class="caution"><strong>Caution:</strong><span> Effective June 17, 2024, Cloud Source Repositories isn't available to new customers. If your organization hasn't previously used Cloud Source Repositories, you can't use Cloud Source Repositories to configure GitOps-style continuous delivery. You can use this tutorial to configure CI/CD with a different source control system, such as GitHub, Bitbucket, or Gitlab. Organizations that have used Cloud Source Repositories prior to June 17, 2024 are not affected by this change.</span></aside> <p>This page explains how to create a continuous integration and delivery (CI/CD) pipeline on Google Cloud using only hosted products and the popular GitOps methodology.</p> <p>Google engineers have been storing configuration and deployment files in our primary source code repository for a long time. This methodology is described in the book <a href="https://landing.google.com/sre/sre-book/chapters/release-engineering/#configuration-management-vJsYUr" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Site Reliability Engineering, Chapter 8</a> (<em>Beyer et. al., 2016</em>), and was demonstrated by Kelsey Hightower during his <a href="https://www.youtube.com/watch" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Google Cloud Next '17 keynote</a>.</p> <p>A key part of GitOps is the idea of "environments-as-code": describing your deployments declaratively using files (for example, Kubernetes manifests) stored in a Git repository.</p> <p>In this tutorial, you create a CI/CD pipeline that automatically builds a container image from committed code, stores the image in <a href="https://docs.cloud.google.com/artifact-registry" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Artifact Registry</a>, updates a Kubernetes manifest in a Git repository, and deploys the application to Google Kubernetes Engine (GKE) using that manifest.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gitops-tutorial-pipeline-architecture.svg" alt="Architecture of the CI/CD pipeline"></p> <p>This tutorial uses two Git repositories:</p> <ul> <li>
+<strong>app repository</strong>: contains the source code of the application itself</li> <li>
+<strong>env repository</strong>: contains the manifests for the Kubernetes Deployment</li> </ul> <p>When you push a change to the <em>app</em> repository, the <a href="https://docs.cloud.google.com/build" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Build</a> pipeline runs tests, builds a container image, and pushes it to Artifact Registry. After pushing the image, Cloud Build updates the Deployment manifest and pushes it to the <em>env</em> repository. This triggers another Cloud Build pipeline that applies the manifest to the GKE cluster and, if successful, stores the manifest in another branch of the <em>env</em> repository.</p> <p>We keep the <em>app</em> and <em>env</em> repositories separate because they have different lifecycles and uses. The main users of the <em>app</em> repository are actual humans and this repository is dedicated to a specific application. The main users of the <em>env</em> repository are automated systems (such as Cloud Build), and this repository might be shared by several applications. The <em>env</em> repository can have several branches that each map to a specific environment (you only use production in this tutorial) and reference a specific container image, whereas the <em>app</em> repository does not.</p> <p>When you finish this tutorial, you have a system where you can easily:</p> <ul> <li>Distinguish between failed and successful deployments by looking at the Cloud Build history,</li> <li>Access the manifest currently used by looking at the <em>production</em> branch of the <em>env</em> repository,</li> <li>Rollback to any previous version by re-executing the corresponding Cloud Build build.</li> </ul> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gitops-tutorial-pipeline-flow.svg" alt="Flow of the CI/CD pipeline"></p> <h2 id="about_this_tutorial">About this tutorial</h2> <p>This tutorial uses <a href="https://docs.cloud.google.com/source-repositories" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Source Repositories</a> to host Git repositories, but you can achieve the same results with other third-party products such as GitHub, Bitbucket, or GitLab.</p> <p>This pipeline does not implement a validation mechanism before the deployment. If you use GitHub, Bitbucket, or GitLab, you can modify the pipeline to use a Pull Request for this purpose.</p> <p>While we recommend <a href="http://spinnaker.io" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Spinnaker</a> to the teams who want to implement advanced deployment patterns (blue/green, canary analysis, multi-cloud, etc.), its feature set might not be needed for a successful CI/CD strategy for smaller organizations and projects. In this tutorial, you learn how to create a CI/CD pipeline fit for applications hosted on GKE with tooling.</p> <p>For simplicity, this tutorial uses a single environment —production— in the <em>env</em> repository, but you can extend it to deploy to multiple environments if needed.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Create Git repositories in Cloud Source Repositories.</li> <li>Create a container image with Cloud Build and store it in Artifact Registry.</li> <li>Create a CI pipeline.</li> <li>Create a CD pipeline.</li> <li>Test the CI/CD pipeline.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing/">GKE</a></li> <li><a href="https://cloud.google.com/source-repositories/pricing">Cloud Source Repositories</a></li> <li><a href="https://cloud.google.com/artifact-registry/pricing">Artifact Registry</a></li> <li><a href="https://cloud.google.com/build/pricing">Cloud Build</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <li>
+<p>Select or create a Google Cloud project.</p> <p><a href="https://console.cloud.google.com/cloud-resource-manager" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Manage Resources</a> </p>
+</li> <li>
+<p>Enable billing for your project.</p> <p><a href="https://docs.cloud.google.com/billing/docs/how-to/modify-project" track-type="tutorial" track-name="internalLink" track-metadata-position="body" class="button button-primary">Enable Billing</a> </p>
+</li> <li>
+<p>Open <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a> to execute the commands listed in this tutorial. Cloud Shell is an interactive shell environment for Google Cloud that lets you manage your projects and resources from your web browser.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Cloud Shell</a> </p>
+</li> <li>
+<p>If the <code translate="no" dir="ltr">gcloud config get-value project</code> command does not return the ID of the project you selected, configure Cloud Shell to use your project.</p> 
+<pre>
+gcloud config set project [PROJECT_ID]
+</pre>
+</li> <li>
+<p>In Cloud Shell, enable the required APIs.</p> 
+<pre>
+gcloud services enable container.googleapis.com \
+    cloudbuild.googleapis.com \
+    sourcerepo.googleapis.com \
+    artifactregistry.googleapis.com
+</pre>
+</li> <li>
+<p>Create an Artifact Registry Docker repository named <code translate="no" dir="ltr">my-repository</code> in the <code translate="no" dir="ltr">us-central1</code> region to store your container images.</p> 
+<pre>gcloud artifacts repositories create my-repository \
+  --repository-format=docker \
+  --location=us-central1
+</pre>
+</li> <li>
+<p>In Cloud Shell, create a GKE cluster that you will use to deploy the sample application of this tutorial.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>Create an Autopilot cluster named <code translate="no" dir="ltr">hello-cloudbuild</code>:</p> 
+<pre data-language="">gcloud container clusters create-auto hello-cloudbuild \
+    --location us-central1
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>Create a one-node Standard cluster named <code translate="no" dir="ltr">hello-cloudbuild</code>:</p> 
+<pre data-language="">gcloud container clusters create hello-cloudbuild \
+    --num-nodes 1 --location us-central1
+</pre></section> </div>
+</li> <li>
+<p>If you have never used Git in Cloud Shell, configure it with your name and email address. Git will use those to identify you as the author of the commits you will create in Cloud Shell.</p> 
+<pre>
+git config --global user.email "YOUR_EMAIL_ADDRESS"
+git config --global user.name "YOUR_NAME"
+</pre>
+</li> </ol> <p>When you finish this tutorial, you can avoid continued billing by deleting the resources you created. See <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cleaning up</a> for more detail.</p> </section> <div id="tutorial-content"> <h2 id="creating_the_git_repositories_in">Creating the Git repositories in Cloud Source Repositories</h2> <p>In this section, you create the two Git repositories (<em>app</em> and <em>env</em>) used in this tutorial, and initialize the <em>app</em> one with some sample code.</p> <ol> <li>
+<p>In Cloud Shell, create the two Git repositories.</p> 
+<pre>
+gcloud source repos create hello-cloudbuild-app
+gcloud source repos create hello-cloudbuild-env
+</pre>
+</li> <li>
+<p>Clone the sample code from GitHub.</p> 
+<pre>
+cd ~
+git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+</pre>
+</li> <li>
+<p>Configure Cloud Source Repositories as a remote.</p> 
+<pre>
+PROJECT_ID=$(gcloud config get-value project)
+git remote add google \
+    "https://source.developers.google.com/p/${PROJECT_ID}/r/hello-cloudbuild-app"
+</pre>
+</li> </ol> <p>The code you cloned contains a "Hello World" application.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>from flask import Flask
+app = Flask('hello-cloudbuild')
+
+@app.route('/')
+def hello():
+  return "Hello World!\n"
+
+if __name__ == '__main__':
+  app.run(host = '0.0.0.0', port = 8080)</pre> </div> <h2 id="creating_a_container_image_with">Creating a container image with Cloud Build</h2> <p>The code you cloned contains the following Dockerfile.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>FROM python:3.13-slim
+RUN pip install flask
+WORKDIR /app
+COPY app.py /app/app.py
+ENTRYPOINT ["python"]
+CMD ["/app/app.py"]</pre> </div> <p>With this Dockerfile, you can create a container image with Cloud Build and store it in Artifact Registry.</p> <ol> <li>
+<p>In Cloud Shell, create a Cloud Build build based on the latest commit with the following command.</p> 
+<pre>
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+COMMIT_ID="$(git rev-parse --short=7 HEAD)"
+gcloud builds submit --tag="us-central1-docker.pkg.dev/${PROJECT_ID}/my-repository/hello-cloudbuild:${COMMIT_ID}" .
+</pre> <p>Cloud Build streams the logs generated by the creation of the container image to your terminal when you execute this command.</p>
+</li> <li>
+<p>After the build finishes, verify that your new container image is available in Artifact Registry.</p> <p><a href="https://console.cloud.google.com/artifacts" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Artifact Registry</a> </p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gitops-tutorial-registry.png" alt="hello-cloudbuild image in Artifact Registry"></p>
+</li> </ol> <h2 id="creating_the_continuous_integration_pipeline">Creating the continuous integration pipeline</h2> <p>In this section, you configure Cloud Build to automatically run a small unit test, build the container image, and then push it to Artifact Registry. Pushing a new commit to Cloud Source Repositories automatically triggers this pipeline. The <code translate="no" dir="ltr">cloudbuild.yaml</code> file included in the code is the pipeline's configuration.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>steps:
+# This step runs the unit tests on the app
+- name: 'python:3.13-slim'
+  id: Test
+  entrypoint: /bin/sh
+  args:
+  - -c
+  - 'pip install flask &amp;&amp; python test_app.py -v'
+
+# This step builds the container image.
+- name: 'gcr.io/cloud-builders/docker'
+  id: Build
+  args:
+  - 'build'
+  - '-t'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/my-repository/hello-cloudbuild:$SHORT_SHA'
+  - '.'
+
+# This step pushes the image to Artifact Registry
+# The PROJECT_ID and SHORT_SHA variables are automatically
+# replaced by Cloud Build.
+- name: 'gcr.io/cloud-builders/docker'
+  id: Push
+  args:
+  - 'push'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/my-repository/hello-cloudbuild:$SHORT_SHA'</pre> </div> <ol> <li>
+<p>Open the Cloud Build <strong>Triggers</strong> page.</p> <p><a href="https://console.cloud.google.com/cloud-build/triggers" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Triggers</a> </p>
+</li> <li><p>Click <strong>Create trigger</strong>.</p></li> <li>
+<p>Fill out the following options:</p> <ul> <li>In the <strong>Name</strong> field, type <code translate="no" dir="ltr">hello-cloudbuild</code>.</li> <li>Under <strong>Event</strong>, select <strong>Push to a branch</strong>.</li> <li>Under <strong>Source</strong>, select <code translate="no" dir="ltr">hello-cloudbuild-app</code> as your <strong>Repository</strong> and <code translate="no" dir="ltr">^master$</code> as your <strong>Branch</strong>.</li> <li>Under <strong>Build configuration</strong>, select <strong>Cloud Build configuration file</strong>.</li> <li>In the <strong>Cloud Build configuration file location</strong> field, type <code translate="no" dir="ltr">cloudbuild.yaml</code> after the <code translate="no" dir="ltr">/</code>.</li> </ul>
+</li> <li>
+<p>Click <strong>Create</strong> to save your build trigger.</p> <p class="note"><strong>Tip</strong>: If you need to create Build Triggers for many projects, you can use the <a href="https://docs.cloud.google.com/build/docs/api/reference/rest/v1/projects.triggers" track-type="article" track-name="internalLink" track-metadata-position="body">Build Triggers API</a>.</p>
+</li> <li>
+<p>In Cloud Shell, push the application code to Cloud Source Repositories to trigger the CI pipeline in Cloud Build.</p> 
+<pre>
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+git push google master
+</pre>
+</li> <li>
+<p>Open the Cloud Build console.</p> <p><a href="https://console.cloud.google.com/cloud-build/builds" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Cloud Build</a> </p> <p>Your recently run and finished builds appear. You can click on a build to follow its execution and examine its logs.</p>
+</li> </ol> <h2 id="creating_the_continuous_delivery_pipeline">Creating the continuous delivery pipeline</h2> <p>Cloud Build is also used for the continuous delivery pipeline. The pipeline runs each time a commit is pushed to the <em>candidate</em> branch of the <em>hello-cloudbuild-env</em> repository. The pipeline applies the new version of the manifest to the Kubernetes cluster and, if successful, copies the manifest over to the <em>production</em> branch. This process has the following properties:</p> <ul> <li>The <em>candidate</em> branch is a history of the deployment attempts.</li> <li>The <em>production</em> branch is a history of the successful deployments.</li> <li>You have a view of successful and failed deployments in Cloud Build.</li> <li>You can rollback to any previous deployment by re-executing the corresponding build in Cloud Build. A rollback also updates the <em>production</em> branch to truthfully reflect the history of deployments.</li> </ul> <p>You will modify the continuous integration pipeline to update the <em>candidate</em> branch of the <em>hello-cloudbuild-env</em> repository, triggering the continuous delivery pipeline.</p> <aside class="note"><strong>Note:</strong><span> You can extend the system described in this tutorial to manage several environments. The easiest way to achieve this is to have a pair of branches for each environment <em>env</em>: a <em>candidate-env</em> branch and an <em>env</em> branch.</span></aside> <h3 id="granting_access_to">Granting Cloud Build access to GKE</h3> <p>To deploy the application in your Kubernetes cluster, Cloud Build needs the Kubernetes Engine Developer <a href="https://docs.cloud.google.com/iam/docs/understanding-roles" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Identity and Access Management Role</a>.</p> <div> <section><p class="_code-tab"><strong>Shell</strong></p>
+<p>In Cloud Shell, execute the following command:</p> 
+<pre data-language="bash">
+PROJECT_NUMBER="$(gcloud projects describe ${PROJECT_ID} --format='get(projectNumber)')"
+gcloud projects add-iam-policy-binding ${PROJECT_NUMBER} \
+    --member=serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com \
+    --role=roles/container.developer
+</pre></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li> <p>In the Google Cloud console, go to the <i class="material-icons" aria-hidden="true" translate="no">settings</i> GKE <b>Permissions</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/cloud-build/settings" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="cloud-build/settings">Go to <b>Permissions</b></a> </p> </li> <li><p>Set the status of the <strong>Kubernetes Engine Developer</strong> role to <strong>Enable</strong>.</p></li> </ol></section> </div> <h3 id="initializing_the_hello-cloudbuild-env_repository">Initializing the <em>hello-cloudbuild-env</em> repository</h3> <p>You need to initialize the <em>hello-cloudbuild-env</em> repository with two branches (<em>production</em> and <em>candidate</em>) and a Cloud Build configuration file describing the deployment process.</p> <ol> <li>
+<p>In Cloud Shell, clone the <em>hello-cloudbuild-env</em> repository and create the <em>production</em> branch.</p> 
+<pre>
+cd ~
+gcloud source repos clone hello-cloudbuild-env
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+git checkout -b production
+</pre>
+</li> <li>
+<p>Copy the <code translate="no" dir="ltr">cloudbuild-delivery.yaml</code> file available in the <em>hello-cloudbuild-app</em> repository and commit the change.</p> 
+<pre>
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+cp ~/hello-cloudbuild-app/cloudbuild-delivery.yaml ~/kubernetes-engine-samples/management/gitops-style-delivery/cloudbuild.yaml
+git add .
+git commit -m "Create cloudbuild.yaml for deployment"
+</pre> <p>The <code translate="no" dir="ltr">cloudbuild-delivery.yaml</code> file describes the deployment process to be run in Cloud Build. It has two steps:</p> <ol> <li><p>Cloud Build applies the manifest on the GKE cluster.</p></li> <li><p>If successful, Cloud Build copies the manifest on the <em>production</em> branch.</p></li> </ol> <div class="github-docwidget-gitinclude-code"> 
+<pre>steps:
+# This step deploys the new version of our container image
+# in the hello-cloudbuild Kubernetes Engine cluster.
+- name: 'gcr.io/cloud-builders/kubectl'
+  id: Deploy
+  args:
+  - 'apply'
+  - '-f'
+  - 'kubernetes.yaml'
+  env:
+  - 'CLOUDSDK_COMPUTE_REGION=us-central1'
+  - 'CLOUDSDK_CONTAINER_CLUSTER=hello-cloudbuild'
+
+# This step copies the applied manifest to the production branch
+# The COMMIT_SHA variable is automatically
+# replaced by Cloud Build.
+- name: 'gcr.io/cloud-builders/git'
+  id: Copy to production branch
+  entrypoint: /bin/sh
+  args:
+  - '-c'
+  - |
+    set -x &amp;&amp; \
+    # Configure Git to create commits with Cloud Build's service account
+    git config user.email $(gcloud auth list --filter=status:ACTIVE --format='value(account)') &amp;&amp; \
+    # Switch to the production branch and copy the kubernetes.yaml file from the candidate branch
+    git fetch origin production &amp;&amp; git checkout production &amp;&amp; \
+    git checkout $COMMIT_SHA kubernetes.yaml &amp;&amp; \
+    # Commit the kubernetes.yaml file with a descriptive commit message
+    git commit -m "Manifest from commit $COMMIT_SHA
+    $(git log --format=%B -n 1 $COMMIT_SHA)" &amp;&amp; \
+    # Push the changes back to Cloud Source Repository
+    git push origin production</pre> </div> </li> <li>
+<p>Create a <em>candidate</em> branch and push both branches for them to be available in Cloud Source Repositories.</p> 
+<pre>
+git checkout -b candidate
+git push origin production
+git push origin candidate
+</pre>
+</li> <li>
+<p>Grant the Source Repository Writer IAM role to the Cloud Build service account for the <em>hello-cloudbuild-env</em> repository.</p> 
+<pre>PROJECT_NUMBER="$(gcloud projects describe ${PROJECT_ID} \
+    --format='get(projectNumber)')"
+cat &gt;/tmp/hello-cloudbuild-env-policy.yaml &lt;&lt;EOF
+bindings:
+- members:
+  - serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com
+  role: roles/source.writer
+EOF
+gcloud source repos set-iam-policy \
+    hello-cloudbuild-env /tmp/hello-cloudbuild-env-policy.yaml
+</pre>
+</li> </ol> <h3 id="creating_the_trigger_for_the_continuous_delivery_pipeline">Creating the trigger for the continuous delivery pipeline</h3> <p>In this section, you configure Cloud Build to be triggered by a push to the <em>candidate</em> branch of the <em>hello-cloudbuild-env</em> repository.</p> <ol> <li>
+<p>Open the <strong>Triggers</strong> page of Cloud Build.</p> <p><a href="https://console.cloud.google.com/cloud-build/triggers" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Triggers</a> </p>
+</li> <li><p>Click <strong>Create trigger</strong>.</p></li> <li>
+<p>Fill out the following options:</p> <ul> <li>In the <strong>Name</strong> field, type <code translate="no" dir="ltr">hello-cloudbuild-deploy</code>.</li> <li>Under <strong>Event</strong>, select <strong>Push to a branch</strong>.</li> <li>Under <strong>Source</strong>, select <code translate="no" dir="ltr">hello-cloudbuild-env</code> as your <strong>Repository</strong> and <code translate="no" dir="ltr">^candidate$</code> as your <strong>Branch</strong>.</li> <li>Under <strong>Configuration</strong>, select <strong>Cloud Build configuration file (yaml or json)</strong>.</li> <li>In the <strong>Cloud Build configuration file location</strong> field, type <code translate="no" dir="ltr">cloudbuild.yaml</code> after the <code translate="no" dir="ltr">/</code>.</li> </ul>
+</li> <li><p>Click <strong>Create</strong>.</p></li> </ol> <h3 id="modifying_the_continuous_integration_pipeline_to_trigger_the_continuous_delivery_pipeline">Modifying the continuous integration pipeline to trigger the continuous delivery pipeline</h3> <p>In this section, you add some steps to the continuous integration pipeline that generates a new version of the Kubernetes manifest and push it to the <em>hello-cloudbuild-env</em> repository to trigger the continuous delivery pipeline.</p> <ol> <li>
+<p>Replace the <code translate="no" dir="ltr">cloudbuild.yaml</code> file with the extended example in the <code translate="no" dir="ltr">cloudbuild-trigger-cd.yaml</code> file.</p> 
+<pre>
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+cp cloudbuild-trigger-cd.yaml cloudbuild.yaml
+</pre> <p>The <code translate="no" dir="ltr">cloudbuild-trigger-cd.yaml</code> is an extended version of the <code translate="no" dir="ltr">cloudbuild.yaml</code> file. It adds steps to generate the new Kubernetes manifest and trigger the continuous delivery pipeline.</p> <aside class="note"><strong>Note:</strong><span> This pipeline uses a <em>sed</em> to render the manifest template. In reality, you might benefit from using a dedicated tool such as <a href="https://github.com/kubernetes-sigs/kustomize" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">kustomize</a> or <a href="https://github.com/GoogleContainerTools/skaffold" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">skaffold</a>. These tools give you more control over the rendering of the manifest templates.</span></aside> <div class="github-docwidget-gitinclude-code"> 
+<pre># This step clones the hello-cloudbuild-env repository
+- name: 'gcr.io/cloud-builders/gcloud'
+  id: Clone env repository
+  entrypoint: /bin/sh
+  args:
+  - '-c'
+  - |
+    gcloud source repos clone hello-cloudbuild-env &amp;&amp; \
+    cd hello-cloudbuild-env &amp;&amp; \
+    git checkout candidate &amp;&amp; \
+    git config user.email $(gcloud auth list --filter=status:ACTIVE --format='value(account)')
+
+# This step generates the new manifest
+- name: 'gcr.io/cloud-builders/gcloud'
+  id: Generate manifest
+  entrypoint: /bin/sh
+  args:
+  - '-c'
+  - |
+     sed "s/GOOGLE_CLOUD_PROJECT/${PROJECT_ID}/g" kubernetes.yaml.tpl | \
+     sed "s/COMMIT_SHA/${SHORT_SHA}/g" &gt; hello-cloudbuild-env/kubernetes.yaml
+
+# This step pushes the manifest back to hello-cloudbuild-env
+- name: 'gcr.io/cloud-builders/gcloud'
+  id: Push manifest
+  entrypoint: /bin/sh
+  args:
+  - '-c'
+  - |
+    set -x &amp;&amp; \
+    cd hello-cloudbuild-env &amp;&amp; \
+    git add kubernetes.yaml &amp;&amp; \
+    git commit -m "Deploying image us-central1-docker.pkg.dev/$PROJECT_ID/my-repository/hello-cloudbuild:${SHORT_SHA}
+    Built from commit ${COMMIT_SHA} of repository hello-cloudbuild-app
+    Author: $(git log --format='%an &lt;%ae&gt;' -n 1 HEAD)" &amp;&amp; \
+    git push origin candidate
+</pre> </div> </li> <li>
+<p>Commit the modifications and push them to Cloud Source Repositories.</p> 
+<pre>
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+git add cloudbuild.yaml
+git commit -m "Trigger CD pipeline"
+git push google master
+</pre> <p>This triggers the continuous integration pipeline in Cloud Build.</p>
+</li> <li>
+<p>Examine the continuous integration build.</p> <p><a href="https://console.cloud.google.com/cloud-build/builds" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Cloud Build</a> </p> <p>Your recently run and finished builds for the <em>hello-cloudbuild-app</em> repository appear. You can click on a build to follow its execution and examine its logs. The last step of this pipeline pushes the new manifest to the <em>hello-cloudbuild-env</em> repository, which triggers the continuous delivery pipeline.</p>
+</li> <li>
+<p>Examine the continuous delivery build.</p> <p><a href="https://console.cloud.google.com/cloud-build/builds" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Cloud Build</a> </p> <p>Your recently run and finished builds for the <em>hello-cloudbuild-env</em> repository appear. You can click on a build to follow its execution and examine its logs.</p>
+</li> </ol> <h3 id="testing_the_complete_pipeline">Testing the complete pipeline</h3> <p>The complete CI/CD pipeline is now configured. In this section, you test it from end to end.</p> <ol> <li>
+<p>Go to the GKE Services page.</p> <p><a href="https://console.cloud.google.com/kubernetes/discovery" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Google Kubernetes Engine Services</a> </p> <p>The list contains a single service called <em>hello-cloudbuild</em> created by the recently completed continuous delivery build.</p>
+</li> <li><p>Click on the endpoint for the <em>hello-cloudbuild</em> service. "Hello World!" appears. If there is no endpoint, or if you see a load balancer error, you might have to wait a few minutes for the load balancer to be completely initialized. Click <strong>Refresh</strong> to update the page if needed.</p></li> <li>
+<p>In Cloud Shell, replace "Hello World" by "Hello Cloud Build", both in the application and in the unit test.</p> 
+<pre>
+cd ~/kubernetes-engine-samples/management/gitops-style-delivery/
+sed -i 's/Hello World/Hello Cloud Build/g' app.py
+sed -i 's/Hello World/Hello Cloud Build/g' test_app.py
+</pre>
+</li> <li>
+<p>Commit and push the change to Cloud Source Repositories.</p> 
+<pre>
+git add app.py test_app.py
+git commit -m "Hello Cloud Build"
+git push google master
+</pre> <p>This triggers the full CI/CD pipeline.</p>
+</li> <li><p>After a few minutes, reload the application in your browser. "Hello Cloud Build!" appears.</p></li> </ol> <h3 id="testing_the_rollback">Testing the rollback</h3> <p>In this section, you rollback to the version of the application that said "Hello World!".</p> <ol> <li>
+<p>Open the Cloud Build console for the <em>hello-cloudbuild-env</em> repository.</p> <p><a href="https://console.cloud.google.com/cloud-build/builds" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Cloud Build</a> </p>
+</li> <li><p>Click on the second most recent build available.</p></li> <li><p>Click <strong>Rebuild</strong>.</p></li> <li><p>When the build is finished, reload the application in your browser. "Hello World!" appears again.</p></li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h3 id="deleting_the_resources">Deleting the resources</h3> <p>If you want to keep the Google Cloud project you used in this tutorial, delete the individual resources:</p> <ol> <li>
+<p>Delete the local Git repositories.</p> 
+<pre>
+cd ~
+rm -rf ~/hello-cloudbuild-app
+rm -rf ~/hello-cloudbuild-env
+</pre>
+</li> <li>
+<p>Delete the Git repositories in Cloud Source Repositories.</p> 
+<pre>
+gcloud source repos delete hello-cloudbuild-app --quiet
+gcloud source repos delete hello-cloudbuild-env --quiet
+</pre>
+</li> <li>
+<p>Delete the Cloud Build Triggers.</p> <ol> <li>
+<p>Open the <strong>Triggers</strong> page of Cloud Build.</p> <p><a href="https://console.cloud.google.com/cloud-build/triggers" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Triggers</a> </p>
+</li> <li><p>For each trigger, click <b>More</b> <i class="material-icons" aria-hidden="true" translate="no">more_vert</i>, then <strong>Delete</strong>.</p></li> </ol>
+</li> <li>
+<p>Delete the Docker repository in Artifact Registry.</p> 
+<pre>
+gcloud artifacts repositories delete my-repository \
+    --location=us-central1
+</pre>
+</li> <li>
+<p>Remove the permission granted to Cloud Build to connect to GKE.</p> 
+<pre>
+PROJECT_NUMBER="$(gcloud projects describe ${PROJECT_ID} \
+    --format='get(projectNumber)')"
+gcloud projects remove-iam-policy-binding ${PROJECT_NUMBER} \
+    --member=serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com \
+    --role=roles/container.developer
+</pre>
+</li> <li>
+<p>Delete the GKE cluster.</p> 
+<pre>gcloud container clusters delete hello-cloudbuild \
+   --location us-central1
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Take a look at more advanced Cloud Build features: <a href="https://docs.cloud.google.com/build/docs/configuring-builds/configure-build-step-order" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Configuring the order of build steps</a>, <a href="https://docs.cloud.google.com/build/docs/configuring-builds/build-test-deploy-artifacts" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Building, Testing, and Deploying Artifacts</a>, <a href="https://docs.cloud.google.com/build/docs/create-custom-build-steps" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Creating Custom Build Steps</a> </li> <li>
+<a href="https://docs.cloud.google.com/source-repositories/docs/connecting-hosted-repositories" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Learn how to mirror a GitHub or Bitbucket repository to Cloud Source Repositories</a> </li> <li>
+<a href="https://docs.cloud.google.com/build/docs/run-builds-on-github" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Connect Cloud Build directly to your GitHub repository</a> </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/gitops-cloud-build" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/gitops-cloud-build</a>
+  </p>
+</div>

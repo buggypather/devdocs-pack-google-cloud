@@ -1,0 +1,392 @@
+<h1 id="manage-vector-indexes">Manage vector indexes</h1> <p>This document describes how to create and manage vector indexes to accelerate your vector searches.</p> <p>A vector index is a data structure designed to let the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search"><code translate="no" dir="ltr">VECTOR_SEARCH</code> function</a> and <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-search"><code translate="no" dir="ltr">AI.SEARCH</code> function</a> run more efficiently, especially on large datasets. When using an index, these search functions use <a href="https://en.wikipedia.org/wiki/Nearest_neighbor_search#Approximation_methods">Approximate Nearest Neighbor (ANN)</a> algorithms to reduce query latency and computational cost. While ANN introduces a degree of approximation, meaning that <a href="https://developers.google.com/machine-learning/crash-course/classification/precision-and-recall#recallsearch_term_rules">recall</a> might not be 100%, the performance improvements typically offer an advantage for most applications.</p> <h2 id="roles_and_permissions">Roles and permissions</h2> <p>To create a vector index, you need the <a href="access-control#bq-permissions"><code translate="no" dir="ltr">bigquery.tables.createIndex</code> IAM permission</a> on the table where you're creating the index. To drop a vector index, you need the <code translate="no" dir="ltr">bigquery.tables.deleteIndex</code> permission. Each of the following predefined IAM roles includes the permissions that you need to work with vector indexes:</p> <ul> <li>BigQuery Data Owner (<code translate="no" dir="ltr">roles/bigquery.dataOwner</code>)</li> <li>BigQuery Data Editor (<code translate="no" dir="ltr">roles/bigquery.dataEditor</code>)</li> </ul> <h2 id="choose-vector-index-type">Choose a vector index type</h2> <p>BigQuery offers two vector index types, <a href="#ivf-index">IVF</a> and <a href="#tree-ah-index">TreeAH</a>, each supporting different use cases. BigQuery supports batching for vector search by processing multiple rows of the input data in the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search"><code translate="no" dir="ltr">VECTOR_SEARCH</code></a>. For small query batches, IVF indexes are preferred. For large query batches, TreeAH indexes, which are built with Google's <a href="https://github.com/google-research/google-research/blob/master/scann/docs/algorithms.md">ScaNN algorithm</a>, are preferred.</p> <h3 id="ivf-index">IVF Index</h3> <p>IVF is an inverted file index, which uses a k-means algorithm to cluster the vector data, and then partitions the vector data based on those clusters. The <code translate="no" dir="ltr">VECTOR_SEARCH</code> and <code translate="no" dir="ltr">AI.SEARCH</code> functions can use these partitions to reduce the amount of data it needs to read in order to determine a result.</p> <h3 id="tree-ah-index">TreeAH Index</h3> <p>The TreeAH index type is named for its combination of a tree-like structure and its use of Asymmetric Hashing (AH), a core quantization technique from the underlying <a href="https://github.com/google-research/google-research/blob/master/scann/docs/algorithms.md">ScaNN algorithm</a>. A TreeAH index works as follows:</p> <ol> <li>The base table is divided into smaller, more manageable shards.</li> <li>A clustering model is trained, with the number of clusters derived from the <code translate="no" dir="ltr">leaf_node_embedding_count</code> option in the <code translate="no" dir="ltr">tree_ah_options</code> argument of the <code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement.</li> <li>The vectors are compressed with product quantization, a technique that reduces their memory usage. The compressed vectors are then stored in the index tables instead of the original vectors, thus reducing vector index sizes.</li> <li>When the <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> function runs, a candidate list for each query vector is efficiently computed using asymmetric hashing, which is hardware-optimized for approximate distance calculations. These candidates are then re-scored and re-ranked using exact embeddings.</li> </ol> <p>The TreeAH algorithm is optimized for batch queries that process hundreds or more query vectors. The use of product quantization can significantly reduce latency and cost, potentially by orders of magnitude compared to IVF. However, due to increased overhead, the IVF algorithm might be better when you have a smaller number of query vectors.</p> <p>We suggest you try the TreeAH index type if your use case meets the following criteria:</p> <ul> <li><p>Your table contains 200 million rows or fewer.</p></li> <li><p>You frequently execute large batch queries involving hundreds or more query vectors.</p></li> </ul> <p>For small batch queries with the TreeAH index type, <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> might revert to <a href="https://wikipedia.org/wiki/Brute-force_search">brute-force search</a>. When this occurs, an <a href="https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#IndexUnusedReason">IndexUnusedReason</a> is provided to explain why the vector index was not utilized.</p> <h2 id="create_an_ivf_vector_index">Create an IVF vector index</h2> <p>To create an IVF vector index, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_vector_index_statement"><code translate="no" dir="ltr">CREATE VECTOR INDEX</code></a> data definition language (DDL) statement:</p> <ol> <li>
+<p>Go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the query editor, run the following SQL statement:</p> <p>To create an <a href="#ivf-index">IVF</a> vector index:</p> 
+<pre>CREATE [ OR REPLACE ] VECTOR INDEX [ IF NOT EXISTS ] INDEX_NAME
+ON DATASET_NAME.TABLE_NAME(COLUMN_NAME)
+STORING(STORED_COLUMN_NAME [, ...])
+OPTIONS(index_type = 'IVF',
+  distance_type = 'DISTANCE_TYPE',
+  ivf_options = '{"num_lists":NUM_LISTS}')</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INDEX_NAME</var></code>: the name of the vector index you're creating. Since the index is always created in the same project and dataset as the base table, there is no need to specify these in the name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATASET_NAME</var></code>: the name of the dataset that contains the table.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TABLE_NAME</var></code>: the name of the table that contains the column with embeddings data.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">COLUMN_NAME</var></code>: the name of a column that contains the embeddings data. The column must have a type of <code translate="no" dir="ltr">ARRAY&lt;FLOAT64&gt;</code>, or if you are using <a href="autonomous-embedding-generation">autonomous embedding generation</a>, a type of <code translate="no" dir="ltr">STRUCT&lt;result ARRAY&lt;FLOAT64&gt;, status STRING&gt;</code>.</p> <p>In all cases, all elements in the embedding array must be non-<code translate="no" dir="ltr">NULL</code>, and all values in the column must have the same array dimensions.</p> <p>If the column type is <code translate="no" dir="ltr">STRUCT&lt;result ARRAY&lt;FLOAT64&gt;, status STRING&gt;</code>, then the <code translate="no" dir="ltr">STRUCT</code> value can be <code translate="no" dir="ltr">NULL</code> or the <code translate="no" dir="ltr">result</code> array can be <code translate="no" dir="ltr">NULL</code>. Any rows with <code translate="no" dir="ltr">NULL</code> for these values are ignored.</p>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">STORED_COLUMN_NAME</var></code>: the name of a top-level column in the table to store in the vector index. The column type can't be <code translate="no" dir="ltr">RANGE</code>. Stored columns are not used if the table has a row-level access policy or the column has a policy tag. For information about how to enable stored columns, see <a href="#stored-columns">Store columns and pre-filter</a>.</p></li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">DISTANCE_TYPE</var></code>: specifies the default distance type to use when performing a vector search using this index. The supported values are <a href="https://en.wikipedia.org/wiki/Euclidean_distance"><code translate="no" dir="ltr">EUCLIDEAN</code></a>, <a href="https://en.wikipedia.org/wiki/Cosine_similarity#Cosine_Distance"><code translate="no" dir="ltr">COSINE</code></a>, and <a href="https://en.wikipedia.org/wiki/Dot_product"><code translate="no" dir="ltr">DOT_PRODUCT</code></a>. <code translate="no" dir="ltr">EUCLIDEAN</code> is the default.</p> <p>The index creation itself always uses <code translate="no" dir="ltr">EUCLIDEAN</code> distance for training but the distance used in your search function can be different.</p> <p>If you specify a value for the <code translate="no" dir="ltr">distance_type</code> argument of the <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> function, that value is used instead of the <code translate="no" dir="ltr"><var translate="no">DISTANCE_TYPE</var></code> value.</p>
+</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">NUM_LISTS</var></code>: an <code translate="no" dir="ltr">INT64</code> value that specifies the number of lists that the IVF index clusters and then partitions your vector data into. This value must be 5,000 or less. During indexing, vectors are assigned to the list corresponding to their nearest cluster centroid. If you omit this argument, BigQuery determines a default value based on your data characteristics. The default value works well for most use cases.</p> <p><code translate="no" dir="ltr"><var translate="no">NUM_LISTS</var></code> controls query tuning granularity. Higher values create more lists, so you can set the <code translate="no" dir="ltr">fraction_lists_to_search</code> option of your search function to scan a smaller percentage of the index. For example, scanning 1% of 100 lists as opposed to scanning 10% of 10 lists. This enables finer control of the search speed and recall but slightly increases the indexing cost. Set this argument value based on how precisely you need to tune query scope.</p>
+</li> </ul>
+</li> </ol> <p>The following example creates a vector index on the <code translate="no" dir="ltr">embedding</code> column of <code translate="no" dir="ltr">my_table</code>:</p> 
+<pre>CREATE TABLE my_dataset.my_table(embedding ARRAY&lt;FLOAT64&gt;);
+
+CREATE VECTOR INDEX my_index ON my_dataset.my_table(embedding)
+OPTIONS(index_type = 'IVF');</pre> <p>The following example creates a vector index on the <code translate="no" dir="ltr">embedding</code> column of <code translate="no" dir="ltr">my_table</code>, and specifies the distance type to use and the IVF options:</p> 
+<pre>CREATE TABLE my_dataset.my_table(embedding ARRAY&lt;FLOAT64&gt;);
+
+CREATE VECTOR INDEX my_index ON my_dataset.my_table(embedding)
+OPTIONS(index_type = 'IVF', distance_type = 'COSINE',
+ivf_options = '{"num_lists": 2500}')</pre> <p>The following example creates a table with <a href="autonomous-embedding-generation">autonomous embedding generation</a> enabled and creates a vector index on the table. The <code translate="no" dir="ltr">description_embedding</code> embedding column is automatically generated based on the <code translate="no" dir="ltr">description</code> column.</p> 
+<pre>CREATE TABLE mydataset.products (
+  description STRING,
+  description_embedding STRUCT&lt;result ARRAY&lt;FLOAT64&gt;, status STRING&gt;
+    GENERATED ALWAYS AS (
+      AI.EMBED(description, connection_id =&gt; 'us.example_connection',
+        endpoint =&gt; 'text-embedding-005'))
+    STORED OPTIONS( asynchronous = TRUE ));
+
+CREATE VECTOR INDEX my_index ON my_dataset.my_table(description_embedding)
+OPTIONS(index_type = 'IVF');</pre> <h2 id="create_a_treeah_vector_index">Create a TreeAH vector index</h2> <p>To create a TreeAH vector index, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_vector_index_statement"><code translate="no" dir="ltr">CREATE VECTOR INDEX</code></a> data definition language (DDL) statement:</p> <ol> <li>
+<p>Go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the query editor, run the following SQL statement:</p> 
+<pre>CREATE [ OR REPLACE ] VECTOR INDEX [ IF NOT EXISTS ] INDEX_NAME
+ON DATASET_NAME.TABLE_NAME(COLUMN_NAME)
+STORING(STORED_COLUMN_NAME [, ...])
+OPTIONS(index_type = 'TREE_AH',
+  distance_type = 'DISTANCE_TYPE',
+  tree_ah_options = '{"leaf_node_embedding_count":LEAF_NODE_EMBEDDING_COUNT,
+    "normalization_type":"NORMALIZATION_TYPE"}')</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INDEX_NAME</var></code>: the name of the vector index that you are creating. Since the index is always created in the same project and dataset as the base table, there is no need to specify these in the name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATASET_NAME</var></code>: the name of the dataset that contains the table.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TABLE_NAME</var></code>: the name of the table that contains the column with embeddings data.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">COLUMN_NAME</var></code>: the name of a column that contains the embeddings data. The column must have a type of <code translate="no" dir="ltr">ARRAY&lt;FLOAT64&gt;</code>, or if you are using <a href="autonomous-embedding-generation">autonomous embedding generation</a>, a type of <code translate="no" dir="ltr">STRUCT&lt;result ARRAY&lt;FLOAT64&gt;, status STRING&gt;</code>.</p> <p>In all cases, all elements in the embedding array must be non-<code translate="no" dir="ltr">NULL</code>, and all values in the column must have the same array dimensions. The array dimension must be at least 2.</p> <p>If the column type is <code translate="no" dir="ltr">STRUCT&lt;result ARRAY&lt;FLOAT64&gt;, status STRING&gt;</code>, then the <code translate="no" dir="ltr">STRUCT</code> value can be <code translate="no" dir="ltr">NULL</code> or the <code translate="no" dir="ltr">result</code> array can be <code translate="no" dir="ltr">NULL</code>. Any rows with <code translate="no" dir="ltr">NULL</code> for these values are ignored.</p>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">STORED_COLUMN_NAME</var></code>: the name of a top-level column in the table to store in the vector index. The column type can't be <code translate="no" dir="ltr">RANGE</code>. Stored columns are not used if the table has a row-level access policy or the column has a policy tag. For information about how to enable stored columns, see <a href="#stored-columns">Store columns and pre-filter</a>.</p></li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">DISTANCE_TYPE</var></code>: an optional argument that specifies the default distance type to use when performing a vector search using this index. The supported values are <a href="https://en.wikipedia.org/wiki/Euclidean_distance"><code translate="no" dir="ltr">EUCLIDEAN</code></a>, <a href="https://en.wikipedia.org/wiki/Cosine_similarity#Cosine_Distance"><code translate="no" dir="ltr">COSINE</code></a>, and <a href="https://en.wikipedia.org/wiki/Dot_product"><code translate="no" dir="ltr">DOT_PRODUCT</code></a>. <code translate="no" dir="ltr">EUCLIDEAN</code> is the default.</p> <p>The index creation itself always uses <code translate="no" dir="ltr">EUCLIDEAN</code> distance for training but the distance used in the search function can be different.</p> <p>If you specify a value for the <code translate="no" dir="ltr">distance_type</code> argument of the <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> function, that value is used instead of the <code translate="no" dir="ltr"><var translate="no">DISTANCE_TYPE</var></code> value.</p>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">LEAF_NODE_EMBEDDING_COUNT</var></code>: an <code translate="no" dir="ltr">INT64</code> value greater than or equal to 500 that specifies the approximate number of vectors in each leaf node of the tree that the TreeAH algorithm creates. The TreeAH algorithm divides the whole data space into a number of lists, with each list containing approximately <code translate="no" dir="ltr"><var translate="no">LEAF_NODE_EMBEDDING_COUNT</var></code> data points. A lower value creates more lists with fewer data points, while a larger value creates fewer lists with more data points. The default is 1,000, which is appropriate for most datasets.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">NORMALIZATION_TYPE</var></code>: a <code translate="no" dir="ltr">STRING</code> value. The supported values are <code translate="no" dir="ltr">NONE</code> or <a href="https://en.wikipedia.org/wiki/Norm_(mathematics)#Euclidean_norm"><code translate="no" dir="ltr">L2</code></a>. The default is <code translate="no" dir="ltr">NONE</code>. Normalization happens before any processing, for both the base table data and the query data, but doesn't modify the embedding column <code translate="no" dir="ltr"><var translate="no">COLUMN_NAME</var></code> in <code translate="no" dir="ltr"><var translate="no">TABLE_NAME</var></code>. Depending on the dataset, the embedding model, and the distance type used during search, normalizing the embeddings might improve recall.</p></li> </ul>
+</li> </ol> <p>The following example creates a vector index on the <code translate="no" dir="ltr">embedding</code> column of <code translate="no" dir="ltr">my_table</code>, and specifies the distance type to use and the TreeAH options:</p> 
+<pre>CREATE TABLE my_dataset.my_table(id INT64, embedding ARRAY&lt;FLOAT64&gt;);
+
+CREATE VECTOR INDEX my_index ON my_dataset.my_table(embedding)
+OPTIONS (index_type = 'TREE_AH', distance_type = 'EUCLIDEAN',
+tree_ah_options = '{"normalization_type": "L2"}');</pre> <h2 id="use_vector_indexes_with_hybrid_search">Use vector indexes with hybrid search</h2> <p>To improve the performance of <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#hybrid-search">hybrid search</a> queries, you can add the keyword information that is needed for processing a lexical search to your vector index by specifying <code translate="no" dir="ltr">lexical_search_columns</code> in your <code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement. This can be done for any existing type of vector index such as IVF or TreeAH. The following example <code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement includes keyword information. In this example, the <code translate="no" dir="ltr">lexical_search_columns</code> option lists all the columns that are used for the lexical portion of a hybrid search query. Any column added to the <code translate="no" dir="ltr">lexical_search_columns</code> list must also be added as a stored column in the <code translate="no" dir="ltr">STORING</code> clause:</p> 
+<pre>CREATE [ OR REPLACE ] VECTOR INDEX [ IF NOT EXISTS ] INDEX_NAME
+ON DATASET_NAME.TABLE_NAME(COLUMN_NAME)
+STORING(STORED_COLUMN_NAME [, ...])
+OPTIONS(
+  index_type = 'INDEX_TYPE',
+  distance_type = 'DISTANCE_TYPE',
+  ivf_options = '{"num_lists":NUM_LISTS}'
+  lexical_search_columns = [LEXICAL_COLUMN_NAME [, ...]])</pre> <p>The following <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#hybrid-search">hybrid search</a> example creates a vector index on the embedding column in <code translate="no" dir="ltr">my_table</code>. The <code translate="no" dir="ltr">header</code>, <code translate="no" dir="ltr">content</code>, and <code translate="no" dir="ltr">footer</code> columns are used for lexical search in hybrid search queries:</p> 
+<pre>CREATE VECTOR INDEX `hybrid_index`
+ON `my_dataset.my_table`(`embedding`)
+    STORING(`header`, `content`, `footer`)
+  OPTIONS (
+    index_type = 'IVF',
+    distance_type = 'EUCLIDEAN',
+    lexical_search_columns = ['header', 'content', 'footer']);</pre> <h2 id="filtering">Filtering</h2> <p>The following sections explain how pre-filters and post-filters affect vector search results, and also how to pre-filter by using stored columns and partitions in the vector index.</p> <h3 id="pre-filters_and_post-filters">Pre-filters and post-filters</h3> <p>In BigQuery <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> calls, both pre-filtering and post-filtering serve to refine search results, by applying conditions based on metadata columns associated with the vector embeddings. It is important to understand their differences, implementation, and impact in order to optimize query performance, cost, and accuracy.</p> <p>Pre-filtering and post-filtering are defined as follows:</p> <ul> <li>
+<strong>Pre-filtering:</strong> Applies filter conditions before the approximate nearest neighbor (ANN) search performs distance calculations on candidate vectors. This narrows the pool of vectors that are considered during the search. Consequently, pre-filtering often results in faster query times and reduced computational cost, as the ANN search evaluates fewer potential candidates.</li> <li>
+<strong>Post-filtering:</strong> Applies filter conditions after the initial <code translate="no" dir="ltr">top_k</code> nearest neighbors have been identified by the ANN search. This refines the final result set based on the specified criteria.</li> </ul> <p>The placement of your <code translate="no" dir="ltr">WHERE</code> clause determines whether a filter acts as a pre-filter or a post-filter.</p> <p>To create a pre-filter, the <code translate="no" dir="ltr">WHERE</code> clause of the query must apply to the base table argument of the search function. For pre-filtering to prune data and optimize index search, the predicate must apply to a <a href="#stored-columns">stored column</a> or a <a href="#partitions">partitioning column</a>. If the predicate applies to any other column, including a non-stored <a href="clustered-tables">clustered column</a>, it acts as a post-filter and results in a full scan.</p> <p>The following example shows how to create a pre-filter:</p> 
+<pre>-- Pre-filter on a stored column. The index speeds up the query.
+SELECT *
+FROM
+  VECTOR_SEARCH(
+    (SELECT * FROM my_dataset.my_table WHERE type = 'animal'),
+    'embedding',
+    TABLE my_dataset.my_testdata);
+
+SELECT *
+FROM
+  AI.SEARCH(
+    (SELECT * FROM my_dataset.my_table WHERE type = 'animal'),
+    'content',
+    'dog');
+
+-- Filter on a column that isn't stored. The index is used to search the
+-- entire table, and then the results are post-filtered. You might see fewer
+-- than 5 matches returned for some embeddings.
+SELECT query.test_id, base.type, distance
+FROM
+  VECTOR_SEARCH(
+    (SELECT * FROM my_dataset.my_table WHERE id = 123),
+    'embedding',
+    TABLE my_dataset.my_testdata,
+    top_k =&gt; 5);
+
+-- Use pre-filters with brute force. The data is filtered and then searched
+-- with brute force for exact results.
+SELECT query.test_id, base.type, distance
+FROM
+  VECTOR_SEARCH(
+    (SELECT * FROM my_dataset.my_table WHERE id = 123),
+    'embedding',
+    TABLE my_dataset.my_testdata,
+    options =&gt; '{"use_brute_force":true}');</pre> <p>To create a post-filter, the <code translate="no" dir="ltr">WHERE</code> clause of the query must be applied outside of the <code translate="no" dir="ltr">VECTOR_SEARCH</code> function, so that it filters the results returned by the search.</p> <p>The following example shows how to create a post-filter:</p> 
+<pre>-- Use post-filters. The index is used, but the entire table is searched and
+-- the post-filtering might reduce the number of results.
+SELECT query.test_id, base.type, distance
+FROM
+  VECTOR_SEARCH(
+    TABLE my_dataset.my_table,
+    'embedding',
+    TABLE my_dataset.my_testdata,
+    top_k =&gt; 5)
+WHERE base.type = 'animal';
+
+SELECT base.id, distance
+FROM
+  VECTOR_SEARCH(
+    TABLE mydataset.base_table,
+    'embedding',
+    (SELECT embedding FROM mydataset.query_table),
+    top_k =&gt; 10
+  )
+WHERE type = 'document' AND year &gt; 2022</pre> <p>When you use post-filtering, or when the base table filters you specify reference non-stored columns and thus act as post-filters, the final result set might contain fewer than <code translate="no" dir="ltr">top_k</code> rows, potentially even zero rows, if the predicate is selective. If you require a specific number of results after filtering, consider specifying a larger <code translate="no" dir="ltr">top_k</code> value or increasing the <code translate="no" dir="ltr">fraction_lists_to_search</code> value in the search function call.</p> <p>In some cases, especially if the pre-filter is very selective, pre-filtering can also reduce the size of the result set. If this happens, try increasing the <code translate="no" dir="ltr">fraction_lists_to_search</code> value in the search function call.</p> <h3 id="stored-columns">Pre-filter with stored columns</h3> <p>To further improve the efficiency of your vector index, you can specify columns from your base table to store in your vector index. Using stored columns can optimize queries that call the <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> functions in the following ways:</p> <ul> <li><p>Instead of searching an entire table, you can call a search function on a query statement that <em>pre-filters</em> the base table with a <code translate="no" dir="ltr">WHERE</code> clause. If your table has an index and you filter on only stored columns, then BigQuery optimizes the query by filtering the data before searching, and then using the index to search the smaller result set. If you filter on columns that aren't stored, then BigQuery applies the filter after the table is searched, or <em>post-filters</em>.</p></li> <li><p>The <code translate="no" dir="ltr">VECTOR_SEARCH</code> and <code translate="no" dir="ltr">AI.SEARCH</code> functions output a struct called <code translate="no" dir="ltr">base</code> that contains all columns from the base table. Without stored columns, a potentially expensive join is needed to retrieve the columns stored in <code translate="no" dir="ltr">base</code>. If you use an IVF index and your query only selects stored columns from <code translate="no" dir="ltr">base</code>, then BigQuery optimizes your query to eliminate that join. For TreeAH indexes, the join with the base table is not removed. Stored columns in TreeAH indexes are only used for pre-filtering purposes.</p></li> </ul> <p>To store columns, list them in the <code translate="no" dir="ltr">STORING</code> clause of the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_vector_index_statement"><code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement</a>. Storing columns increases the size of the vector index, so it's best to store only the most frequently used or filtered columns.</p> <p>The following example creates a vector index with stored columns, and then runs a vector search query that only selects stored columns:</p> 
+<pre>-- Create a table that contains an embedding.
+CREATE TABLE my_dataset.my_table(embedding ARRAY&lt;FLOAT64&gt;, type STRING, creation_time DATETIME, id INT64);
+
+-- Create a query table that contains an embedding.
+CREATE TABLE my_dataset.my_testdata(embedding ARRAY&lt;FLOAT64&gt;, test_id INT64);
+
+-- Create a vector index with stored columns.
+CREATE VECTOR INDEX my_index ON my_dataset.my_table(embedding)
+STORING (type, creation_time)
+OPTIONS (index_type = 'IVF');
+
+-- Select only stored columns from a vector search to avoid an expensive join.
+SELECT query, base.type, distance
+FROM
+  VECTOR_SEARCH(
+    TABLE my_dataset.my_table,
+    'embedding'
+    TABLE my_dataset.my_testdata);</pre> <h4 id="stored_column_limitations">Stored column limitations</h4> <ul> <li>If the mode, type, or schema of a column is changed in the base table, and if it is a stored column in the vector index, then there can be a delay before that change is reflected in the vector index. Until the updates have been applied to the index, the vector search queries use the modified stored columns from the base table.</li> <li>If you select a column of type <code translate="no" dir="ltr">STRUCT</code> from the <code translate="no" dir="ltr">query</code> output of a search query on a table that has an index with stored columns, then the whole query might fail.</li> </ul> <h3 id="partitions">Pre-filter with partitions</h3> <p>If the table that you are creating the vector index on is partitioned, you can choose to also partition the vector index. Partitioning the vector index has the following benefits:</p> <ul> <li>Partition pruning is applied to the vector indexes in addition to the table partitions. Partition pruning occurs when the vector search uses a qualifying filter on the value of the partitioning column. This allows BigQuery to scan the partitions that match the filter and skip the remaining partitions. Partition pruning can decrease I/O costs. For more information on partition pruning, see <a href="querying-partitioned-tables">Query partitioned tables</a>.</li> <li>The vector search is less likely to miss results if you pre-filter on the partitioning column.</li> </ul> <p>You can only partition TreeAH vector indexes. You can't create a partitioned vector index on an <a href="autonomous-embedding-generation">automatically generated embedding column</a>.</p> <p>Partitioning a vector index is only recommended if you use pre-filtering to limit most of your vector searches to a few partitions.</p> <p>To create a partitioned index, use the <code translate="no" dir="ltr">PARTITION BY</code> clause of the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_vector_index_statement"><code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement</a>. The <code translate="no" dir="ltr">PARTITION BY</code> clause that you specify in the <code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement must be the same as the <code translate="no" dir="ltr">PARTITION BY</code> clause specified in the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_table_statement"><code translate="no" dir="ltr">CREATE TABLE</code> statement</a> of the table that you are creating the vector index on, as shown in the following example:</p> 
+<pre>-- Create a date-partitioned table.
+CREATE TABLE my_dataset.my_table(
+  embeddings ARRAY,
+  id INT64,
+  date DATE,
+)
+PARTITION BY date;
+
+-- Create a partitioned vector index on the table.
+CREATE VECTOR INDEX my_index ON my_dataset.my_table(embeddings)
+PARTITION BY date
+OPTIONS(index_type='TREE_AH', distance_type='COSINE');</pre> <p>If the table uses integer range or time-unit column partitioning, the partitioning column is stored in the vector index, which increases storage cost. If a table column is used in both the <code translate="no" dir="ltr">STORING</code> and <code translate="no" dir="ltr">PARTITION BY</code> clauses of the <code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement, the column is stored only once.</p> <p>To use the vector index partition, filter on the partitioning column in the base table subquery of the <code translate="no" dir="ltr">VECTOR_SEARCH</code> or <code translate="no" dir="ltr">AI.SEARCH</code> call. In the following example, the <code translate="no" dir="ltr">samples.items</code> table is partitioned by the <code translate="no" dir="ltr">produced_date</code> column, so the base table subquery in the <code translate="no" dir="ltr">VECTOR_SEARCH</code> statement filters on the <code translate="no" dir="ltr">produced_date</code> column:</p> 
+<pre>SELECT query.id, base.id, distance
+FROM VECTOR_SEARCH(
+  (SELECT * FROM my_dataset.my_table WHERE produced_date = '2025-01-01'),
+  'embedding',
+  TABLE samples.test,
+  distance_type =&gt; 'COSINE',
+  top_k =&gt; 10
+);</pre> <h4 id="examples">Examples</h4> <p>Create a partitioned vector index on a datetime-partitioned table:</p> 
+<pre>-- Create a datetime-partitioned table.
+CREATE TABLE my_dataset.my_table(
+  id INT64,
+  produced_date DATETIME,
+  embeddings ARRAY
+)
+PARTITION BY produced_date;
+
+-- Create a partitioned vector index on the table.
+CREATE VECTOR INDEX index0 ON my_dataset.my_table(embeddings)
+PARTITION BY produced_date
+OPTIONS(index_type='TREE_AH', distance_type='COSINE');</pre> <p>Create a partitioned vector index on a timestamp-partitioned table:</p> 
+<pre>-- Create a timestamp-partitioned table.
+CREATE TABLE my_dataset.my_table(
+  id INT64,
+  produced_time TIMESTAMP,
+  embeddings ARRAY
+)
+PARTITION BY TIMESTAMP_TRUNC(produced_time, HOUR);
+
+-- Create a partitioned vector index on the table.
+CREATE VECTOR INDEX index0 ON my_dataset.my_table(embeddings)
+PARTITION BY TIMESTAMP_TRUNC(produced_time, HOUR)
+OPTIONS(index_type='TREE_AH', distance_type='COSINE');</pre> <p>Create a partitioned vector index on an integer range-partitioned table:</p> 
+<pre>-- Create an integer range-partitioned table.
+CREATE TABLE my_dataset.my_table(
+  id INT64,
+  embeddings ARRAY
+)
+PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(-100, 100, 20));
+
+-- Create a partitioned vector index on the table.
+CREATE VECTOR INDEX index0 ON my_dataset.my_table(embeddings)
+PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(-100, 100, 20))
+OPTIONS(index_type='TREE_AH', distance_type='COSINE');</pre> <p>Create a partitioned vector index on an ingestion time-partitioned table:</p> 
+<pre>-- Create an ingestion time-partitioned table.
+CREATE TABLE my_dataset.my_table(
+  id INT64,
+  embeddings ARRAY
+)
+PARTITION BY TIMESTAMP_TRUNC(_PARTITIONTIME, DAY);
+
+-- Create a partitioned vector index on the table.
+CREATE VECTOR INDEX index0 ON my_dataset.my_table(embeddings)
+PARTITION BY TIMESTAMP_TRUNC(_PARTITIONTIME, DAY)
+OPTIONS(index_type='TREE_AH', distance_type='COSINE');</pre> <h3 id="pre-filtering_limitations">Pre-filtering limitations</h3> <ul> <li>You can't use <a href="views-intro">logical views</a> in your pre-filter.</li> <li>If your pre-filter contains a <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/subqueries">subquery</a>, it might interfere with index usage.</li> <li>Pre-filtering data pruning is only optimized when filtering on <a href="#partitions">partitioned columns</a> or <a href="#stored-columns">stored columns</a>, not on <a href="clustered-tables">clustered columns</a>.</li> </ul> <aside class="warning"><strong>Warning:</strong><span> Filtering on <a href="clustered-tables">clustered columns</a> that aren't also <a href="#stored-columns">stored columns</a> in the vector index in the pre-filter subquery doesn't prune clustered blocks and results in a full table scan.</span></aside> <h2 id="understanding_when_data_is_indexed">Understanding when data is indexed</h2> <p>Vector indexes are fully managed by BigQuery and are automatically refreshed when the indexed table changes.</p> <p>Indexing is asynchronous. There is a delay between adding new rows to the base table and the new rows being reflected in the index. However, the <code translate="no" dir="ltr">VECTOR_SEARCH</code> and <code translate="no" dir="ltr">AI.SEARCH</code> functions still take all rows into account and don't miss unindexed rows. The functions search using the index for indexed records, and use brute force search for the records that aren't yet indexed.</p> <p>If you create a vector index on an <a href="autonomous-embedding-generation">automatically generated embedding column</a>, then index training starts as soon as at least 80% of the rows have generated embeddings.</p> <p>If you create a vector index on a table that is smaller than 10 MB, then the vector index isn't populated. Similarly, if you delete data from an indexed table and the table size falls below 10 MB, then the vector index is temporarily disabled. In this case, vector search queries don't use the index and the <code translate="no" dir="ltr">indexUnusedReasons</code> code in the <a href="https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#vectorsearchstatistics"><code translate="no" dir="ltr">vectorSearchStatistics</code></a> section of the <code translate="no" dir="ltr">Job</code> resource is <code translate="no" dir="ltr">BASE_TABLE_TOO_SMALL</code>. Without the index, your search function automatically falls back to using brute force to find the nearest neighbors of embeddings.</p> <p>If you delete the indexed column in a table, or rename the table itself, the vector index is automatically deleted.</p> <h2 id="monitoring_the_status_of_vector_indexes">Monitoring the status of vector indexes</h2> <p>You can monitor the health of your vector indexes by querying <code translate="no" dir="ltr">INFORMATION_SCHEMA</code> views. The following views contain metadata on vector indexes:</p> <ul> <li>
+<p>The <a href="information-schema-vector-indexes"><code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEXES</code> view</a> has information about the vector indexes in a dataset.</p> <p>After the <code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement completes, the index must still be populated before you can use it. You can use the <code translate="no" dir="ltr">last_refresh_time</code> and <code translate="no" dir="ltr">coverage_percentage</code> columns to verify the readiness of a vector index. If the vector index isn't ready, you can still use the <code translate="no" dir="ltr">VECTOR_SEARCH</code> and <code translate="no" dir="ltr">AI.SEARCH</code> functions on a table, they just might run more slowly without the index.</p>
+</li> <li><p>The <a href="information-schema-vector-index-columns"><code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEX_COLUMNS</code> view</a> has information about the vector-indexed columns for all tables in a dataset.</p></li> <li><p>The <a href="information-schema-vector-index-options"><code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEX_OPTIONS</code> view</a> has information about the options used by the vector indexes in a dataset.</p></li> </ul> <h3 id="vector_index_examples">Vector index examples</h3> <p>The following example shows all active vector indexes on tables in the dataset <code translate="no" dir="ltr">my_dataset</code>, located in the project <code translate="no" dir="ltr">my_project</code>. It includes their names, the DDL statements used to create them, and their coverage percentage. If an indexed base table is less than 10 MB, then its index is not populated, in which case the <code translate="no" dir="ltr">coverage_percentage</code> value is 0.</p> 
+<pre>SELECT table_name, index_name, ddl, coverage_percentage
+FROM my_project.my_dataset.INFORMATION_SCHEMA.VECTOR_INDEXES
+WHERE index_status = 'ACTIVE';</pre> <p>The result is similar to the following:</p> 
+<pre>
++------------+------------+-------------------------------------------------------------------------------------------------+---------------------+
+| table_name | index_name | ddl                                                                                             | coverage_percentage |
++------------+------------+-------------------------------------------------------------------------------------------------+---------------------+
+| table1     | indexa     | CREATE VECTOR INDEX `indexa` ON `my_project.my_dataset.table1`(embeddings)                      | 100                 |
+|            |            | OPTIONS (distance_type = 'EUCLIDEAN', index_type = 'IVF', ivf_options = '{"num_lists": 100}')   |                     |
++------------+------------+-------------------------------------------------------------------------------------------------+---------------------+
+| table2     | indexb     | CREATE VECTOR INDEX `indexb` ON `my_project.my_dataset.table2`(vectors)                         | 42                  |
+|            |            | OPTIONS (distance_type = 'COSINE', index_type = 'IVF', ivf_options = '{"num_lists": 500}')      |                     |
++------------+------------+-------------------------------------------------------------------------------------------------+---------------------+
+| table3     | indexc     | CREATE VECTOR INDEX `indexc` ON `my_project.my_dataset.table3`(vectors)                         | 98                  |
+|            |            | OPTIONS (distance_type = 'DOT_PRODUCT', index_type = 'TREE_AH',                                 |                     |
+|            |            |          tree_ah_options = '{"leaf_node_embedding_count": 1000, "normalization_type": "NONE"}') |                     |
++------------+------------+-------------------------------------------------------------------------------------------------+---------------------+
+</pre> <h3 id="vector_index_columns_examples">Vector index columns examples</h3> <p>The following query extracts information on columns that have vector indexes:</p> 
+<pre>SELECT table_name, index_name, index_column_name, index_field_path
+FROM my_project.dataset.INFORMATION_SCHEMA.VECTOR_INDEX_COLUMNS;</pre> <p>The result is similar to the following:</p> 
+<pre>
++------------+------------+-------------------+------------------+
+| table_name | index_name | index_column_name | index_field_path |
++------------+------------+-------------------+------------------+
+| table1     | indexa     | embeddings        | embeddings       |
+| table2     | indexb     | vectors           | vectors          |
+| table3     | indexc     | vectors           | vectors          |
++------------+------------+-------------------+------------------+
+</pre> <h3 id="vector_index_options_examples">Vector index options examples</h3> <p>The following query extracts information on vector index options:</p> 
+<pre>SELECT table_name, index_name, option_name, option_type, option_value
+FROM my_project.dataset.INFORMATION_SCHEMA.VECTOR_INDEX_OPTIONS;</pre> <p>The result is similar to the following:</p> 
+<pre>
++------------+------------+------------------+------------------+-------------------------------------------------------------------+
+| table_name | index_name | option_name      | option_type      | option_value                                                      |
++------------+------------+------------------+------------------+-------------------------------------------------------------------+
+| table1     | indexa     | index_type       | STRING           | IVF                                                               |
+| table1     | indexa     | distance_type    | STRING           | EUCLIDEAN                                                         |
+| table1     | indexa     | ivf_options      | STRING           | {"num_lists": 100}                                                |
+| table2     | indexb     | index_type       | STRING           | IVF                                                               |
+| table2     | indexb     | distance_type    | STRING           | COSINE                                                            |
+| table2     | indexb     | ivf_options      | STRING           | {"num_lists": 500}                                                |
+| table3     | indexc     | index_type       | STRING           | TREE_AH                                                           |
+| table3     | indexc     | distance_type    | STRING           | DOT_PRODUCT                                                       |
+| table3     | indexc     | tree_ah_options  | STRING           | {"leaf_node_embedding_count": 1000, "normalization_type": "NONE"} |
++------------+------------+------------------+------------------+-------------------------------------------------------------------+
+</pre> <h2 id="vector_index_usage">Verifying vector index usage</h2> <p>Information on vector index usage is available in the job metadata of the job that ran the vector search query. You can <a href="managing-jobs#view-job">view job metadata</a> by using the Google Cloud console, the bq command-line tool, the BigQuery API, or the client libraries.</p> <p>When you use the Google Cloud console, you can find vector index usage information in the <strong>Vector Index Usage Mode</strong> and <strong>Vector Index Unused Reasons</strong> fields.</p> <p>When you use the bq tool or the BigQuery API, you can find vector index usage information in the <a href="https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#vectorsearchstatistics"><code translate="no" dir="ltr">VectorSearchStatistics</code></a> section of the <code translate="no" dir="ltr">Job</code> resource.</p> <p>The index usage mode indicates whether a vector index was used by providing one of the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">UNUSED</code>: No vector index was used.</li> <li>
+<code translate="no" dir="ltr">PARTIALLY_USED</code>: Some search functions in the query used vector indexes and some didn't.</li> <li>
+<code translate="no" dir="ltr">FULLY_USED</code>: Every search function in the query used a vector index.</li> </ul> <p>When the index usage mode value is <code translate="no" dir="ltr">UNUSED</code> or <code translate="no" dir="ltr">PARTIALLY_USED</code>, the index unused reasons indicate why vector indexes weren't used in the query.</p> <p>For example, the following results returned by <code translate="no" dir="ltr">bq show --format=prettyjson -j my_job_id</code> shows that the index was not used because the <code translate="no" dir="ltr">use_brute_force</code> option was specified in the <code translate="no" dir="ltr">VECTOR_SEARCH</code> function:</p> 
+<pre>
+"vectorSearchStatistics": {
+  "indexUnusedReasons": [
+    {
+      "baseTable": {
+        "datasetId": "my_dataset",
+        "projectId": "my_project",
+        "tableId": "my_table"
+      },
+      "code": "INDEX_SUPPRESSED_BY_FUNCTION_OPTION",
+      "message": "No vector index was used for the base table `my_project:my_dataset.my_table` because use_brute_force option has been specified."
+    }
+  ],
+  "indexUsageMode": "UNUSED"
+}
+</pre> <p>Known issue: The vector index usage might be inaccurate when the query is running, is canceled, or has failed.</p> <h2 id="index_management_options">Index management options</h2> <p>To create indexes and have BigQuery maintain them, you have two options:</p> <ul> <li>
+<a href="#use_shared_slots">Use the default shared slot pool</a>: When the data you plan to index is below your per-organization <a href="https://docs.cloud.google.com/bigquery/quotas#index_limits">limit</a>, you can use the free shared slot pool for index management.</li> <li>
+<a href="#use_your_own_reservation">Use your own reservation</a>: To achieve more predictable and consistent indexing progress on your larger production workloads, you can use your own reservations for index management.</li> </ul> <h3 id="use_shared_slots">Use shared slots</h3> <p>If you have not configured your project to use a <a href="#use_your_own_reservation">dedicated reservation</a> for indexing, index management is handled in the free, shared slot pool, subject to the following constraints.</p> <p>If you add data to a table which causes the total size of indexed tables to exceed your organization's <a href="https://docs.cloud.google.com/bigquery/quotas#index_limits">limit</a>, BigQuery pauses index management for that table. When this happens, the <code translate="no" dir="ltr">index_status</code> field in the <a href="information-schema-vector-indexes"><code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEXES</code> view</a> displays <code translate="no" dir="ltr">PENDING DISABLEMENT</code> and the index is queued for deletion. While the index is pending disablement, it is still used in queries and you are charged for the index storage. After the index is deleted, the <code translate="no" dir="ltr">index_status</code> field shows the index as <code translate="no" dir="ltr">TEMPORARILY DISABLED</code>. In this state, queries don't use the index, and you are not charged for index storage. In this case, the <a href="https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#indexunusedreason"><code translate="no" dir="ltr">IndexUnusedReason</code> code</a> is <code translate="no" dir="ltr">BASE_TABLE_TOO_LARGE</code>.</p> <p>If you delete data from the table and the total size of indexed tables falls below the per-organization limit, then index management is resumed. The <code translate="no" dir="ltr">index_status</code> field in the <code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEXES</code> view is <code translate="no" dir="ltr">ACTIVE</code>, queries can use the index, and you are charged for the index storage.</p> <p>You can use the <a href="information-schema-indexes-by-organization"><code translate="no" dir="ltr">INFORMATION_SCHEMA.SEARCH_INDEXES_BY_ORGANIZATION</code> view</a> to understand your current consumption towards the per-organization limit in a given region, broken down by projects and tables.</p> <p>BigQuery does not make guarantees about the available capacity of the shared pool or the throughput of indexing you see. For production applications, you might want to use dedicated slots for your index processing.</p> <h3 id="use_your_own_reservation">Use your own reservation</h3> <p>Instead of using the default shared slot pool, you can optionally designate your own reservation to index your tables. Using your own reservation ensures predictable and consistent performance of index-management jobs, such as creation, refresh, and background optimizations.</p> <ul> <li>There are no table size limits when an indexing job runs in your reservation.</li> <li>Using your own reservation gives you flexibility in your index management. If you need to create a very large index or make a major update to an indexed table, you can temporarily add more slots to the assignment.</li> </ul> <p>To index the tables in a project with a designated reservation, <a href="reservations-tasks">create a reservation</a> in the region where your tables are located. Then, assign the project to the reservation with the <code translate="no" dir="ltr">job_type</code> set to <code translate="no" dir="ltr">BACKGROUND</code>, which shares resources across background optimization jobs:</p> <div> <section><p class="_code-tab"><strong>SQL</strong></p>
+<p>Use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_assignment_statement"><code translate="no" dir="ltr">CREATE ASSIGNMENT</code> DDL statement</a>.</p>   <ol> <li>
+<p>In the Google Cloud console, go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the query editor, enter the following statement:</p> 
+<pre data-language="">CREATE ASSIGNMENT
+  `ADMIN_PROJECT_ID.region-LOCATION.RESERVATION_NAME.ASSIGNMENT_ID`
+OPTIONS (
+  assignee = 'projects/PROJECT_ID',
+  job_type = 'BACKGROUND');</pre> <p> Replace the following: </p>
+<ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ADMIN_PROJECT_ID</var></code>: the project ID of the <a href="reservations-workload-management#admin-project">administration project</a> that owns the reservation resource</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the <a href="locations">location</a> of the reservation</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation </li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">ASSIGNMENT_ID</var></code>: the ID of the assignment</p> <p>The ID must be unique to the project and location, start and end with a lowercase letter or a number, and contain only lowercase letters, numbers, and dashes.</p>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the ID of the project containing the tables to index. This project is assigned to the reservation.</li> </ul> </li> <li>
+<p>Click <span class="material-icons" aria-hidden="true" translate="no">play_circle</span> <strong>Run</strong>.</p> 
+</li> </ol> <p>For more information about how to run queries, see <a href="running-queries#queries">Run an interactive query</a>.</p></section> <section><p class="_code-tab"><strong>bq</strong></p>
+<p>Use the <code translate="no" dir="ltr">bq mk</code> command:</p> 
+<pre data-language="">
+bq mk \
+    --project_id=ADMIN_PROJECT_ID \
+    --location=LOCATION \
+    --reservation_assignment \
+    --reservation_id=RESERVATION_NAME \
+    --assignee_id=PROJECT_ID \
+    --job_type=BACKGROUND \
+    --assignee_type=PROJECT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ADMIN_PROJECT_ID</var></code>: the project ID of the <a href="reservations-workload-management#admin-project">administration project</a> that owns the reservation resource</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the <a href="locations">location</a> of the reservation</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of the reservation</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the ID of the project to assign to this reservation</li> </ul></section> </div> <h4 id="view_your_indexing_jobs">View your indexing jobs</h4> <p>A new indexing job is created every time an index is created or updated on a single table. To view information about the job, query the <a href="information-schema-jobs"><code translate="no" dir="ltr">INFORMATION_SCHEMA.JOBS*</code> views</a>. You can filter for indexing jobs by setting <code translate="no" dir="ltr">job_type IS NULL AND SEARCH(job_id, '`search_index`')</code> in the <code translate="no" dir="ltr">WHERE</code> clause of your query. The following example lists the five most recent indexing jobs in the project <code translate="no" dir="ltr">my_project</code>:</p> 
+<pre>SELECT *
+FROM
+ region-us.INFORMATION_SCHEMA.JOBS
+WHERE
+  project_id  = 'my_project'
+  AND job_type IS NULL
+  AND SEARCH(job_id, '`search_index`')
+ORDER BY
+ creation_time DESC
+LIMIT 5;</pre> <aside class="note"><strong>Note:</strong><span> You can't view information about indexing jobs run in the default shared slot pool.</span></aside> <h4 id="choose_your_reservation_size">Choose your reservation size</h4> <p>To choose the right number of slots for your reservation, you should consider when index-management jobs are run, how many slots they use, and what your usage looks like over time. BigQuery triggers an index-management job in the following situations:</p> <ul> <li>You create an index on a table.</li> <li>Data is modified in an indexed table.</li> <li>The schema of a table changes and this affects which columns are indexed.</li> <li>Index data and metadata are periodically optimized or updated.</li> </ul> <p>The number of slots you need for an index-management job on a table depends on the following factors:</p> <ul> <li>The size of the table</li> <li>The rate of data ingestion to the table</li> <li>The rate of DML statements applied to the table</li> <li>The acceptable delay for building and maintaining the index</li> <li>The complexity of the index, typically determined by attributes of the data, such as the number of duplicate terms</li> </ul> <h5 id="monitor_usage_and_progress">Monitor Usage and Progress</h5> <p>The best way to assess the number of slots you need to efficiently run your index-management jobs is to monitor your slot utilization and adjust the reservation size accordingly. The following query produces the daily slot usage for index-management jobs. Only the past 30 days are included in the region <code translate="no" dir="ltr">us-west1</code>:</p> 
+<pre>SELECT
+  TIMESTAMP_TRUNC(job.creation_time, DAY) AS usage_date,
+  -- Aggregate total_slots_ms used for index-management jobs in a day and divide
+  -- by the number of milliseconds in a day. This value is most accurate for
+  -- days with consistent slot usage.
+  SAFE_DIVIDE(SUM(job.total_slot_ms), (1000 * 60 * 60 * 24)) AS average_daily_slot_usage
+FROM
+  `region-us-west1`.INFORMATION_SCHEMA.JOBS job
+WHERE
+  project_id = 'my_project'
+  AND job_type IS NULL
+  AND SEARCH(job_id, '`search_index`')
+GROUP BY
+  usage_date
+ORDER BY
+  usage_date DESC
+limit 30;</pre> <p>When there are insufficient slots to run index-management jobs, an index can become out of sync with its table and indexing jobs might fail. In this case, BigQuery rebuilds the index from scratch. To avoid having an out-of-sync index, ensure you have enough slots to support index updates from data ingestion and optimization. For more information on monitoring slot usage, see <a href="admin-resource-charts">admin resource charts</a>.</p> <h2 id="rebuild_a_vector_index">Rebuild a vector index</h2> <p>When table data changes significantly after a vector index is created, the vector index can become less efficient. When a vector index is less efficient, a vector search query that initially had high <a href="https://developers.google.com/machine-learning/glossary#recall">recall</a> when using the index will have lower recall, because the data distribution shift in the base table isn't represented in the vector index.</p> <p>If you want to improve recall without increasing search query latency, rebuild the vector index. Alternatively, you can increase the value of the vector search's <code translate="no" dir="ltr">fraction_lists_to_search</code> option to improve recall, but this typically makes the search query slower. To find out when an index was last built, run the following query:</p> 
+<pre>SELECT last_model_build_time
+FROM DATASET_NAME.INFORMATION_SCHEMA.VECTOR_INDEXES
+WHERE table_name = TABLE_NAME;</pre> <p>You can use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/vectorindex_functions#vector_indexstatistics"><code translate="no" dir="ltr">VECTOR_INDEX.STATISTICS</code> function</a> to calculate how much an indexed table's data has drifted between when a vector index was created and the present.</p> <p>If table data has changed enough to require a vector index rebuild, you can use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#alter_vector_index_rebuild_statement"><code translate="no" dir="ltr">ALTER VECTOR INDEX REBUILD</code> statement</a> to rebuild the vector index without having to drop the vector index, and without any index downtime. When you run the statement, BigQuery creates a <em>shadow index</em>, a background-only index that inherits the configuration of the current index, on the table and trains it in the background. BigQuery promotes the shadow index to be the active index when the shadow index has enough coverage.</p> <p>Follow these steps to rebuild a vector index:</p> <ol> <li>
+<p>Go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the query editor, run the following SQL statement to check the indexed table's data drift:</p> 
+<pre>SELECT * FROM VECTOR_INDEX.STATISTICS(TABLE DATASET_NAME.TABLE_NAME);</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">DATASET_NAME</var></code>: the name of the dataset that contains the indexed table.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TABLE_NAME</var></code>: the name of the table that contains the vector index.</li> </ul> <p>The function returns a <code translate="no" dir="ltr">FLOAT64</code> value in the range <code translate="no" dir="ltr">[0,1)</code>. A lower value indicates less drift. Typically, a value of <code translate="no" dir="ltr">0.3</code> or greater is considered a significant enough change to indicate that a vector index rebuild might be beneficial.</p>
+</li> <li>
+<p>If the <code translate="no" dir="ltr">VECTOR_INDEX.STATISTICS</code> function indicates that table data drift is significant, run the following SQL statement to rebuild the vector index:</p> 
+<pre>ALTER VECTOR INDEX IF EXISTS INDEX_NAME
+ON DATASET_NAME.TABLE_NAME
+REBUILD;</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INDEX_NAME</var></code>: the name of the vector index that you are rebuilding.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATASET_NAME</var></code>: the name of the dataset that contains the indexed table.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TABLE_NAME</var></code>: the name of the table that contains the vector index.</li> </ul>
+</li> </ol> <h3 id="monitor_a_rebuild">Monitor a rebuild</h3> <p>To monitor your index rebuild, query the <a href="information-schema-vector-indexes"><code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEXES</code> view</a>. For example, the following query shows the rebuild status of all indexes on tables in the dataset <code translate="no" dir="ltr">my_dataset</code> in the project <code translate="no" dir="ltr">my_project</code>. If an index has no ongoing rebuild, then the value for <code translate="no" dir="ltr">last_index_alteration_info</code> is <code translate="no" dir="ltr">NULL</code>.</p> 
+<pre>SELECT
+  table_name,
+  index_name,
+  last_index_alteration_info.status AS status,
+  last_index_alteration_info.new_coverage_percentage AS coverage
+FROM my_project.my_dataset.INFORMATION_SCHEMA.VECTOR_INDEXES
+</pre> <p>The result looks similar to the following:</p> 
+<pre>+------------+------------+-------------+----------+
+| table_name | index_name | status      | coverage |
++------------+------------+-------------+----------+
+| table1     | index_a    | IN_PROGRESS | 50       |
+| table2     | index_b    | null        | null     |
++------------+------------+-------------+----------+
+</pre> <h3 id="cancel_a_rebuild">Cancel a rebuild</h3> <p>To cancel a vector index rebuild, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/system-procedures#bqcancel_index_alteration"><code translate="no" dir="ltr">BQ.CANCEL_INDEX_ALTERATION</code> system procedure</a>. An index alteration operation might complete before the cancellation request is processed. To confirm whether the operation was successfully canceled, query the <a href="information-schema-vector-indexes"><code translate="no" dir="ltr">INFORMATION_SCHEMA.VECTOR_INDEXES</code> view</a>. If the cancellation was successful, the <code translate="no" dir="ltr">last_model_build_time</code> field isn't updated and the <code translate="no" dir="ltr">last_index_alteration_info</code> field isn't present for that index.</p> <h2 id="delete_a_vector_index">Delete a vector index</h2> <p>When you no longer need a vector index or want to change which column is indexed on a table, you can delete the index on that table by using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#drop_vector_index"><code translate="no" dir="ltr">DROP VECTOR INDEX</code> DDL statement</a>:</p> <ol> <li>
+<p>Go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li>
+<p>In the query editor, run the following SQL statement:</p> 
+<pre>DROP VECTOR INDEX INDEX_NAME ON DATASET_NAME.TABLE_NAME;</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INDEX_NAME</var></code>: the name of the vector index that you are deleting.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATASET_NAME</var></code>: the name of the dataset that contains the indexed table.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TABLE_NAME</var></code>: the name of the table that contains the vector index.</li> </ul>
+</li> </ol> <p>If an indexed table is deleted, its index is deleted automatically.</p> <h2 id="export-to-vector-search">Export embeddings to Vector Search</h2> <p>To enable ultra-low latency online applications, use BigQuery integration with Gemini Enterprise Agent Platform <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/vector-search/overview">Vector Search</a> to import your BigQuery embeddings into Vector Search and deploy low latency endpoints. For more information, see <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/vector-search/import-index-data-from-big-query">Import index data from BigQuery</a>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>For an overview of vector index use cases, pricing, and limitations, see the <a href="vector-search-intro">Introduction to vector search</a>.</li> <li>Learn how to perform a vector search using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/search_functions#vector_search"><code translate="no" dir="ltr">VECTOR_SEARCH</code> function</a>.</li> <li>Learn how to perform semantic search using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-search"><code translate="no" dir="ltr">AI.SEARCH</code> function</a>.</li> <li>Learn more about the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_vector_index_statement"><code translate="no" dir="ltr">CREATE VECTOR INDEX</code> statement</a>.</li> <li>Try the <a href="vector-search">Search embeddings with vector search</a> tutorial.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/vector-index" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/vector-index</a>
+  </p>
+</div>

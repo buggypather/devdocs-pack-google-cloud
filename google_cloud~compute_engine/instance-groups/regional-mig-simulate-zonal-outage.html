@@ -1,0 +1,73 @@
+<h1>Simulate a zone outage for a regional MIG</h1> <p>To test that your <a href="../instance-groups#managed_instance_groups">regional managed instance group (MIG)</a> is overprovisioned enough and can survive a zone outage, you can use the following example to simulate a zonal failure.</p> <h2 id="byb">Before you begin</h2> <ul> <li>If you want to use the command-line examples in this guide, install the <a href="../gcloud-compute">Google Cloud CLI</a>.</li> <li> If you haven't already, set up <a href="../authentication">authentication</a>. Authentication verifies your identity for access to Google Cloud services and APIs. To run code or samples from a local development environment, you can authenticate to Compute Engine by selecting one of the following options: <p>Select the tab for how you plan to use the samples on this page:</p> <div class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>gcloud</strong></p> <ol>
+<li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. After installation, <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the Google Cloud CLI by running the following command: </p> 
+<pre data-language="bash">gcloud init</pre> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li>
+<li>
+<a href="../gcloud-compute#set_default_zone_and_region_in_your_local_client"> Set a default region and zone</a>.</li>
+</ol> </section> <section> <p class="_code-tab"><strong>REST</strong></p> <p> To use the REST API samples on this page in a local development environment, you use the credentials you provide to the gcloud CLI. </p> <ol> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </ol> <p> For more information, see <a href="https://docs.cloud.google.com/docs/authentication/rest">Authenticate for using REST</a> in the Google Cloud authentication documentation. </p> </section> </div> </li> </ul> <h2 id="use_a_script_to_simulate_a_zone_outage">Use a script to simulate a zone outage</h2> <p>This script stops and starts Apache as the default scenario. If this doesn't apply to your application, replace the commands that stop and start Apache with your own failure and recovery scenario.</p> <ol> <li>
+<p>Deploy and run this script continuously in every VM in the group. You can do this by adding the script to the instance template or by including the script in a <a href="../images/create-delete-deprecate-private-images">custom image</a> and using the image in the instance template.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>#!/usr/bin/env bash
+
+# Copyright 2016 Google Inc. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+function GetMetadata() {
+  curl -s "$1" -H "Metadata-Flavor: Google"
+}
+
+PROJECT_METADATA_URL="http://metadata.google.internal/computeMetadata/v1/project/attributes"
+INSTANCE_METADATA_URL="http://metadata.google.internal/computeMetadata/v1/instance"
+ZONE=$(GetMetadata "$INSTANCE_METADATA_URL/zone" | cut -d '/' -f 4)
+INSTANCE_NAME=$(hostname)
+
+# We keep track of the state to make sure failure and recovery is triggered only once.
+STATE="healthy"
+while true; do
+  if [[ "$ZONE" = "$(GetMetadata $PROJECT_METADATA_URL/failed_zone)" ]] &amp;&amp; \
+     [[ "$INSTANCE_NAME" = *"$(GetMetadata $PROJECT_METADATA_URL/failed_instance_names)"* ]]; then
+    if [[ "$STATE" = "healthy" ]]; then
+      STATE="failure"
+      # Do something to simulate failure here.
+      echo "STARTING A FAILURE"
+      /etc/init.d/apache2 stop
+    fi
+  else
+    if [[ "$STATE" = "failure" ]] ; then
+      STATE="healthy"
+      # Do something to recover here.
+      echo "RECOVERING FROM FAILURE"
+      /etc/init.d/apache2 start
+    fi
+  fi
+  sleep 5
+done
+
+</pre> </div> </li> <li>
+<p>Simulate a zone failure by setting these two project metadata fields:</p> <ul> <li>
+<code translate="no" dir="ltr">failed_zone</code>: Sets the zone where you want to simulate the outage (limit the failure to just one zone).</li> <li>
+<code translate="no" dir="ltr">failed_instance_names</code>: Choose the VMs to take offline by name (to limit the failure to only VM names containing this string).</li> </ul> <p>You can set this metadata using the gcloud CLI. For example, the following command sets the zone outage to the <code translate="no" dir="ltr">europe-west1-b</code> zone and affects VMs that have names starting with <code translate="no" dir="ltr">base-instance-name</code>:</p> 
+<pre>gcloud compute project-info add-metadata --metadata failed_zone='europe-west1-b',failed_instance_names='base-instance-name-'</pre>
+</li> <li>
+<p>After you are done simulating the outage, recover from the failure by removing the metadata keys:</p> 
+<pre>gcloud compute project-info remove-metadata --keys failed_zone,failed_instance_names</pre>
+</li> </ol> <p>Here are some ideas for failure scenarios you can run using this script:</p> <ul> <li>Stop your application completely to see how the MIG responds.</li> <li>Make your VMs return as "unhealthy" on load balancing health checks.</li> <li>Modify iptables to block some of the traffic to and from the VM.</li> <li>Shutdown the VMs. By default, it will be recreated by the regional MIG shortly after but the new incarnation will immediately shutdown itself as soon as the script runs and as long as the metadata values are set. This will result in a crash loop.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="monitor-instance-distribution">Monitor instance distribution in MIGs</a> to observe how capacity shifts across zones during and after a simulated outage.</li> <li>Learn how to build <a href="https://docs.cloud.google.com/solutions/scalable-and-resilient-apps">scalable and resilient web applications</a>.</li> <li>Learn about <a href="https://docs.cloud.google.com/solutions/disaster-recovery-cookbook">disaster recovery on Google Cloud Platform</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/instance-groups/regional-mig-simulate-zonal-outage" class="_attribution-link">https://docs.cloud.google.com/compute/docs/instance-groups/regional-mig-simulate-zonal-outage</a>
+  </p>
+</div>

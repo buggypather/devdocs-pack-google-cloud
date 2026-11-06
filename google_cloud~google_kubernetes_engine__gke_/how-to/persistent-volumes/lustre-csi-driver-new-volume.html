@@ -1,0 +1,238 @@
+<h1>Access Managed Lustre instances on GKE with the Managed Lustre CSI driver</h1>  <p>This guide describes how you can create a new Kubernetes <a href="https://kubernetes.io/docs/concepts/storage/volumes/">volume</a> backed by the Managed Lustre CSI driver in GKE with <a href="https://kubernetes.io/docs/concepts/storage/dynamic-provisioning/">dynamic provisioning</a>. The Managed Lustre CSI driver lets you create storage backed by <a href="../../concepts/managed-lustre">Managed Lustre instances</a> on-demand, and access them as volumes for your stateful workloads.</p> <h3 id="multi-nic_support_for_high-performance_networking">Multi-NIC support for high-performance networking</h3> <p>For GKE clusters running version <code translate="no" dir="ltr">1.35.2-gke.1842000</code> or later, the Managed Lustre CSI driver is enabled by default to use all available Network Interface Cards (NICs) for increased throughput. This support aggregates bandwidth by spreading TCP storage traffic across your network interfaces.</p> <p>To use multi-NIC support, your nodes must meet the following requirements:</p> <ul> <li>
+<strong>Standard NICs for TCP:</strong> your nodes must use standard NICs, such as <a href="https://docs.cloud.google.com/compute/docs/networking/using-gvnic">Google Virtual NIC (gVNIC)</a> or VirtIO-Net, to handle TCP storage traffic.</li> <li>
+<strong>Same VPC:</strong> all standard NICs must reside in the same <a href="https://docs.cloud.google.com/vpc/docs/vpc">VPC network</a>.</li> <li>
+<strong>RDMA considerations:</strong> your nodes can also have RDMA NICs attached; however, the Managed Lustre CSI driver only uses the standard NICs for TCP storage traffic.</li> </ul> <p>If you want to disable the multi-NIC support, see <a href="#disable-multi-nic">Disable multi-NIC for Lustre</a>.</p> <h3 id="lustre_communication_ports">Lustre communication ports</h3> <p>The GKE Managed Lustre CSI driver uses different ports for communication with Managed Lustre instances, depending on your GKE cluster version and existing Managed Lustre configurations.</p> <ul> <li><p><strong>Default port (Recommended):</strong> for new GKE clusters that run version <code translate="no" dir="ltr">1.33.2-gke.4780000</code> or later, the driver uses port <code translate="no" dir="ltr">988</code> for Lustre communication by default.</p></li> <li>
+<p><strong>Legacy Port (Deprecated):</strong> use port <code translate="no" dir="ltr">6988</code> by appending the <code translate="no" dir="ltr">--enable-legacy-lustre-port</code> flag to your <code translate="no" dir="ltr">gcloud</code> commands in the following scenarios:</p> <ul> <li>
+<strong>Earlier GKE versions:</strong> if your GKE cluster runs a version earlier than <code translate="no" dir="ltr">1.33.2-gke.4780000</code>, the <code translate="no" dir="ltr">--enable-legacy-lustre-port</code> flag works around a port conflict with the <code translate="no" dir="ltr">gke-metadata-server</code> on GKE nodes.</li> <li>
+<strong>Existing Lustre instances:</strong> if you are connecting to an existing Managed Lustre instance that was created with the <code translate="no" dir="ltr">gke-support-enabled</code> flag, you <em>must</em> still include <code translate="no" dir="ltr">--enable-legacy-lustre-port</code> in your <code translate="no" dir="ltr">gcloud</code> commands, irrespective of your cluster version. Without this flag, your GKE cluster will fail to mount the existing Lustre instance.</li> </ul>
+</li> </ul> <p>You can configure the new and existing clusters to use either the default port <code translate="no" dir="ltr">988</code>, or the legacy port <code translate="no" dir="ltr">6988</code>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Cloud Managed Lustre API and the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable APIs </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>For limitations and requirements, see the <a href="../../concepts/managed-lustre#csi-driver-overview">CSI driver overview</a>.</li> <li>Make sure to <a href="#new-cluster">enable the Managed Lustre CSI driver</a>. It is disabled by default in Standard and Autopilot clusters.</li> </ul> <h3 id="var-setup">Set up environment variables</h3> <p>Set up the following environment variables:</p> 
+<pre>export CLUSTER_NAME=CLUSTER_NAME
+export PROJECT_ID=PROJECT_ID
+export NETWORK_NAME=LUSTRE_NETWORK
+export IP_RANGE_NAME=LUSTRE_IP_RANGE
+export FIREWALL_RULE_NAME=LUSTRE_FIREWALL_RULE
+export LOCATION=ZONE
+export CLUSTER_VERSION=CLUSTER_VERSION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LUSTRE_NETWORK</var></code>: the shared Virtual Private Cloud (VPC) network where both the GKE cluster and Managed Lustre instance reside.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LUSTRE_IP_RANGE</var></code>: the name for the IP address range created for VPC Network Peering with Managed Lustre.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LUSTRE_FIREWALL_RULE</var></code>: the name for the firewall rule to allow TCP traffic from the IP address range.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the geographical <a href="https://docs.cloud.google.com/compute/docs/regions-zones">zone</a> of your GKE cluster; for example, <code translate="no" dir="ltr">us-central1-a</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE cluster version.</li> </ul> <h3 id="vpc-setup">Set up a VPC network</h3> <p>You must specify the same VPC network when creating the Managed Lustre instance and your GKE clusters, or connected through <a href="https://docs.cloud.google.com/network-connectivity/docs/network-connectivity-center/how-to/working-with-hubs-spokes">Network Connectivity Center</a> if using a peered VPC network.</p> <ol> <li>
+<p>To enable service networking, run the following command:</p> 
+<pre>gcloud services enable servicenetworking.googleapis.com \
+    --project=${PROJECT_ID}
+</pre>
+</li> <li>
+<p>Create a VPC network. Setting the <code translate="no" dir="ltr">--mtu</code> flag to <code translate="no" dir="ltr">8896</code> results in a 10% performance gain.</p> 
+<pre>gcloud compute networks create ${NETWORK_NAME} \
+    --subnet-mode=auto --project=${PROJECT_ID} \
+    --mtu=8896
+</pre>
+</li> <li>
+<p>Create an IP address range.</p> 
+<pre>gcloud compute addresses create ${IP_RANGE_NAME} \
+    --global \
+    --purpose=VPC_PEERING \
+    --prefix-length=20 \
+    --description="Managed Lustre VPC Peering" \
+    --network=${NETWORK_NAME} \
+    --project=${PROJECT_ID}
+</pre>
+</li> <li>
+<p>Get the CIDR range associated with the range you created in the preceding step.</p> 
+<pre>CIDR_RANGE=$(
+  gcloud compute addresses describe ${IP_RANGE_NAME} \
+      --global  \
+      --format="value[separator=/](address, prefixLength)" \
+      --project=${PROJECT_ID}
+)
+</pre>
+</li> <li>
+<p>Create a firewall rule to allow TCP traffic from the IP address range you created.</p> 
+<pre>gcloud compute firewall-rules create ${FIREWALL_RULE_NAME} \
+    --allow=tcp:988,tcp:6988 \
+    --network=${NETWORK_NAME} \
+    --source-ranges=${CIDR_RANGE} \
+    --project=${PROJECT_ID}
+</pre>
+</li> <li>
+<p>To set up network peering for your project, verify that you have necessary IAM permissions, specifically the <code translate="no" dir="ltr">compute.networkAdmin</code> or <code translate="no" dir="ltr">servicenetworking.networksAdmin</code> role.</p> <ol> <li>Go to Google Cloud console &gt; <strong>IAM &amp; Admin</strong>, then search for your project owner principal.</li> <li>Click the pencil icon, then click <strong>+ ADD ANOTHER ROLE</strong>.</li> <li>Select <strong>Compute Network Admin</strong> or <strong>Service Networking Admin</strong>.</li> <li>Click <strong>Save</strong>.</li> </ol>
+</li> <li>
+<p>Connect the peering.</p> 
+<pre>gcloud services vpc-peerings connect \
+    --network=${NETWORK_NAME} \
+    --project=${PROJECT_ID} \
+    --ranges=${IP_RANGE_NAME} \
+    --service=servicenetworking.googleapis.com
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> Your GKE cluster must be in the same VPC network that you set up in this section, or connected through <a href="https://docs.cloud.google.com/network-connectivity/docs/network-connectivity-center/how-to/working-with-hubs-spokes">Network Connectivity Center</a> if using a peered VPC network. For improved network throughput, consider <a href="../using-tier-1#enable_tier_1_bandwidth_on_a_cluster">enabling Tier 1 bandwidth</a> when you create the cluster.</span></aside> <h2 id="manage">Configure the Managed Lustre CSI driver</h2> <p>This section covers how you can enable and disable the Managed Lustre CSI driver.</p> <h3 id="enable-feature-new-cluster">Enable the Managed Lustre CSI driver on a new GKE cluster</h3> <p>The following sections describe how to enable the Managed Lustre CSI driver on a new GKE cluster.</p> <h4 id="enable-default-port">Use the default port <code translate="no" dir="ltr">988</code>
+</h4> <p>To enable the Managed Lustre CSI driver when creating a new GKE cluster that runs version <code translate="no" dir="ltr">1.33.2-gke.4780000</code> or later, run the following command:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">gcloud container clusters create-auto "${CLUSTER_NAME}" \
+    --location=${LOCATION} \
+    --network="${NETWORK_NAME}" \
+    --cluster-version=${CLUSTER_VERSION} \
+    --enable-lustre-csi-driver
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">gcloud container clusters create "${CLUSTER_NAME}" \
+    --location=${LOCATION} \
+    --network="${NETWORK_NAME}" \
+    --cluster-version=${CLUSTER_VERSION} \
+    --addons=LustreCsiDriver
+</pre></section> </div> <h4 id="enable-legacy-port">Use the legacy port <code translate="no" dir="ltr">6988</code>
+</h4> <p>To enable the Managed Lustre CSI driver when creating a new GKE cluster that runs a version earlier than <code translate="no" dir="ltr">1.33.2-gke.4780000</code>, run the following command:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">gcloud container clusters create-auto "${CLUSTER_NAME}" \
+    --location=${LOCATION} \
+    --network="${NETWORK_NAME}" \
+    --cluster-version=${CLUSTER_VERSION} \
+    --enable-lustre-csi-driver \
+    --enable-legacy-lustre-port
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">gcloud container clusters create "${CLUSTER_NAME}" \
+    --location=${LOCATION} \
+    --network="${NETWORK_NAME}" \
+    --cluster-version=${CLUSTER_VERSION} \
+    --addons=LustreCsiDriver \
+    --enable-legacy-lustre-port
+</pre></section> </div> <h3 id="enable-on-existing-cluster">Enable the Managed Lustre CSI driver on existing GKE clusters</h3> <p>The following sections describe how to enable the Managed Lustre CSI driver on existing GKE clusters.</p> <h4 id="enable-default-port-existing-cluster">Use the default port <code translate="no" dir="ltr">988</code>
+</h4> <p>To enable the Managed Lustre CSI driver on an existing GKE cluster that runs version <code translate="no" dir="ltr">1.33.2-gke.4780000</code> or later, run the following command:</p> 
+<pre>  gcloud container clusters update ${CLUSTER_NAME} \
+      --location=${LOCATION} \
+      --update-addons=LustreCsiDriver=ENABLED
+</pre> <h4 id="enable-legacy-port-existing-cluster">Use the legacy port <code translate="no" dir="ltr">6988</code>
+</h4> <p>To enable the Managed Lustre CSI driver on an existing GKE cluster, you might need to use the legacy port <code translate="no" dir="ltr">6988</code> by adding the <code translate="no" dir="ltr">--enable-legacy-lustre-port</code> flag. This flag is required in the following scenarios:</p> <ul> <li>If your GKE cluster runs on a version <em>earlier than <code translate="no" dir="ltr">1.33.2-gke.4780000</code></em>.</li> <li>
+<p>If you intend to connect this cluster to an existing Managed Lustre instance that was created with the <a href="https://docs.cloud.google.com/managed-lustre/docs/create-instance#optional-flags"><code translate="no" dir="ltr">gke-support-enabled</code></a> flag.</p> 
+<pre>gcloud container clusters update ${CLUSTER_NAME} \
+    --location=${LOCATION} \
+    --enable-legacy-lustre-port
+</pre>
+</li> </ul> <aside class="note"><strong>Note:</strong><span> If you enable the CSI driver on an existing cluster and later upgrade your cluster to <code translate="no" dir="ltr">1.33.2-gke.4780000</code> or newer, you might still need this flag if you continue to connect to <code translate="no" dir="ltr">gke-support-enabled</code> Lustre instances.</span></aside> <h3 id="node-upgrade-required">Node upgrade required on existing clusters</h3> <p>Enabling the Managed Lustre CSI driver on existing clusters can trigger node re-creation in order to update the necessary kernel modules for the Managed Lustre client. For immediate availability, we recommend manually upgrading your node pools.</p> <p>GKE clusters on a release channel upgrade according to their scheduled rollout, which can take several weeks depending on your <a href="../../concepts/maintenance-windows-and-exclusions#maintenance_windows">maintenance window</a>. If you're on a static GKE version, you need to <a href="../upgrading-a-cluster#upgrading-nodes">manually upgrade</a> your node pools.</p> <p>Until the node upgrade fully completes, the CSI driver Pod might crashloop on nodes pending update. If you see an <code translate="no" dir="ltr">Operation not permitted</code> error in the CSI driver Pod logs, this indicates that node upgrade or recreation is required.</p> <p>After the node pool upgrade, CPU nodes might appear to be using a GPU image in the Google Cloud console or CLI output. This behavior is expected. The GPU image is being reused on CPU nodes to securely install the Managed Lustre kernel modules. You won't be charged for GPU usage.</p> <h3 id="create-multinic-node-pool">(Optional) Create a multi-NIC node pool</h3> <p>To use high-performance networking, you must create a node pool with an instance type that supports <a href="https://docs.cloud.google.com/vpc/docs/multiple-interfaces-concepts">multiple network interfaces</a>. The multi-NIC support is enabled by default on GKE clusters that run version <code translate="no" dir="ltr">1.35.2-gke.1842000</code> or later. Ensure that your secondary network interfaces reside within the same VPC network as your primary interface.</p> <p>Run the following command:</p> 
+<pre>gcloud container node-pools create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --machine-type=MACHINE_TYPE \
+    --enable-gvnic \
+    --additional-node-network network=NETWORK_NAME,subnetwork=SECONDARY_SUBNET
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region or zone of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type for the node pool, such as <code translate="no" dir="ltr">a3-megagpu-8g</code> which is often used with multi-NIC for high-performance. Multi-NIC is supported on any machine type.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the VPC network name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SECONDARY_SUBNET</var></code>: the name of the secondary subnet.</li> </ul> <h3 id="disable-multi-nic">Disable multi-NIC on Lustre</h3> <p>While multi-NIC support is recommended for high-performance workloads, you might want to disable it in specific scenarios. For example, you might not want to spread Lustre traffic across all available hardware interfaces, or you might need to isolate connectivity issues to a single network path for troubleshooting.</p> <p><strong>Note:</strong> If you disable multi-NIC support on running nodes, you might need to recreate or <a href="../upgrading-a-cluster#upgrading-nodes">manually upgrade your node pools</a> for this change to take effect.</p> <div> <section><p class="_code-tab"><strong>For a cluster</strong></p>
+<p>To disable high-performance networking for the entire cluster, use the <code translate="no" dir="ltr">--disable-multi-nic-lustre</code> flag when creating or updating the cluster. For example:</p> 
+<pre data-language="">gcloud container clusters update CLUSTER_NAME \
+    --location=LOCATION \
+    --disable-multi-nic-lustre
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region or zone of your cluster.</li> </ul></section> <section><p class="_code-tab"><strong>For a node pool</strong></p>
+<p>To disable high-performance networking for a specific node pool, update the node pool to set the <code translate="no" dir="ltr">lustre.csi.storage.gke.io/multi-nic</code> label to <code translate="no" dir="ltr">false</code>:</p> 
+<pre data-language="">gcloud container node-pools update NODE_POOL_NAME \
+--cluster=CLUSTER_NAME \
+--zone=LOCATION \
+--node-labels=lustre.csi.storage.gke.io/multi-nic=false
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the zone of your cluster.</li> </ul></section> </div> <h3 id="disable">Disable the Managed Lustre CSI driver</h3> <p>You can disable the Managed Lustre CSI driver on an existing GKEcluster by using the Google Cloud CLI.</p> <aside class="warning"><strong>Warning:</strong><span> Disabling the Managed Lustre CSI driver can disrupt workloads that have Managed Lustre file systems mounted.</span></aside>
+<pre>gcloud container clusters update ${CLUSTER_NAME} \
+    --location=${LOCATION} \
+    --update-addons=LustreCsiDriver=DISABLED
+</pre> <p>After the CSI driver is disabled, GKE automatically recreates your nodes and uninstalls the Managed Lustre kernel modules.</p> <h2 id="new-volume">Create a new volume using the Managed Lustre CSI driver</h2> <p>The following sections describe the typical process for creating a Kubernetes volume backed by a Managed Lustre instance in GKE:</p> <ol> <li>
+<a href="#storageclass">Create a StorageClass</a>.</li> <li>
+<a href="#pvc">Use a PersistentVolumeClaim to access the volume</a>.</li> <li>
+<a href="#workload">Create a workload that consumes the volume</a>.</li> </ol> <h3 id="storageclass">Create a StorageClass</h3> <p>When the Managed Lustre CSI driver is enabled, GKE automatically creates a StorageClass for provisioning Managed Lustre instances. The StorageClass depends on the Managed Lustre <a href="https://docs.cloud.google.com/sdk/gcloud/reference/lustre/instances/create#--per-unit-storage-throughput">performance tier</a>, and is one of the following:</p> <ul> <li><code translate="no" dir="ltr">lustre-rwx-125mbps-per-tib</code></li> <li><code translate="no" dir="ltr">lustre-rwx-250mbps-per-tib</code></li> <li><code translate="no" dir="ltr">lustre-rwx-500mbps-per-tib</code></li> <li><code translate="no" dir="ltr">lustre-rwx-1000mbps-per-tib</code></li> </ul> <p>GKE provides a default StorageClass for each supported Managed Lustre performance tier. This simplifies the dynamic provisioning of Managed Lustre instances, as you can use the built-in StorageClasses without having to define your own.</p> <p>For zonal clusters, the CSI driver provisions Managed Lustre instances in the same zone as the cluster. For regional clusters, it provisions the instance in one of the zones within the region.</p> <p>The following example shows you how to create a custom StorageClass with specific topology requirements:</p> <ol> <li>
+<p>Save the following manifest in a file named <code translate="no" dir="ltr">lustre-class.yaml</code>:</p> 
+<pre>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: lustre-class
+provisioner: lustre.csi.storage.gke.io
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+parameters:
+  perUnitStorageThroughput: "1000"
+  network: LUSTRE_NETWORK
+allowedTopologies:
+- matchLabelExpressions:
+  - key: topology.gke.io/zone
+    values:
+    - us-central1-a
+</pre> <p>For the full list of fields that are supported in the StorageClass, see the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/lustre-csi-driver/lustre-csi-driver-reference">Managed Lustre CSI driver reference documentation</a>.</p>
+</li> <li>
+<p>Create the StorageClass by running this command:</p> 
+<pre>kubectl apply -f lustre-class.yaml
+</pre>
+</li> </ol> <h3 id="pvc">Use a PersistentVolumeClaim to access the Volume</h3> <p>This section shows you how to create a <a href="../../concepts/persistent-volumes#persistentvolumeclaims">PersistentVolumeClaim</a> resource that references the Managed Lustre CSI driver's StorageClass.</p> <ol> <li>
+<p>Save the following manifest in a file named <code translate="no" dir="ltr">lustre-pvc.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lustre-pvc
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 9000Gi
+  storageClassName: lustre-class
+</pre>
+<aside class="warning"><strong>Warning:</strong><span> For GKE clusters running versions earlier than <code translate="no" dir="ltr">1.35.0-gke.2331000</code>, changing the storage size of the PVC isn't supported and requires you to re-create the PVC with the new size. For more information, see <a href="../../concepts/managed-lustre#limitations">Limitations</a>. To increase storage capacity for clusters running version <code translate="no" dir="ltr">1.35.0-gke.2331000</code> or later, see <a href="expand-lustre-volumes">Scale your Managed Lustre storage on GKE</a>.</span></aside> <p>For the full list of fields that are supported in the PersistentVolumeClaim, see the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/lustre-csi-driver/lustre-csi-driver-reference">Managed Lustre CSI driver reference documentation</a>.</p>
+</li> <li>
+<p>Create the PersistentVolumeClaim by running this command:</p> 
+<pre>kubectl apply -f lustre-pvc.yaml
+</pre>
+</li> </ol> <h3 id="workload">Create a workload to consume the volume</h3> <p>This section shows an example of how to create a Pod that consumes the PersistentVolumeClaim resource you created earlier.</p> <p>Multiple Pods can share the same PersistentVolumeClaim resource.</p> <ol> <li>
+<p>Save the following manifest in a file named <code translate="no" dir="ltr">my-pod.yaml</code>.</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    volumeMounts:
+      - name: lustre-volume
+        mountPath: /data
+  volumes:
+  - name: lustre-volume
+    persistentVolumeClaim:
+      claimName: lustre-pvc
+</pre>
+</li> <li>
+<p>Apply the manifest to the cluster.</p> 
+<pre>kubectl apply -f my-pod.yaml
+</pre>
+</li> <li>
+<p>Verify that the Pod is running. The Pod runs after the PersistentVolumeClaim is provisioned. This operation might take a few minutes to complete.</p> 
+<pre>kubectl get pods
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME           READY   STATUS    RESTARTS   AGE
+my-pod         1/1     Running   0          11s
+</pre>
+</li> </ol> <h2 id="fsgroup">Use fsGroup with Managed Lustre volumes</h2> <p>You can change the group ownership of the <em>root level directory</em> of the mounted file system to match a user-requested fsGroup specified in the Pod's <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod">SecurityContext</a>. fsGroup won't recursively change the ownership of the entire mounted Managed Lustre file system; only the root directory of the mount point is affected.</p> <h2 id="troubleshooting">Troubleshooting</h2> <p>For troubleshooting guidance, refer to the <a href="https://docs.cloud.google.com/managed-lustre/docs/lustre-csi-driver-troubleshooting">Troubleshooting page</a> in the Managed Lustre documentation.</p> <h2 id="clean_up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account, delete the storage resources you created in this guide.</p> <ol> <li>
+<p>Delete the Pod and PersistentVolumeClaim.</p> <aside class="note"><strong>Note:</strong><span> If you create the PersistentVolume with a "Delete" persistentVolumeReclaimPolicy, deleting the PersistentVolumeClaim also deletes the PersistentVolume and the underlying Managed Lustre instance.</span></aside>
+<pre>kubectl delete pod my-pod
+kubectl delete pvc lustre-pvc
+</pre>
+</li> <li>
+<p>Check the PersistentVolume status.</p> 
+<pre>kubectl get pv
+</pre> <p>The output is similar to the following:</p> 
+<pre>No resources found
+</pre> <p>It might take a few minutes for the underlying Managed Lustre instance to be fully deleted.</p>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="https://docs.cloud.google.com/managed-lustre/docs/overview">Explore the Managed Lustre documentation</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/lustre-csi-driver-new-volume" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/lustre-csi-driver-new-volume</a>
+  </p>
+</div>

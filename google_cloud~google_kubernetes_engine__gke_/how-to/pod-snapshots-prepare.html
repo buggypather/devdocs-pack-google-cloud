@@ -1,0 +1,268 @@
+<h1>Prepare for Pod snapshots</h1>  <p>Google Kubernetes Engine (GKE) Pod snapshots let you save and restore running Pod states to improve workload startup latency. Before you can capture snapshots of your workloads, you must prepare your cluster and storage environment.</p> <p>Use this document to learn how to enable and configure Pod snapshots on your cluster and set up Cloud Storage to store the snapshots. For more information about how Pod snapshots work, see <a href="../concepts/pod-snapshots">About GKE Pod snapshots</a>.</p> <p>Platform admins and operators and Application developers can use this document to configure clusters, create storage buckets, and set up access permissions for Pod snapshots. For more information about the common roles and example tasks referenced in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h2 id="enable">Enable Pod snapshots</h2> <p>You can enable Pod snapshots on a new or existing cluster. Pod snapshots require GKE Sandbox and <a href="../concepts/workload-identity">Workload Identity Federation for GKE</a>. Autopilot clusters enable both features by default. For Standard clusters, you must enable Workload Identity Federation for GKE on the cluster and configure a node pool to run in GKE Sandbox.</p> <p>To enable Pod snapshots on a cluster, follow the steps for the GKE mode of operation that you want to use:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ul> <li>
+<p>To enable Pod snapshots on a new cluster, run the following command:</p> 
+<pre data-language="">  gcloud container clusters create-auto CLUSTER_NAME \
+      --enable-pod-snapshots \
+      --location=CONTROL_PLANE_LOCATION \
+      --cluster-version=CLUSTER_VERSION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version of your new cluster, which must be 1.35.3-gke.1234000 or later.</li> </ul>
+</li> <li>
+<p>To enable Pod snapshots on an existing cluster, follow these steps:</p> <ol> <li>
+<p>Upgrade the cluster to version 1.35.3-gke.1234000 or later:</p> 
+<pre data-language="">  gcloud container clusters upgrade CLUSTER_NAME \
+      --cluster-version=CLUSTER_VERSION \
+      --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version to upgrade your cluster to, which must be 1.35.3-gke.1234000 or later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul>
+</li> <li>
+<p>Enable Pod snapshots on your cluster:</p> 
+<pre data-language="">  gcloud container clusters update CLUSTER_NAME \
+      --enable-pod-snapshots \
+      --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul>
+</li> </ol>
+</li> </ul> <p>Pod snapshots with the default <code translate="no" dir="ltr">whole-pod</code> scope don't support E2 machine types, whereas file system snapshots (<code translate="no" dir="ltr">rootfs-only</code>) do. In Autopilot clusters, GKE might schedule Pods on E2 nodes by default. If you use the <code translate="no" dir="ltr">whole-pod</code> scope, use a <a href="node-attributes-compute-classes">ComputeClass custom resource</a> to help ensure that your workloads run on compatible hardware.</p> <p>To create and use a ComputeClass custom resource, follow these steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">non-e2-class.yaml</code>:</p> 
+<pre data-language="">  apiVersion: cloud.google.com/v1
+  kind: ComputeClass
+  metadata:
+    name: non-e2-class
+  spec:
+    priorities:
+    - machineFamily: n2
+    - machineFamily: c3
+    activeMigration:
+      optimizeRulePriority: false
+    whenUnsatisfiable: DoNotScaleUp
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre data-language="">  kubectl apply -f non-e2-class.yaml
+</pre>
+</li> <li>
+<p>In your Pod specification, reference the ComputeClass custom resource by using the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> node selector:</p> 
+<pre data-language="">  spec:
+    nodeSelector:
+      cloud.google.com/compute-class: non-e2-class
+    # Multiple lines are omitted here
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ul> <li>
+<p>To enable Pod snapshots on a new cluster, run the following command:</p> 
+<pre data-language="">  gcloud container clusters create CLUSTER_NAME \
+      --enable-pod-snapshots \
+      --cluster-version=CLUSTER_VERSION \
+      --workload-pool=PROJECT_ID.svc.id.goog \
+      --workload-metadata=GKE_METADATA \
+      --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version of your new cluster, which must be 1.35.3-gke.1234000 or later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul>
+</li> <li>
+<p>To enable Pod snapshots on an existing cluster, follow these steps:</p> <ol> <li>
+<p>Upgrade the cluster to version 1.35.3-gke.1234000 or later:</p> 
+<pre data-language="">  gcloud container clusters upgrade CLUSTER_NAME \
+      --node-pool=NODE_POOL_NAME \
+      --cluster-version=CLUSTER_VERSION \
+      --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the version to upgrade your cluster to, which must be 1.35.3-gke.1234000 or later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul>
+</li> <li>
+<p>Enable Pod snapshots on your cluster:</p> 
+<pre data-language="">  gcloud beta container clusters update CLUSTER_NAME \
+      --enable-pod-snapshots \
+      --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul>
+</li> </ol>
+</li> </ul> <p>To run Pods in GKE Sandbox on a Standard cluster, you must create or update a node pool with GKE Sandbox enabled. To update a node pool, use the <code translate="no" dir="ltr">--sandbox type=gvisor</code> flag. To create a node pool with GKE Sandbox enabled, run the following command:</p> 
+<pre data-language="">gcloud container node-pools create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --node-version=NODE_VERSION \
+    --machine-type=MACHINE_TYPE \
+    --location=CONTROL_PLANE_LOCATION \
+    --image-type=cos_containerd \
+    --sandbox type=gvisor
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_VERSION</var></code>: the version to use for the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/machine-types">type of machine</a> to use for the nodes.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul> <p>For more information about GKE Sandbox, see <a href="sandbox-pods#enabling-existing">Harden workload isolation with GKE Sandbox</a>.</p></section> </div> <h2 id="store-snapshots">Store snapshots</h2> <p>GKE stores Pod snapshots in a <a href="https://docs.cloud.google.com/storage/docs/buckets">Cloud Storage bucket</a>. Each snapshot contains the application memory and, optionally, the GPU state of the Pod. To authenticate to Cloud Storage, Pod snapshots use the Pod's ServiceAccount object, which requires <a href="workload-identity">Workload Identity Federation for GKE</a>.</p> <p>Pod snapshots require the following bucket configurations:</p> <ul> <li>
+<strong><a href="https://docs.cloud.google.com/storage/docs/hns-overview">Hierarchical namespaces</a></strong>: you must enable hierarchical namespaces to support higher read and write queries per second. Hierarchical namespaces also require that you enable <a href="https://docs.cloud.google.com/storage/docs/uniform-bucket-level-access">uniform bucket-level access</a>.</li> <li>
+<strong><a href="https://docs.cloud.google.com/storage/docs/soft-delete">Soft delete</a></strong>: because Pod snapshots use <a href="https://docs.cloud.google.com/storage/docs/parallel-composite-uploads">parallel composite uploads</a>, disable data protection features like soft delete. If you leave these features enabled, then soft deletions of the temporary objects can increase your storage bill significantly.</li> <li>
+<strong><a href="https://docs.cloud.google.com/storage/docs/locations">Location</a></strong>: the Cloud Storage bucket location must be in the same location as the GKE cluster because transferring snapshots across different regions might affect performance.</li> </ul> <p>To create a bucket with the required configurations, run the following command:</p> 
+<pre>gcloud storage buckets create gs://BUCKET_NAME \
+    --uniform-bucket-level-access \
+    --enable-hierarchical-namespace \
+    --soft-delete-duration=0d \
+    --location=LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your bucket.</li> </ul> <p>For a complete list of options for bucket creation, see <a href="https://docs.cloud.google.com/sdk/gcloud/reference/storage/buckets/create#FLAGS">Flags</a> in the documentation for the <code translate="no" dir="ltr">buckets create</code> command.</p> <h2 id="grant-permissions">Grant workloads access to the Cloud Storage bucket</h2> <p>By default, GKE doesn't have access to Cloud Storage. To read and write Pod snapshots, you must grant an IAM role that contains the corresponding permissions to the Kubernetes ServiceAccount object that your workload Pods use, or <a href="#enable-multi-tenancy">enable multi-tenancy by using short-lived tokens</a>.</p> <h3 id="ksa-permission">Grant roles to specific Kubernetes ServiceAccount objects</h3> <aside class="warning"><strong>Warning:</strong><span> Granting Cloud Storage permissions to a Pod's Kubernetes ServiceAccount (<code translate="no" dir="ltr">podKSA</code>) lets processes running inside the container access the Cloud Storage bucket directly, which can be a security risk. Don't use <code translate="no" dir="ltr">podKSA</code> if the Pod runs untrusted code, such as an agentic sandbox. Instead, <a href="#enable-multi-tenancy">enable multi-tenancy by using short-lived tokens</a> (<code translate="no" dir="ltr">federatedP4SA</code>).</span></aside> <p>To grant roles to specific Kubernetes ServiceAccount objects, follow these steps:</p> <ol> <li>
+<p>To communicate with your cluster by using <code translate="no" dir="ltr">kubectl</code> commands, get credentials for your cluster:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul>
+</li> <li>
+<p>For each Pod, follow these steps:</p> <ol> <li>
+<p>Create a ServiceAccount object:</p> 
+<pre>kubectl create serviceaccount SERVICEACCOUNT_NAME \
+    --namespace=NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICEACCOUNT_NAME</var></code>: the name of your ServiceAccount object.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for your Pods.</li> </ul>
+</li> <li>
+<p>Grant the ServiceAccount object permission to access the bucket. Choose one of the following options based on your security requirements:</p> <ul> <li>
+<strong>Standard permissions</strong>: grants full read, write, and delete access.</li> <li>
+<strong>Write-once permissions</strong>: prevents overwriting or deleting finalized snapshot files, but grants permission to delete temporary objects for parallel composite uploads.</li> </ul> <p>To grant permission, run the commands for your selected option:</p> <div> <section><p class="_code-tab"><strong>Standard permissions</strong></p>
+
+<pre data-language="">gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.bucketViewer"
+</pre>
+
+<pre data-language="">gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.objectUser"
+</pre></section> <section><p class="_code-tab"><strong>Write-once permissions</strong></p>
+
+<pre data-language="">gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.bucketViewer"
+</pre>
+
+<pre data-language="">gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.objectCreator"
+</pre>
+
+<pre data-language="">gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.objectViewer"
+</pre>
+
+<pre data-language="">gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.objectUser" \
+    --condition='expression=resource.type == "storage.googleapis.com/Object" &amp;&amp; (resource.name.extract("/pages.img_{part}") != "" || resource.name.extract("/fs_checkpoint_pages.img_{part}") != ""),title=allow_pcu_temp_part_cleanup,description=Allow deleting temporary parallel composite upload part objects only'
+</pre></section> </div> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for your Pods.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICEACCOUNT_NAME</var></code>: the name of your ServiceAccount object.</li> </ul>
+</li> </ol>
+</li> </ol> <h3 id="enable-multi-tenancy">Enable multi-tenancy using short-lived tokens</h3> <p>As an alternative to granting permissions to individual ServiceAccount objects, you can enable multi-tenancy with short-lived, scope-restricted tokens. This approach helps to avoid the propagation delay associated with manual IAM bindings. Instead of granting permissions to each ServiceAccount object, you perform a one-time grant of the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/storage#storage.admin">Storage Admin role</a> (<code translate="no" dir="ltr">roles/storage.admin</code>) on the snapshot storage bucket to the GKE node service account. The node service account then creates short-lived tokens on demand for specific paths.</p> <p>Enabling tokens with Pod snapshots requires GKE version 1.35.3-gke.1737000 or later.</p> <p>To enable multi-tenancy, follow these steps:</p> <ol> <li>
+<p>To grant the node service account permission to use the bucket, run the following command:</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="serviceAccount:service-PROJECT_NUMBER@gcp-sa-gkenode.iam.gserviceaccount.com" \
+    --role="roles/storage.admin"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number.</li> </ul>
+</li> <li><p>When you <a href="#configure-storage">configure storage for snapshots</a>, set the value of the <code translate="no" dir="ltr">tokenSource</code> field to <code translate="no" dir="ltr">federatedP4SA</code>.</p></li> </ol> <h2 id="grant-controller-permissions">Grant the Pod snapshot controller access to the Cloud Storage bucket</h2> <p>To let the Pod snapshot controller delete snapshots inside the Cloud Storage bucket, you must grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/storage#storage.objectUser">Storage Object User role</a> (<code translate="no" dir="ltr">roles/storage.objectUser</code>) to the GKE service agent on the project. To grant the role, run the following command:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+    --role="roles/storage.objectUser" \
+    --condition="expression=resource.name.startsWith(\"projects/_/buckets/BUCKET_NAME\"),title=restrict_to_bucket,description=Restricts access to one bucket only"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> </ul> <h2 id="managed-folders">Optional: Create managed folders for the Cloud Storage bucket</h2> <p>To isolate permissions for snapshots from mutually untrusted Pods, which is useful in multi-tenant use cases, create managed folders. To set up managed folders, follow these steps:</p> <ol> <li>
+<p>Create a custom IAM role that contains only the necessary permissions for Pod snapshots. Run the command for your selected option:</p> <div> <section><p class="_code-tab"><strong>Standard permissions</strong></p>
+
+<pre data-language="">gcloud iam roles create podSnapshotGcsReadWriter \
+    --project=PROJECT_ID \
+    --permissions="storage.objects.get,storage.objects.list,storage.objects.create,storage.objects.delete,storage.folders.create"
+</pre></section> <section><p class="_code-tab"><strong>Write-once permissions</strong></p>
+
+<pre data-language="">gcloud iam roles create podSnapshotGcsReadWriter \
+    --project=PROJECT_ID \
+    --permissions="storage.objects.get,storage.objects.list,storage.objects.create,storage.folders.create"
+</pre></section> </div> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/storage#storage.bucketViewer">Storage Bucket Viewer role</a> (<code translate="no" dir="ltr">roles/storage.bucketViewer</code>) to all ServiceAccount objects in the target namespace. This role lets the ServiceAccount objects read bucket metadata, but doesn't grant them permissions to read or write the objects in the bucket.</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://BUCKET_NAME \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/namespace/NAMESPACE" \
+    --role="roles/storage.bucketViewer"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for your Pods.</li> </ul>
+</li> <li>
+<p>For each ServiceAccount object that needs to store Pod snapshots, follow these steps:</p> <ol> <li>
+<p>Create a managed folder for the ServiceAccount object:</p> 
+<pre>gcloud storage managed-folders create gs://BUCKET_NAME/FOLDER_PATH/
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">FOLDER_PATH</var></code>: the path for the managed folder (for example, <code translate="no" dir="ltr">my-app-snapshots</code>).</li> </ul>
+</li> <li>
+<p>Grant the ServiceAccount object the custom <code translate="no" dir="ltr">podSnapshotGcsReadWriter</code> role on the managed folder. To grant permission, run the commands for your selected option:</p> <div> <section><p class="_code-tab"><strong>Standard permissions</strong></p>
+
+<pre data-language="">gcloud storage managed-folders add-iam-policy-binding gs://BUCKET_NAME/FOLDER_PATH/ \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="projects/PROJECT_ID/roles/podSnapshotGcsReadWriter"
+</pre></section> <section><p class="_code-tab"><strong>Write-once permissions</strong></p>
+
+<pre data-language="">gcloud storage managed-folders add-iam-policy-binding gs://BUCKET_NAME/FOLDER_PATH/ \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="projects/PROJECT_ID/roles/podSnapshotGcsReadWriter"
+</pre>
+
+<pre data-language="">gcloud storage managed-folders add-iam-policy-binding gs://BUCKET_NAME/FOLDER_PATH/ \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/SERVICEACCOUNT_NAME" \
+    --role="roles/storage.objectUser" \
+    --condition='expression=resource.type == "storage.googleapis.com/Object" &amp;&amp; (resource.name.extract("/pages.img_{part}") != "" || resource.name.extract("/fs_checkpoint_pages.img_{part}") != ""),title=allow_pcu_temp_part_cleanup,description=Allow deleting temporary parallel composite upload part objects only'
+</pre></section> </div> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">FOLDER_PATH</var></code>: the path for the managed folder (for example, <code translate="no" dir="ltr">my-app-snapshots</code>).</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for your Pods.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICEACCOUNT_NAME</var></code>: the name of your ServiceAccount object.</li> </ul>
+</li> </ol>
+<aside class="note"><strong>Note:</strong><span> IAM policies can take several minutes to take effect in GKE.</span></aside>
+</li> </ol> <h2 id="configure-storage">Configure storage for snapshots</h2> <p>To specify where to store Pod snapshots, create a PodSnapshotStorageConfig custom resource:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">example-pod-snapshot-storage-config.yaml</code>. This example configures GKE to store Pod snapshots in the <code translate="no" dir="ltr"><var translate="no">FOLDER_PATH</var>/</code> path inside the Cloud Storage bucket <code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>:</p> 
+<pre>apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: example-pod-snapshot-storage-config
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: "BUCKET_NAME"
+      path: "FOLDER_PATH"
+      tokenSource: "TOKEN_SOURCE"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your Cloud Storage bucket.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">FOLDER_PATH</var></code>: the path for the Cloud Storage managed folder.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">TOKEN_SOURCE</var></code>: the identity provider for access. Use <code translate="no" dir="ltr">podKSA</code> (default) or <code translate="no" dir="ltr">federatedP4SA</code> for multi-tenancy.</p> <aside class="warning"><strong>Warning:</strong><span> <code translate="no" dir="ltr">podKSA</code> lets processes inside the container access the Cloud Storage bucket, which can be a security risk. Don't use <code translate="no" dir="ltr">podKSA</code> if the Pod runs untrusted code, such as an agentic sandbox; use <code translate="no" dir="ltr">federatedP4SA</code> instead.</span></aside>
+</li> </ul>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f example-pod-snapshot-storage-config.yaml
+</pre>
+</li> </ol> <h2 id="whats-next">What's next</h2> <p>Learn how to <a href="pod-snapshots-trigger">trigger a Pod snapshot</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots-prepare" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots-prepare</a>
+  </p>
+</div>

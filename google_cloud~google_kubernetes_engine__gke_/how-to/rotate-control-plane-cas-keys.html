@@ -1,0 +1,440 @@
+<h1>Rotate customer-managed control plane CAs and keys</h1>  <aside class="note"><b>Note:</b> This document uses a <a href="https://cloud.google.com/products#product-launch-stages">general availability</a> feature named <i>GKE control plane authority</i> that's only available for eligible Google Cloud customers. To request access to this feature, contact your Google Cloud account team.</aside> <p>This page shows cluster administrators and Security engineers how to rotate the certificate authorities (CAs) and service account signing keys that you configured for GKE control plane authority.</p> <p>You should be familiar with the following concepts:</p> <ul> <li>
+<a href="../concepts/about-control-plane-authority#key-credential-management">Key and credential management</a>.</li> <li>
+<a href="../concepts/about-control-plane-authority#rotation-customer-managed-credentials">Rotation of customer-managed credentials</a>.</li> <li>
+<a href="https://docs.cloud.google.com/kms/docs/key-rotation#asymmetric">Considerations for asymmetric keys</a>.</li> </ul> <h2 id="plan-rotations">Plan credential rotations</h2> <p>This document shows you how to rotate the following credential components in your control plane:</p> <ul> <li>The cluster root CA, the aggregation root CA, the etcd API root CA, and the etcd peer root CA.</li> <li>The Kubernetes ServiceAccount signing and verification keys.</li> </ul> <p>You can also rotate the customer-managed encryption keys that you used to encrypt your control plane boot disks, etcd disks, and the etcd internal backup that Google Cloud uses for disaster recovery. For more information, see <a href="rotate-etcd-kcp-encryption-keys">Rotate etcd and control plane boot disk encryption keys</a>.</p> <aside class="key-point"><b>Best practice</b>: <p>Validate your key and credential rotation procedures <i>before</i> an actual incident occurs.</p></aside> <p>Rotate your credentials to avoid CA expiry, to mitigate key version compromises, and as part of your organization's security practices. To plan how often you rotate specific GKE control plane authority resources, consider the following:</p> <ul> <li>By default, GKE certificates signed by the root CAs in Certificate Authority Service (CA Service) expire one year after the creation date.</li> <li>Keys in Cloud Key Management Service (Cloud KMS) don't expire. Perform a manual key rotation only if your organization has requirements for key rotation. To minimize disruptions to running workloads, don't configure automatic key rotation for these keys.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li><p>Have an existing cluster that uses <a href="../tutorials/run-your-own-cas-keys">self-managed CAs and service account keys</a> and runs GKE version 1.35.2-gke.1842000 or later.</p></li> <li>
+<p>Identify the project IDs of the following Google Cloud projects:</p> <ul> <li>
+<strong>Key project</strong>: the project that contains your Cloud KMS and CA Service resources.</li> <li>
+<strong>Cluster project</strong>: the project that contains your GKE cluster.</li> </ul>
+</li> <li>
+<p>To do the validation tasks in this document, verify that the following Data Access audit logs are enabled:</p> <ul> <li>Cloud Key Management Service (KMS) API: <code translate="no" dir="ltr">DATA_READ</code>
+</li> <li>Certificate Authority Service: <code translate="no" dir="ltr">ADMIN_READ</code>
+</li> </ul> <p>To enable these log types, see <a href="https://docs.cloud.google.com/logging/docs/audit/configure-data-access">Enable Data Access audit logs</a>.</p>
+</li> </ul> <h3 id="required-roles-permissions">Required roles and permissions</h3> <p> To get the permissions that you need to rotate your customer-managed CAs and keys, ask your administrator to grant you the following IAM roles: </p> <ul> <li> Manage keys or key versions: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudkms#cloudkms.admin">Cloud KMS Admin </a> (<code translate="no" dir="ltr">roles/cloudkms.admin</code>) on your key project </li> <li> Manage root CAs: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/privateca#privateca.admin">CA Service Admin </a> (<code translate="no" dir="ltr">roles/privateca.admin</code>) on your key project </li> <li> Configure clusters to use new credentials: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.clusterAdmin">Kubernetes Engine Cluster Admin </a> (<code translate="no" dir="ltr">roles/container.clusterAdmin</code>) on your cluster project </li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <h3 id="limitations">Limitations</h3> <p>The asymmetric Cloud KMS keys that you use for service account signing and verification don't support automatic key rotation.</p> <h2 id="rotate-service-account-keys">Rotate the service account signing and verification keys</h2> <p>When you setup GKE control plane authority, you add a service account signing key and service account verification keys to your cluster. GKE uses these keys to sign and validate bearer tokens for Kubernetes ServiceAccounts. During a rotation, you add your new key to the list of service account verification keys, wait for changes to propagate, and then replace the service account signing key with the new key.</p> <p>To rotate the service account keys, follow these steps:</p> <ol> <li>
+<p>Get the full resource name of the original key version of the service account signing key:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --project=CLUSTER_PROJECT_ID \
+    --location=CONTROL_PLANE_LOCATION \
+    --format="value(userManagedKeysConfig.serviceAccountSigningKeys)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the location of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: the project ID of the cluster project.</li> </ul> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/keyRings/KEYRING_NAME/cryptoKeys/SIGNING_KEY_NAME/cryptoKeyVersions/ORIGINAL_SIGNING_KEY_VERSION
+</pre> <p>In this output, <code translate="no" dir="ltr"><var translate="no">SIGNING_KEY_NAME</var></code> is the name of the key and <code translate="no" dir="ltr"><var translate="no">ORIGINAL_SIGNING_KEY_VERSION</var></code> is the number of the original signing key version.</p>
+</li> <li>
+<p>Create a new key version for the service account signing key:</p> 
+<pre>gcloud kms keys versions create \
+    --key=SIGNING_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SIGNING_KEY_NAME</var></code>: the name of the service account signing key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEYRING_NAME</var></code>: the name of the key ring that holds the key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Google Cloud location of the key ring.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: the project ID of your <em>key project</em>.</li> </ul>
+</li> <li>
+<p>Get the full resource name of the new key version:</p> 
+<pre>gcloud kms keys versions list \
+    --key=SIGNING_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+    --filter="STATE=ENABLED" --sort-by=~ \
+    --format="value(name)" | sed 1q
+</pre> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/keyRings/KEYRING_NAME/cryptoKeys/SIGNING_KEY_NAME/cryptoKeyVersions/NEW_SIGNING_KEY_VERSION
+</pre> <p>In this output, <code translate="no" dir="ltr"><var translate="no">SIGNING_KEY_NAME</var></code> is the name of the key and <code translate="no" dir="ltr"><var translate="no">NEW_SIGNING_KEY_VERSION</var></code> is the number of the new signing key version.</p>
+</li> <li>
+<p>Add the new key version to the set of service account verification keys for the cluster:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --service-account-verification-keys=ORIGINAL_KEY_VERSION_PATH,NEW_KEY_VERSION_PATH
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ORIGINAL_KEY_VERSION_PATH</var></code>: the full resource name of the original signing key version from the output of the first step in this section. For example, <code translate="no" dir="ltr">projects/example-key-project/locations/us-central1/keyRings/example-keyring/cryptokeys/example-signing-key/cryptoKeyVersions/1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NEW_KEY_VERSION_PATH</var></code>: the full resource name of the new signing key version from the output of the previous step. For example, <code translate="no" dir="ltr">projects/example-key-project/locations/us-central1/keyRings/example-keyring/cryptokeys/example-signing-key/cryptoKeyVersions/2</code>.</li> </ul> <p>After the cluster update operation completes, it might take up to 10 minutes for the new key version path to propagate to the Kubernetes API server and every GKE API endpoint.</p>
+</li> <li>
+<p>To confirm that the new key version path is fully propagated, do the following:</p> <ol> <li>
+<p>Get the public component of the cluster signing keys from the GKE API as a JSON Web Key Set (JWKS):</p> 
+<pre>curl https://container.googleapis.com/v1/projects/CLUSTER_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/clusters/CLUSTER_NAME/jwks
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+  "keys": [
+    {
+      "kty": "RSA",
+      "alg": "RS256",
+      "use": "sig",
+      "kid": "KEY1_ID",
+      "n": "KEY1_MODULUS",
+      "e": "KEY1_EXPONENT"
+    },
+    {
+      "kty": "RSA",
+      "alg": "RS256",
+      "use": "sig",
+      "kid": "KEY2_ID",
+      "n": "KEY2_MODULUS",
+      "e": "KEY2_EXPONENT"
+    }
+  ]
+}
+</pre> <p>This output must have two key entries, which indicates that both of the key versions are available in the GKE API. If you only see one key entry, wait for 10 minutes and retry the command.</p>
+</li> <li>
+<p>Connect to the cluster so that you can run <code translate="no" dir="ltr">kubectl</code> commands:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Get the public component of the cluster signing keys from the Kubernetes API server as a JWKS:</p> 
+<pre>kubectl get --raw /openid/v1/jwks | jq
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+  "keys": [
+    {
+      "kty": "RSA",
+      "alg": "RS256",
+      "use": "sig",
+      "kid": "KEY1_ID",
+      "n": "KEY1_MODULUS",
+      "e": "KEY1_EXPONENT"
+    },
+    {
+      "kty": "RSA",
+      "alg": "RS256",
+      "use": "sig",
+      "kid": "KEY2_ID",
+      "n": "KEY2_MODULUS",
+      "e": "KEY2_EXPONENT"
+    }
+  ]
+}
+</pre> <p>This output must have two key entries, which indicates that both of the key versions are available in the Kubernetes API server. If you only see one key entry, wait for 10 minutes and retry the command.</p>
+</li> </ol>
+</li> <li>
+<p>Update the cluster to use the new key version as the service account signing key:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --service-account-signing-keys=NEW_KEY_VERSION_PATH
+</pre>
+</li> <li>
+<p>Verify that new service account tokens use the new key version:</p> <ol> <li>
+<p>Create a ServiceAccount:</p> 
+<pre>kubectl create serviceaccount test-sa-1
+</pre>
+</li> <li>
+<p>Create a token for the ServiceAccount:</p> 
+<pre>kubectl create token test-sa-1
+</pre>
+</li> <li>
+<p>Extract a recently signed digest from Logging:</p> 
+<pre>export SIGNED_DIGEST=$(gcloud logging read \
+    'resource.type="gke_cluster"
+    AND resource.labels.cluster_name="CLUSTER_NAME"
+    AND protoPayload.methodName="google.cloud.gkeauth.v1.Auth.SignServiceAccountJWT"
+    AND protoPayload.metadata.subject="system:serviceaccount:default:test-sa-1"' \
+    --freshness=1h \
+    --bucket=_Required \
+    --location=global \
+    --view=_AllLogs \
+    --order=DESC \
+    --limit=1 \
+    --format="value(protoPayload.metadata.toBeSignedDigest)")
+</pre>
+</li> <li>
+<p>Validate that the new signing key version is in use:</p> 
+<pre>gcloud logging read \
+    'resource.type="cloudkms_cryptokeyversion" 
+    AND protoPayload.methodName="AsymmetricSign"
+    AND protoPayload.request.digest.sha256="'${SIGNED_DIGEST}'"' \
+    --freshness=1h \
+    --bucket=_Default \
+    --location=global \
+    --view=_AllLogs \
+    --order=DESC \
+    --limit=1 \
+    --format="value(protoPayload.resourceName)"
+</pre> <p>The output is the resource path of the new signing key version.</p>
+</li> </ol>
+</li> <li>
+<p>Wait for every token in the cluster that uses the original service account signing key version to expire. By default, the token lifetime is one hour, with a configurable maximum of 24 hours. To check the configured token lifetime in your cluster, run the following command:</p> 
+<pre>kubectl get pods -A -o json | jq -r '.items[]?.spec?.volumes[]?.projected?.sources[]?.serviceAccountToken?.expirationSeconds | select(. != null)' | sort -nr | head -n 1
+</pre>
+<aside class="note"><strong>Note:</strong><span> if you store ServiceAccount tokens in Secrets, recreate the Secrets so that Kubernetes generates new tokens that are signed by the new key version.</span></aside>
+</li> <li><p>Wait for the configured token lifetime from the output of the previous step to pass. After this period of time passes, all of the bound tokens in your cluster use the new service account signing key version.</p></li> <li>
+<p>Remove the original key version from the list of verification keys for the cluster:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --service-account-verification-keys=NEW_KEY_VERSION_PATH
+</pre>
+</li> <li>
+<p>Optional: Disable the original key version. After you verify that the original key version isn't being used and that the cluster is healthy, destroy the key version.</p> <p>Unless you're rotating the keys in response to a critical event, we recommend that you wait for a few days before you destroy the original key version. For more information, see <a href="https://docs.cloud.google.com/kms/docs/destroy-restore">Destroy and restore key versions</a>.</p>
+</li> </ol> <p>After you complete these steps, every new and existing service account token in your cluster is signed by the new key version. The API server rejects any requests that use a bearer token with the original key version, because the original key version doesn't exist in the cluster configuration.</p> <h2 id="rotate-cas">Rotate the GKE control plane authority CAs</h2> <p>The following sections show you how to rotate the root CAs that the cluster uses for GKE control plane authority.</p> <h3 id="create-key-versions-cas">Create new key versions for the CAs</h3> <ol> <li>
+<p>Create a new key version for the cluster root CA key:</p> 
+<pre>gcloud kms keys versions create \
+    --key=CLUSTER_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_CA_KEY_NAME</var></code>: the name of the cluster root CA key for the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEYRING_NAME</var></code>: the name of the key ring that holds the key.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Google Cloud location of the key ring. This is the same as your cluster location.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_PROJECT_ID</var></code>: the project ID of your <em>key project</em>.</li> </ul>
+</li> <li>
+<p>Create a new key version for the aggregation root CA key:</p> 
+<pre>gcloud kms keys versions create \
+    --key=AGGREGATION_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">AGGREGATION_CA_KEY_NAME</var></code> with the name of the aggregation root CA key for the cluster.</p>
+</li> <li>
+<p>Create a new key version for the etcd API root CA key:</p> 
+<pre>gcloud kms keys versions create \
+    --key=ETCD_API_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ETCD_API_CA_KEY_NAME</var></code> with the name of the etcd API root CA key for the cluster.</p>
+</li> <li>
+<p>Create a new key version for the etcd peer root CA key:</p> 
+<pre>gcloud kms keys versions create \
+    --key=ETCD_PEER_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ETCD_PEER_CA_KEY_NAME</var></code> with the name of the etcd peer root CA key for the cluster.</p>
+</li> </ol> <h3 id="create-root-cas">Create new root CAs</h3> <ol> <li>
+<p>Get the full resource name of the new cluster root CA key version:</p> 
+<pre>gcloud kms keys versions list \
+    --key=CLUSTER_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+    --filter="STATE=ENABLED" --sort-by=~ \
+    --format="value(name)" | sed 1q
+</pre> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/keyRings/KEYRING_NAME/cryptoKeys/CLUSTER_CA_KEY_NAME/cryptoKeyVersions/VERSION
+</pre> <p>In this output, <code translate="no" dir="ltr"><var translate="no">VERSION</var></code> is the number of the new key version.</p>
+</li> <li>
+<p>Create a new cluster root CA in the cluster CA pool:</p> 
+<pre>gcloud privateca roots create CLUSTER_ROOT_CA_NAME \
+    --pool=CLUSTER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --kms-key-version=CLUSTER_CA_KEY_PATH \
+    --subject="CN=cluster-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_ROOT_CA_NAME</var></code>: a name for your new root CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_CA_POOL_NAME</var></code>: the name of the cluster CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_CA_KEY_PATH</var></code>: the full resource name of the new key version from the output of the preceding step.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ORGANIZATION</var></code>: your organization name.</li> </ul>
+</li> <li>
+<p>Get the full resource name of the new aggregation root CA key version:</p> 
+<pre>gcloud kms keys versions list \
+    --key=AGGREGATION_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+    --filter="STATE=ENABLED" --sort-by=~ \
+    --format="value(name)" | sed 1q
+</pre> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/keyRings/KEYRING_NAME/cryptoKeys/AGGREGATION_CA_KEY_NAME/cryptoKeyVersions/VERSION
+</pre>
+</li> <li>
+<p>Create a new aggregation root CA in the aggregation CA pool:</p> 
+<pre>gcloud privateca roots create AGGREGATION_ROOT_CA_NAME \
+    --pool=AGGREGATION_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --kms-key-version=AGGREGATION_CA_KEY_PATH \
+    --subject="CN=aggregation-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">AGGREGATION_ROOT_CA_NAME</var></code>: a name for your new aggregation root CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGGREGATION_CA_POOL_NAME</var></code>: the name of the aggregation CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGGREGATION_CA_KEY_PATH</var></code>: the full resource name of the new key version from the output of the preceding step.</li> </ul>
+</li> <li>
+<p>Get the full resource name of the new etcd API root CA key version:</p> 
+<pre>gcloud kms keys versions list \
+    --key=ETCD_API_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+    --filter="STATE=ENABLED" --sort-by=~ \
+    --format="value(name)" | sed 1q
+</pre> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/keyRings/KEYRING_NAME/cryptoKeys/ETCD_API_CA_KEY_NAME/cryptoKeyVersions/VERSION
+</pre>
+</li> <li>
+<p>Create a new etcd API root CA in the etcd API CA pool:</p> 
+<pre>gcloud privateca roots create ETCD_API_ROOT_CA_NAME \
+    --pool=ETCD_API_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --kms-key-version=ETCD_API_CA_KEY_PATH \
+    --subject="CN=etcd-api-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ETCD_API_ROOT_CA_NAME</var></code>: a name for your new etcd API root CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ETCD_API_CA_POOL_NAME</var></code>: the name of the etcd API CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ETCD_API_CA_KEY_PATH</var></code>: the full resource name of the new key version from the output of the preceding step.</li> </ul>
+</li> <li>
+<p>Get the full resource name of the new etcd peer root CA key version:</p> 
+<pre>gcloud kms keys versions list \
+    --key=ETCD_PEER_CA_KEY_NAME \
+    --keyring=KEYRING_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+    --filter="STATE=ENABLED" --sort-by=~ \
+    --format="value(name)" | sed 1q
+</pre> <p>The output is similar to the following:</p> 
+<pre>projects/KEY_PROJECT_ID/locations/CONTROL_PLANE_LOCATION/keyRings/KEYRING_NAME/cryptoKeys/ETCD_PEER_CA_KEY_NAME/cryptoKeyVersions/VERSION
+</pre>
+</li> <li>
+<p>Create a new etcd peer root CA in the etcd peer CA pool:</p> 
+<pre>gcloud privateca roots create ETCD_PEER_ROOT_CA_NAME \
+    --pool=ETCD_PEER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --kms-key-version=ETCD_PEER_CA_KEY_PATH \
+    --subject="CN=etcd-peer-ca, O=ORGANIZATION" \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ETCD_PEER_ROOT_CA_NAME</var></code>: a name for your new etcd peer root CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ETCD_PEER_CA_POOL_NAME</var></code>: the name of the etcd peer CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ETCD_PEER_CA_KEY_PATH</var></code>: the full resource name of the new key version from the output of the preceding step.</li> </ul>
+</li> <li><p>Before you continue, propagate the root CA changes to the cluster trust bundle by following the instructions in the <a href="#restart-kcp-nodes">Restart the control plane and nodes</a> section.</p></li> </ol> <h3 id="replace-new-root-cas">Replace the original root CAs with the new root CAs</h3> <p>After you restart the control plane and nodes, follow these steps:</p> <ol> <li>
+<p>Enable the new cluster root CA:</p> 
+<pre>gcloud privateca roots enable CLUSTER_ROOT_CA_NAME \
+    --pool=CLUSTER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Enable the new aggregation root CA:</p> 
+<pre>gcloud privateca roots enable AGGREGATION_ROOT_CA_NAME \
+    --pool=AGGREGATION_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Enable the new etcd API root CA:</p> 
+<pre>gcloud privateca roots enable ETCD_API_ROOT_CA_NAME \
+    --pool=ETCD_API_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Enable the new etcd peer root CA:</p> 
+<pre>gcloud privateca roots enable ETCD_PEER_ROOT_CA_NAME \
+    --pool=ETCD_PEER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre>
+</li> <li>
+<p>Disable the original cluster root CA:</p> 
+<pre>gcloud privateca roots disable ORIGINAL_CLUSTER_ROOT_CA \
+    --pool=CLUSTER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_CLUSTER_ROOT_CA</var></code> with the name of the original cluster root CA that you're rotating.</p>
+</li> <li>
+<p>Disable the original aggregation root CA:</p> 
+<pre>gcloud privateca roots disable ORIGINAL_AGGREGATION_ROOT_CA \
+    --pool=AGGREGATION_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_AGGREGATION_ROOT_CA</var></code> with the name of the original aggregation root CA that you're rotating.</p>
+</li> <li>
+<p>Disable the original etcd API root CA:</p> 
+<pre>gcloud privateca roots disable ORIGINAL_ETCD_API_ROOT_CA \
+    --pool=ETCD_API_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_ETCD_API_ROOT_CA</var></code> with the name of the original etcd API root CA that you're rotating.</p>
+</li> <li>
+<p>Disable the original etcd peer root CA:</p> 
+<pre>gcloud privateca roots disable ORIGINAL_ETCD_PEER_ROOT_CA \
+    --pool=ETCD_PEER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_ETCD_PEER_ROOT_CA</var></code> with the name of the original etcd peer root CA that you're rotating.</p>
+</li> <li><p>At this point, the new root CAs issue all new certificates in the cluster. To issue new certificates for the <code translate="no" dir="ltr">kubelet</code> on each node, <a href="#restart-kcp-nodes">Restart the control plane and nodes</a>. This step is required because <code translate="no" dir="ltr">kubelet</code> certificates have long lifetimes.</p></li> </ol> <p>After multiple days where the cluster remains in a healthy state, you can delete the original root CAs, as described in the next section.</p> <h3 id="delete-original-cas">Delete the original root CAs</h3> <p>This section shows you how to delete your original root CAs. Before you follow these steps, verify the following:</p> <ul> <li>The cluster remained in a healthy state for multiple days after you replaced the original root CAs with the new root CAs.</li> <li>You replaced all of the certificates issued by the original root CAs with new certificates.</li> </ul> <p>To delete the original root CAs, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/roots/delete"><code translate="no" dir="ltr">gcloud privateca roots delete</code></a> command, as described in the following steps. In these commands, the <code translate="no" dir="ltr">--ignore-active-certificates</code> flag deletes the CA after a grace period, even if the CA has un-revoked or un-expired certificates.</p> <ol> <li>
+<p>Delete the original cluster root CA:</p> 
+<pre>gcloud privateca roots delete ORIGINAL_CLUSTER_ROOT_CA \
+    --pool=CLUSTER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+      --ignore-active-certificates
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_CLUSTER_ROOT_CA</var></code> with the name of the original cluster root CA that you're rotating.</p>
+</li> <li>
+<p>Delete the original aggregation root CA:</p> 
+<pre>gcloud privateca roots delete ORIGINAL_AGGREGATION_ROOT_CA \
+    --pool=AGGREGATION_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+      --ignore-active-certificates
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_AGGREGATION_ROOT_CA</var></code> with the name of the original aggregation root CA that you're rotating.</p>
+</li> <li>
+<p>Delete the original etcd API root CA:</p> 
+<pre>gcloud privateca roots delete ORIGINAL_ETCD_API_ROOT_CA \
+    --pool=ETCD_API_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+      --ignore-active-certificates
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_ETCD_API_ROOT_CA</var></code> with the name of the original etcd API root CA that you're rotating.</p>
+</li> <li>
+<p>Delete the original etcd peer root CA:</p> 
+<pre>gcloud privateca roots delete ORIGINAL_ETCD_PEER_ROOT_CA \
+    --pool=ETCD_PEER_CA_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=KEY_PROJECT_ID \
+      --ignore-active-certificates
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORIGINAL_ETCD_PEER_ROOT_CA</var></code> with the name of the original etcd peer root CA that you're rotating.</p>
+</li> <li><p>Optional: Propagate the changes to root CAs to the cluster trust bundle. For instructions, see the <a href="#restart-kcp-nodes">Restart the control plane and nodes</a> section. If you skip this step, the original root CAs are removed during the next control plane and node version upgrade.</p></li> </ol> <aside class="success"><strong>Success:</strong><span> You rotated all of the root CAs in your control plane. All of the CA certificates in your cluster are issued by your new root CAs. The original root CAs no longer exist in the cluster trust bundle.</span></aside> <h3 id="restart-kcp-nodes">Restart the control plane and nodes</h3> <p>When you make changes to the root CA configuration of your cluster, such as enabling root CAs, disabling root CAs, or revoking certificates, you must propagate those changes to the cluster's trust bundle. To propagate changes to trust bundle for the cluster, you restart the control plane and (in some scenarios) the nodes.</p> <ol> <li>
+<p>Upgrade the cluster control plane to the same version that it already uses.</p> <aside class="caution"><strong>Caution:</strong><span> In zonal clusters, the control plane becomes unavailable until the upgrade operation completes. In Autopilot clusters and regional Standard clusters, the control plane remains available.</span></aside> <ol> <li>
+<p>Find the GKE version that control plane already uses:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --format="value(currentMasterVersion)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your GKE cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE version that the cluster already runs.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT_ID</var></code>: the project ID of your <em>cluster project</em>.</li> </ul>
+</li> <li>
+<p>Upgrade the control plane:</p> 
+<pre>gcloud container clusters upgrade CLUSTER_NAME \
+    --master \
+    --location=CONTROL_PLANE_LOCATION \
+    --cluster-version=CLUSTER_VERSION \
+    --project=CLUSTER_PROJECT_ID
+</pre>
+</li> </ol>
+</li> <li>
+<p>For cluster root CA rotation only, trigger node recreation by upgrading each of your node pools to the same version that they already use.</p> <aside class="caution"><strong>Caution:</strong><span> GKE immediately begins recreating the nodes for this change using the node upgrade strategy, regardless of active maintenance policies. GKE depends on <a href="node-upgrades-quota">resource availability</a> for the change. Disabling node auto-upgrades <a href="node-auto-upgrades#disable-only-versions">doesn't prevent this change</a>. Prepare the workloads that run on your nodes for disruption before you initiate this change.</span></aside> <ol> <li>
+<p>Find the GKE version that the node pool uses:</p> 
+<pre>gcloud container node-pools describe NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --project=CLUSTER_PROJECT_ID \
+    --format="value(version)"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code> with the name of the node pool to upgrade.</p>
+</li> <li>
+<p>Upgrade the node pool:</p> 
+<pre>gcloud container clusters upgrade CLUSTER_NAME \
+    --node-pool=NODE_POOL_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --cluster-version=CLUSTER_VERSION \
+    --project=CLUSTER_PROJECT_ID
+</pre>
+</li> </ol>
+</li> <li><p>After your control plane and nodes finish upgrading, update any Kubernetes API clients like the kubectl CLI to use the updated trust bundle. If you manually generate certificates by using Kubernetes CertificateSigningRequests, re-issue all of those certificates and provide the new certificates to API clients.</p></li> </ol> <p>If you performed the steps in this section during a CA rotation, proceed to the next phase of the rotation, which is one of the following sections in this document:</p> <ul> <li>
+<a href="#replace-new-root-cas">Replace the original root CAs with the new root CAs</a>.</li> <li>
+<a href="#delete-original-cas">Delete the original root CAs</a>.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li><a href="rotate-etcd-kcp-encryption-keys">Rotate etcd and control plane boot disk encryption keys</a></li> <li><a href="verify-identity-issuance-usage">Verify identity issuance and usage</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/rotate-control-plane-cas-keys" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/rotate-control-plane-cas-keys</a>
+  </p>
+</div>

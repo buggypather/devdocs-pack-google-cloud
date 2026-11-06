@@ -1,0 +1,119 @@
+<h1>Ensure compatibility of TLS certificates before upgrading to GKE 1.29</h1>  <p>GKE clusters running version 1.29 or later don't support Transportation Layer Security (TLS) certificates signed with the <a href="https://en.wikipedia.org/wiki/SHA-1">SHA-1 algorithm</a>. To prevent impact to your clusters, you need to replace incompatible certificates of <a href="https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#configure-admission-webhooks-on-the-fly">webhook</a> and <a href="https://kubernetes.io/docs/tasks/extend-kubernetes/configure-aggregation-layer/#contacting-the-extension-apiserver">extension API server</a> backends with certificates using <a href="#compatible-signing-algorithms">compatible signing algorithms</a> before upgrading your clusters to version 1.29.</p> <h3 id="impact">Impact to clusters of this removal</h3> <p>GKE <a href="../deprecations#how_kubernetes_deprecations_work_with">pauses automatic upgrades</a> when it detects that a cluster is using certificates that are incompatible with version 1.29. After you replace the certificates with certificates using <a href="#compatible-signing-algorithms">compatible signing algorithms</a>, or version 1.28 reaches <a href="../release-schedule">end of support</a>, GKE resumes automatic upgrades.</p> <p>If you don't replace the incompatible certificates before upgrading to 1.29, you could experience the following issues with your clusters:</p> <ul> <li>GKE webhook backends that use TLS certificates signed with the SHA-1 algorithm will stop working due to authentication failure. Webhook calls will fail for the Kubernetes control plane communicating with your webhooks with incompatible certificates. Depending on your configuration, especially if you use admission webhooks, failure to contact a webhook might block resource creation on your cluster, such as Pod creation, which can be very disruptive.</li> <li>Calls to APIs served by the extension API servers will fail.</li> </ul> <h2 id="why-remove">Why Kubernetes is removing this capability</h2> <p>GKE operates open source Kubernetes, which uses the <a href="https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/">kube-apiserver component</a> to contact your webhook and extension API server backends using TLS. The kube-apiserver component is written in the Go programming language.</p> <p>From Go version 1.18, Go started <a href="https://go.dev/doc/go1.18#sha1">rejecting TLS certificates signed with the SHA-1 algorithm</a>, but left a debug switch <code translate="no" dir="ltr">x509sha1=1</code> to enable the old behavior to ease the migration process. GKE version 1.24 was the first version built using Go version 1.18. GKE builds of Kubernetes had enabled this debug switch until version 1.29. The switch will be <a href="https://github.com/golang/go/issues/62048">removed in Go 1.24</a>. GKE 1.29 builds Kubernetes with the switch disabled to prepare for the future Go removal of the debug switch. After GKE upgrades your clusters to version 1.29, calls from your cluster's control plane to webhooks or extension API servers in the cluster that provide a TLS certificate signed with SHA-1 algorithm will fail.</p> <h2 id="identify">Identify affected clusters</h2> <p>GKE monitors your clusters and uses the <a href="https://docs.cloud.google.com/recommender/docs/overview">Recommender service</a> to deliver guidance through insights and recommendations identifying clusters that have webhook or extension API server backends using TLS certificates signed with the SHA-1 algorithm. Or, you can use logs to identify calls to affected backends from your cluster.</p> <h3 id="get-insights-recs">How to get insights and recommendations</h3> <p>For clusters running version 1.24 or later, follow the instructions to <a href="viewing-deprecation-insights-and-recommendations#view-insights-recs">view insights and recommendations</a>. You can get insights using the gcloud CLI, or the Recommender API, filtering with the subtype <code translate="no" dir="ltr">DEPRECATION_K8S_SHA_1_CERTIFICATE</code>.</p> <h3 id="get-logs">How to get logs</h3> <p>For clusters running 1.24 or later with Cloud Logging <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/installing#installing">enabled</a>, GKE provides a <a href="../how-to/audit-logging#viewing_your_projects_admin_activity_log">Cloud Audit Logs log</a> to identify calls to affected backends from your cluster. You can use the following filter to search for the logs:</p> 
+<pre>logName =~ "projects/.*/logs/cloudaudit.googleapis.com%2Factivity"
+resource.type = "k8s_cluster"
+operation.producer = "k8s.io"
+"insecure-sha1.invalid-cert.kubernetes.io"
+</pre> <p>The audit logs include the hostname of the affected backend. To learn more about how to interpret the results, see the next section.</p> <h2 id="interpret">Interpret the guidance from insights and recommendations</h2> <p>A recommendation includes the hostname of the affected backend, and whether it is webhook or extension API server. Hostnames that refer to Services in the cluster follow the format <code translate="no" dir="ltr">&lt;service-name&gt;.&lt;namespace&gt;.svc</code>.</p> <p>If the affected backend certificate is from a webhook server, the hostname can either be a Service in the cluster, or a URL. To learn more, see <a href="https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#contacting-the-webhook">Contacting the webhook</a>.</p> <p>If the affected certificate is from an extension API server, the hostname is a Service in the cluster. To learn more, see the <a href="https://kubernetes.io/docs/tasks/extend-kubernetes/configure-aggregation-layer/#contacting-the-extension-apiserver">Contacting the extension apiserver</a>.</p> <p>After you have identified the affected backend, follow the instructions to <a href="#inspect-cert-service">inspect the certificate of a Service</a> or <a href="#inspect-url-backend">Inspect the certificate of a URL backend</a>, depending on the type.</p> <p>If your clusters have not called servers with affected certificates in the last 30 days, you won't see any recommendations.</p> <h4 id="examples">Example recommendations</h4> <p>See the following example list of recommendations:</p> 
+<pre>RECOMMENDATION_ID                     PRIMARY_IMPACT_CATEGORY  RECOMMENDATION_STATE  LAST_REFRESH_TIME               PRIORITY  RECOMMENDER_SUBTYPE                DESCRIPTION
+26bfcb32-6f2a-407c-874f-8cf55b3af912  RELIABILITY              ACTIVE                2024-02-15T01:09:04.454456273Z  P2        DEPRECATION_K8S_SHA_1_CERTIFICATE  Update the webhook and/or extension API servers that use certificates signed with SHA-1 algorithm to use certificates with compatible signing algorithms prior to upgrading the cluster to version 1.29. [Learn more](https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/sha1-1-29#mitigate_the_risk_of_upgrading_to_129).
+</pre> <p>To get details of the cluster and Service, <a href="../how-to/optimize-with-recommenders#view-insights-recs">describe the recommendation</a>. The output for a Service named <code translate="no" dir="ltr">example-webhook</code> in the <code translate="no" dir="ltr">default</code> namespace is similar to the following:</p> 
+<pre>associatedInsights:
+- insight: projects/&lt;CLUSTER_PROJECT_NUMBER&gt;/locations/&lt;CLUSTER_LOCATION&gt;/insightTypes/google.container.DiagnosisInsight/insights/d76887a8-9eed-41a0-9459-d49dee43455e
+content:
+  overview:
+    featureDeprecationRecommendation:
+    - featureName: x.509_certificate_signature_algorithm
+      featureReplacementValue: algorithm [compatible with GKE v1.29](https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/sha1-1-29#compatible-signing-algorithms)
+      featureValue: SHA1
+      stopServingVersion: '1.29'
+      targetType: hostname
+      targetValue: example-webhook.default.svc
+    targetClusters:
+    - clusterId: 3be916a554724c79a2314c8baee3fd57cf1c39df1ad34c3daf291db701b6d541
+      clusterUri: //container.googleapis.com/projects/&lt;CLUSTER_PROJECT_NUMBER&gt;/locations/&lt;CLUSTER_LOCATION&gt;/clusters/&lt;CLUSTER_NAME&gt;
+description: Update the webhook and/or extension API servers that use certificates
+  signed with SHA-1 algorithm to use certificates with compatible signing algorithms
+  prior to upgrading the cluster to version 1.29. [Learn more](https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/sha1-1-29#mitigate_the_risk_of_upgrading_to_129).
+etag: '"ad50aac8278951d5"'
+lastRefreshTime: '2024-02-15T01:09:04.454456273Z'
+name: projects/&lt;CLUSTER_PROJECT_NUMBER&gt;/locations/&lt;CLUSTER_LOCATION&gt;/recommenders/google.container.DiagnosisRecommender/recommendations/26bfcb32-6f2a-407c-874f-8cf55b3af912
+primaryImpact:
+  category: RELIABILITY
+  reliabilityProjection:
+    risks:
+    - SERVICE_DISRUPTION
+priority: P2
+recommenderSubtype: DEPRECATION_K8S_SHA_1_CERTIFICATE
+stateInfo:
+  state: ACTIVE
+targetResources:
+- //container.googleapis.com/projects/&lt;CLUSTER_PROJECT_NUMBER&gt;/locations/&lt;CLUSTER_LOCATION&gt;/clusters/&lt;CLUSTER_NAME&gt;
+</pre> <h3 id="inspect-cert-service">Inspect the certificate of a Service</h3> <p>Both webhooks and extension API servers can be backed by Services.</p> <p>After you have identified relevant backend Services to inspect, use the following instructions to inspect the certificate of each Service to check which certificates use the SHA-1 algorithm and need to be updated.</p> <ol> <li>
+<p>Find the selector and target port of the Service:</p> 
+<pre>kubectl describe service --namespace=NAMESPACE SERVICE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> and <code translate="no" dir="ltr"><var translate="no">SERVICE_NAME</var></code> with the values from <code translate="no" dir="ltr">targetValue</code>.</p> <p>The output is similar to the following:</p> 
+<pre>Name: example-service
+Namespace: default
+Labels: run=nginx
+Selector: run=nginx
+Type: ClusterIP
+IP: 172.21.xxx.xxx
+Port: 443
+TargetPort: 444
+</pre> <p>This output indicates that <code translate="no" dir="ltr">example-service</code> has the selector <code translate="no" dir="ltr">run=nginx</code> and target port <code translate="no" dir="ltr">444</code>.</p> <aside class="note"><strong>Note:</strong><span> When the <code translate="no" dir="ltr">TargetPort</code> is not included, it is the same value as the <code translate="no" dir="ltr">Port</code> field.</span></aside>
+</li> <li>
+<p>Find a Pod matching the selector:</p> 
+<pre>kubectl get pods --namespace=NAMESPACE --selector=run=nginx
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME          READY   STATUS    RESTARTS   AGE
+example-pod   1/1     Running   0          21m
+</pre> <p>This output indicates that the matching Pod is <code translate="no" dir="ltr">example-pod</code>.</p>
+</li> <li>
+<p>Set up a port forward from your <code translate="no" dir="ltr">kubectl</code> localhost to the Pod:</p> <aside class="note"><strong>Note:</strong><span> These next commands use port <code translate="no" dir="ltr">8888</code>, however you can pick a different port, as this port is chosen arbitrarily.</span></aside>
+<pre>kubectl port-forward --namespace=NAMESPACE pods/example-pod 8888:SERVICE_TARGET_PORT &amp;
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SERVICE_TARGET_PORT</var></code> with the <code translate="no" dir="ltr">TargetPort</code> value from the Service. If <code translate="no" dir="ltr">TargetPort</code> is not included, use the <code translate="no" dir="ltr">Port</code> value.</p>
+</li> <li>
+<p>Use <code translate="no" dir="ltr">openssl</code> to show the certificate that the Service uses:</p> 
+<pre>openssl s_client -connect localhost:8888 &lt;/dev/null | openssl x509 -noout -text
+</pre> <p>This example output shows a valid certificate signed with the <a href="https://en.wikipedia.org/wiki/SHA-2">SHA-256 algorithm</a>:</p> 
+<pre>Certificate:
+    Data:
+        ...
+        Signature Algorithm: sha256WithRSAEncryption
+...
+    Signature Algorithm: sha256WithRSAEncryption
+</pre> <p>This example output shows an invalid certificate signed with the SHA-1 algorithm:</p> 
+<pre>Certificate:
+    Data:
+        ...
+        Signature Algorithm: sha1WithRSAEncryption
+...
+    Signature Algorithm: sha1WithRSAEncryption
+</pre> <p>If the output from the certificate is similar, you must update the certificate to use a <a href="#compatible-signing-algorithms">compatible signing algorithm</a>. For example, if you use the <code translate="no" dir="ltr">certificate.k8s.io</code> API to manage TLS certificates in your cluster, you can follow the instructions to <a href="https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster/#create-a-certificate-signing-request">create a certificate signing request</a>.</p>
+</li> </ol> <h4 id="clean_up_the_port_forward">Clean up the port forward</h4> <p>To clean up the port forward running in the background, find the process and terminate it.</p> <ol> <li>
+<p>Run the following command to list the running processes:</p> 
+<pre>jobs
+</pre> <p>See the output to get the ID of the process to terminate:</p> 
+<pre>[1]+  Running                 kubectl port-forward pods/example-pod 8888:444 &amp;
+</pre> <p>This example output indicates that the process ID is <code translate="no" dir="ltr">1</code>.</p>
+</li> <li>
+<p>Terminate the process, replacing <code translate="no" dir="ltr"><var translate="no">PROCESS_ID</var></code>:</p> 
+<pre>kill %PROCESS_ID
+</pre> <p>See the following output:</p> 
+<pre>[1]+  Terminated              kubectl port-forward pods/example 8888:444
+</pre> <p>This example output shows that the process was terminated.</p>
+</li> </ol> <h3 id="inspect-url-backend">Inspect the certificate of a URL backend</h3> <p>If the webhook uses a <code translate="no" dir="ltr">url</code> backend, directly connect to the hostname specified in the URL. For example, if the URL is <code translate="no" dir="ltr">https://example.com:123/foo/bar</code>, use the following <code translate="no" dir="ltr">openssl</code> command to show the certificate that the backend uses:</p> 
+<pre>openssl s_client -connect example.com:123 &lt;/dev/null | openssl x509 -noout -text
+</pre> <p>This example output shows a valid certificate signed with the <a href="https://en.wikipedia.org/wiki/SHA-2">SHA-256 algorithm</a>:</p> 
+<pre>Certificate:
+    Data:
+        ...
+        Signature Algorithm: sha256WithRSAEncryption
+...
+    Signature Algorithm: sha256WithRSAEncryption
+</pre> <p>This example output shows an invalid certificate signed with the SHA-1 algorithm:</p> 
+<pre>Certificate:
+    Data:
+        ...
+        Signature Algorithm: sha1WithRSAEncryption
+...
+    Signature Algorithm: sha1WithRSAEncryption
+</pre> <p>If the output from the certificate is similar, you must update the certificate to use a <a href="#compatible-signing-algorithms">compatible signing algorithm</a>. For example, if you use the <code translate="no" dir="ltr">certificate.k8s.io</code> API to manage TLS certificates in your cluster, you can follow the instructions to <a href="https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster/#create-a-certificate-signing-request">create a certificate signing request</a>.</p> <h2 id="mitigate_the_risk_of_upgrading_to_129">Mitigate the risk of upgrading to 1.29</h2> <p>After you have identified affected clusters and their backend Services using certificates signed with SHA-1 algorithm, you must update the Services to use certificates with <a href="#compatible-signing-algorithms">compatible signing algorithms</a> prior to upgrading the clusters to version 1.29.</p> <p>Affected clusters are automatically detected by GKE and <a href="../deprecations#auto-upgrade-pause">won't be auto-upgraded</a> to version 1.29 until either incompatible certificates are no longer used or version 1.28 reaches <a href="../release-schedule">end of support</a>. Once 1.28 reaches end of support, the clusters will be auto-upgraded to 1.29.</p> <h3 id="compatible-signing-algorithms">Compatible signing algorithms</h3> <p>GKE version 1.29 is compatible with supported algorithms in the Go x509 package. This includes the following algorithms:</p> <ul> <li><code translate="no" dir="ltr">SHA256WithRSA</code></li> <li><code translate="no" dir="ltr">SHA384WithRSA</code></li> <li><code translate="no" dir="ltr">SHA512WithRSA</code></li> <li><code translate="no" dir="ltr">ECDSAWithSHA256</code></li> <li><code translate="no" dir="ltr">ECDSAWithSHA384</code></li> <li><code translate="no" dir="ltr">ECDSAWithSHA512</code></li> <li><code translate="no" dir="ltr">SHA256WithRSAPSS</code></li> <li><code translate="no" dir="ltr">SHA384WithRSAPSS</code></li> <li><code translate="no" dir="ltr">SHA512WithRSAPSS</code></li> <li><code translate="no" dir="ltr">PureEd25519</code></li> </ul> <p>To find available algorithms, see the <a href="https://go.dev/src/crypto/x509/x509.go">x509.go source file</a> and search for <code translate="no" dir="ltr">UnknownSignatureAlgorithm SignatureAlgorithm = iota</code>. Algorithms that the Go x509 package supports are listed in the <code translate="no" dir="ltr">const</code> block with this line. To find unsupported insecure signing algorithms, search for uses of <code translate="no" dir="ltr">InsecureAlgorithmError</code> in the file.</p> <h2 id="resources">Resources</h2> <p>See the following resources for additional information on this change:</p> <ul> <li>Go 1.18 <a href="https://go.dev/doc/go1.18#sha1">release notes</a>
+</li> <li>Go 1.24 <a href="https://golang.org/doc/go1.15#commonname">x509sha1 debug switch removal</a>
+</li> <li>Go x509 <a href="https://go.dev/src/crypto/x509/x509.go">supported algorithms</a>  </li>
+</ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/sha1-1-29" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/sha1-1-29</a>
+  </p>
+</div>

@@ -1,0 +1,101 @@
+<h1>Troubleshoot privileged Autopilot workloads and allowlists</h1>  <p>Privileged workloads in Google Kubernetes Engine (GKE) Autopilot clusters must be configured correctly to avoid problems. Misconfigurations can lead to synchronization failures with allowlists or cause the workload to be rejected. These problems can prevent essential agents or services from running with the necessary permissions.</p> <p>Use this document to troubleshoot issues with deploying privileged workloads on Autopilot. Find guidance on resolving allowlist synchronization errors and diagnosing why a privileged workload might be rejected.</p> <p>This information is important for Platform admins and operators and security teams who deploy workloads with elevated permissions on Autopilot clusters. For more information about the common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="allowlist-synchronization-issues">Allowlist synchronization issues</h2> <p>When you deploy an AllowlistSynchronizer, GKE attempts to install and synchronize the allowlist files that you specify. If this synchronization fails, the <code translate="no" dir="ltr">status</code> field of the AllowlistSynchronizer reports the error.</p> <p>Get the status of the <code translate="no" dir="ltr">AllowlistSynchronizer</code> object:</p> 
+<pre>kubectl get allowlistsynchronizer ALLOWLIST_SYNCHRONIZER_NAME -o yaml
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ALLOWLIST_SYNCHRONIZER_NAME</var></code> with the name of the AllowlistSynchronizer.</p> <p>The output is similar to the following:</p> 
+<pre>...
+status:
+  conditions:
+  - type: Ready
+    status: "False"
+    reason: "SyncError"
+    message: "some allowlists failed to sync: example-allowlist-1.yaml"
+    lastTransitionTime: "2024-10-12T10:00:00Z"
+    observedGeneration: 2
+  managedAllowlistStatus:
+    - filePath: "gs://path/to/allowlist1.yaml"
+      generation: 1
+      phase: Installed
+      lastSuccessfulSync: "2024-10-10T10:00:00Z"
+    - filePath: "gs://path/to/allowlist2.yaml"
+      phase: Failed
+      lastError: "Initial install failed: invalid contents"
+      lastSuccessfulSync: "2024-10-08T10:00:00Z"
+</pre> <p>The <code translate="no" dir="ltr">conditions.message</code> field and the <code translate="no" dir="ltr">managedAllowlistStatus.lastError</code> field provide detailed information about the error. Use this information to resolve the issue.</p> <h3 id="multiple_allowlistsynchronizers">Multiple AllowlistSynchronizers</h3> <p>In GKE clusters on versions earlier than 1.33.4-gke.1035000, <code translate="no" dir="ltr">WorkloadAllowlists</code> might fail to install if more than one <code translate="no" dir="ltr">AllowlistSynchronizer</code> is present.</p> <p>To resolve the issue, use only a single <code translate="no" dir="ltr">AllowlistSynchronizer</code> that contains multiple <code translate="no" dir="ltr">allowlistPaths</code>.</p> <p>Alternatively, you can upgrade your cluster to a newer version.</p> <h3 id="workload-container-sorting">Workload container sorting</h3> <p>In GKE clusters on versions earlier than 1.34.0-gke.0000000, if one or more workload container images match a container image that's specified in an in-cluster WorkloadAllowlist, then the workload containers might be created and sorted in reverse-alphabetical order.</p> <p>To resolve this issue, try the following options:</p> <ul> <li>Upgrade your cluster to version 1.34.0-gke.0000000 or later.</li> <li>Rename your workload's containers so that they are sorted in the correct order.</li> </ul> <h2 id="privileged-workload-deployment-issues">Privileged workload deployment issues</h2> <p>After successfully installing an allowlist, you deploy the corresponding privileged workload in your cluster. In some cases, GKE might reject the workload.</p> <p>Try the following resolution options:</p> <ul> <li>Ensure that the GKE version of your cluster meets the version requirement of the workload.</li> <li>Ensure that the workload that you're deploying is the workload to which the allowlist file applies.</li> </ul> <p>To see why a privileged workload was rejected, request detailed information from GKE about allowlist violations:</p> <ol> <li>
+<p>Get a list of the installed allowlists in the cluster:</p> 
+<pre>kubectl get workloadallowlist
+</pre> <p>Find the name of the allowlist that should apply to the privileged workload.</p>
+</li> <li><p>Open the YAML manifest of the privileged workload in a text editor. If you can't access the YAML manifests, for example if the workload deployment process uses other tooling, contact the workload provider to open an issue. Skip the remaining steps.</p></li> <li>
+<p>Add the following label to the <code translate="no" dir="ltr">spec.metadata.labels</code> section of the privileged workload Pod specification:</p> 
+<pre>labels:
+  cloud.google.com/matching-allowlist: ALLOWLIST_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ALLOWLIST_NAME</var></code> with the name of the allowlist that you obtained in the previous step. Use the name from the output of the <code translate="no" dir="ltr">kubectl get workloadallowlist</code> command, not the path to the allowlist file.</p>
+</li> <li>
+<p>Save the manifest and apply the workload to the cluster:</p> 
+<pre>kubectl apply -f WORKLOAD_MANIFEST_FILE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">WORKLOAD_MANIFEST_FILE</var></code> with the path to the manifest file.</p> <p>The output provides detailed information about which fields in the workload didn't match the specified allowlist, like in the following example:</p> 
+<pre>Error from server (GKE Warden constraints violations): error when creating "STDIN": admission webhook "warden-validating.common-webhooks.networking.gke.io" denied the request:
+
+===========================================================================
+Workload Mismatches Found for Allowlist (example-allowlist-1):
+===========================================================================
+HostNetwork Mismatch: Workload=true, Allowlist=false
+HostPID Mismatch: Workload=true, Allowlist=false
+Volume[0]: data
+         - data not found in allowlist. Verify volume with matching name exists in allowlist.
+Container[0]:
+- Envs Mismatch:
+        - env[0]: 'ENV_VAR1' has no matching string or regex pattern in allowlist.
+        - env[1]: 'ENV_VAR2' has no matching string or regex pattern in allowlist.
+- Image Mismatch: Workload=k8s.gcr.io/diff/image, Allowlist=k8s.gcr.io/pause2. Verify that image string or regex match.
+- SecurityContext:
+        - Capabilities.Add Mismatch: the following added capabilities are not permitted by the allowlist: [SYS_ADMIN SYS_PTRACE]
+- VolumeMount[0]: data
+        - data not found in allowlist. Verify volumeMount with matching name exists in allowlist.
+</pre> <p>In this example, the following violations occur:</p> <ul> <li>The workload specifies <code translate="no" dir="ltr">hostNetwork: true</code>, but the allowlist doesn't specify <code translate="no" dir="ltr">hostNetwork: true</code>.</li> <li>The workload specifies <code translate="no" dir="ltr">hostPID: true</code>, but the allowlist doesn't specify <code translate="no" dir="ltr">hostPID: true</code>.</li> <li>The workload specifies a volume named <code translate="no" dir="ltr">data</code>, but the allowlist doesn't specify a volume named <code translate="no" dir="ltr">data</code>.</li> <li>The container specifies environment variables named <code translate="no" dir="ltr">ENV_VAR1</code> and <code translate="no" dir="ltr">ENV_VAR2</code>, but the allowlist doesn't specify these environment variables.</li> <li>The container specifies the image <code translate="no" dir="ltr">k8s.gcr.io/diff/image</code>, but the allowlist specifies <code translate="no" dir="ltr">k8s.gcr.io/pause2</code>.</li> <li>The container adds the <code translate="no" dir="ltr">SYS_ADMIN</code> and <code translate="no" dir="ltr">SYS_PTRACE</code> capabilities, but the allowlist doesn't allow adding these capabilities.</li> <li>The container specifies a volume mount named <code translate="no" dir="ltr">data</code>, but the allowlist doesn't specify a volume mount named <code translate="no" dir="ltr">data</code>.</li> </ul>
+</li> </ol> <p>If you're deploying a workload that's owned by a third-party provider, open an issue with that provider to resolve the violations. Provide the output from the previous step in the issue.</p> <h3 id="gke-version-mismatch">Incompatible GKE version</h3> <p>GKE might reject a workload if the allowlist specifies a minimum GKE version that's later than the cluster GKE version.</p> <ol> <li>
+<p>Check whether the allowlist specifies a minimum GKE version:</p> 
+<pre>kubectl describe workloadallowlist ALLOWLIST_NAME | grep "minGKEVersion"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ALLOWLIST_NAME</var></code> with the name of the allowlist.</p> <p>If the output is empty, the allowlist doesn't specify a minimum GKE version. Skip this section. If the output is a value, the allowlist specifies a minimum GKE version.</p>
+</li> <li>
+<p>Check the cluster GKE version:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=CLUSTER_LOCATION \
+    --format="value(currentMasterVersion)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_LOCATION</var></code>: the Google Cloud location of the cluster.</li> </ul> <p>The output is similar to the following:</p> 
+<pre>1.32.3-gke.1006000
+</pre>
+</li> <li><p>If the GKE version of the cluster is earlier than the minimum GKE version of the allowlist, upgrade the cluster to the minimum GKE version of the allowlist or later. For more information, see <a href="../how-to/upgrading-a-cluster#upgrading_the_cluster">Upgrading the cluster</a>.</p></li> </ol> <p>After the upgrade completes, try to deploy the workload to the cluster.</p> <h3 id="string-mismatches">String mismatches</h3> <p>Specific fields in the WorkloadAllowlist specification must be exact string matches of the corresponding fields in the workload specification.</p> <ol> <li>
+<a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/workloadallowlist">Open the WorkloadAllowlist CustomResourceDefinition (CRD) reference page</a>.</li> <li>For each field in your WorkloadAllowlist specification, check whether the CRD requires an exact string match.</li> <li>
+<p>For each field that requires an exact string match, check whether the value in your WorkloadAllowlist specification matches the corresponding value in your workload specification.</p> <p>For example, every command that a container runs must exactly match a command in the allowlist. Any deviation from the exact command results in a rejection.</p>
+</li> </ol> <p>If there's a mismatch, update your WorkloadAllowlist specification to match your workload specification.</p> <h3 id="regex-mismatches">Regular expression mismatches</h3> <p>Specific fields in the WorkloadAllowlist specification support regular expression matching.</p> <ol> <li>In your WorkloadAllowlist specification, find the fields that specify regular expressions.</li> <li>
+<p>Ensure that the regular expression syntax is correct. The WorkloadAllowlist CRD supports the <a href="https://github.com/google/re2/wiki/syntax">Google RE2 regular expression syntax</a>. Validate that your expressions have the following properties:</p> <ul> <li>The regular expression begins with the <code translate="no" dir="ltr">^</code> character and ends with the <code translate="no" dir="ltr">$</code> character. For example, <code translate="no" dir="ltr">^example-auth\.google\.com\/go_[a-z0-9]+\/google\/path$</code>.</li> <li>Every special character is escaped with the <code translate="no" dir="ltr">\</code> escape character. Look for extra or missing <code translate="no" dir="ltr">\</code> characters.</li> <li>Image paths in the allowlist don't include tags or digests. For example, use <code translate="no" dir="ltr">k8s.gcr.io/pause</code> instead of <code translate="no" dir="ltr">k8s.gcr.io/pause:3.1</code> or <code translate="no" dir="ltr">k8s.gcr.io/pause@sha256:1234567890</code>.</li> </ul>
+</li> </ol> <p>After you fix any regular expression issues, try to deploy your workload to the cluster.</p> <h3 id="escape-characters-in-commands-and-arguments">Escape characters in commands and arguments</h3> <p>GKE can't match commands and arguments if you don't escape the special characters. The requirements for escaping characters depend on how you apply the allowlist. For example, applying an allowlist as a YAML or JSON file has different escaping requirements than creating an allowlist specification by using a command-line tool. This section describes the escaping requirements for YAML files.</p> <p>Escape every special character in the <code translate="no" dir="ltr">commands</code> and <code translate="no" dir="ltr">args</code> fields of the WorkloadAllowlist specification, even if you don't use a regular expression. To escape special characters, use the <code translate="no" dir="ltr">\</code> character, such as in the following examples:</p> <ul> <li>
+<strong>Command</strong>: <code translate="no" dir="ltr">kubectl describe \$\{POD_NAME\}</code>
+</li> <li>
+<strong>Argument</strong>: <code translate="no" dir="ltr">hostname \$NODE_NAME; dcgm-exporter --remote-hostengine-info \$\(NODE_IP\) --collectors /etc/dcgm-exporter/counters.csv</code>
+</li> </ul> <h3 id="webhook-interference-allowlist-workloads">Webhook interference with workloads on an allowlist</h3> <p>In some cases, even if a workload is correctly configured to match an allowlist, it might still be rejected by GKE. This situation can happen if another admission controller (webhook) in your cluster modifies the Pods created by the workload controller after they have been allowed by the allowlist. These modifications can cause the Pod specification to no longer match the allowlist, leading to rejection by the GKE Warden admission webhook.</p> <p>This issue is common with third-party monitoring and security agents that inject sidecar containers or environment variables into Pods.</p> <p>The most common symptom is that your workload controller (such as a DaemonSet or Deployment) is created successfully, but it fails to create any Pods. When you inspect the controller's events, you will see messages indicating that the Pods were denied by the admission webhook.</p> <ol> <li>Follow the steps in the <a href="#privileged-workload-deployment-issues">Privileged workload deployment issues</a> section to add the <code translate="no" dir="ltr">cloud.google.com/matching-allowlist</code> label to your workload.</li> <li>Copy the <code translate="no" dir="ltr">spec.template</code> from your workload's YAML manifest.</li> <li>Create a new Pod manifest and paste the copied spec into the <code translate="no" dir="ltr">spec</code> field.</li> <li>
+<p>Set the <code translate="no" dir="ltr">apiVersion</code>, <code translate="no" dir="ltr">kind</code>, and <code translate="no" dir="ltr">metadata.name</code> fields in the Pod manifest:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: POD_NAME
+  labels:
+    cloud.google.com/matching-allowlist: ALLOWLIST_NAME
+spec:
+  # Paste the content of spec.template here
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: The name for your test Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ALLOWLIST_NAME</var></code>: The name of the allowlist.</li> </ul>
+</li> <li>
+<p>Apply the Pod manifest:</p> 
+<pre>kubectl apply -f YOUR_POD_MANIFEST_FILE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">YOUR_POD_MANIFEST_FILE</var></code> with the path to your Pod manifest file.</p>
+</li> <li><p>Inspect the output from the previous step. If you see unexpected fields in the "Workload Mismatches" section, such as extra environment variables (for example, <code translate="no" dir="ltr">DD_AGENT_HOST</code>), containers, or volumes, it is a strong indication that another webhook is modifying your Pods.</p></li> </ol> <p>To resolve this issue, you need to configure the conflicting webhook to exclude it from modifying the Pods of your allowlisted workload. This is typically done by adding a label or annotation to the workload or its namespace to signal to the webhook that it should be excluded from mutation. For example, with Datadog, you would add the <code translate="no" dir="ltr">admission.datadoghq.com/enabled: "false"</code> label to your workload's namespace.</p> <p>Consult the documentation for the specific third-party software you are using to learn how to exclude workloads from its admission controller.</p> <p>By preventing the other webhook from modifying the Pods, you can help to ensure that they continue to match the allowlist and are successfully deployed on your Autopilot cluster.</p> <h2 id="bugs-feature-requests">Bugs and feature requests for privileged workloads and allowlists</h2> <p>If you run a privileged workload that's provided by a GKE partner or a third-party provider, that provider is responsible for creating, developing, and maintaining their privileged workloads and allowlists. If you encounter a bug or have a feature request for a partner or third-party privileged workload or allowlist, contact the provider.</p> <h2 id="whats_next">What's next</h2> <ul> <li>
+<p>If you can't find a solution to your problem in the documentation, see <a href="../getting-support" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Get support</a> for further help, including advice on the following topics:</p> <ul> <li>Opening a support case by contacting <a href="https://cloud.google.com/support-hub" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Cloud Customer Care</a>.</li> <li>Getting support from the community by <a href="http://stackoverflow.com/questions/tagged/google-kubernetes-engine" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">asking questions on StackOverflow</a> and using the <code translate="no" dir="ltr">google-kubernetes-engine</code> tag to search for similar issues. You can also join the <a href="https://googlecloud-community.slack.com/messages/C0B9GKTKJ/" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">#kubernetes-engine</code> Slack channel</a> for more community support.</li> <li>Opening issues or feature requests by using the <a href="https://docs.cloud.google.com/support/docs/issue-trackers" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">public issue tracker</a>.</li> </ul>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/autopilot-privileged-workloads" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/autopilot-privileged-workloads</a>
+  </p>
+</div>

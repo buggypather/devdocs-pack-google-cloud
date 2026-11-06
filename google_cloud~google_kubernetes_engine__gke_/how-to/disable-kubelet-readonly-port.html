@@ -1,0 +1,307 @@
+<h1>Disable the kubelet read-only port in GKE clusters</h1>  <p>This page shows you how to disable the insecure kubelet read-only port in Google Kubernetes Engine (GKE) clusters to reduce the risk of unauthorized access to the kubelet, and how to migrate applications to a more secure port.</p> <p>In Kubernetes clusters, including GKE, the <code translate="no" dir="ltr">kubelet</code> process running on nodes serves a read-only API using the insecure port <code translate="no" dir="ltr">10255</code>. Kubernetes doesn't perform any authentication or authorization checks on this port. The kubelet serves the same endpoints on the more secure, authenticated port <code translate="no" dir="ltr">10250</code>.</p> <p><strong>Disable the kubelet read-only port and switch any workloads that use port <code translate="no" dir="ltr">10255</code> to use the more secure port <code translate="no" dir="ltr">10250</code> instead.</strong></p> <aside class="note"><strong>Note:</strong><span> The kubelet read-only port is disabled by default in new clusters that run version 1.32 or later.</span></aside> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure that you have an existing Autopilot or Standard cluster. To create a new cluster, see <a href="creating-an-autopilot-cluster">Create an Autopilot cluster</a>.</li> </ul> <h3 id="requirements">Requirements</h3> <ul> <li>You can only disable the insecure kubelet read-only port in GKE version 1.26.4-gke.500 or later.</li> </ul> <h2 id="check-usage-migrate-apps">Check for insecure port usage and migrate applications</h2> <p>Before you disable the insecure read-only port, migrate any of your running applications that use the port to the more secure read-only port. Workloads that might need migration include custom metrics pipelines and workloads that access kubelet endpoints.</p> <ul> <li>For workloads that need access to the information served by the kubelet API on the node, like metrics, use port <code translate="no" dir="ltr">10250</code>.</li> <li>For workloads that get Kubernetes information using the kubelet API on the node, like listing Pods on the node, use the Kubernetes API instead.</li> </ul> <h3 id="check-apps-use-kubelet-port">Check whether applications use the insecure kubelet read-only port</h3> <p>This section shows you how to check for insecure port usage in your cluster.</p> <h4 id="check-apps-use-port-autopilot">Check for port usage on Autopilot mode</h4> <p>To check for port usage in an Autopilot cluster, ensure that you have at least one workload that isn't a DaemonSet running in the cluster. If you perform the following steps on an empty Autopilot cluster, the results might be invalid.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">read-only-port-metrics.yaml</code>:</p> 
+<pre># Create a namespace for the DaemonSet that checks for port usage.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node-metrics-printer-namespace
+---
+# Grant access to read node metrics in the cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-metrics-printer-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes/metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-metrics-printer-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-metrics-printer-role
+# Bind the ClusterRole to the ServiceAccount that the DaemonSet will use.
+subjects:
+- kind: ServiceAccount
+  name: node-metrics-printer-sa
+  namespace: node-metrics-printer-namespace
+---
+# Create a ServiceAccount for the DaemonSet.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-metrics-printer-sa
+  namespace: node-metrics-printer-namespace
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-metrics-printer
+  namespace: node-metrics-printer-namespace
+spec:
+  selector:
+    matchLabels:
+      app: node-metrics-printer
+  template:
+    metadata:
+      labels:
+        app: node-metrics-printer
+    spec:
+      # Assign the ServiceAccount to the DaemonSet.
+      serviceAccountName: node-metrics-printer-sa
+      containers:
+      - name: metrics-printer
+        image: us-docker.pkg.dev/cloud-builders/ga/v1/curl:latest
+        command: ["sh", "-c"]
+        # Call the /metrics endpoint using the insecure kubelet read-only
+        # port.
+        args:
+        - 'while true; do curl -s --cacert "${CA_CERT}" -H "Authorization: Bearer $(cat ${TOKEN_FILE})" "https://${NODE_ADDRESS}:10250/metrics"|grep kubelet_http_requests_total; sleep 20; done'
+        env:
+        # Provide credentials and the IP address for the command.
+        - name: CA_CERT
+          value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        - name: TOKEN_FILE
+          value: /var/run/secrets/kubernetes.io/serviceaccount/token
+        - name: NODE_ADDRESS
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+</pre> <p>This manifest does the following:</p> <ol> <li>Creates a namespace and sets up RBAC roles to allow reading node metrics.</li> <li>Deploys a DaemonSet that checks the kubelet metrics for the insecure read-only port.</li> </ol>
+</li> <li>
+<p>Deploy the manifest:</p> 
+<pre>kubectl create -f read-only-port-metrics.yaml
+</pre>
+</li> <li>
+<p>Check the DaemonSet logs:</p> 
+<pre>kubectl logs --namespace=node-metrics-printer-namespace \
+    --all-containers --prefix \
+    --selector=app=node-metrics-printer
+</pre> <p>If the output has any results that contain the string <code translate="no" dir="ltr">server_type=readonly</code>, an application is using the insecure read-only port.</p>
+</li> </ol> <h4 id="check-apps-use-port-standard">Check for port usage on Standard mode</h4> <p>Run the following command on at least one node in every node pool in your cluster:</p> 
+<pre>kubectl get --raw /api/v1/nodes/NODE_NAME/proxy/metrics | grep http_requests_total | grep readonly
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node.</p> <p>If the output contains entries with the <code translate="no" dir="ltr">server_type="readonly"</code> string, then the following scenarios can occur:</p> <ul> <li>Workloads on the node use the insecure kubelet read-only port.</li> <li>After disabling the insecure port, the command still returns the <code translate="no" dir="ltr">server_type="readonly"</code> string. This is because the <code translate="no" dir="ltr">kubelet_http_requests_total</code> metric represents the cumulative number of HTTP requests received by the kubelet server since its last restart. This number is not reset when the insecure port is disabled. This number is reset after GKE restarts the kubelet server, such as during a node upgrade. To learn more, see <a href="https://kubernetes.io/docs/reference/instrumentation/metrics/">Kubernetes Metrics Reference</a>.</li> </ul> <p>If the output is empty, no workloads on that node use the insecure read-only port.</p> <h3 id="Identify">Identify the workloads that are using the insecure kubelet read-only port</h3> <p>To identify the workloads that are using the insecure port, check the workload's configuration files such as ConfigMaps and Pods.</p> <p>Run the following commands:</p> 
+<pre>kubectl get pods --all-namespaces -o yaml | grep 10255
+kubectl get configmaps --all-namespaces -o yaml | grep 10255
+</pre> <p>If the output of the command is not empty, use the following script to identify the names of the ConfigMaps or Pods that are using the insecure port:</p> 
+<pre># This function checks if a Kubernetes resource is using the insecure port 10255.
+#
+# Arguments:
+#  $1 - Resource type (e.g., pod, configmap, )
+#  $2 - Resource name
+#  $3 - Namespace
+#
+# Output:
+#  Prints a message indicating whether the resource is using the insecure port.
+isUsingInsecurePort() {
+  resource_type=$1
+  resource_name=$2
+  namespace=$3
+
+  config=$(kubectl get $resource_type $resource_name -n $namespace -o yaml)
+
+  # Check if kubectl output is empty
+  if [[ -z "$config" ]]; then
+    echo "No configuration file detected for $resource_type: $resource_name (Namespace: $namespace)"
+    return
+  fi
+
+  if echo "$config" | grep -q "10255"; then
+    echo "Warning: The configuration file ($resource_type: $namespace/$resource_name) is using insecure port 10255. It is recommended to migrate to port 10250 for enhanced security."
+  else
+    echo "Info: The configuration file ($resource_type: $namespace/$resource_name) is not using insecure port 10255."
+  fi
+}
+
+# Get the list of ConfigMaps with their namespaces
+configmaps=$(kubectl get configmaps -A -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name | tail -n +2 | awk '{print $1"/"$2}')
+
+# Iterate over each ConfigMap
+for configmap in $configmaps; do
+  namespace=$(echo $configmap | cut -d/ -f1)
+  configmap_name=$(echo $configmap | cut -d/ -f2)
+  isUsingInsecurePort "configmap" "$configmap_name" "$namespace"
+done
+
+# Get the list of Pods with their namespaces
+pods=$(kubectl get pods -A -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name | tail -n +2 | awk '{print $1"/"$2}')
+
+# Iterate over each Pod
+for pod in $pods; do
+  namespace=$(echo $pod | cut -d/ -f1)
+  pod_name=$(echo $pod | cut -d/ -f2)
+  isUsingInsecurePort "pod" "$pod_name" "$namespace"
+done
+</pre> <p>Once you've identified the relevant workloads, migrate them to use the secure port 10250 by completing the steps in the following section.</p> <h3 id="migrate-apps">Migrate from the insecure kubelet read-only port</h3> <p>Typically, migrating an application to the secure port involves the following steps:</p> <ol> <li><p>Update URLs or endpoints that refer to the insecure read-only port to use the secure read-only port instead. For example, change <code translate="no" dir="ltr">http://203.0.113.104:10255</code> to <code translate="no" dir="ltr">http://203.0.113.104:10250</code>.</p></li> <li>
+<p>Set the certificate authority (CA) certificate of the HTTP client to the cluster CA certificate. To find this certificate, run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --format="value(masterAuth.clusterCaCertificate)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your cluster.</li> </ul>
+</li> </ol> <p>The authenticated port <code translate="no" dir="ltr">10250</code> requires that you grant appropriate RBAC roles to the subject to access the specific resources. For details, in the Kubernetes documentation, see <a href="https://kubernetes.io/docs/reference/access-authn-authz/kubelet-authn-authz/#kubelet-authorization" target="k8sLink" track-name="k8sLink" track-type="tasks">kubelet authorization</a>.</p> <p>If your workload uses the <code translate="no" dir="ltr">/pods</code> endpoint on the insecure kubelet read-only port, you need to grant the <code translate="no" dir="ltr">nodes/proxy</code> RBAC permission to access the endpoint on the secure kubelet port. <code translate="no" dir="ltr">nodes/proxy</code> is a powerful permission that you can't grant in GKE Autopilot clusters and that you shouldn't grant in GKE Standard clusters. Use the Kubernetes API with a <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/field-selectors/"><code translate="no" dir="ltr">fieldSelector</code></a> for the node name instead.</p> <p>If you use third-party applications that depend on the insecure kubelet read-only port, check with the application vendor for instructions to migrate to secure port <code translate="no" dir="ltr">10250</code>.</p> <h3 id="example-migration">Example migration</h3> <p>Consider a Pod that queries metrics from the insecure kubelet read-only port.</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: kubelet-readonly-example
+spec:
+  restartPolicy: Never
+  containers:
+  - name: kubelet-readonly-example
+    image: us-docker.pkg.dev/cloud-builders/ga/v1/curl:latest
+    command:
+      - curl
+      - http://${NODE_ADDRESS}:10255/metrics
+    env:
+    - name: NODE_ADDRESS
+      valueFrom:
+        fieldRef:
+          fieldPath: status.hostIP
+</pre> <p>This application does the following:</p> <ul> <li>Uses the <code translate="no" dir="ltr">default</code> ServiceAccount in the <code translate="no" dir="ltr">default</code> namespace</li> <li>Runs the <code translate="no" dir="ltr">curl</code> command against the <code translate="no" dir="ltr">/metrics</code> endpoint on the node.</li> </ul> <p>To update this Pod to use the secure port <code translate="no" dir="ltr">10250</code>, do the following steps:</p> <ol> <li>
+<p>Create a ClusterRole with access to get node metrics:</p> 
+<pre>apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: curl-authenticated-role
+rules:
+# Grant access to read node metrics in the cluster.
+- apiGroups:
+  - ""
+  resources:
+  - nodes/metrics
+  verbs:
+  - get
+</pre>
+</li> <li>
+<p>Bind the ClusterRole to your application's identity:</p> 
+<pre>apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: curl-authenticated-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: curl-authenticated-role
+# Bind the ClusterRole to the default ServiceAccount in the default
+# namespace.
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default
+</pre>
+</li> <li>
+<p>Update the <code translate="no" dir="ltr">curl</code> command to use the secure port endpoint with the corresponding authorization headers:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: kubelet-authenticated-example
+spec:
+  restartPolicy: Never
+  containers:
+  - name: kubelet-readonly-example
+    image: us-docker.pkg.dev/cloud-builders/ga/v1/curl:latest
+    env:
+    - name: NODE_ADDRESS
+      valueFrom:
+        fieldRef:
+          fieldPath: status.hostIP
+    # Update the command to send a request with the ServiceAccount
+    # credentials in the header.
+    command:
+    - sh
+    - -c
+    - 'curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H "Authorization:
+      Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" https://${NODE_ADDRESS}:10250/metrics'
+</pre>
+</li> </ol> <h2 id="modify-firewalls">Modify VPC firewall rules</h2> <p>If you update workloads to use port <code translate="no" dir="ltr">10250</code>, create firewall rules so that Pods in the cluster can reach the port in your node IP address ranges. The firewall rules should do the following:</p> <ul> <li>Allow incoming traffic to TCP port <code translate="no" dir="ltr">10250</code> on your node IP address ranges from internal Pod IP address ranges</li> <li>Deny incoming traffic to TCP port <code translate="no" dir="ltr">10250</code> on your node IP address ranges from the public internet.</li> </ul> <aside class="caution"><strong>Caution:</strong><span> Don't modify the default firewall rules that GKE creates in your clusters. Create new rules for the secure port. Modifying the default rules might result in unexpected behavior in your workloads.</span></aside> <p>You can use the following <a href="../concepts/firewall-rules#cluster-fws">default GKE firewall rules</a> as a template for the parameters to specify in your new rules:</p> <ul> <li><code translate="no" dir="ltr">gke-[cluster-name]-[cluster-hash]-inkubelet</code></li> <li><code translate="no" dir="ltr">gke-[cluster-name]-[cluster-hash]-exkubelet</code></li> </ul> <h2 id="disable-autopilot">Disable the insecure read-only port on Autopilot clusters</h2> <p>You can disable the insecure kubelet read-only port for new and existing Autopilot clusters.</p> <p>To disable the insecure kubelet read-only port on an Autopilot cluster, use the <code translate="no" dir="ltr">--no-autoprovisioning-enable-insecure-kubelet-readonly-port</code> flag, like in the following command. All new and existing nodes in the cluster stop using the port.</p> <aside class="caution"><strong>Caution:</strong><span> This command starts a rolling update of all the nodes in your cluster, which might cause disruptions in running workloads.</span></aside>
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --location=LOCATION \
+    --no-autoprovisioning-enable-insecure-kubelet-readonly-port
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your existing cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your existing cluster.</li> </ul> <p>You can also use the <code translate="no" dir="ltr">--no-autoprovisioning-enable-insecure-kubelet-readonly-port</code> flag when you create a new cluster by using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create-auto">gcloud container clusters create-auto</a> command.</p> <h2 id="disable-standard">Disable the insecure read-only port on Standard clusters</h2> <p>You can disable the insecure kubelet read-only port for entire Standard clusters or for individual node pools. We recommend that you disable the port for the entire cluster.</p> <p>If you use node auto-provisioning, automatically provisioned node pools inherit the port setting that you specify at the cluster level. You can optionally specify a different setting for auto-provisioned node pools, but we recommend that you disable the port across all nodes in your cluster.</p> <p>You can also use a <a href="node-system-config">node system configuration file</a> to declaratively disable the insecure kubelet read-only port. If you use this file, you can't use the commands in the following sections to control the kubelet setting.</p> <h3 id="disable-standard-existing-clusters">Disable the insecure read-only port on existing Standard clusters</h3> <p>To disable the insecure kubelet read-only port on an existing Standard cluster, use the <code translate="no" dir="ltr">--no-enable-insecure-kubelet-readonly-port</code> flag like in the following command. Any <strong>new</strong> node pools won't use the insecure port. GKE doesn't update existing node pools automatically.</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --location=LOCATION \
+    --no-enable-insecure-kubelet-readonly-port
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your existing Standard cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your existing Standard cluster.</li> </ul> <p>You can also use the <code translate="no" dir="ltr">--no-autoprovisioning-enable-insecure-kubelet-readonly-port</code> flag when you create a new cluster by using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create">gcloud container clusters create</a> command.</p> <h3 id="disable-standard-node-pools">Disable the insecure read-only port on Standard node pools</h3> <p>We recommend that you set the read-only port setting at the cluster level in all cases. If you disabled the read-only port on an existing cluster that already had running node pools, use the following command to disable the port on those node pools.</p> <aside class="caution"><strong>Caution:</strong><span> This command starts a rolling update of the nodes in that node pool, which might cause disruptions in running workloads.</span></aside>
+<pre>gcloud container node-pools update NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --no-enable-insecure-kubelet-readonly-port
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of the cluster.</li> </ul> <h2 id="verify">Verify that the port is disabled</h2> <p>To verify that the insecure kubelet read-only port is disabled, describe the GKE resource.</p> <h3 id="check-port-autopilot">Check the port status in Autopilot clusters</h3> <p>Run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --flatten=nodePoolAutoConfig \
+    --format="value(nodeKubeletConfig)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your Autopilot cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your Autopilot cluster.</li> </ul> <p>If the port is disabled, the output is the following:</p> 
+<pre>insecureKubeletReadonlyPortEnabled: false
+</pre> <h3 id="check-port-standard">Check the port status in Standard clusters</h3> <p>The port status is available in the <code translate="no" dir="ltr">nodePoolDefaults.nodeConfigDefaults.nodeKubeletConfig</code> field when you describe your cluster using the GKE API.</p> <p>In Standard clusters, you'll also see a <code translate="no" dir="ltr">nodeConfig</code> field that sets a value for the kubelet read-only port status. The <code translate="no" dir="ltr">nodeConfig</code> field is deprecated and applies only to the default node pool that GKE creates when you create a new Standard mode cluster. The status of the port in the deprecated <code translate="no" dir="ltr">nodeConfig</code> field doesn't apply to other node pools in the cluster.</p> <p>Run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --flatten=nodePoolDefaults.nodeConfigDefaults \
+    --format="value(nodeKubeletConfig)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your Standard cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of your Standard cluster.</li> </ul> <p>If the port is disabled, the output is the following:</p> 
+<pre>insecureKubeletReadonlyPortEnabled: false
+</pre> <p>If the output of this command is blank, the insecure <code translate="no" dir="ltr">kubelet</code> read-only port might still be enabled. To disable the port, run the command in the <a href="#disable-standard-existing-clusters">Disable the insecure read-only port on existing Standard clusters</a> section.</p> <h3 id="check-status-node-pools">Check the port status in Standard node pools</h3> <p>Run the following command:</p> 
+<pre>gcloud container node-pools describe NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --flatten=config \
+    --format="value(kubeletConfig)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of the cluster.</li> </ul> <p>If the port is disabled, the output is the following:</p> 
+<pre>insecureKubeletReadonlyPortEnabled: false
+</pre> <h2 id="prevent-port-usage-org-policy">Prevent insecure port usage with an organization policy</h2> <p>You can use Organization Policy Service to enforce that clusters in your organization, folder, or project must disable the insecure <code translate="no" dir="ltr">kubelet</code> read-only port. To enforce this requirement, you create a <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/creating-managing-custom-constraints">custom constraint</a>, and then reference that constraint in an organization policy. To deny creation or update operations when the insecure <code translate="no" dir="ltr">kubelet</code> read-only port is enabled, see these examples:</p> <ul> <li>
+<p>The following custom constraint denies cluster creation or update operations if the insecure <code translate="no" dir="ltr">kubelet</code> read-only port is enabled:</p> 
+<pre>name: organizations/ORGANIZATION_ID/customConstraints/custom.disableClusterInsecureKubeletReadOnlyPort
+resourceTypes:
+- container.googleapis.com/Cluster
+methodTypes:
+- CREATE
+- UPDATE
+condition:
+  "resource.NodeKubeletConfig.insecureKubeletReadonlyPortEnabled == true ||
+  resource.AutoprovisioningNodePoolDefaults.insecureKubeletReadonlyPortEnabled == true ||
+  resource.NodePoolAutoConfig.NodeKubeletConfig.insecureKubeletReadonlyPortEnabled == true"
+actionType: DENY
+displayName: Disable insecure kubelet read-only port
+description: All new and existing clusters must disable the insecure kubelet read-only port.
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORGANIZATION_ID</var></code> with your organization ID.</p>
+</li> <li>
+<p>The following custom constraint denies node pool creation or update operations if the insecure <code translate="no" dir="ltr">kubelet</code> read-only port is enabled:</p> 
+<pre>name: organizations/ORGANIZATION_ID/customConstraints/custom.disableNodePoolInsecureKubeletReadOnlyPort
+resourceTypes:
+- container.googleapis.com/NodePool
+methodTypes:
+- CREATE
+- UPDATE
+condition: "resource.NodeConfig.NodeKubeletConfig.insecureKubeletReadonlyPortEnabled == true"
+actionType: DENY
+displayName: Disable insecure kubelet read-only port
+description: All new and existing node pools must disable the insecure kubelet read-only port.
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ORGANIZATION_ID</var></code> with your organization ID.</p>
+</li> </ul> <p>For more information about how to create a custom constraint and enforce the constraint in an organization policy, see <a href="custom-org-policies">Restrict actions on GKE resources using custom organization policies</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/disable-kubelet-readonly-port" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/disable-kubelet-readonly-port</a>
+  </p>
+</div>

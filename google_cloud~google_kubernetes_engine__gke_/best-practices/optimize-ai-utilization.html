@@ -1,0 +1,262 @@
+<h1>Best practices for GKE AI/ML workload prioritization</h1>  <p>This document describes tools and best practices for maximizing resource utilization and minimizing downtime of heterogeneous AI/ML workloads in Google Kubernetes Engine (GKE), especially when there's no capacity in reservations or through on-demand resources. <em>Heterogeneous workloads</em> refer to different types of AI/ML workloads that run simultaneously in the same GKE cluster. For example, you might run a latency-sensitive online inference service alongside a series of interruptible batch training jobs.</p> <p>This guide provides recommendations for Platform admins and operators and Data and AI specialists. For a consolidated overview of all GKE best practices, see <a href="../best-practices">Best practices for GKE</a>.</p> <h2 id="benefits">Benefits of AI/ML workload prioritization</h2> <p>Heterogeneous workloads have different priorities and share limited capacity and resources. The best practices in this page describe how to configure GKE and open source tools to help you get the following benefits:</p> <ul> <li>Minimize downtime for high-priority workloads.</li> <li>Quickly execute high-priority workloads.</li> <li>Optimize resource consumption.</li> </ul> <h2 id="open_source_tools">Background</h2> <p>GKE supports the following open source tools for optimizing resource utilization.</p> <ul> <li>
+<p><strong>Kueue:</strong> a Kubernetes-native workload queueing system designed for batch, AI, and high performance computing workloads. Kueue can be extended to manage other workload types, such as those defined by Custom Resource Definitions like <code translate="no" dir="ltr">leaderworkerset</code>. Kueue manages quotas and how workloads consume them in a Kubernetes cluster. Kueue makes decisions about when a workload waits, when a workload starts (for example, by creating the Pod), and when a Pod belonging to a workload gets preempted.</p> <p>For more information about Kueue, see the <a href="https://kueue.sigs.k8s.io/docs/concepts/">Kueue concepts</a> documentation.</p>
+</li> <li>
+<p><strong>Hotswap:</strong> a technique that reduces mean time to recovery (MTTR). Hotswap enables preemption based on workload priority when cluster resources are fully utilized and no additional capacity is available, either from on-demand instances or existing reservations.</p> <ul> <li>When a node that hosts a workload becomes unhealthy, the workload is rescheduled on eligible spare nodes. If no spare nodes are available, Hotswap can preempt a lower-priority workload to make room for the workload being recovered.</li> <li>If you configure your Pods with <code translate="no" dir="ltr">PriorityClass</code>, the workload configured with higher priority evicts a running low-priority workload to acquire its resources. This eviction process is known as preemption.</li> </ul>
+</li> </ul> <h2 id="use_cases">Use cases</h2> <p>Use the following table to understand the best practices for each use case:</p> <table> <thead> <tr> <th>Use case</th> <th>Best practice</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td>Multiple workloads with different priorities</td> <td>Use Kueue to define queues and assign priorities to workloads based on their importance. Kueue can manage quota so that certain teams or projects have access to a set amount of resources.</td> <td> <p>Kueue lets you apply the following configurations:</p> <ul> <li>Prioritize high priority Jobs by assigning higher Kueue <code translate="no" dir="ltr">WorkloadPriority</code> to them.</li> <li>Enable Kueue's fair-share queuing so that all workloads eventually receive resources, even low-priority ones.</li> </ul> <p>To test the best practice configuration, see the <a href="#examples">Kueue example</a> in this document.</p> </td> </tr> <tr> <td>You have to reduce the current MTTR.</td> <td>Use Hotswap to reschedule workloads in healthy resources when an interruption occurs, and preempt low-priority workloads in favor of high-priority workloads.</td> <td> <p>Hotswap lets you apply the following configurations:</p> <ul>
+<li>Configure <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/">PriorityClasses</a> to define priority levels for your workloads.</li> <li>Assign higher <code translate="no" dir="ltr">PriorityClasses</code> to critical workloads.</li> <li>Automatically reschedule workloads on healthy nodes when interruptions occur.</li>
+</ul> <p>To test the best practice configuration, see the <a href="#examples">Hotswap example</a> in this document.</p>
+</td> </tr> <tr> <td>Multiple AI workloads competing for limited resources</td> <td>Combine Kueue and Hotswap. This combination provides a robust system that prioritizes critical workloads both during initial scheduling and during runtime.</td> <td> <p>Kueue and Hotswap let you apply the following configurations:</p> <ul> <li>Use Kueue to manage the initial scheduling and admission of workloads based on priority.</li> <li>Use Hotswap to handle workload interruptions and enable rapid recovery. Hotswap helps to reduce the time to recovery of a high-priority workload when an interruption occurs.</li> </ul> <p>To test the best practice configuration, see the <a href="#examples">Kueue and Hotswap example</a> in this document.</p>
+</td> </tr> </tbody> </table> <h2 id="examples">Examples of best practice implementations</h2> <p>The following examples demonstrate how to implement Kueue and Hotswap, and how to combine them for the best practices described in the preceding section.</p> <div> <section><p class="_code-tab"><strong>Kueue</strong></p>
+<p>The following example manifest shows a Kueue configuration:</p> 
+<pre data-language="">  apiVersion: kueue.x-k8s.io/v1beta1
+  kind: ResourceFlavor
+  metadata:
+    name: tpu-v6e-slice
+  spec:
+    nodeLabels:
+      cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+  ---
+  apiVersion: kueue.x-k8s.io/v1beta1
+  kind: ClusterQueue
+  metadata:
+    name: tpu-training-cq
+  spec:
+    resourceGroups:
+    - flavors:
+      - name: tpu-v6e-slice
+        resources:
+        - name: google.com/tpu
+          nominalQuota: 32
+    queueingStrategy: BestEffortFIFO
+    preemption:
+      reclaimWithinCohort: Never
+      reclaimOutOfCohort:
+        enable: true
+        reclaimMoreThanNominalQuota: false
+  ---
+  apiVersion: kueue.x-k8s.io/v1beta1
+  kind: LocalQueue
+  metadata:
+    name: default-queue
+    namespace: default
+  spec:
+    clusterQueue: tpu-training-cq
+</pre> <p>This manifest does the following:</p> <ul> <li>Defines a <code translate="no" dir="ltr">ResourceFlavor</code> named <code translate="no" dir="ltr">tpu-v6e-slice</code> that specifies the node labels for TPU v6e slices.</li> <li>Defines a <code translate="no" dir="ltr">ClusterQueue</code> named <code translate="no" dir="ltr">tpu-training-cq</code> that manages the quota for TPU resources.</li> <li>Defines a <code translate="no" dir="ltr">LocalQueue</code> named <code translate="no" dir="ltr">default-queue</code> that allows workloads in the <code translate="no" dir="ltr">default</code> namespace to use the <code translate="no" dir="ltr">tpu-training-cq</code> cluster queue.</li> </ul></section> <section><p class="_code-tab"><strong>Hotswap</strong></p>
+<p>The following example shows a Hotswap configuration that defines two Priority Classes, <code translate="no" dir="ltr">low-priority-job</code> and <code translate="no" dir="ltr">high-priority-job</code>. This Hotswap configuration creates a high-priority JobSet workload and uses <a href="https://github.com/google/maxtext">MaxText</a>.</p> 
+<pre data-language="">  apiVersion: scheduling.k8s.io/v1
+  kind: PriorityClass
+  metadata:
+    name: low-priority-job
+  value: 1000000
+  globalDefault: false
+  description: "This priority class should be used for low priority pods only."
+  ---
+  apiVersion: scheduling.k8s.io/v1
+  kind: PriorityClass
+  metadata:
+    name: high-priority-job
+  value: 2000000
+  globalDefault: false
+  description: "This priority class should be used for critical pods only."
+  ---
+  apiVersion: jobset.x-k8s.io/v1alpha2
+  kind: JobSet
+  metadata:
+    name: high-jax-trillium
+    annotations:
+      alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+  spec:
+    failurePolicy:
+      maxRestarts: 10
+      restartStrategy: BlockingRecreate
+    replicatedJobs:
+    - name: slice
+      replicas: 2
+      template:
+        spec:
+          backoffLimit: 0
+          completions: 4
+          parallelism: 4
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+                cloud.google.com/gke-tpu-topology: 4x4
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              priorityClassName: high-priority-job
+              containers:
+              - name: jax-program
+                image: &lt;IMAGE LOCATION&gt;
+                command:
+                -   python3
+                -   MaxText/train.py
+                -   MaxText/configs/base.yml
+                -   model_name=llama2-7b
+                -   run_name=&lt;UNIQUE RUN NAME&gt;
+                -   steps=300
+                -   base_output_directory=gs://&lt;OUTPUT BUCKET&gt;
+                -   dataset_path=gs://max-datasets-rogue
+                -   max_target_length=4096
+                -   dataset_type=synthetic
+                -   enable_checkpointing=False
+                resources:
+                  limits:
+                    google.com/tpu: 4
+</pre> <p>Based on this configuration, Hotswap performs the following actions:</p> <ul> <li>If an infrastructure failure interrupts the high-priority workload, the JobSet restarts it. Hotswap preempts the low-priority workload to reschedule the high-priority workload before the infrastructure recovers. The low-priority workload remains in a failed status. This process significantly reduces workload idle time.</li> <li>When the infrastructure recovers, Hotswap reschedules the low-priority workload in the node pool that recovered.</li> </ul></section> <section><p class="_code-tab"><strong>Kueue and Hotswap</strong></p>
+<p>Combine Kueue and Hotswap when you operate in a complex environment with limited resources. This combination provides a robust system that prioritizes critical workloads during initial scheduling and during runtime.</p> <p>The following example shows a combined Kueue and Hotswap configuration. This example uses <a href="https://github.com/google/maxtext">MaxText</a>:</p> 
+<pre data-language="">  apiVersion: scheduling.k8s.io/v1
+  kind: PriorityClass
+  metadata:
+    name: low-priority-job
+  value: 1000000
+  globalDefault: false
+  description: "This priority class should be used for low priority pods only."
+  ---
+  apiVersion: scheduling.k8s.io/v1
+  kind: PriorityClass
+  metadata:
+    name: high-priority-job
+  value: 2000000
+  globalDefault: false
+  description: "This priority class should be used for critical pods only."
+  ---
+  apiVersion: kueue.x-k8s.io/v1beta1
+  kind: ResourceFlavor
+  metadata:
+    name: tpu-v6e-slice
+  spec:
+    nodeLabels:
+      cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+  ---
+  apiVersion: kueue.x-k8s.io/v1beta1
+  kind: ClusterQueue
+  metadata:
+    name: tpu-training-cq
+  spec:
+    resourceGroups:
+    - flavors:
+      - name: tpu-v6e-slice
+        resources:
+        - name: google.com/tpu
+          nominalQuota: 32
+    queueingStrategy: BestEffortFIFO
+    preemption:
+      reclaimWithinCohort: Never
+      reclaimOutOfCohort:
+        enable: true
+        reclaimMoreThanNominalQuota: false
+  ---
+  apiVersion: kueue.x-k8s.io/v1beta1
+  kind: LocalQueue
+  metadata:
+    name: default-queue
+    namespace: default
+  spec:
+    clusterQueue: tpu-training-cq
+  ---
+  apiVersion: jobset.x-k8s.io/v1alpha2
+  kind: JobSet
+  metadata:
+    name: low-jax-trillium
+    annotations:
+      kueue.x-k8s.io/queue-name: default-queue
+      alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+  spec:
+    failurePolicy:
+      maxRestarts: 10
+      restartStrategy: BlockingRecreate
+    replicatedJobs:
+    - name: slice
+      replicas: 2
+      template:
+        spec:
+          backoffLimit: 0
+          completions: 4
+          parallelism: 4
+          template:
+            metadata:
+              labels:
+                kueue.x-k8s.io/managed-by: kueue
+                kueue.x-k8s.io/priority-class: low-priority-job
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+                cloud.google.com/gke-tpu-topology: 4x4
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              priorityClassName: low-priority-job
+              containers:
+              - name: jax-program
+                image: &lt;IMAGE LOCATION&gt;
+                command:
+                - python3
+                - MaxText/train.py
+                - MaxText/configs/base.yml
+                - model_name=llama2-7b
+                - run_name=low-priority-run
+                - steps=30000
+                - base_output_directory=gs://&lt;OUTPUT BUCKET&gt;
+                - dataset_path=gs://max-datasets-rogue
+                - max_target_length=4096
+                - dataset_type=synthetic
+                - enable_checkpointing=False
+                resources:
+                  limits:
+                    google.com/tpu: 4
+  ---
+  apiVersion: jobset.x-k8s.io/v1alpha2
+  kind: JobSet
+  metadata:
+    name: high-jax-trillium
+    annotations:
+      kueue.x-k8s.io/queue-name: default-queue
+      alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+  spec:
+    failurePolicy:
+      maxRestarts: 10
+      restartStrategy: BlockingRecreate
+    replicatedJobs:
+    - name: slice
+      replicas: 2
+      template:
+        spec:
+          backoffLimit: 0
+          completions: 4
+          parallelism: 4
+          template:
+            metadata:
+              labels:
+                kueue.x-k8s.io/managed-by: kueue
+                kueue.x-k8s.io/priority-class: high-priority-job
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+                cloud.google.com/gke-tpu-topology: 4x4
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              priorityClassName: high-priority-job
+              containers:
+              - name: jax-program
+                image: &lt;IMAGE LOCATION&gt;
+                command:
+                - python3
+                - MaxText/train.py
+                - MaxText/configs/base.yml
+                - model_name=llama2-7b
+                - run_name=high-priority-run
+                - steps=300
+                - base_output_directory=gs://&lt;OUTPUT BUCKET&gt;
+                - dataset_path=gs://max-datasets-rogue
+                - max_target_length=4096
+                - dataset_type=synthetic
+                - enable_checkpointing=False
+                resources:
+                  limits:
+                    google.com/tpu: 4
+</pre> <p>Based on this configuration, Kueue is combined with Hotswap, and performs the following actions:</p> <ul> <li>Kueue manages the admission of both <code translate="no" dir="ltr">low-jax-trillium</code> and <code translate="no" dir="ltr">high-jax-trillium</code> JobSets into the cluster queue based on their defined priorities and available resources.</li> <li>If the <code translate="no" dir="ltr">high-jax-trillium</code> JobSet is interrupted by an infrastructure failure, Hotswap preempts the <code translate="no" dir="ltr">low-jax-trillium</code> JobSet to reschedule the high-priority JobSet.</li> <li>Hotswap ensures the high-priority JobSet restarts quickly, minimizing its idle time.</li> <li>When the infrastructure recovers, Hotswap reschedules the low-priority JobSet in the recovered node pool.</li> </ul></section> </div> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="../concepts/gpus">deploy GPU workloads in GKE</a>.</li> <li>Learn how to <a href="../how-to/tpus">deploy TPU workloads in GKE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/optimize-ai-utilization" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/optimize-ai-utilization</a>
+  </p>
+</div>

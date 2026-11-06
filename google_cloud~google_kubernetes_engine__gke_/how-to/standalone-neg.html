@@ -1,0 +1,841 @@
+<h1>Container-native load balancing through standalone zonal NEGs</h1>  <p>This page shows you how to create a Kubernetes Service that is backed by a <a href="https://docs.cloud.google.com/load-balancing/docs/negs#zonal-neg">zonal <code translate="no" dir="ltr">GCE_VM_IP_PORT</code> network endpoint group (NEG)</a> in a Google Kubernetes Engine (GKE) <a href="../concepts/alias-ips">VPC-native cluster</a>.</p> <p>For information on the benefits, requirements, and limitations of container-native load balancing, see <a href="../concepts/container-native-load-balancing">Container-native load balancing</a>.</p> <h2 id="overview">Overview</h2> <p>A <a href="https://docs.cloud.google.com/load-balancing/docs/negs">NEG</a> represents a group of endpoints. GKE supports standalone NEGs of the <code translate="no" dir="ltr">GCE_VM_IP_PORT</code> type. <code translate="no" dir="ltr">GCE_VM_IP_PORT</code> NEGs support endpoints using either the VM's primary internal IP address or an IP address from one of its alias IP ranges.</p> <p>In the context of a GKE VPC-native cluster using standalone NEGs, each endpoint is a Pod IP address and target port. Pod IP addresses are sourced from the node's alias IP range for Pods, which comes from the cluster's <a href="../concepts/alias-ips#cluster_sizing_secondary_range_pods">subnet secondary IP address range for Pods</a>.</p> <p>GKE provides a <em>NEG controller</em> to manage the membership of <code translate="no" dir="ltr">GCE_VM_IP_PORT</code> NEGs. You can add the NEGs it creates as backends to the backend services for load balancers that you configure outside of the GKE API.</p> <p>The following diagram describes how Kubernetes API objects correspond to Compute Engine objects.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg1.svg" alt="Kubernetes Services correspond to Compute Engine network endpoint groups,
+while Kubernetes Pods correspond to Compute Engine network endpoints. The NEG
+controller component of the control plane manages this."></p> <h3 id="ingress_with_negs">Ingress with NEGs</h3> <p>When <a href="container-native-load-balancing">NEGs are used with GKE Ingress</a>, the Ingress controller facilitates the creation of all aspects of the load balancer. This includes creating the virtual IP address, forwarding rules, health checks, firewall rules, and more.</p> <p>Ingress is the recommended way to use container-native load balancing as it has many features that simplify the management of NEGs. Standalone NEGs are an option if NEGs managed by Ingress don't serve your use case.</p> <h3 id="standalone_negs">Standalone NEGs</h3> <p>When NEGs are deployed with load balancers provisioned by anything other than Ingress, they are considered standalone NEGs. Standalone NEGs are deployed and managed through the NEG controller, but the forwarding rules, health checks, and other load balancing objects are deployed manually.</p> <p>Standalone NEGs don't conflict with Ingress enabled container-native load balancing.</p> <p>The following illustration shows the differences in how the load balancing objects are deployed in each scenario:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg2.svg" alt="With standalone NEGs and Ingress managed NEGs, the NEG controller on the
+GKE control plane manages the NEG and Network endpoints objects. With standalone NEGs, every other component is
+managed by the user as described in the previous paragraphs."></p> <p>By default, the GKE NEG controller creates standalone NEGs only in the zones where the cluster has nodes. To simplify load balancer setup, you can also <a href="#pre-provisioning">pre-provision empty NEGs</a> in specific zones (or all zones within a region) immediately after creating your Service, without waiting for workloads to be deployed. Support for pre-provisioning NEGs is in the <a href="https://cloud.google.com/products#product-launch-stages">Preview</a> stage.</p> <h4 id="garbage_collection">Preventing leaked NEGs</h4> <p>With standalone NEGs, you are responsible for managing the lifecycles of NEGs and the resources that make up the load balancer. You could leak NEGs in these ways:</p> <ul> <li>When a GKE service is deleted, the associated NEG won't be garbage collected if the NEG is still referenced by a backend service. Dereference the NEG from the backend service to allow NEG deletion.</li> <li>
+<p>When a cluster is deleted, standalone NEGs won't be deleted in the following scenarios:</p> <ul> <li>The NEG is still referenced by a backend service.</li> <li>The cluster deletion process shuts down the NEG controller before the controller can delete the NEG.</li> </ul> <p>To prevent leaked NEGs, dereference the NEG from the backend service and delete all NEGs before you delete the cluster.</p>
+</li> </ul> <p>If you have leaked NEGs after deleting the cluster or service, you can <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/network-endpoint-groups/delete">delete the NEGs</a> by using the Google Cloud CLI.</p> <h2 id="use_cases_of_standalone_negs">Use cases of standalone NEGs</h2> <p>Standalone NEGs have several critical uses. Standalone NEGs are very flexible. This is in contrast to Ingress (used with or without NEGs) which defines a specific set of load balancing objects that were chosen in an opinionated way to make them straightforward to use.</p> <p>Use cases for standalone NEGs include:</p> <h3 id="heterogeneous_services_of_containers_and_vms">Heterogeneous services of containers and VMs</h3> <p>NEGs can contain both VM and container IP addresses. This means a single virtual IP address can point to a backend that consists of both Kubernetes and non-Kubernetes workloads. This can also be used to migrate existing workloads to a GKE cluster.</p> <p>Standalone NEGs can point to VM IPs which makes it possible to manually configure load balancers to point at backends that are comprised of both VMs and containers for the same service VIP.</p> <h3 id="customized_ingress_controllers">Customized Ingress controllers</h3> <p>You can use a customized Ingress controller (or no Ingress controller) to configure load balancers that target standalone NEGs.</p> <h3 id="use_with">Use Cloud Service Mesh with GKE</h3> <p>You can use <a href="https://docs.cloud.google.com/service-mesh">Cloud Service Mesh</a> with GKE. Cloud Service Mesh uses standalone NEGs to provide container-native load balancing for the managed service mesh.</p> <h3 id="uses_with">Use external proxy Network Load Balancers with GKE</h3> <p>You can use standalone NEGs to load balance directly to containers with the <a href="https://docs.cloud.google.com/load-balancing/docs/tcp">external proxy Network Load Balancer</a> which is not supported natively by Kubernetes/GKE.</p> <h2 id="pod_readiness">Pod readiness</h2> <p><a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-readiness-gate">Readiness gates</a> are an extensibility feature of Kubernetes that allow the injection of extra feedback or signals into the PodStatus to allow the Pod to transition to the Ready state. The NEG controller manages a custom readiness gate to help ensure that the full network path from Compute Engine load balancer to pod is functional. Pod readiness gates in GKE are explained in <a href="../concepts/container-native-load-balancing#pod_readiness">container-native load balancing</a>.</p> <p>Ingress with NEGs deploys and manages Compute Engine health checks on behalf of the load balancer. However, standalone NEGs make no assumptions about Compute Engine health checks because they are expected to be deployed and managed separately. Compute Engine health checks should always be configured along with the load balancer to prevent traffic from being sent to backends which are not ready to receive. If there is no health check status associated with the NEG (usually because no health check is configured), then the NEG controller will mark the Pod's readiness gate value to True when its corresponding endpoint is programmed in NEG.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<p>Ensure that you have an existing VPC-native cluster. Your cluster must have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled. New GKE clusters have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled by default.</p> <p>To create a new Standard cluster, see <a href="alias-ips">Create a VPC-native cluster</a>. Autopilot clusters are VPC-native by default.</p>
+</li> </ul> <h2 id="how_to">Using standalone NEGs</h2> <p>The following instructions show you how to use standalone NEGs with an external HTTP load balancer on GKE.</p> <p>You must create the following objects:</p> <ul> <li>A <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" track-name="k8sLink" track-type="concept">Deployment</a> that creates and manages Pods.</li> <li>A <a href="../concepts/service">Service</a> that creates a NEG.</li> <li>A load balancer created with the Compute Engine API. This differs from using NEGs with Ingress, in which case Ingress creates and configures a load balancer for you. With standalone NEGs you are responsible for associating the NEG and the backend service to connect the Pods to the load balancer. The load balancer consists of several components, shown in the following diagram:</li> </ul> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg3.svg" alt="The components of a load balancer are a forwarding rule, target HTTP proxy,
+URL map, health check, and backend service. This directs traffic to a NEG that
+contains Pod IP addresses."></p> <h3 id="deploy">Create a Deployment</h3> <p>The following example manifests specify Deployments that run three instances of a containerized HTTP server. The HTTP server responds to requests with the hostname of the application server, the name of the Pod the server is running on.</p> <p>We recommend you use workloads that use Pod readiness feedback.</p> <div class="ds-selector-tabs"> <section> <p class="_code-tab"><strong>Using Pod readiness feedback</strong></p> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    run: neg-demo-app # Label for the Deployment
+  name: neg-demo-app # Name of Deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      run: neg-demo-app
+  template: # Pod template
+    metadata:
+      labels:
+        run: neg-demo-app # Labels Pods from this Deployment
+    spec: # Pod specification; each Pod created by this Deployment has this specification
+      containers:
+      - image: registry.k8s.io/e2e-test-images/agnhost:2.40 # Application to run in Deployment's Pods
+        name: hostname
+        args:
+        - serve-hostname
+        - --port=9376
+  </pre> </section> <section> <p class="_code-tab"><strong>Using hardcoded delay</strong></p> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    run: neg-demo-app # Label for the Deployment
+  name: neg-demo-app # Name of Deployment
+spec:
+  minReadySeconds: 60 # Number of seconds to wait after a Pod is created and its status is Ready
+  replicas: 3
+  selector:
+    matchLabels:
+      run: neg-demo-app
+  template: # Pod template
+    metadata:
+      labels:
+        run: neg-demo-app # Labels Pods from this Deployment
+    spec: # Pod specification; each Pod created by this Deployment has this specification
+      containers:
+      - image: registry.k8s.io/e2e-test-images/agnhost:2.40 # Application to run in Deployment's Pods
+        name: hostname
+        args:
+        - serve-hostname
+        - --port=9376
+  </pre> </section> </div> <p>Save this manifest as <code translate="no" dir="ltr">neg-demo-app.yaml</code>, then create the Deployment by running the following command:</p> 
+<pre>kubectl apply -f neg-demo-app.yaml
+</pre> <h3 id="service">Create a Service</h3> <p>The following manifest specifies a Service where:</p> <ul> <li>Any Pod with the label <code translate="no" dir="ltr">run: neg-demo-app</code> is a member of this Service.</li> <li>The Service has one <a href="https://v1-25.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.25/#serviceport-v1-core">ServicePort</a> field with port 80.</li> <li>The <code translate="no" dir="ltr">cloud.google.com/neg</code> annotation specifies that port 80 will be associated with a NEG. The optional <code translate="no" dir="ltr">name</code> field specifies that the NEG will be named <code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code>. If the <code translate="no" dir="ltr">name</code> field is omitted, a unique name will be automatically generated. See <a href="#naming_negs">naming NEGs</a> for details.</li> <li>Each member Pod must have a container that is listening on TCP port 9376.</li> </ul> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  name: neg-demo-svc
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports": {"80":{"name": "NEG_NAME"}}}'
+spec:
+  type: ClusterIP
+  selector:
+    run: neg-demo-app # Selects Pods labelled run: neg-demo-app
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 9376
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code> with the name for the NEG. The NEG name must be unique in its region.</p> <p>Save this manifest as <code translate="no" dir="ltr">neg-demo-svc.yaml</code>, then create the Service by running the following command:</p> 
+<pre>kubectl apply -f neg-demo-svc.yaml
+</pre> <p>A NEG is created within a few minutes of Service creation.</p> <h4 id="service-types">Service types</h4> <p>While this example uses a <code translate="no" dir="ltr">ClusterIP</code> service, all five <a href="../concepts/service#types_of_services">types of Services</a> support standalone NEGs. We recommend the default type, <code translate="no" dir="ltr">ClusterIP</code>.</p> <h4 id="naming_negs">Naming NEGs</h4> <p>In GKE versions 1.18.18-gke.1200 and later, you can specify a custom name for NEGs, or GKE can generate a name automatically. Previous versions of GKE only support automatically generated NEG names.</p> <p>GKE creates one NEG in each zone used by the cluster. The NEGs all use the same name.</p> <h5 id="specify-a-name">Specifying a name</h5> <p>Specifying a custom NEG name simplifies <a href="#add_backends">configuring the load balancer</a> because you know the name and zone(s) of the NEG(s) in advance. Custom NEG names must meet the following requirements:</p> <ul> <li><p>Be unique to the cluster's zone for zonal clusters, or unique to the region for regional clusters.</p></li> <li><p>Must not match the name of any existing NEG that was not created by the GKE NEG controller.</p></li> <li><p>Must not contain underscores.</p></li> </ul> <aside class="note"><strong>Note:</strong><span> When there's a name conflict, NEG creation or syncing fails. For troubleshooting steps, see <a href="#neg_is_not_synced_with_service">NEG is not synced with Service</a>.</span></aside> <p>Use the <code translate="no" dir="ltr">name</code> field in the <code translate="no" dir="ltr">cloud.google.com/neg</code> annotation of the Service to specify a NEG name:</p> 
+<pre>cloud.google.com/neg: '{"exposed_ports": {"80":{"name": "NEG_NAME"}}}'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code> with the name for the NEG. The NEG name must be unique in its region.</p> <h5 id="use-auto-name">Using an automatically generated name</h5> <p>Automatically generated NEG names are guaranteed to be unique. To use an automatically generated name, omit the <code translate="no" dir="ltr">name</code> field:</p> 
+<pre>cloud.google.com/neg: '{"exposed_ports": {"80":{}}}'
+</pre> <p>The automatically generated name has the following format:</p> <p><code translate="no" dir="ltr">k8s1-<var translate="no">CLUSTER_UID</var>-<var translate="no">NAMESPACE</var>-<var translate="no">SERVICE</var>-<var translate="no">PORT</var>-<var translate="no">RANDOM_HASH</var></code></p> <h4 id="map-multiple-negs">Mapping ports to multiple NEGs</h4> <p>A Service can listen on more than one port. By definition, NEGs have only a single IP address and port. This means that if you specify a Service with multiple ports, it will create a NEG for each port.</p> <p>The format of the <code translate="no" dir="ltr">cloud.google.com/neg</code> annotation is:</p> 
+<pre>cloud.google.com/neg: '{
+   "exposed_ports":{
+      "SERVICE_PORT_1":{},
+      "SERVICE_PORT_2":{},
+      "SERVICE_PORT_3":{},
+      ...
+   }
+ }'
+</pre> <p>In this example, each instance of <code translate="no" dir="ltr"><var translate="no">SERVICE_PORT_N</var></code> is a distinct port number that refers to existing service ports of the Service. For each service port listed, the NEG controller creates one NEG in each zone the cluster occupies.</p> <h4 id="pre-provisioning">Pre-provisioning empty NEGs</h4> <p>By default, the GKE NEG controller creates a standalone NEG only in the zones where the cluster has nodes. If a cluster scales up and adds nodes in a new zone, the controller automatically creates the corresponding NEGs. To attach empty NEGs to a backend service immediately after setting up a Kubernetes Service—without waiting for nodes to scale into those zones—pre-provision empty NEGs (Preview). Pre-provisioning NEGs simplifies load balancer configuration since traffic routing begins automatically when workloads eventually scale into those new zones.</p> <p>To enable pre-provisioning, extend the <code translate="no" dir="ltr">cloud.google.com/neg</code> annotation on your Kubernetes Service with the optional <code translate="no" dir="ltr">zones</code> field, for example:</p> 
+<pre>cloud.google.com/neg: '{"exposed_ports": {"80":{}}, "zones":["us-central1-a", "us-central1-b"]}'
+</pre> <p>If you specify multiple ports under <code translate="no" dir="ltr">exposed_ports</code>, the configured zones setting applies to the NEGs created for all of those ports.</p> <p>The <code translate="no" dir="ltr">zones</code> field accepts a list of string values. You can configure the <code translate="no" dir="ltr">zones</code> field in the following ways:</p> <ul> <li>
+<p><strong>Omitted or empty list:</strong> if the <code translate="no" dir="ltr">zones</code> field is missing or set to <code translate="no" dir="ltr">[]</code>, the controller uses the default behavior:</p> <ul> <li>NEGs are created only in zones where the cluster has nodes.</li> <li>Any unused NEGs are marked as <code translate="no" dir="ltr">INACTIVE</code>.</li> </ul>
+</li> <li><p><strong>Wildcard <code translate="no" dir="ltr">["*"]</code>:</strong> this option creates empty NEGs across <strong>all zones within the region</strong> where the GKE cluster is located. This behavior applies to both regional and zonal clusters (for a zonal cluster, GKE creates empty NEGs in all other zones of the region).</p></li> <li><p><strong>Explicit list of zones:</strong> this option creates NEGs in the specified zones (for example, <code translate="no" dir="ltr">["us-central1-a",
+"us-central1-b"]</code>), as well as any other zones where the cluster has nodes.</p></li> </ul> <h5 id="requirements_and_limitations">Requirements and limitations</h5> <ul> <li>Your cluster must use GKE version 1.36.2-gke.3104000 or later.</li> <li>Any zones listed in the <code translate="no" dir="ltr">zones</code> field must reside within the same region as your cluster.</li> <li>If you configure the <code translate="no" dir="ltr">zones</code> field with an incorrect format, the controller falls back to standard behavior and raises a <code translate="no" dir="ltr">Warning</code> event on the Service object.</li> <li>Empty NEGs count against your regional project quotas. Using wildcard configurations across multiple services might exhaust your limits.</li> <li>When you use the wildcard (<code translate="no" dir="ltr">["*"]</code>) option to configure the <code translate="no" dir="ltr">zones</code> field, newly created zones in a region might take significant time to propagate for NEG pre-provisioning. If your workloads depend on new zones, specify those zones explicitly in the annotation.</li> </ul> <h4 id="retrieve-neg-status">Retrieve NEG statuses</h4> <p>Use the following command to retrieve the statuses of the cluster's Services:</p> 
+<pre>kubectl get service neg-demo-svc -o yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>cloud.google.com/neg-status: '{
+   "network-endpoint-groups":{
+      "SERVICE_PORT_1": "NEG_NAME_1",
+      "SERVICE_PORT_2": "NEG_NAME_2",
+      ...
+   },
+   "zones":["ZONE_1", "ZONE_2", ...]
+}
+</pre> <p>In this output, each element in the <code translate="no" dir="ltr">network-endpoint-groups</code> mapping is a service port (like <code translate="no" dir="ltr"><var translate="no">SERVICE_PORT_1</var></code>) and the name of the corresponding managed NEGs (like <code translate="no" dir="ltr"><var translate="no">NEG_NAME_1</var></code>). The <code translate="no" dir="ltr">zones</code> list contains every zone (like <code translate="no" dir="ltr"><var translate="no">ZONE_1</var></code>) that has a NEG in it.</p> <p>The output is similar to the following:</p> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    cloud.google.com/neg: '{"exposed_ports": {"80":{}}}'
+    cloud.google.com/neg-status: '{"network_endpoint_groups":{"80":"k8s1-cca197ad-default-neg-demo-app-80-4db81e02"},"zones":["ZONE_1", "ZONE_2"]}'
+  labels:
+    run: neg-demo-app
+  name: neg-demo-app
+  namespace: default
+  selfLink: /api/v1/namespaces/default/services/neg-demo-app
+  ...
+spec:
+  clusterIP: 10.0.14.252
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 9376
+  selector:
+    run: neg-demo-app
+  sessionAffinity: None
+status:
+  loadBalancer: {}
+</pre> <p>In this example, the annotation shows that service port 80 is exposed to NEGs named <code translate="no" dir="ltr">k8s1-cca197ad-default-neg-demo-app-80-4db81e02</code>.</p> <h4 id="validate-neg-creation">Validate NEG creation</h4> <p>A NEG is created within a few minutes of Service creation. If there are Pods that match the label specified in the Service manifest, then upon creation the NEG will contain the IPs of the Pods.</p> <p>There are two ways to verify that the NEG is created and is correctly configured. In GKE 1.18.6-gke.6400 and later, a custom resource <code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> stores status information about NEGs created by the Service controller. In previous versions, you must inspect the NEGs directly.</p> <h5 id="svcneg">The <code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> resource</h5> <p>List the NEGs in a cluster by getting all of the <code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> resources:</p> 
+<pre>kubectl get svcneg
+</pre> <p>Observe the status of a NEG by checking the status of the <code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> resource:</p> 
+<pre>kubectl get svcneg NEG_NAME -o yaml
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code> with the name of the individual NEG you want to inspect.</p> <p>The output of this command includes a status section that might contain error messages. If you have pre-provisioned NEGs, the output displays these NEGs in states of <code translate="no" dir="ltr">ACTIVE</code> even if there are no Pods running in those zones yet.</p> <p>Some errors are reported as a Service event. You can find further details by querying the Service object:</p> 
+<pre>kubectl describe service SERVICE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SERVICE_NAME</var></code> with the name of the relevant Service.</p> <p>To verify that the NEG controller is successfully syncing the NEG, check the status field of the <code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> resource for a condition with <code translate="no" dir="ltr">type:Synced</code>. The time of the most recent sync is in the <code translate="no" dir="ltr">status.lastSyncTime</code> field.</p> <p><code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> resources only exist in GKE version 1.18 and later.</p> <h5 id="inspect-neg-directly">Inspecting NEGs directly</h5> <p>Verify that the NEG exists by listing the NEGs in your Google Cloud project and checking for a NEG that matches the Service you created. The NEG's name has the following format:</p> <p><code translate="no" dir="ltr">k8s1-<var translate="no">CLUSTER_UID</var>-<var translate="no">NAMESPACE</var>-<var translate="no">SERVICE</var>-<var translate="no">PORT</var>-<var translate="no">RANDOM_HASH</var></code></p> <p>Use the following command to list NEGs:</p> 
+<pre>gcloud compute network-endpoint-groups list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                          LOCATION       ENDPOINT_TYPE   SIZE
+k8s1-70aa83a6-default-my-service-80-c9710a6f  ZONE_NAME      GCE_VM_IP_PORT  3
+</pre> <p>This output shows that the <code translate="no" dir="ltr">SIZE</code> of the NEG is 3, meaning that it has three endpoints which correspond to the three Pods in the Deployment.</p> <p>Identify the individual endpoints with the following command:</p> 
+<pre>gcloud compute network-endpoint-groups list-network-endpoints NEG_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code> with the name of the NEG for which you want to display the individual endpoints.</p> <p>The output shows three endpoints, each of which has a Pod's IP address and port:</p> 
+<pre>INSTANCE                                           IP_ADDRESS  PORT
+gke-cluster-3-default-pool-4cc71a15-qlpf  10.12.1.43  9376
+gke-cluster-3-default-pool-4cc71a15-qlpf  10.12.1.44  9376
+gke-cluster-3-default-pool-4cc71a15-w9nk  10.12.2.26  9376
+</pre> <h2 id="attaching-ext-https-lb">Attaching an external Application Load Balancer to standalone NEGs</h2> <p>You can use NEGs as a backend for an external Application Load Balancer using the Compute Engine API.</p> <ol> <li>
+<p>Create a firewall rule. Load balancers need to access cluster endpoints to perform health checks. This command creates a firewall rule to allow access:</p> 
+<pre>gcloud compute firewall-rules create fw-allow-health-check-and-proxy \
+   --network=NETWORK_NAME \
+   --action=allow \
+   --direction=ingress \
+   --target-tags=GKE_NODE_NETWORK_TAGS \
+   --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+   --rules=tcp:9376
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the network where the cluster runs.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GKE_NODE_NETWORK_TAGS</var></code>: the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">networking tags</a> on the GKE nodes.</li> </ul> <p>If you did not create custom network tags for your nodes, GKE automatically generates tags for you. You can look up these generated tags by running the following command:</p> 
+<pre>gcloud compute instances describe INSTANCE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code> with the name of the host Compute Engine VM instance running the GKE node. For example, the output in the previous <a href="#inspect-neg-directly">section</a> displays the instance names in the <code translate="no" dir="ltr">INSTANCE</code> column for the GKE nodes.</p> <p>For Standard clusters, you can also run <code translate="no" dir="ltr">gcloud compute instances list</code> to list all instances in your project.</p>
+</li> <li>
+<p>Create a global virtual IP address for the load balancer:</p> 
+<pre>gcloud compute addresses create hostname-server-vip \
+    --ip-version=IPV4 \
+    --global
+</pre>
+</li> <li>
+<p>Create a health check. This is used by the load balancer to detect the liveness of individual endpoints within the NEG.</p> 
+<pre>gcloud compute health-checks create http http-basic-check \
+    --use-serving-port
+</pre>
+</li> <li>
+<p>Create a <a href="https://docs.cloud.google.com/load-balancing/docs/backend-service">backend service</a> that specifies that this is a global external Application Load Balancer:</p> 
+<pre>gcloud compute backend-services create my-bes \
+    --protocol HTTP \
+    --health-checks http-basic-check \
+    --global
+</pre>
+</li> <li>
+<p>Create a <a href="https://docs.cloud.google.com/load-balancing/docs/url-map-concepts">URL map</a> and <a href="https://docs.cloud.google.com/load-balancing/docs/target-proxies">target proxy</a> for the load balancer. This example is very straightforward because the <code translate="no" dir="ltr">serve_hostname</code> app used for this guide has a single endpoint and does not feature URLs.</p> 
+<pre>gcloud compute url-maps create web-map \
+    --default-service my-bes
+</pre>
+
+<pre>gcloud compute target-http-proxies create http-lb-proxy \
+    --url-map web-map
+</pre>
+</li> <li>
+<p>Create a <a href="https://docs.cloud.google.com/load-balancing/docs/forwarding-rule-concepts">forwarding rule</a>. This is what creates the load balancer.</p> 
+<pre>gcloud compute forwarding-rules create http-forwarding-rule \
+    --address=HOSTNAME_SERVER_VIP \
+    --global \
+    --target-http-proxy=http-lb-proxy \
+    --ports=80
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">HOSTNAME_SERVER_VIP</var></code> with the IP address to use for the load balancer. If you omit <code translate="no" dir="ltr">--address</code>, GKE automatically assigns an ephemeral IP address.</p> <p>You can also <a href="https://docs.cloud.google.com/vpc/docs/reserve-static-external-ip-address">reserve a new static external IP address</a>.</p>
+</li> </ol> <h3 id="checkpoint">Checkpoint</h3> <p>These are the resources you have created so far:</p> <ul> <li>An external virtual IP address</li> <li>The forwarding rules</li> <li>The firewall rules</li> <li>The target HTTP proxy</li> <li>The URL map the Compute Engine health check</li> <li>The backend service</li> <li>The Compute Engine health check</li> </ul> <p>The relationship between these resources is shown in the following diagram:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg7.svg" alt="Relationship between the resources you've created."></p> <p>These resources together are a load balancer. In the next step you will add backends to the load balancer.</p> <p>One of the benefits of standalone NEGs demonstrated here is that the lifecycles of the load balancer and backend can be completely independent. The load balancer can continue running after the application, its services, or the GKE cluster is deleted. You can add and remove new NEGs or multiple NEGs from the load balancer without changing any of the frontend load balancer objects.</p> <h3 id="add_backends">Add backends to the load balancer</h3> <p>Use <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/backend-services/add-backend"><code translate="no" dir="ltr">gcloud compute backend-services
+add-backend</code></a> to connect the NEG to the load balancer by adding it as a backend of the <code translate="no" dir="ltr">my-bes</code> backend service:</p> 
+<pre>gcloud compute backend-services add-backend my-bes \
+    --global \
+    --network-endpoint-group=NEG_NAME \
+    --network-endpoint-group-zone=NEG_ZONE \
+    --balancing-mode RATE --max-rate-per-endpoint 5
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code>: the name of your network endpoint group. The name is either the <a href="#naming_negs">name you specified when creating the NEG</a> or an autogenerated name. If you did not specify a name for the NEG, see the following instructions to find the autogenerated name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NEG_ZONE</var></code>: the zone your network endpoint group is in. See the following instructions to find this value.</li> </ul> <p>Use this command to get the name and location of the NEG:</p> 
+<pre>gcloud compute network-endpoint-groups list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                          LOCATION       ENDPOINT_TYPE   SIZE
+k8s1-70aa83a6-default-my-service-80-c9710a6f  ZONE_NAME      GCE_VM_IP_PORT  3
+</pre> <p>In this example output, the name of the NEG is <code translate="no" dir="ltr">k8s1-70aa83a6-default-my-service-80-c9710a6f</code>.</p> <p>Multiple NEGs can be added to the same backend service. Global backend services like <code translate="no" dir="ltr">my-bes</code> can have NEG backends in different regions, while regional backend services must have backends in a single region.</p> <h3 id="validate_that_the_load_balancer_works">Validate that the load balancer works</h3> <aside class="note"><strong>Note:</strong><span> It may take a few minutes for the load balancer to provision and stabilize.</span></aside> <p>There are two ways to validate that the load balancer you set up is working:</p> <ul> <li>Verify that the health check is correctly configured and reporting healthy.</li> <li>Access the application and verify its response.</li> </ul> <h3 id="verify_health_checks">Verify health checks</h3> <p>Check that the backend service is associated with the health check and network endpoint groups, and that the individual endpoints are healthy.</p> <p>Use this command to check that the backend service is associated with your health check and your network endpoint group:</p> 
+<pre>gcloud compute backend-services describe my-bes --global
+</pre> <p>The output is similar to the following:</p> 
+<pre>backends:
+- balancingMode: RATE
+  capacityScaler: 1.0
+  group: ... /networkEndpointGroups/k8s1-70aa83a6-default-my-service-80-c9710a6f
+...
+healthChecks:
+- ... /healthChecks/http-basic-check
+...
+name: my-bes
+...
+</pre> <p>Next, check the health of the individual endpoints:</p> 
+<pre>gcloud compute backend-services get-health my-bes --global
+</pre> <p>The <code translate="no" dir="ltr">status:</code> section of the output is similar to the following:</p> 
+<pre>status:
+  healthStatus:
+  - healthState: HEALTHY
+    instance: ... gke-cluster-3-default-pool-4cc71a15-qlpf
+    ipAddress: 10.12.1.43
+    port: 50000
+  - healthState: HEALTHY
+    instance: ... gke-cluster-3-default-pool-4cc71a15-qlpf
+    ipAddress: 10.12.1.44
+    port: 50000
+  - healthState: HEALTHY
+    instance: ... gke-cluster-3-default-pool-4cc71a15-w9nk
+    ipAddress: 10.12.2.26
+    port: 50000
+</pre> <h3 id="access_the_application">Access the application</h3> <p>Access the application through the load balancer's IP address to confirm that everything is working.</p> <aside class="note"><strong>Note:</strong><span> It takes a few minutes for the load balancer to be fully programmed.</span></aside> <p>First, get the virtual IP address of the load balancer:</p> 
+<pre>gcloud compute addresses describe hostname-server-vip --global | grep "address:"
+</pre> <p>The output will include an IP address. Next, send a request to that IP address (<code translate="no" dir="ltr">34.98.102.37</code> in this example):</p> 
+<pre>curl 34.98.102.37
+</pre> <p>The response from the <code translate="no" dir="ltr">serve_hostname</code> app should be <code translate="no" dir="ltr">neg-demo-app</code>.</p> <h2 id="attaching-int-https-lb">Attaching an internal Application Load Balancer to standalone NEGs</h2> <p>You can use NEGs to configure an internal Application Load Balancer for your services running in standalone GKE Pods.</p> <h3 id="proxy-only-subnet">Configuring the proxy-only subnet</h3> <p>The <a href="https://docs.cloud.google.com/load-balancing/docs/proxy-only-subnets">proxy-only subnet</a> is for all regional internal Application Load Balancers in the load balancer's region.</p> <aside class="special"><strong>Important:</strong><span> Don't try to assign addresses from the proxy-only subnet to your load balancer's forwarding rule or backends. You assign the forwarding rule's IP address and the backend instance IP addresses from a different subnet range (or ranges) from the proxy-only subnet. Google Cloud reserves the subnet range for Google Cloud-managed proxies.</span></aside><div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>If you're using the Google Cloud console, you can wait and create the proxy-only subnet later.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Create the proxy-only subnet with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/networks/subnets/create">gcloud compute networks subnets create</a> command.</p> 
+<pre data-language="bash">gcloud compute networks subnets create proxy-only-subnet \
+    --purpose=REGIONAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=COMPUTE_REGION \
+    --network=lb-network \
+    --range=10.129.0.0/23
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">COMPUTE_REGION</var></code> with the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">Compute Engine</a> for the subnet.</p></section> <section><p class="_code-tab"><strong>API</strong></p>
+<p>Create the proxy-only subnet with the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/subnetworks/insert"><code translate="no" dir="ltr">subnetworks.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/projects/PROJECT_ID/regions/COMPUTE_REGION/subnetworks
+</pre>
+
+<pre data-language="">{
+  "name": "proxy-only-subnet",
+  "ipCidrRange": "10.129.0.0/23",
+  "network": "projects/PROJECT_ID/global/networks/lb-network",
+  "region": "projects/PROJECT_ID/regions/COMPUTE_REGION",
+  "purpose": "REGIONAL_MANAGED_PROXY",
+  "role": "ACTIVE"
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_REGION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">Compute Engine</a> for the subnet.</li> </ul></section> </div> <h3 id="configure_firewall_rules">Configuring firewall rules</h3> <p>This example uses the following firewall rules:</p> <ul> <li><p><code translate="no" dir="ltr">fw-allow-ssh</code>: An ingress rule, applicable to the instances being load balanced, that allows incoming SSH connectivity on TCP port 22 from any address. You can choose a more restrictive source IP range for this rule. For example, you can specify just the IP ranges of the system from which you initiate SSH sessions. This example uses the target tag <code translate="no" dir="ltr">allow-ssh</code> to identify the VMs to which the firewall rule applies.</p></li> <li><p><code translate="no" dir="ltr">fw-allow-health-check</code>: An ingress rule, applicable to the instances being load balanced, that allows all TCP traffic from the Google Cloud health checking systems (in <code translate="no" dir="ltr">130.211.0.0/22</code> and <code translate="no" dir="ltr">35.191.0.0/16</code>). This example uses the target tag <code translate="no" dir="ltr">load-balanced-backend</code> to identify the instances to which it should apply.</p></li> <li><p><code translate="no" dir="ltr">fw-allow-proxies</code>: An ingress rule, applicable to the instances being load balanced, that allows TCP traffic on port <code translate="no" dir="ltr">9376</code> from the internal HTTP(S) load balancer's managed proxies. This example uses the target tag <code translate="no" dir="ltr">load-balanced-backend</code> to identify the instances to which it should apply.</p></li> </ul> <p>Without these firewall rules, the <a href="https://docs.cloud.google.com/vpc/docs/firewalls#default_firewall_rules">default deny ingress</a> rule blocks incoming traffic to the backend instances.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Firewall policies</strong> page in the Google Cloud console.</p> <p><a href="https://console.cloud.google.com/net-security/firewall-manager/firewall-policies/list" target="console" class="button button-primary">Go to <strong>Firewall policies</strong></a> </p>
+</li> <li>
+<p>Click <strong>Create firewall rule</strong> <span class="material-icons" aria-hidden="true" translate="no">add_box</span> to create the rule to allow incoming SSH connections:</p> <ul> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">fw-allow-ssh</code>
+</li> <li>
+<strong>Network</strong>: <code translate="no" dir="ltr">lb-network</code>
+</li> <li>
+<strong>Direction of traffic</strong>: ingress</li> <li>
+<strong>Action on match</strong>: allow</li> <li>
+<strong>Targets</strong>: Specified target tags</li> <li>
+<strong>Target tags</strong>: <code translate="no" dir="ltr">allow-ssh</code>
+</li> <li>
+<strong>Source filter</strong>: <code translate="no" dir="ltr">IPv4 ranges</code>
+</li> <li>
+<strong>Source IPv4 ranges</strong>: <code translate="no" dir="ltr">0.0.0.0/0</code>
+</li> <li>
+<strong>Protocols and ports</strong>: <ul> <li>Select <strong>Specified protocols and ports</strong>.</li> <li>Select the <code translate="no" dir="ltr">tcp</code> checkbox and specify port <code translate="no" dir="ltr">22</code>.</li> </ul>
+</li> </ul>
+</li> <li><p>Click <strong>Create</strong>.</p></li> <li>
+<p>Click <strong>Create firewall rule</strong> <span class="material-icons" aria-hidden="true" translate="no">add_box</span> again to create the rule to allow Google Cloud health checks:</p> <ul> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">fw-allow-health-check</code>
+</li> <li>
+<strong>Network</strong>: <code translate="no" dir="ltr">lb-network</code>
+</li> <li>
+<strong>Direction of traffic</strong>: ingress</li> <li>
+<strong>Action on match</strong>: allow</li> <li>
+<strong>Targets</strong>: Specified target tags</li> <li>
+<strong>Target tags</strong>: <code translate="no" dir="ltr">load-balanced-backend</code>
+</li> <li>
+<strong>Source filter</strong>: <code translate="no" dir="ltr">IPv4 ranges</code>
+</li> <li>
+<strong>Source IPv4 ranges</strong>: <code translate="no" dir="ltr">130.211.0.0/22</code> and <code translate="no" dir="ltr">35.191.0.0/16</code>
+</li> <li>
+<strong>Protocols and ports</strong>: <ul> <li>Select <strong>Specified protocols and ports</strong>
+</li> <li>Select the <code translate="no" dir="ltr">tcp</code> checkbox and specify port <code translate="no" dir="ltr">80</code>. As a best practice, limit this rule to just the protocols and ports that match those used by your health check. If you use <code translate="no" dir="ltr">tcp:80</code> for the protocol and port, Google Cloud can contact your VMs using HTTP on port 80, but it cannot contact them using HTTPS on port 443.</li> </ul>
+</li> </ul>
+</li> <li><p>Click <strong>Create</strong>.</p></li> <li>
+<p>Click <strong>Create firewall rule</strong> <span class="material-icons" aria-hidden="true" translate="no">add_box</span> again to create the rule to allow the load balancer's proxy servers to connect the backends:</p> <ul> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">fw-allow-proxies</code>
+</li> <li>
+<strong>Network</strong>: <code translate="no" dir="ltr">lb-network</code>
+</li> <li>
+<strong>Direction of traffic</strong>: ingress</li> <li>
+<strong>Action on match</strong>: allow</li> <li>
+<strong>Targets</strong>: Specified target tags</li> <li>
+<strong>Target tags</strong>: <code translate="no" dir="ltr">load-balanced-backend</code>
+</li> <li>
+<strong>Source filter</strong>: <code translate="no" dir="ltr">IPv4 ranges</code>
+</li> <li>
+<strong>Source IPv4 ranges</strong>: <code translate="no" dir="ltr">10.129.0.0/23</code>
+</li> <li>
+<strong>Protocols and ports</strong>: <ul> <li>Select <strong>Specified protocols and ports</strong>.</li> <li>Select the <code translate="no" dir="ltr">tcp</code> checkbox and specify port <code translate="no" dir="ltr">9376</code>.</li> </ul>
+</li> </ul>
+</li> <li><p>Click <strong>Create</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Create the <code translate="no" dir="ltr">fw-allow-ssh</code> firewall rule to allow SSH connectivity to VMs with the network tag <code translate="no" dir="ltr">allow-ssh</code>. When you omit <code translate="no" dir="ltr">source-ranges</code>, Google Cloud <a href="https://docs.cloud.google.com/vpc/docs/firewalls#sources_for_the_rule">interprets the rule to mean any source</a>.</p> 
+<pre data-language="bash">gcloud compute firewall-rules create fw-allow-ssh \
+    --network=lb-network \
+    --action=allow \
+    --direction=ingress \
+    --target-tags=allow-ssh \
+    --rules=tcp:22
+</pre>
+</li> <li>
+<p>Create the <code translate="no" dir="ltr">fw-allow-health-check</code> rule to allow Google Cloud health checks. This example allows all TCP traffic from health check probers; however, you can configure a narrower set of ports to meet your needs.</p> 
+<pre data-language="bash">gcloud compute firewall-rules create fw-allow-health-check \
+    --network=lb-network \
+    --action=allow \
+    --direction=ingress \
+    --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+    --target-tags=load-balanced-backend \
+    --rules=tcp
+</pre>
+</li> <li>
+<p>Create the <code translate="no" dir="ltr">fw-allow-proxies</code> rule to allow the internal HTTP(S) load balancer's proxies to connect to your backends.</p> 
+<pre data-language="bash">gcloud compute firewall-rules create fw-allow-proxies \
+    --network=lb-network \
+    --action=allow \
+    --direction=ingress \
+    --source-ranges=10.129.0.0/23 \
+    --target-tags=load-balanced-backend \
+    --rules=tcp:9376
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>API</strong></p>
+<p>Create the <code translate="no" dir="ltr">fw-allow-ssh</code> firewall rule by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/insert"><code translate="no" dir="ltr">firewalls.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/global/firewalls
+</pre>
+
+<pre data-language="">{
+  "name": "fw-allow-ssh",
+  "network": "projects/PROJECT_ID/global/networks/lb-network",
+  "sourceRanges": [
+    "0.0.0.0/0"
+  ],
+  "targetTags": [
+    "allow-ssh"
+  ],
+  "allowed": [
+   {
+     "IPProtocol": "tcp",
+     "ports": [
+       "22"
+     ]
+   }
+  ],
+ "direction": "INGRESS"
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p> <p>Create the <code translate="no" dir="ltr">fw-allow-health-check</code> firewall rule by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/insert"><code translate="no" dir="ltr">firewalls.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/global/firewalls
+</pre>
+
+<pre data-language="">{
+  "name": "fw-allow-health-check",
+  "network": "projects/PROJECT_ID/global/networks/lb-network",
+  "sourceRanges": [
+    "130.211.0.0/22",
+    "35.191.0.0/16"
+  ],
+  "targetTags": [
+    "load-balanced-backend"
+  ],
+  "allowed": [
+    {
+      "IPProtocol": "tcp"
+    }
+  ],
+  "direction": "INGRESS"
+}
+</pre> <p>Create the <code translate="no" dir="ltr">fw-allow-proxies</code> firewall rule to allow TCP traffic within the proxy subnet the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/insert"><code translate="no" dir="ltr">firewalls.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/global/firewalls
+</pre>
+
+<pre data-language="">{
+  "name": "fw-allow-proxies",
+  "network": "projects/PROJECT_ID/global/networks/lb-network",
+  "sourceRanges": [
+    "10.129.0.0/23"
+  ],
+  "targetTags": [
+    "load-balanced-backend"
+  ],
+  "allowed": [
+    {
+      "IPProtocol": "tcp",
+      "ports": [
+        "9376"
+      ]
+    }
+  ],
+  "direction": "INGRESS"
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p></section> </div> <h3 id="configuring_the_load_balancer">Configuring the load balancer</h3> <p>For the forwarding rule's IP address, use a backend subnet. If you try to use the <a href="#proxy-only-subnet">proxy-only subnet</a>, forwarding rule creation fails.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<h3 id="select_a_load_balancer_type">Select a load balancer type</h3> <ol> <li>Go to the <strong>Create a load balancer</strong> page in the Google Cloud console. <a href="https://console.cloud.google.com/networking/loadbalancing/add" target="console" class="button button-primary">Go to <strong>Create a load balancer</strong></a> </li> <li>Under <strong>HTTP(S) Load Balancing</strong>, click <strong>Start configuration</strong>.</li> <li>Select <em>Only between my VMs</em>. This setting means that the load balancer is internal.</li> <li>Click <strong>Continue</strong>.</li> </ol> <h3 id="prepare_the_load_balancer">Prepare the load balancer</h3> <ol> <li>For the <strong>Name</strong> of the load balancer, enter <code translate="no" dir="ltr">l7-ilb-gke-map</code>.</li> <li>For the <strong>Region</strong>, select the region where you created the subnet.</li> <li>For the <strong>Network</strong>, select <code translate="no" dir="ltr">lb-network</code>.</li> </ol> <h3 id="reserve_a_proxy-only_subnet">Reserve a proxy-only subnet</h3> <aside class="note"><strong>Note:</strong><span> If you've already reserved a proxy-only subnet, <a href="#proxy-only-subnet">as instructed</a>, the <strong>Reserve a Subnet</strong> button isn't displayed, so you skip this section and continue with the steps in <a href="#config-backend-service">Configure the backend service</a>.</span></aside> <p>Reserve a proxy-only subnet:</p> <ol> <li>Click <strong>Reserve a Subnet</strong>.</li> <li>For the <strong>Name</strong>, enter <code translate="no" dir="ltr">proxy-only-subnet</code>.</li> <li>For the <strong>IP address range</strong>, enter <code translate="no" dir="ltr">10.129.0.0/23</code>.</li> <li>Click <strong>Add</strong>.</li> </ol> <h3 id="config-backend-service">Configure the backend service</h3> <ol> <li>Click <strong>Backend configuration</strong>.</li> <li>From the <strong>Create or select backend services</strong> menu, select <strong>Create a backend service</strong>.</li> <li>Set the <strong>Name</strong> of the backend service to <code translate="no" dir="ltr">l7-ilb-gke-backend-service</code>.</li> <li>For <strong>Backend type</strong>, select <strong>Network endpoint groups</strong>.</li> <li>In the <strong>New backend</strong> card of the <strong>Backends</strong> section: <ol> <li>Set the <strong>Network endpoint group</strong> to the NEG was created by GKE. To get the NEG name, see <a href="#validate-neg-creation">Validate NEG creation</a>.</li> <li>For <strong>Maximum RPS</strong>, specify a maximum rate of <code translate="no" dir="ltr">5</code> RPS per endpoint. Google Cloud will exceed this maximum if necessary.</li> <li>Click <strong>Done</strong>.</li> </ol>
+</li> <li>From the <strong>Health check</strong> drop-down list, select <strong>Create a health check</strong> and then specify the following parameters: <ol> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">l7-ilb-gke-basic-check</code>
+</li> <li>
+<strong>Protocol</strong>: HTTP</li> <li>
+<strong>Port specification</strong>: <em>Serving port</em>
+</li> <li>Click <strong>Save and Continue</strong>.</li> </ol>
+</li> <li>Click <strong>Create</strong>.</li> </ol> <h3 id="configure_the_url_map">Configure the URL map</h3> <ol> <li>Click <strong>Routing rules</strong>. Ensure that the <em>l7-ilb-gke-backend-service</em> is the only backend service for any unmatched host and any unmatched path.</li> </ol> <h3 id="configure_the_frontend">Configure the frontend</h3> <p>Click <strong>Frontend configuration</strong> and perform the following steps:</p> <p><strong>For HTTP:</strong></p> <ol> <li>Click <strong>Frontend configuration</strong>.</li> <li>Click <strong>Add frontend IP and port</strong>.</li> <li>Set the <strong>Name</strong> to <em>l7-ilb-gke-forwarding-rule</em>.</li> <li>Set the <strong>Protocol</strong> to <em>HTTP</em>.</li> <li>Set the <strong>Subnetwork</strong> the name of your cluster's subnet.</li> <li>Under <strong>Internal IP</strong>, select <em>Reserve a static internal IP address</em>.</li> <li>In the panel that appears provide the following details: <ol> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">l7-ilb-gke-ip</code>
+</li> <li>In the <strong>Static IP address</strong> section, select <em>Let me choose</em>.</li> <li>In the <strong>Custom IP address</strong> section, enter <code translate="no" dir="ltr">10.1.2.199</code>.</li> <li>Click <strong>Reserve</strong>.</li> </ol>
+</li> <li>Set the <strong>Port</strong> to <code translate="no" dir="ltr">80</code>.</li> <li>Click <strong>Done</strong>.</li> </ol> <p><strong>For HTTPS:</strong></p> <p>If you are using HTTPS between the client and the load balancer, you need one or more SSL certificate resources to configure the proxy. See <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates">SSL Certificates</a> for information on how to create SSL certificate resources. Google-managed certificates aren't supported with internal HTTP(S) load balancers.</p> <ol> <li>Click <strong>Frontend configuration</strong>.</li> <li>Click <strong>Add frontend IP and port</strong>.</li> <li>In the <strong>Name</strong> field, enter <code translate="no" dir="ltr">l7-ilb-gke-forwarding-rule</code>.</li> <li>In the <strong>Protocol</strong> field, select <code translate="no" dir="ltr">HTTPS (includes HTTP/2)</code>.</li> <li>Set the <strong>Subnet</strong> the name of your cluster's subnet.</li> <li>Under <strong>Internal IP</strong>, select <em>Reserve a static internal IP address</em>.</li> <li>In the panel that appears provide the following details: <ol> <li>
+<strong>Name</strong>: <code translate="no" dir="ltr">l7-ilb-gke-ip</code>
+</li> <li>In the <strong>Static IP address</strong> section, select <em>Let me choose</em>.</li> <li>In the <strong>Custom IP address</strong> section, enter <code translate="no" dir="ltr">10.1.2.199</code>.</li> <li>Click <strong>Reserve</strong>.</li> </ol>
+</li> <li>Ensure that the <strong>Port</strong> is set to <code translate="no" dir="ltr">443</code>, to allow HTTPS traffic.</li> <li>Click the <strong>Certificate</strong> drop-down list. <ol> <li>If you already have a <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates#certificate-types">self-managed SSL certificate resource</a> you want to use as the primary SSL certificate, select it from the drop-down menu.</li> <li>Otherwise, select <strong>Create a new certificate</strong>. <ol> <li>Fill in a <strong>Name</strong> of <code translate="no" dir="ltr">l7-ilb-cert</code>.</li> <li>In the appropriate fields upload your PEM-formatted files: <ul> <li><strong>Public key certificate</strong></li> <li><strong>Certificate chain</strong></li> <li><strong>Private key</strong></li> </ul>
+</li> <li>Click <strong>Create</strong>.</li> </ol>
+</li> </ol>
+</li> <li>To add certificate resources in addition to the primary SSL certificate resource: <ol> <li>Click <strong>Add certificate</strong>.</li> <li>Select a certificate from the <strong>Certificates</strong> list or click <strong>Create a new certificate</strong> and follow the instructions.</li> </ol>
+</li> <li>Click <strong>Done</strong>.</li> </ol> <h3 id="complete_the_configuration">Complete the configuration</h3> <p>Click <strong>Create</strong>.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Define the HTTP health check with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/health-checks/create/http">gcloud compute health-checks create http</a> command.</p> 
+<pre data-language="bash">gcloud compute health-checks create http l7-ilb-gke-basic-check \
+    --region=COMPUTE_REGION \
+    --use-serving-port
+</pre>
+</li> <li>
+<p>Define the backend service with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/backend-services/create">gcloud compute backend-services create</a> command.</p> 
+<pre data-language="bash">gcloud compute backend-services create l7-ilb-gke-backend-service \
+    --load-balancing-scheme=INTERNAL_MANAGED \
+    --protocol=HTTP \
+    --health-checks=l7-ilb-gke-basic-check \
+    --health-checks-region=COMPUTE_REGION \
+    --region=COMPUTE_REGION
+</pre>
+</li> <li>
+<p>Set the <code translate="no" dir="ltr">DEPLOYMENT_NAME</code> variable:</p> 
+<pre data-language="bash">export DEPLOYMENT_NAME=NEG_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code> with the name of the NEG.</p>
+</li> <li>
+<p>Add NEG backends to the backend service with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/backend-services/add-backend">gcloud compute backend-services add-backend</a> command.</p> 
+<pre data-language="bash">gcloud compute backend-services add-backend l7-ilb-gke-backend-service \
+    --network-endpoint-group=$DEPLOYMENT_NAME \
+    --network-endpoint-group-zone=COMPUTE_ZONE-b \
+    --region=COMPUTE_REGION \
+    --balancing-mode=RATE \
+    --max-rate-per-endpoint=5
+</pre>
+</li> <li>
+<p>Create the URL map with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/url-maps/create">gcloud compute url-maps create</a> command.</p> 
+<pre data-language="bash">gcloud compute url-maps create l7-ilb-gke-map \
+    --default-service=l7-ilb-gke-backend-service \
+    --region=COMPUTE_REGION
+</pre>
+</li> <li>
+<p>Create the target proxy.</p> <p><strong>For HTTP:</strong></p> <p>Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/target-http-proxies/create">gcloud compute target-http-proxies create</a> command.</p> 
+<pre data-language="bash">gcloud compute target-http-proxies create l7-ilb-gke-proxy \
+    --url-map=l7-ilb-gke-map \
+    --url-map-region=COMPUTE_REGION \
+    --region=COMPUTE_REGION
+</pre> <p><strong>For HTTPS:</strong></p> <p>See <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates">SSL Certificates</a> for information on how to create SSL certificate resources. Google-managed certificates aren't supported with internal HTTP(S) load balancers.</p> <p>Assign your filepaths to variable names.</p> 
+<pre data-language="bash">export LB_CERT=PATH_TO_PEM_FORMATTED_FILE
+</pre>
+
+<pre data-language="bash">export LB_PRIVATE_KEY=PATH_TO_PEM_FORMATTED_FILE
+</pre> <p>Create a regional SSL certificate using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/ssl-certificates/create">gcloud compute ssl-certificates create</a> command.</p> <p><a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/ssl-certificates/create">gcloud compute ssl-certificates create</a></p> 
+<pre data-language="bash">gcloud compute ssl-certificates create l7-ilb-cert \
+    --certificate=$LB_CERT \
+    --private-key=$LB_PRIVATE_KEY \
+    --region=COMPUTE_REGION
+</pre> <p>Use the regional SSL certificate to create a target proxy with the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/target-https-proxies/create">gcloud compute target-https-proxies create</a> command.</p> 
+<pre data-language="bash">gcloud compute target-https-proxies create l7-ilb-gke-proxy \
+    --url-map=l7-ilb-gke-map \
+    --region=COMPUTE_REGION \
+    --ssl-certificates=l7-ilb-cert
+</pre>
+</li> <li>
+<p>Create the forwarding rule.</p> <p>For custom networks, you must reference the subnet in the forwarding rule. Note that this is the VM subnet, not the proxy subnet.</p> <p><strong>For HTTP:</strong></p> <p>Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/forwarding-rules/create">gcloud compute forwarding-rules create</a> command with the correct flags.</p> 
+<pre data-language="bash">gcloud compute forwarding-rules create l7-ilb-gke-forwarding-rule \
+    --load-balancing-scheme=INTERNAL_MANAGED \
+    --network=lb-network \
+    --subnet=SUBNET_NAME \
+    --address=10.1.2.199 \
+    --ports=80 \
+    --region=COMPUTE_REGION \
+    --target-http-proxy=l7-ilb-gke-proxy \
+    --target-http-proxy-region=COMPUTE_REGION
+</pre> <p><strong>For HTTPS:</strong></p> <p>Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/forwarding-rules/create">gcloud compute forwarding-rules create</a> command with the correct flags.</p> 
+<pre data-language="bash">gcloud compute forwarding-rules create l7-ilb-gke-forwarding-rule \
+    --load-balancing-scheme=INTERNAL_MANAGED \
+    --network=lb-network \
+    --subnet=SUBNET_NAME  \
+    --address=10.1.2.199 \
+    --ports=443 \
+    --region=COMPUTE_REGION \
+    --target-https-proxy=l7-ilb-gke-proxy \
+    --target-https-proxy-region=COMPUTE_REGION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code> with the name of your cluster's subnet.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>API</strong></p>
+<p>Create the health check by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionHealthChecks/insert"><code translate="no" dir="ltr">regionHealthChecks.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/regions/COMPUTE_REGION/healthChecks
+</pre>
+
+<pre data-language="">{
+   "name": "l7-ilb-gke-basic-check",
+   "type": "HTTP",
+   "httpHealthCheck": {
+     "portSpecification": "USE_SERVING_PORT"
+   }
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the project ID.</p> <p>Create the regional backend service by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionBackendServices/insert"><code translate="no" dir="ltr">regionBackendServices.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/regions/COMPUTE_REGION/backendServices
+</pre>
+
+<pre data-language="">{
+  "name": "l7-ilb-gke-backend-service",
+  "backends": [
+    {
+      "group": "https://www.googleapis.com/compute/v1/projects/PROJECT_ID/zones/COMPUTE_ZONE/networkEndpointGroups/NEG_NAME",
+      "balancingMode": "RATE",
+      "maxRatePerEndpoint": 5
+    }
+  ],
+  "healthChecks": [
+    "projects/PROJECT_ID/regions/COMPUTE_REGION/healthChecks/l7-ilb-gke-basic-check"
+  ],
+  "loadBalancingScheme": "INTERNAL_MANAGED"
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code>: the name of the NEG.</li> </ul> <p>Create the URL map by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionUrlMaps/insert"><code translate="no" dir="ltr">regionUrlMaps.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/regions/COMPUTE_REGION/urlMaps
+</pre>
+
+<pre data-language="">{
+  "name": "l7-ilb-gke-map",
+  "defaultService": "projects/PROJECT_ID/regions/COMPUTE_REGION/backendServices/l7-ilb-gke-backend-service"
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the project ID.</p> <p>Create the target HTTP proxy by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/regionTargetHttpProxies/insert"><code translate="no" dir="ltr">regionTargetHttpProxies.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/regions/COMPUTE_REGION/targetHttpProxy
+</pre>
+
+<pre data-language="">{
+  "name": "l7-ilb-gke-proxy",
+  "urlMap": "projects/PROJECT_ID/global/urlMaps/l7-ilb-gke-map",
+  "region": "COMPUTE_REGION"
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the project ID.</p> <p>Create the forwarding rule by making a <code translate="no" dir="ltr">POST</code> request to the <a href="https://docs.cloud.google.com/compute/docs/reference/rest/v1/forwardingRules/insert"><code translate="no" dir="ltr">forwardingRules.insert</code></a> method.</p> 
+<pre data-language="">POST https://compute.googleapis.com/compute/v1/projects/PROJECT_ID/regions/COMPUTE_REGION/forwardingRules
+</pre>
+
+<pre data-language="">{
+  "name": "l7-ilb-gke-forwarding-rule",
+  "IPAddress": "10.1.2.199",
+  "IPProtocol": "TCP",
+  "portRange": "80-80",
+  "target": "projects/PROJECT_ID/regions/COMPUTE_REGION/targetHttpProxies/l7-ilb-gke-proxy",
+  "loadBalancingScheme": "INTERNAL_MANAGED",
+  "subnetwork": "projects/PROJECT_ID/regions/COMPUTE_REGION/subnetworks/SUBNET_NAME",
+  "network": "projects/PROJECT_ID/global/networks/lb-network",
+  "networkTier": "PREMIUM",
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the project ID.</p></section> </div> <h3 id="test_client">Testing</h3> <p>Create a VM instance in the zone to test connectivity:</p> 
+<pre>gcloud compute instances create l7-ilb-client \
+    --image-family=debian-9 \
+    --image-project=debian-cloud \
+    --zone=COMPUTE_ZONE \
+    --network=lb-network \
+    --subnet=SUBNET_NAME \
+    --tags=l7-ilb-client,allow-ssh
+</pre> <p>Sign in to the client instance to check that HTTP(S) services on the backends are reachable using the internal Application Load Balancer's forwarding rule IP address, and traffic is being load balanced among endpoints in the NEG.</p> <p>Connect to each client instance using SSH:</p> 
+<pre>gcloud compute ssh l7-ilb-client \
+    --zone=COMPUTE_ZONE-b
+</pre> <p>Verify that the IP is serving its hostname:</p> 
+<pre>curl 10.1.2.199
+</pre> <p>For HTTPS testing, run the following command:</p> 
+<pre>curl -k -s 'https://test.example.com:443' --connect-to test.example.com:443:10.1.2.199:443
+</pre> <p>The <code translate="no" dir="ltr">-k</code> flag causes <code translate="no" dir="ltr">curl</code> to skip certificate validation.</p> <p>Run 100 requests and confirm that they are load balanced.</p> <p><strong>For HTTP:</strong></p> 
+<pre>{
+RESULTS=
+for i in {1..100}
+do
+    RESULTS="$RESULTS:$(curl --silent 10.1.2.199)"
+done
+echo "***"
+echo "*** Results of load-balancing to 10.1.2.199: "
+echo "***"
+echo "$RESULTS" | tr ':' '\n' | grep -Ev "^$" | sort | uniq -c
+echo
+}
+</pre> <p><strong>For HTTPS:</strong></p> 
+<pre>{
+RESULTS=
+for i in {1..100}
+do
+    RESULTS="$RESULTS:$(curl -k -s 'https://test.example.com:443' --connect-to test.example.com:443:10.1.2.199:443
+)"
+done
+echo "***"
+echo "*** Results of load-balancing to 10.1.2.199: "
+echo "***"
+echo "$RESULTS" | tr ':' '\n' | grep -Ev "^$" | sort | uniq -c
+echo
+}
+</pre> <h2 id="attach-ext-tcp-lb">Attach an external proxy Network Load Balancer to standalone NEGs</h2> <p>You can use standalone NEGs to load balance directly to containers with the <a href="https://docs.cloud.google.com/load-balancing/docs/tcp">external proxy Network Load Balancer</a> which is not supported natively by Kubernetes or GKE. Proxy Network Load Balancers are intended for TCP traffic only, with or without SSL. For HTTP(S) traffic, we recommend that you use an Application Load Balancer instead.</p> <ol> <li>
+<p>Create a firewall rule to allow health checks.</p> <p>Load balancers need to access cluster endpoints to perform health checks. The following command creates a firewall rule to allow access:</p> 
+<pre>gcloud compute firewall-rules create allow-tcp-lb-and-health \
+   --network=NETWORK_NAME \
+   --target-tags=GKE_NODE_NETWORK_TAGS \
+   --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+   --allow tcp:9376
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the network where the cluster runs.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GKE_NODE_NETWORK_TAGS</var></code>: the <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">networking tags</a> on the GKE nodes.</li> </ul> <p>If you didn't create custom network tags for your nodes, GKE automatically generates tags for you. You can look up these generated tags by running the following command:</p> 
+<pre>gcloud compute instances describe INSTANCE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code> with the name of the host Compute Engine VM instance running the GKE node. For example, the output in the <a href="#inspect-neg-directly">Inspect NEGs directly</a> section displays the instance names in the <code translate="no" dir="ltr">INSTANCE</code> column for the GKE nodes.</p> <p>For Standard clusters, you can also run the <code translate="no" dir="ltr">gcloud compute instances list</code> to list all instances in your project.</p> <p>For Autopilot clusters, target the cluster service account instead of network tags.</p> <p>Replace the <code translate="no" dir="ltr">--target-tags=<var translate="no">GKE_NODE_NETWORK_TAGS</var></code> flag with <code translate="no" dir="ltr">--target-service-accounts=<var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>. We recommended that you use a custom <a href="service-accounts#minimum_permissions">minimally-privileged</a> service account for the cluster.</p>
+</li> <li>
+<p>Create a global virtual IP address for the load balancer:</p> 
+<pre>gcloud compute addresses create tcp-lb-static-ipv4 \
+   --ip-version=IPV4 \
+   --global
+</pre>
+</li> <li>
+<p>Define a health check for backend endpoints.</p> <p>The load balancer uses health checks to detect the liveness of individual endpoints within the NEG.</p> 
+<pre>gcloud compute health-checks create tcp my-tcp-health-check \
+   --use-serving-port
+</pre>
+</li> <li>
+<p>Create a backend service with session affinity.</p> <p>This <a href="https://docs.cloud.google.com/load-balancing/docs/backend-service">backend service</a> specifies that this is a external proxy Network Load Balancer with <a href="https://docs.cloud.google.com/load-balancing/docs/backend-service#client_ip_affinity"><code translate="no" dir="ltr">CLIENT_IP</code></a> session affinity:</p> 
+<pre>gcloud compute backend-services create my-tcp-lb \
+   --load-balancing-scheme EXTERNAL_MANAGED \
+   --global-health-checks \
+   --global \
+   --protocol TCP \
+   --health-checks my-tcp-health-check \
+   --timeout 5m \
+   --session-affinity=CLIENT_IP
+</pre>
+</li> <li>
+<p>Create a <a href="https://docs.cloud.google.com/load-balancing/docs/target-proxies">target TCP proxy</a> for the load balancer.</p> <p>If you want to turn on the <a href="https://docs.cloud.google.com/load-balancing/docs/tcp/set-up-global-ext-proxy-tcp#proxy-protocol">proxy header</a>, set it to <code translate="no" dir="ltr">PROXY_V1</code> instead of <code translate="no" dir="ltr">NONE</code>.</p> 
+<pre>gcloud compute target-tcp-proxies create my-tcp-lb-target-proxy \
+    --backend-service my-tcp-lb \
+    --proxy-header NONE
+</pre>
+</li> <li>
+<p>Create a <a href="https://docs.cloud.google.com/load-balancing/docs/forwarding-rule-concepts">forwarding rule</a> to route traffic.</p> <p>This forwarding rule creates the load balancer.</p> 
+<pre> gcloud compute forwarding-rules create my-tcp-lb-ipv4-forwarding-rule \
+    --load-balancing-scheme EXTERNAL_MANAGED \
+    --global \
+    --target-tcp-proxy my-tcp-lb-target-proxy \
+    --address tcp-lb-static-ipv4 \
+    --ports 80
+</pre>
+</li> </ol> <h3 id="verify_load_balancer_resources_creation">Verify load balancer resources creation</h3> <p>You have created the following resources:</p> <ul> <li>An external virtual IP address</li> <li>The forwarding rule</li> <li>The firewall rule</li> <li>The target proxy</li> <li>The backend service</li> <li>The Compute Engine health check</li> </ul> <p>The external virtual IP address is connected to the forwarding rule, which directs traffic that is allowed by the firewall rule to the target proxy. The target proxy then communicates with the backend service, which is periodically checked by the health check. The relationship between these resources is shown in the following diagram:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg8.svg" alt="Relationship between the resources you've created."></p> <p>These resources together are a load balancer. In the next step, you will add backends to the load balancer.</p> <p>One of the benefits of the standalone NEGs demonstrated here is that the lifecycles of the load balancer and backend can be completely independent. The load balancer can continue running after the application, its services, or the GKE cluster is deleted. You can add and remove new NEGs or multiple NEGs from the load balancer without changing any of the frontend load balancer objects.</p> <h3 id="add_tcp_backends">Add standalone NEGs as backends to the load balancer</h3> <p>Use <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/backend-services/add-backend"><code translate="no" dir="ltr">gcloud compute backend-services
+add-backend</code></a> to connect the NEG to the load balancer by adding as a backend of the <code translate="no" dir="ltr">my-tcp-lb</code> backend service:</p> 
+<pre>gcloud compute backend-services add-backend my-tcp-lb \
+    --global \
+    --network-endpoint-group=NEG_NAME \
+    --network-endpoint-group-zone=NEG_ZONE \
+    --balancing-mode CONNECTION \
+    --max-connections 100
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NEG_NAME</var></code>: the name of your network endpoint group. The name is either the <a href="#naming_negs">name you specified when creating the NEG</a> or an autogenerated name. If you did not specify a name for the NEG, see the following instructions to find the autogenerated name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NEG_ZONE</var></code>: the zone your network endpoint group is in. See the following instructions to find this value.</li> </ul> <p>To get the name and location of the NEGs, use this command:</p> 
+<pre>gcloud compute network-endpoint-groups list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME: k8s1-65a95e90-default-neg-demo-svc-80-663a85e4
+LOCATION: us-central1-a
+ENDPOINT_TYPE: GCE_VM_IP_PORT
+SIZE: 3
+</pre> <p>In this example output, the name of the NEG is <code translate="no" dir="ltr">kk8s1-65a95e90-default-neg-demo-svc-80-663a85e4</code> and zone is <code translate="no" dir="ltr">us-central1-a</code>.</p> <p>Multiple NEGs can be added to the same backend service. Global backend services like <code translate="no" dir="ltr">my-tcp-lb</code> can have NEG backends in different regions, while regional backend services must have backends in a single region.</p> <h3 id="verify_the_load_balancer_configuration_and_connectivity">Verify the load balancer configuration and connectivity</h3> <aside class="note"><strong>Note:</strong><span> It might take a few minutes for the load balancer to provision and stabilize.</span></aside> <p>There are two ways to validate that the load balancer you set up is working:</p> <ul> <li>Verify that the health check is correctly configured and is reporting as healthy.</li> <li>Access the application and verify its response.</li> </ul> <h3 id="verify_health_checks_2">Verify health checks</h3> <p>Check that the backend service is associated with the health check and network endpoint groups, and that the individual endpoints are healthy.</p> <p>To check that the backend service is associated with your health check and your network endpoint group, use this command:</p> 
+<pre>gcloud compute backend-services describe my-tcp-lb --global
+</pre> <p>The output is similar to the following:</p> 
+<pre>backends:
+- balancingMode: CONNECTION
+  group: ... /networkEndpointGroups/k8s1-65a95e90-default-neg-demo-svc-80-663a85e4
+  maxConnections: 100
+...
+healthChecks:
+- ... /healthChecks/my-tcp-health-check
+...
+name: my-tcp-lb
+...
+</pre> <p>Next, check the health of the individual endpoints:</p> 
+<pre>gcloud compute backend-services get-health my-tcp-lb --global
+</pre> <p>The <code translate="no" dir="ltr">status:</code> section of the output is similar to the following:</p> 
+<pre>status:
+  healthStatus:
+  - healthState: HEALTHY
+    instance: ... gke-cluster-3-default-pool-4cc71a15-qlpf
+    ipAddress: 10.12.1.43
+    port: 50000
+  - healthState: HEALTHY
+    instance: ... gke-cluster-3-default-pool-4cc71a15-qlpf
+    ipAddress: 10.12.1.44
+    port: 50000
+  - healthState: HEALTHY
+    instance: ... gke-cluster-3-default-pool-4cc71a15-w9nk
+    ipAddress: 10.12.2.26
+    port: 50000
+</pre> <h3 id="verify-app-connectivity">Verify application connectivity</h3> <p>To verify that the load balancer is functioning correctly, access the application through the external IP address of the load balancer.</p> <aside class="note"><strong>Note:</strong><span> Allow several minutes for the load balancer to be fully programmed.</span></aside> <ol> <li>
+<p><strong>Get the external IP address of the load balancer:</strong></p> <p>To retrieve the external IP address that you reserved for the load balancer, use the following command:</p> 
+<pre>gcloud compute addresses describe tcp-lb-static-ipv4 --global | grep "address:"
+</pre> <p>This command outputs the IP address.</p>
+</li> <li>
+<p><strong>Send a request to the IP address:</strong></p> <p>Use the <code translate="no" dir="ltr">curl</code> command to send a request to the external IP address.</p> 
+<pre>curl EXTERNAL_IP_ADDRESS
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">EXTERNAL_IP_ADDRESS</var></code> with the IP address that you obtained in the previous step:</p> <p>The response from the <code translate="no" dir="ltr">serve_hostname</code> application should begin with <code translate="no" dir="ltr">neg-demo-app</code>.</p>
+</li> </ol> <h2 id="implementing_heterogeneous_services_vms_and_containers">Implementing heterogeneous services (VMs and containers)</h2> <p>Load balancers can be frontends to mixed Kubernetes and non-Kubernetes workloads. This could be part of a migration from VMs to containers or a permanent architecture that benefits from a shared load balancer. This can be achieved by creating load balancers that target different kinds of backends including standalone NEGs.</p> <h3 id="vms_and_containers_in_the_same_backend_service">VMs and containers in the same backend service</h3> <p>This example shows how to create a NEG that points at an existing VM running a workload, and how to add this NEG as another backend of an existing <code translate="no" dir="ltr">backendService</code>. This way a single load balancer balances between VMs and GKE containers.</p> <p>This examples extends the <a href="#how_to">previous example</a> that uses an external HTTP load balancer.</p> <p>Because all endpoints are grouped by the same <code translate="no" dir="ltr">backendService</code>, the VM and container endpoints are considered the <strong>same service</strong>. This means the host or path matching will treat all backends identically based on the URL map rules.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg4.svg" alt="The described architecture. The load balancer created earlier points to two NEGs, the NEG for containers created earlier and a new NEG containing a VM's IP address."></p> <p>When you use a NEG as a backend for a backend service, all other backends in that backend service must also be NEGs. You can't use instance groups and NEGs as backends in the same backend service. Additionally, containers and VMs cannot exist as endpoints within the same NEG, so they must always be configured with separate NEGs.</p> <ol> <li>
+<p>Deploy a VM to Compute Engine with this command:</p> 
+<pre>gcloud compute instances create vm1 \
+    --zone=COMPUTE_ZONE \
+    --network=NETWORK \
+    --subnet=SUBNET \
+    --image-project=cos-cloud \
+    --image-family=cos-stable --tags=vm-neg-tag
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_ZONE</var></code>: the name of the zone.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK</var></code>: the name of the network.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET</var></code>: the name of the subnet associated with the network.</li> </ul>
+</li> <li>
+<p>Deploy an application to the VM:</p> 
+<pre>gcloud compute ssh vm1 \
+    --zone=COMPUTE_ZONE \
+    --command="docker run -d --rm --network=host registry.k8s.io/e2e-test-images/agnhost:2.40 serve-hostname --port=9376 &amp;&amp; sudo iptables -P INPUT ACCEPT"
+</pre> <p>This command deploys to the VM the same example application used in the earlier example. For simplicity, the application is run as a Docker container but this is not essential. The <code translate="no" dir="ltr">iptables</code> command is required to allow firewall access to the running container.</p>
+</li> <li>
+<p>Validate that the application is serving on port 9376 and reporting that it is running on vm1:</p> 
+<pre>gcloud compute ssh vm1 \
+    --zone=COMPUTE_ZONE \
+    --command="curl -s localhost:9376"
+</pre> <p>The server should respond with <code translate="no" dir="ltr">vm1</code>.</p>
+</li> <li>
+<p>Create a NEG to use with the VM endpoint. Containers and VMs can both be NEG endpoints, but a single NEG can't have both VM and container endpoints.</p> 
+<pre>gcloud compute network-endpoint-groups create vm-neg \
+    --subnet=SUBNET \
+    --zone=COMPUTE_ZONE
+</pre>
+</li> <li>
+<p>Attach the VM endpoint to the NEG:</p> 
+<pre>gcloud compute network-endpoint-groups update vm-neg \
+    --zone=COMPUTE_ZONE \
+    --add-endpoint="instance=vm1,ip=VM_PRIMARY_IP,port=9376"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">VM_PRIMARY_IP</var></code> with the VM's primary IP address.</p>
+</li> <li>
+<p>Confirm that the NEG has the VM endpoint:</p> 
+<pre>gcloud compute network-endpoint-groups list-network-endpoints vm-neg \
+    --zone COMPUTE_ZONE
+</pre>
+</li> <li>
+<p>Attach the NEG to the backend service using the <a href="#add_backends">same command that you used to add a container backend</a>:</p> 
+<pre>gcloud compute backend-services add-backend my-bes
+    --global \
+    --network-endpoint-group vm-neg \
+    --network-endpoint-group-zone COMPUTE_ZONE \
+    --balancing-mode RATE --max-rate-per-endpoint 10
+</pre>
+</li> <li>
+<p>Open firewall to allow the VM's health check:</p> 
+<pre>gcloud compute firewall-rules create fw-allow-health-check-to-vm1 \
+    --network=NETWORK \
+    --action=allow \
+    --direction=ingress \
+    --target-tags=vm-neg-tag \
+    --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+    --rules=tcp:9376
+</pre>
+</li> <li>
+<p>Validate that the load balancer is forwarding traffic to both the new vm1 backend and the existing container backend by sending test traffic:</p> 
+<pre>for i in `seq 1 100`; do curl ${VIP};echo; done
+</pre> <p>You should see responses from both the container (<code translate="no" dir="ltr">neg-demo-app</code>) and VM (<code translate="no" dir="ltr">vm1</code>) endpoints.</p>
+</li> </ol> <h3 id="vms_and_containers_for_different_backend_services">VMs and containers for different backend services</h3> <p>This example shows how to create a NEG that points at an existing VM running a workload, and how to add this NEG as the backend to a new <code translate="no" dir="ltr">backendService</code>. This is useful for the case where the containers and VMs are different services but need to share the same L7 load balancer, such as if the services share the same IP address or domain name.</p> <p>This examples extends the <a href="#how_to">previous example</a> that has a VM backend in the same backend service as the container backend. This example reuses that VM.</p> <p>Because the container and VM endpoints are grouped in separate backend services, they are considered <strong>different services</strong>. This means that the URL map will match backends and direct traffic to the VM or container based on the hostname.</p> <p>The following diagram shows how a single virtual IP address corresponds to two host names, which in turn correspond to a container-based backend service and a VM-based backend service.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg5.svg" alt="A single virtual IP address mapping to two hostnames, one hostname for a container-based backend and one for a VM-based backend."></p> <p>The following diagram shows the architecture described in the previous section:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/sneg6.svg" alt="The architecture has two NEGs, one for the service implemented with containers
+and another for the service implemented with VMs. There is a backend service
+object for each NEG. The URL Map object directs traffic to the correct backend
+service based on the requested URL."></p> <ol> <li>
+<p>Create a new backend service for the VM:</p> 
+<pre>gcloud compute backend-services create my-vm-bes \
+   --protocol HTTP \
+   --health-checks http-basic-check \
+   --global
+</pre>
+</li> <li>
+<p>Attach the NEG for the VM, <code translate="no" dir="ltr">vm-neg</code>, to the backend-service:</p> 
+<pre>gcloud compute backend-services add-backend my-vm-bes \
+    --global \
+    --network-endpoint-group vm-neg \
+    --network-endpoint-group-zone COMPUTE_ZONE \
+    --balancing-mode RATE --max-rate-per-endpoint 10
+</pre>
+</li> <li>
+<p>Add a host rule to the <a href="https://docs.cloud.google.com/load-balancing/docs/url-map-concepts">URL map</a> to direct requests for <code translate="no" dir="ltr">container.example.com</code> host to the container backend service:</p> 
+<pre>gcloud compute url-maps add-path-matcher web-map \
+    --path-matcher-name=container-path --default-service=my-bes \
+    --new-hosts=container.example.com --global
+</pre>
+</li> <li>
+<p>Add another host rule the URL map to direct requests for <code translate="no" dir="ltr">vm.example.com</code> host to the VM backend service:</p> 
+<pre>gcloud compute url-maps add-path-matcher web-map \
+    --path-matcher-name=vm-path --default-service=my-vm-bes \
+    --new-hosts=vm.example.com --global
+</pre>
+<aside class="note"><strong>Note:</strong><span> It takes a few minutes for the load balancer to be fully programmed.</span></aside>
+</li> <li>
+<p>Validate that the load balancer sends traffic to the VM backend based on the requested path:</p> 
+<pre>curl -H "HOST:vm.example.com" VIRTUAL_IP
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">VIRTUAL_IP</var></code> with the virtual IP address.</p>
+</li> </ol> <h2 id="limitations_of_standalone_negs">Limitations of standalone NEGs</h2> <ul> <li>Annotation validation errors are exposed to the user through Kubernetes events.</li> <li>The <a href="../concepts/container-native-load-balancing#limitations">limitations of NEGs</a> also apply to standalone NEGs.</li> <li>Standalone NEGs don't work with <a href="https://docs.cloud.google.com/vpc/docs/legacy">legacy networks</a>.</li> <li>Standalone NEGs can only be used with compatible network services including <a href="https://docs.cloud.google.com/service-mesh">Cloud Service Mesh</a> and the <a href="https://docs.cloud.google.com/load-balancing/docs/negs/zonal-neg-concepts">compatible load balancer types</a>.</li> </ul> <h2 id="pricing">Pricing</h2> <p>Refer to the <a href="https://docs.cloud.google.com/vpc/network-pricing#lb-pricing">load balancing section</a> of the pricing page for details on pricing of the load balancer. There is no additional charge for NEGs.</p> <h2 id="troubleshooting">Troubleshooting</h2> <p>This section provides troubleshooting steps for common issues that you might encounter with the standalone NEGs.</p> <h3 id="no_standalone_neg_configured">No standalone NEG configured</h3> <p><strong>Symptom:</strong> No NEG is created.</p> <p><strong>Potential Resolution:</strong></p> <ul> <li>Check the events associated with the Service and look for error messages.</li> <li>Verify the standalone NEG annotation is well-formed JSON, and that the exposed ports match existing Ports in the Service spec.</li> <li>Verify the NEG status annotation and see if expected service ports has corresponding NEGs.</li> <li>Verify that the NEGs have been created in the expected zones, with the command <code translate="no" dir="ltr">gcloud compute network-endpoint-groups list</code>.</li> <li>If using GKE version 1.18 or later, check if the <a href="#svcneg"><code translate="no" dir="ltr">svcneg</code> resource</a> for the Service exists. If it does, check the <code translate="no" dir="ltr">Initialized</code> condition for any error information.</li> <li>If you are using <a href="#specify-a-name">custom NEG names</a>, ensure that each NEG name in is unique in its region.</li> </ul> <h3 id="traffic_does_not_reach_the_endpoints">Traffic does not reach the endpoints</h3> <p><strong>Symptom:</strong> 502 errors or rejected connections.</p> <p><strong>Potential Resolution:</strong></p> <ul> <li>After the service is configured new endpoints will generally become reachable after attaching them to NEG, provided they respond to health checks.</li> <li>If after this time traffic still can't reach the endpoints resulting in 502 error code for HTTP(S) or connections being rejected for TCP/SSL load balancers, check the following: <ul> <li>Verify that firewall rules allow incoming TCP traffic to your endpoints from following ranges: <code translate="no" dir="ltr">130.211.0.0/22</code> and <code translate="no" dir="ltr">35.191.0.0/16</code>.</li> <li>Verify that your endpoints are healthy using the Google Cloud CLI or by calling <code translate="no" dir="ltr">getHealth</code> API on the <code translate="no" dir="ltr">backendService</code> or the listEndpoints API on the NEG with the showHealth parameter set to <code translate="no" dir="ltr">SHOW</code>.</li> </ul>
+</li> </ul> <h3 id="stalled_rollout">Stalled rollout</h3> <p><strong>Symptom:</strong> Rolling out an updated Deployment stalls, and the number of up-to-date replicas does not match the chosen number of replicas.</p> <p><strong>Potential Resolution:</strong></p> <p>The deployment's health checks are failing. The container image might be bad or the health check might be misconfigured. The rolling replacement of Pods waits until the newly started Pod passes its Pod Readiness gate. This only occurs if the Pod is responding to load balancer health checks. If the Pod does not respond, or if the health check is misconfigured, the readiness gate conditions can't be met and the rollout can't continue.</p> <ul> <li>
+<p>If you're using kubectl 1.13 or higher, you can check the status of a Pod's readiness gates with the following command:</p> 
+<pre>kubectl get my-Pod -o wide
+</pre> <p>Check the <strong>READINESS GATES</strong> column.</p> <p>This column doesn't exist in kubectl 1.12 and lower. A Pod that is marked as being in the READY state may have a failed readiness gate. To verify this, use the following command:</p> 
+<pre>kubectl get my-pod -o yaml
+</pre> <p>The readiness gates and their status are listed in the output.</p>
+</li> <li><p>Verify that the container image in your Deployment's Pod specification is functioning correctly and is able to respond to health checks.</p></li> <li><p>Verify that the health checks are correctly configured.</p></li> </ul> <h3 id="neg_is_not_garbage_collected">NEG is not garbage collected</h3> <p><strong>Symptom:</strong> A NEG that should have been deleted still exists.</p> <p><strong>Potential Resolution:</strong></p> <ul> <li>The NEG is not garbage collected if the NEG is referenced by a backend service. See <a href="#garbage_collection">Preventing leaked NEGs</a> for details.</li> <li>If using 1.18 or later, you can check for events in the <code translate="no" dir="ltr">ServiceNetworkEndpointGroup</code> resource using <a href="#svcneg">the service neg procedure</a>.</li> <li>Check to see if the NEG is still needed by a service. Check the <code translate="no" dir="ltr">svcneg</code> resource for the service that corresponds to the NEG and check if a Service annotation exists.</li> </ul> <h3 id="neg_is_not_synced_with_service">NEG is not synced with Service</h3> <p><strong>Symptom:</strong> Expected (Pod IP) endpoints don't exist in the NEG, the NEG is not synchronized, or the error <code translate="no" dir="ltr">Failed to sync NEG_NAME (will not retry):
+neg name NEG_NAME is already in use, found a custom named neg with an empty
+description</code></p> <p><strong>Potential Resolution:</strong></p> <p>If you are using GKE 1.18 or later, <a href="#svcneg">check the <code translate="no" dir="ltr">svcneg</code> resource</a> for information:</p> <ul> <li>Check the <code translate="no" dir="ltr">status.lastSyncTime</code> value to verify if the NEG has synced recently.</li> <li>Check the <code translate="no" dir="ltr">Synced</code> condition for any errors that occurred in the most recent sync.</li> </ul> <p>If you are using GKE 1.19.9 or later, check whether there exists a NEG whose name and zone match the name and zone of the NEG that the GKE NEG controller needs to create. For example, a NEG with the name that the NEG controller needs to use might have been created using gcloud CLI or the Google Cloud console in the cluster's zone (or one of the cluster's zones). In this case, you must delete the existing NEG before the NEG controller can synchronize its endpoints. Standalone NEG creation and membership are designed to be managed by the NEG controller.</p> <h2 id="whats_next">What's next</h2> <ul> <li><a href="https://docs.cloud.google.com/load-balancing/docs/negs/zonal-neg-concepts">Zonal network endpoint groups overview</a></li> <li><a href="https://docs.cloud.google.com/load-balancing/docs/backend-service">Backend Services</a></li> <li><a href="https://docs.cloud.google.com/load-balancing/docs/health-checks">Creating Health Checks</a></li> <li><a href="https://docs.cloud.google.com/load-balancing/docs/target-proxies">Using Target Proxies</a></li> <li><a href="https://docs.cloud.google.com/load-balancing/docs/forwarding-rules">Using Forwarding Rules</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/standalone-neg" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/standalone-neg</a>
+  </p>
+</div>

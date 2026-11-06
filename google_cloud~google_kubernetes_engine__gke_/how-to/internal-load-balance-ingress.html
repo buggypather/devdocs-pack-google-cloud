@@ -1,0 +1,278 @@
+<h1>Configuring Ingress for internal Application Load Balancers</h1>  <p>This page shows you how to set up and use Ingress for internal Application Load Balancers in Google Kubernetes Engine (GKE). Ingress provides built-in support for internal load balancing through the GKE Ingress controller.</p> <p>To learn more about which features are supported for Ingress for internal Application Load Balancers, see <a href="ingress-configuration">Ingress features</a>. You can also learn more about how Ingress for internal Application Load Balancers works in <a href="../concepts/ingress-ilb">Ingress for internal Application Load Balancers</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h3 id="requirements_and_limitations">Requirements and limitations</h3> <p>Ingress for internal Application Load Balancers has the following requirements:</p> <ul> <li>Your cluster must use a GKE version later than 1.16.5-gke.10.</li> <li>Your cluster must be <a href="../concepts/alias-ips">VPC-native</a>.</li> <li>Your cluster must have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled. This add-on is enabled by default. You must not disable it.</li> <li>You must use <a href="https://docs.cloud.google.com/load-balancing/docs/negs">Network Endpoint Groups (NEGs)</a> as backends for your Service.</li> <li>You can't enable global access for your internal Application Load Balancer. If you need global access, we recommend that you <a href="deploying-gateways#internal-gateway">deploy an internal Gateway</a>.</li> <li>
+<a href="single-stack-ipv6">Single-stack IPv6 clusters</a> don't support GKE Ingress. To configure internal Application Load Balancers on single-stack IPv6 clusters, <a href="deploying-gateways#internal-gateway">deploy an internal Gateway</a> instead.</li> </ul> <h2 id="deploying_ingress_fors">Deploying Ingress for internal Application Load Balancers</h2> <p>The following exercises show you how to deploy Ingress for internal Application Load Balancers:</p> <ol> <li>
+<a href="#prepare-environment">Prepare your environment</a>.</li> <li>
+<a href="#create-cluster">Create a cluster</a>.</li> <li>
+<a href="#deploy-app">Deploy an application</a>.</li> <li>
+<a href="#deploy-service">Deploy a Service</a>.</li> <li>
+<a href="#deploy-ingress">Deploy Ingress</a>.</li> <li>
+<a href="#validate">Validate the deployment</a>.</li> <li>
+<a href="#delete">Delete Ingress resources</a>.</li> </ol> <h3 id="prepare-environment">Prepare your environment</h3> <p>Before you can deploy load balancer resources through the Kubernetes Ingress API, you must prepare your <a href="../concepts/ingress-ilb#required_networking_environment">networking environment</a> so that the load balancer proxies can be deployed in a given region.</p> <p>Create a proxy-only subnet:</p> 
+<pre>gcloud compute networks subnets create proxy-only-subnet \
+    --purpose=REGIONAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=COMPUTE_REGION \
+    --network=NETWORK_NAME \
+    --range=10.129.0.0/23
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_REGION</var></code>: a <a href="https://docs.cloud.google.com/compute/docs/regions-zones/viewing-regions-zones">Compute Engine region</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the name of the network for the subnet.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/load-balancing/docs/l7-internal/setting-up-l7-internal#configuring_the_proxy-only_subnet">configuring the proxy-only subnet</a>.</p> <h3 id="create_a_firewall_rule">Create a firewall rule</h3> <p>The Ingress controller does not create a firewall rule to allow connections from the load balancer proxies in the proxy-subnet. You must create this firewall rule manually. However, the Ingress controller does create firewall rules to allow ingress for Google Cloud health-checks.</p> <p>Create a firewall rule to allow connections from the load balancer proxies in the proxy-only subnet to the pod listening port:</p> <aside class="note"><strong>Note:</strong><span> Shared VPC environments require additional preparation. For more information, see <a href="../concepts/ingress#shared_vpc">Shared VPC Ingress preparation</a>.</span></aside>
+<pre>gcloud compute firewall-rules create allow-proxy-connection \
+    --allow=TCP:CONTAINER_PORT \
+    --source-ranges=10.129.0.0/23 \
+    --network=NETWORK_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CONTAINER_PORT</var></code> with the value of the port that the Pod is listening to, such as <code translate="no" dir="ltr">9376</code>.</p> <h3 id="create-cluster">Creating a cluster</h3> <p>In this section, you create a VPC-native cluster that you can use with Ingress for internal Application Load Balancers. You can create this cluster using the Google Cloud CLI or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Create a cluster in the same network as the proxy-only subnet:</p> 
+<pre data-language="bash">gcloud container clusters create-auto CLUSTER_NAME \
+    --location=COMPUTE_LOCATION \
+    --network=NETWORK_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: a name for your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones/viewing-regions-zones">Compute Engine location</a> for the cluster. You must use the same location as the proxy-subnet that you created in the previous section.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li> In the Google Cloud console, go to the <b>Create an Autopilot cluster</b> page. <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/auto/add" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="kubernetes/auto/add">Go to Create an Autopilot cluster</a> </p> </li> <li>In the <strong>Cluster basics</strong> section, complete the following: <ol> <li>Enter the <strong>Name</strong> for your cluster.</li> <li>For the <strong>Location type</strong>, select a <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">Compute Engine region</a> for your cluster. You must use the same region as the proxy-subnet that you created in the previous section.</li> </ol>
+</li> <li>In the navigation pane, click <strong>Networking</strong>.</li> <li>In the <strong>Network</strong> list, select the network that you want the cluster to be created in. This network must be in the same VPC network as the proxy-subnet.</li> <li>In the <strong>Node subnet</strong> list, select the proxy-subnet that you created</li> <li>Click <strong>Create</strong>.</li> </ol></section> </div> <h3 id="deploy-app">Deploying a web application</h3> <p>In this section, you create a <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" track-name="k8sLink" track-type="concept" class="external">Deployment</a>.</p> <p>To create a Deployment:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">web-deployment.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: hostname
+  name: hostname-server
+spec:
+  selector:
+    matchLabels:
+      app: hostname
+  minReadySeconds: 60
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: hostname
+    spec:
+      containers:
+      - image: registry.k8s.io/serve_hostname:v1.4
+        name: hostname-server
+        ports:
+        - containerPort: 9376
+          protocol: TCP
+      terminationGracePeriodSeconds: 90
+</pre> <p>This manifest describes a Deployment that listens on an HTTPS server on port 9376. This Deployment also manages Pods for your application. Each Pod runs one application container with an HTTPS server that returns the hostname of the application server as the response. The default hostname of a Pod is the name of the Pod. The container also handles graceful termination.</p>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f web-deployment.yaml
+</pre>
+</li> </ol> <h3 id="deploy-service">Deploying a Service as a Network Endpoint Group (NEG)</h3> <p>In this section, you create a <a href="../concepts/service">Service</a> resource. The Service selects the backend containers by their labels so that the Ingress controller can program them as backend endpoints. Ingress for internal Application Load Balancers requires you to use <a href="https://docs.cloud.google.com/load-balancing/docs/negs">NEGs</a> as backends. The feature does not support Instance Groups as backends. Because NEG backends are required, the following NEG annotation is required when you deploy Services that are exposed through Ingress:</p> 
+<pre>annotations:
+  cloud.google.com/neg: '{"ingress": true}'
+</pre> <p>Your Service is automatically annotated with <code translate="no" dir="ltr">cloud.google.com/neg: '{"ingress": true}'</code> when all of the following conditions are true:</p> <ul> <li>You are using VPC-native clusters.</li> <li>You are not using a Shared VPC.</li> <li>You are not using <a href="network-policy">GKE Network Policy</a>.</li> </ul> <p>The annotation is automatically added using a <code translate="no" dir="ltr">MutatingWebhookConfiguration</code> with name <code translate="no" dir="ltr">neg-annotation.config.common-webhooks.networking.gke.io</code>. You can check if the <code translate="no" dir="ltr">MutatingWebhookConfiguration</code> is present with the following command:</p> 
+<pre>kubectl get mutatingwebhookconfigurations
+</pre> <p>The usage of NEGs allows the Ingress controller to perform <a href="../concepts/ingress#container-native_load_balancing">container native load balancing</a>. Traffic is load balanced from the Ingress proxy directly to the Pod IP as opposed to traversing the node IP or kube-proxy networking. In addition, <a href="../concepts/container-native-load-balancing#pod_readiness">Pod readiness gates</a> are implemented to determine the health of Pods from the perspective of the load balancer and not only the Kubernetes readiness and liveness checks. Pod readiness gates ensure that traffic is not dropped during lifecycle events such as Pod startup, Pod loss, or node loss.</p> <p>If you do not include a NEG annotation, you receive a warning on the Ingress object that prevents you from configuring the internal Application Load Balancer. A Kubernetes event is also generated on the Ingress if the NEG annotation is not included. The following message is an example of the event message:</p> 
+<pre>Message
+-------
+error while evaluating the ingress spec: could not find port "8080" in service "default/no-neg-svc"
+</pre> <p>An NEG is not created until an Ingress references the Service. The NEG does not appear in Compute Engine until the Ingress and its referenced Service both exist. NEGs are a zonal resource and for multi-zonal clusters, one is created per Service per zone.</p> <p>To create a Service:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">web-service.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  name: hostname
+  namespace: default
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+spec:
+  ports:
+  - name: host1
+    port: 80
+    protocol: TCP
+    targetPort: 9376
+  selector:
+    app: hostname
+  type: ClusterIP
+</pre>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f web-service.yaml
+</pre>
+</li> </ol> <h3 id="deploy-ingress">Deploying Ingress</h3> <p>In this section, you create an Ingress resource that triggers the deployment of a Compute Engine load balancer through the Ingress controller. Ingress for internal Application Load Balancers requires the following annotation:</p> 
+<pre>annotations:
+    kubernetes.io/ingress.class: "gce-internal"
+</pre> <p>You cannot use the <code translate="no" dir="ltr">ingressClassName</code> field to specify a GKE Ingress. You must use the <code translate="no" dir="ltr">kubernetes.io/ingress.class</code> annotation. For more information, see <a href="../concepts/ingress#controller_summary">GKE Ingress controller behavior</a>.</p> <aside class="caution"><strong>Caution:</strong><span> Any Ingress resource deployed on GKE without the <code translate="no" dir="ltr">kubernetes.io/ingress.class</code> annotation is interpreted as an external Ingress resource which deploys an external load balancer for the Service. To prevent users from exposing applications publicly by accidentally omitting the correct annotation, implement an <a href="https://docs.cloud.google.com/load-balancing/docs/access-control/iam-conditions">Identity and Access Management (IAM) policy</a> that enforces limits on public load balancer creation. This policy blocks public load balancer deployment cluster-wide while still allowing internal load balancer creation through Ingress and Service resources.</span></aside> <p>To create an Ingress:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">internal-ingress.yaml</code>:</p> 
+<pre>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ilb-demo-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "gce-internal"
+spec:
+  defaultBackend:
+    service:
+      name: hostname
+      port:
+        number: 80
+</pre>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f internal-ingress.yaml
+</pre>
+</li> </ol> <h3 id="validate">Validating a successful Ingress deployment</h3> <p>In this section, you validate if your deployment was successful.</p> <p>It can take several minutes for the Ingress resource to become fully provisioned. During this time, the Ingress controller creates items such as forwarding rules, backend services, URL maps, and NEGs.</p> <p>To retrieve the status of your Ingress resource that you created in the previous section, run the following command:</p> 
+<pre>kubectl get ingress ilb-demo-ingress
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME               HOSTS    ADDRESS            PORTS     AGE
+ilb-demo-ingress   *        10.128.0.58        80        59s
+</pre> <p>When the <code translate="no" dir="ltr">ADDRESS</code> field is populated, the Ingress is ready. The use of an RFC 1918 address in this field indicates an internal IP within the VPC.</p> <p>Since the internal Application Load Balancer is a regional load balancer, the virtual IP (VIP) is only accessible from a client within the same region and VPC. After retrieving the load balancer VIP, you can use tools (for example, <code translate="no" dir="ltr">curl</code>) to issue <code translate="no" dir="ltr">HTTP GET</code> calls against the VIP from inside the VPC.</p> <p>To issue a <code translate="no" dir="ltr">HTTP GET</code> call, complete the following steps:</p> <ol> <li>
+<p>To reach your Ingress VIP from inside the VPC, deploy a VM within the same region and network as the cluster:</p> 
+<pre>gcloud compute instances create l7-ilb-client \
+    --image-family=debian-12 \
+    --image-project=debian-cloud \
+    --network=NETWORK_NAME \
+    --subnet=SUBNET_NAME \
+    --zone=COMPUTE_ZONE \
+    --tags=allow-ssh
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: the name of a subnet in the network.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_ZONE</var></code>: a <a href="https://docs.cloud.google.com/compute/docs/regions-zones/viewing-regions-zones">Compute Engine zone</a> in the region.</li> </ul> <p>To learn more about creating instances, see <a href="https://docs.cloud.google.com/compute/docs/instances/create-start-instance">Creating and starting a VM instance</a>.</p>
+</li> <li>
+<p>To access the internal VIP from inside the VM, use <code translate="no" dir="ltr">curl</code>:</p> <ol> <li>
+<p>SSH in to the VM that you created in the previous step:</p> 
+<pre>gcloud compute ssh l7-ilb-client \
+    --zone=COMPUTE_ZONE
+</pre>
+</li> <li>
+<p>Use <code translate="no" dir="ltr">curl</code> to access the internal application VIP:</p> 
+<pre>curl 10.128.0.58
+hostname-server-6696cf5fc8-z4788
+</pre> <p>The successful HTTP response and hostname of one of the backend containers indicates that the full load balancing path is functioning correctly.</p>
+</li> </ol>
+</li> </ol> <h3 id="delete">Deleting Ingress resources</h3> <p>Removing Ingress and Service resources also removes the Compute Engine load balancer resources associated with them. To prevent resource leaking, ensure that Ingress resources are torn down when you no longer need them. You must also delete Ingress and Service resources before you delete clusters or else the Compute Engine load balancing resources are orphaned.</p> <p>To remove an Ingress, complete the following steps:</p> <ol> <li>
+<p>Delete the Ingress. For example, to delete the Ingress you created in this page, run the following command:</p> 
+<pre>kubectl delete ingress ilb-demo-ingress
+</pre> <p>Deleting the Ingress removes the forwarding rules, backend services, and URL maps associated with this Ingress resource.</p>
+</li> <li>
+<p>Delete the Service. For example, to delete the Service you created in this page, run the following command:</p> 
+<pre>kubectl delete service hostname
+</pre> <p>Deleting the Service removes the NEG associated with the Service.</p>
+</li> </ol> <p>To deploy an application on GKE and expose the application with a private load balanced IP address, see <a href="https://github.com/GoogleCloudPlatform/gke-networking-recipes/tree/main/ingress/single-cluster/ingress-internal-basic">Basic Internal Ingress</a>.</p> <h2 id="static_ip_addressing">Static IP addressing</h2> <p>Internal Ingress resources support both static and ephemeral IP addressing. If an IP address is not specified, an available IP address is automatically allocated from the GKE node subnet. However, the Ingress resource does not provision IP addresses from the <a href="https://docs.cloud.google.com/load-balancing/docs/l7-internal/setting-up-l7-internal#configure-a-network">proxy-only subnet</a> as that subnet is only used for internal proxy consumption. These ephemeral IP addresses are allocated to the Ingress only for the lifecycle of the internal Ingress resource. If you delete your Ingress and create a new Ingress from the same manifest file, you are not guaranteed to get the same external IP address.</p> <p>If you want a permanent IP address that's independent from the lifecycle of the internal Ingress resource, you must reserve a regional static internal IP address. You can then specify a static IP address by using the <code translate="no" dir="ltr">kubernetes.io/ingress.regional-static-ip-name</code> annotation on your Ingress resource.</p> <p>The following example shows you how to add this annotation:</p> 
+<pre>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-ingress
+  annotations:
+    kubernetes.io/ingress.regional-static-ip-name: STATIC_IP_NAME
+    kubernetes.io/ingress.class: "gce-internal"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">STATIC_IP_NAME</var></code> with a static IP name that meets the following criteria:</p> <ul> <li>Create the static IP address before you deploy the Ingress. A load balancer does not deploy until the static IP exists, and referencing a non-existent IP address resource does not create a static IP. If you modify an existing Ingress to use a static IP address instead of an ephemeral IP address, GKE might change the IP address of the load balancer when GKE re-creates the forwarding rule of the load balancer.</li> <li>The static IP is <a href="https://docs.cloud.google.com/vpc/docs/provisioning-shared-vpc#reserve_internal_ip">reserved in the service project</a> for an Ingress deployed in the service project of a Shared VPC.</li> <li>Reference the Google Cloud IP address resource by its name, rather than its IP address.</li> <li>The IP address must be from a subnet in the same region as the GKE cluster. You can use any available private subnet within the region (with the exception of the <a href="https://docs.cloud.google.com/load-balancing/docs/l7-internal/setting-up-l7-internal#configure-a-network">proxy-only subnet</a>). Different Ingress resources can also have addresses from different subnets.</li> </ul> <h2 id="https_between_client_and_load_balancer">HTTPS between client and load balancer</h2> <p>Ingress for internal load balancing supports the serving of TLS certificates to clients. You can serve TLS certificates through Kubernetes Secrets or through pre-shared regional SSL certificates in Google Cloud. You can also specify multiple certificates per Ingress resource. Use of both HTTPS and HTTP simultaneously is supported for GKE 1.25+. To enable this feature, you need to create a static IP address with PURPOSE=SHARED_LOADBALANCER_VIP, and configure it on the ingress. If a static IP address is not provided, only HTTPS traffic is allowed, and you need to follow the documentation for <a href="../concepts/ingress-xlb#disabling_http">Disabling HTTP</a>.</p> <aside class="note"><strong>Note:</strong><span> Ingress for internal load balancing does not support pre-shared global SSL certificates or Google-managed certificates.</span></aside> <p>The following steps detail how to create a certificate in Google Cloud and then serve it through Ingress to internal clients for both HTTPS and HTTP traffic:</p> <ol> <li>
+<p>Create the regional certificate:</p> 
+<pre>gcloud compute ssl-certificates create CERT_NAME \
+    --certificate CERT_FILE_PATH \
+    --private-key KEY_FILE_PATH \
+    --region COMPUTE_REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CERT_NAME</var></code>: a name for your certificate that you choose.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERT_FILE_PATH</var></code>: the path to your local certificate file to create a self-managed certificate. The certificate must be in PEM format.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_FILE_PATH</var></code>: the path to a local private key file. The private key must be in PEM format and must use RSA or ECDSA encryption.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_REGION</var></code>: a Compute Engine region for your certificate.</li> </ul>
+</li> <li><p>Reserve and apply a static IP address following <a href="#static_ip_addressing">Static IP addressing</a>.</p></li> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">ingress-pre-shared-cert.yaml</code>:</p> 
+<pre>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ilb-demo-ing
+  namespace: default
+  annotations:
+    ingress.gcp.kubernetes.io/pre-shared-cert: "CERT_NAME"
+    kubernetes.io/ingress.regional-static-ip-name: STATIC_IP_NAME
+    kubernetes.io/ingress.class: "gce-internal"
+spec:
+  rules:
+  - host: DOMAIN
+    http:
+      paths:
+      - pathType: ImplementationSpecific
+        backend:
+          service:
+            name: SERVICE_NAME
+            port:
+              number: 80
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">DOMAIN</var></code>: your domain.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERT_NAME</var></code>: the name of the certificate you created in the previous section.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_NAME</var></code>: the name of your Service.</li> </ul>
+</li> <li>
+<p>Apply the manifest to the cluster:</p> 
+<pre>kubectl apply -f ingress-pre-shared-cert.yaml
+</pre>
+</li> </ol> <h2 id="https_between_load_balancer_and_application">HTTPS between load balancer and application</h2> <p>If your application runs in a GKE Pod and can receive HTTPS requests, you can configure the load balancer to use HTTPS when it forwards requests to your application. For more information, see <a href="../concepts/ingress-ilb#https_tls_between_load_balancer_and_your_application">HTTPS (TLS) between load balancer and your application</a>.</p> <h2 id="shared_vpc">Shared VPC</h2> <h3 id="manually_add_the_neg_annotation">Manually add the NEG annotation</h3> <p>If the GKE in which you are deploying the Ingress resources is in a Shared VPC service project, the services are not automatically annotated with the annotation <code translate="no" dir="ltr">cloud.google.com/neg: '{"ingress": true}'</code> because the <code translate="no" dir="ltr">MutatingWebhookConfiguration</code> responsible for injecting the annotation to the services is not installed.</p> <p>You must add the NEG annotation to the manifest of the Services that are exposed through Ingress for internal Application Load Balancers.</p> <h3 id="firewall_rules">VPC firewall rules</h3> <p>If the GKE cluster in which you are deploying the Ingress resources is in a Shared VPC service project, and you want the GKE control plane to manage the firewall resources in your host project, then the service project's GKE service account must be granted the appropriate IAM permissions in the host project as per <a href="cluster-shared-vpc#managing_firewall_resources">Managing firewall resources for clusters with Shared VPC</a>. This lets the Ingress controller create firewall rules to allow ingress traffic for Google Cloud health checks.</p> <p>The following is an example of an event that might be present in the Ingress resource logs. This error occurs when the Ingress controller is unable to create a firewall rule to allow ingress traffic for Google Cloud health checks if the permissions are not configured correctly.</p> 
+<pre>Firewall change required by security admin: `gcloud compute firewall-rules update &lt;RULE_NAME&gt; --description "GCE L7 firewall rule" --allow tcp:&lt;PORT&gt; --source-ranges 130.211.0.0/22,35.191.0.0/16 --target-tags &lt;TARGET_TAG&gt; --project &lt;HOST_PROJECT&gt;
+</pre> <p>If you prefer to <a href="../concepts/ingress#manually_provision_firewall_rules_from_the_host_project">manually provision firewall rules from the host project</a>, then you can mute the <code translate="no" dir="ltr">firewallXPNError</code> events by adding the <code translate="no" dir="ltr">networking.gke.io/suppress-firewall-xpn-error: "true"</code> annotation to the Ingress resource.</p> <h2 id="summary_of_internal_ingress_annotations">Summary of internal Ingress annotations</h2> <p>The following tables show you the annotations that you can add when you are creating Ingress and Service resources for Ingress for internal Application Load Balancers.</p> <h3 id="ingress_annotations">Ingress annotations</h3> <table> <thead> <tr> <th><strong>Annotation</strong></th> <th><strong>Description</strong></th> </tr> </thead> <tbody> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">kubernetes.io/ingress.class</code></td> <td>You can set as <code translate="no" dir="ltr">"gce-internal"</code> for internal Ingress. If the class is not specified, an Ingress resource is interpreted by default as an external Ingress. For more information, see <a href="../concepts/ingress#controller_summary"> GKE Ingress controller behavior.</a>
+</td> </tr> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">kubernetes.io/ingress.allow-http</code></td> <td>You can allow HTTP traffic between the client and the HTTP(S) load balancer. Possible values are <code translate="no" dir="ltr">true</code> and <code translate="no" dir="ltr">false</code>. The default value is <code translate="no" dir="ltr">true</code>. For more information, see <a href="../concepts/ingress-xlb#disabling_http">Disabling HTTP</a>.</td> </tr> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">ingress.gcp.kubernetes.io/pre-shared-cert</code></td> <td>You can upload certificates and keys to your Google Cloud project. Use this annotation to reference the certificates and keys. For more information, see <a href="ingress-multi-ssl">Using multiple SSL certificates with external Application Load Balancers</a>.</td> </tr> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">networking.gke.io/suppress-firewall-xpn-error</code></td> <td>
+<p> In <a href="https://github.com/kubernetes/ingress-gce" target="_blank">GLBC 1.4</a> and later, you can mute the <code translate="no" dir="ltr">firewallXPNError</code> event. For Ingress Load Balancers, if Kubernetes can't change the firewall rules due to insufficient permission, a <code translate="no" dir="ltr">firewallXPNError</code> event is created every several minutes. </p> <p> Add <code translate="no" dir="ltr">networking.gke.io/suppress-firewall-xpn-error: "true"</code> annotation to the ingress resource. The default value is <code translate="no" dir="ltr">false</code>. You can remove this annotation to unmute. </p>
+</td> </tr> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">kubernetes.io/ingress.regional-static-ip-name</code></td> <td>You can specify a static IP address to provision your internal Ingress resource. For more information, see <a href="internal-load-balance-ingress#static_ip_addressing">Static IP addressing</a>.</td> </tr> </tbody> </table> <h3 id="service_annotations_related_to_ingress">Service annotations related to Ingress</h3> <table> <thead> <tr> <th><strong>Annotation</strong></th> <th><strong>Description</strong></th> </tr> </thead> <tbody> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">cloud.google.com/backend-config</code></td> <td>Use this annotation to configure the backend service associated with a servicePort. For more information, see <a href="ingress-configuration">Ingress configuration</a>.</td> </tr> <tr> <td style="white-space: nowrap;"><code translate="no" dir="ltr">cloud.google.com/neg</code></td> <td>Use this annotation to specify that the load balancer should use network endpoint groups. For more information, see <a href="container-native-load-balancing">Using Container-native Load Balancing</a>.</td> </tr> </tbody> </table> <h2 id="troubleshooting">Troubleshooting</h2> <p>Understanding and observing the state of Ingress typically involves inspecting the associated resources. The types of issues encountered often include load balancing resources not being created properly, traffic not reaching backends, or backends not appearing healthy.</p> <p>Some common troubleshooting steps include:</p> <ul> <li>Verifying that client traffic is originating from within the same region and VPC as the load balancer.</li> <li>Verifying that the Pods and backends are healthy.</li> <li>Validating the traffic path to the VIP and for Compute Engine health checks to ensure it is not blocked by firewall rules.</li> <li>Checking the Ingress resource events for errors.</li> <li>Describing the Ingress resource to see the mapping to Compute Engine resources.</li> <li>Validating that the Compute Engine load balancing resources exist, have the correct configurations, and do not have errors reported.</li> </ul> <h3 id="filtering_for_ingress_events">Filtering for Ingress events</h3> <p>The following query filters for errors across all Ingress events in your cluster:</p> 
+<pre>kubectl get events --all-namespaces --field-selector involvedObject.kind=Ingress
+</pre> <p>You can also filter by objects or object names:</p> 
+<pre>kubectl get events --field-selector involvedObject.kind=Ingress,involvedObject.name=hostname-internal-ingress
+</pre> <p>In the following error, you can see that the Service referenced by the Ingress does not exist:</p> 
+<pre>LAST SEEN   TYPE      REASON      OBJECT                              MESSAGE
+0s          Warning   Translate   ingress/hostname-internal-ingress   error while evaluating the ingress spec: could not find service "default/hostname-invalid"
+</pre> <h3 id="inspecting_load_balancer_resources">Inspecting Compute Engine load balancer resources</h3> <p>The following command displays the full output for the Ingress resource so that you can see the mappings to the Compute Engine resources that are created by the Ingress controller:</p> 
+<pre>kubectl get ing INGRESS_FILENAME -o yaml
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">INGRESS_FILENAME</var></code> with your Ingress resource's filename.</p> <p>The output is similar to the following:</p> 
+<pre>apiVersion: v1
+items:
+- apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    annotations:
+      ingress.kubernetes.io/backends: '{"k8s1-241a2b5c-default-hostname-80-29269aa5":"HEALTHY"}'
+      ingress.kubernetes.io/forwarding-rule: k8s-fw-default-ilb-demo-ingress--241a2b5c94b353ec
+      ingress.kubernetes.io/target-proxy: k8s-tp-default-ilb-demo-ingress--241a2b5c94b353ec
+      ingress.kubernetes.io/url-map: k8s-um-default-ilb-demo-ingress--241a2b5c94b353ec
+      kubectl.kubernetes.io/last-applied-configuration: |
+       {"apiVersion":"networking.k8s.io/v1","kind":"Ingress","metadata":{"annotations":{"kubernetes.io/ingress.class":"gce-internal"},"name":"ilb-demo-ingress","namespace":"default"},"spec":{"defaultBackend":{"service":{"name":"hostname"},"port":{"number":80}}}}
+      kubernetes.io/ingress.class: gce-internal
+    creationTimestamp: "2019-10-15T02:16:18Z"
+    finalizers:
+    - networking.gke.io/ingress-finalizer
+    generation: 1
+    name: ilb-demo-ingress
+    namespace: default
+    resourceVersion: "1538072"
+    selfLink: /apis/networking.k8s.io/v1/namespaces/default/ingresses/ilb-demo-ingress
+    uid: 0ef024fe-6aea-4ee0-85f6-c2578f554975
+  spec:
+    defaultBackend:
+      service:
+        name: hostname
+        port:
+          number: 80
+  status:
+    loadBalancer:
+      ingress:
+      - ip: 10.128.0.127
+kind: List
+metadata:
+  resourceVersion: ""
+  selfLink: ""
+</pre> <p>The <code translate="no" dir="ltr">ingress.kubernetes.io/backends</code> annotations list the backends and their status. Make sure that your backends are listed as <code translate="no" dir="ltr">HEALTHY</code>.</p> <p>The Compute Engine resources created by the Ingress can be queried directly to understand their status and configuration. Running these queries can also be helpful when troubleshooting.</p> <p>To list all Compute Engine forwarding rules:</p> 
+<pre>gcloud compute forwarding-rules list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                                        REGION       IP_ADDRESS      IP_PROTOCOL  TARGET
+k8s-fw-default-hostname-internal-ingress--42084f6a534c335b  REGION_NAME  10.128.15.225   TCP          REGION_NAME/targetHttpProxies/k8s-tp-default-hostname-internal-ingress--42084f6a534c335b
+</pre> <p>To list the health of a backend service, first list the backend services, and make a copy of the name of the backend service you want to inspect:</p> 
+<pre>gcloud compute backend-services list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                         BACKENDS                                                                       PROTOCOL
+k8s1-42084f6a-default-hostname-80-98cbc1c1   REGION_NAME/networkEndpointGroups/k8s1-42084f6a-default-hostname-80-98cbc1c1 HTTP
+</pre> <p>You can now use the backend service name to query its health:</p> 
+<pre>gcloud compute backend-services get-health k8s1-42084f6a-default-hostname-80-98cbc1c1 \
+    --region COMPUTE_REGION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">COMPUTE_REGION</var></code> with the Compute Engine region of the backend service.</p> <p>The output is similar to the following:</p> 
+<pre>backend: https://www.googleapis.com/compute/v1/projects/user1-243723/zones/ZONE_NAME/networkEndpointGroups/k8s1-42084f6a-default-hostname-80-98cbc1c1
+status:
+  healthStatus:
+  - healthState: HEALTHY
+</pre> <h2 id="whats_next">What's next</h2> <ul> <li><p>Learn about <a href="../concepts/ingress">GKE Ingress for external Application Load Balancers</a>.</p></li> <li><p>Read a conceptual overview of <a href="../concepts/service">Services</a> in GKE.</p></li> <li><p>Learn how to create an <a href="internal-load-balancing">internal passthrough Network Load Balancer on GKE</a>.</p></li> <li><p>Implement a <a href="https://github.com/GoogleCloudPlatform/gke-networking-recipes/tree/main/ingress/single-cluster/ingress-internal-basic" class="external">basic internal Ingress</a>.</p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/internal-load-balance-ingress" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/internal-load-balance-ingress</a>
+  </p>
+</div>

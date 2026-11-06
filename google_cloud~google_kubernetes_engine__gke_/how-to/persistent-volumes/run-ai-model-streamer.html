@@ -1,0 +1,279 @@
+<h1>Accelerate model loading on GKE with Run:ai Model Streamer</h1>  <p>This document shows you how to accelerate loading the large AI model weights from <a href="https://docs.cloud.google.com/storage">Cloud Storage</a> by using <a href="https://github.com/run-ai/runai-model-streamer/blob/master/docs/README.md">Run:ai Model Streamer</a> with the vLLM inference server on Google Kubernetes Engine (GKE).</p> <p>The solution in this document assumes that you have your AI model and weights in <code translate="no" dir="ltr">safetensors</code> format already loaded in a <a href="https://docs.cloud.google.com/storage/docs/buckets">Cloud Storage bucket</a>.</p> <p>By adding the <code translate="no" dir="ltr">--load-format=runai_streamer</code> flag to your vLLM deployment, you can use the Run:ai Model Streamer to improve model download efficiency for your AI workloads on GKE.</p> <p>This document is intended for the following users:</p> <ul> <li>Machine learning (ML) engineers who need to load large AI models from object storage into GPU/TPU nodes as quickly as possible.</li> <li>Platform admins and operators who automate and optimize model serving infrastructure on GKE.</li> <li>Cloud architects who evaluate specialized data loading tools for AI/ML workloads.</li> </ul> <p>To learn more about common roles and example tasks referenced in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="overview">Overview</h2> <p>The solution described in this document uses three core components—Run:ai Model Streamer, vLLM, and the <code translate="no" dir="ltr">safetensors</code> file format—to accelerate the process of loading model weights from Cloud Storage onto GPU or TPU nodes.</p> <h3 id="runai-model-streamer">Run:ai Model Streamer</h3> <p><a href="https://docs.vllm.ai/en/stable/models/extensions/runai_model_streamer.html">Run:ai Model Streamer</a> is an open-source Python SDK that speeds up loading large AI models onto accelerators. It streams model weights directly from storage, like Cloud Storage buckets, to your GPU or TPU memory. The model streamer is particularly suitable for accessing <code translate="no" dir="ltr">safetensors</code> files located in Cloud Storage.</p> <h3 id="safetensors">safetensors</h3> <p><a href="https://huggingface.co/docs/safetensors/index"><code translate="no" dir="ltr">safetensors</code></a> is a file format to store tensors, the core data structures in AI models, in a way that enhances both security and speed. <code translate="no" dir="ltr">safetensors</code> is designed as an alternative to Python's pickle format, and it enables fast loading times through a <em>zero-copy</em> approach. This approach lets the tensors be directly accessible from the source without needing to load the entire file into the local memory first.</p> <h3 id="vllm">vLLM</h3> <p><a href="https://docs.vllm.ai/en/stable/index.html">vLLM</a> is an open-source library for LLM inference and serving. It's a high-performance inference server that's optimized for rapidly loading large AI models. In this document, vLLM is the core engine that runs your AI model on GKE and handles incoming inference requests. Run:ai Model Streamer's built-in authentication support for Cloud Storage requires vLLM version 0.11.1 or later for GPUs, and 0.18.0 or later for TPUs.</p> <h2 id="how-model-streamer-works">How Run:ai Model Streamer accelerates model loading</h2> <p>When you start an LLM-based AI application for inference, a significant delay often occurs before the model is ready to use. This delay, known as a <em>cold start</em>, happens because the entire multi-gigabyte model file must be downloaded from a storage location, like a Cloud Storage bucket, to your machine's local disk. The file is then loaded into your accelerator's memory. During this loading period, the expensive accelerator is sitting idle, which is inefficient and costly.</p> <p>Instead of the download-then-load process, the model streamer streams the model directly from your Cloud Storage to the GPU or TPU memory. The streamer uses a high-performance backend to read multiple parts of the model, called <em>tensors</em>, in parallel. Reading tensors concurrently is significantly faster than loading the file sequentially.</p> <h3 id="architecture_overview">Architecture overview</h3> <p>The Run:ai Model Streamer integrates with vLLM on GKE to accelerate model loading by streaming model weights directly from Cloud Storage to accelerator memory, bypassing local disk.</p> <p>The following diagram shows this architecture:</p> <figure> <a href="https://docs.cloud.google.com/static/kubernetes-engine/images/runai_model-streamer.png" class="screenshot lightbox"> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/runai_model-streamer.png" alt="Architecture of Run:ai Model Streamer loading model weights from Cloud Storage to vLLM on GKE."> </a> <figcaption>Run:ai Model Streamer architecture with vLLM and Cloud Storage.</figcaption> </figure> <p>This architecture includes the following components and workflow:</p> <ul> <li>
+<strong>Cloud Storage bucket</strong>: stores the AI model weights in <code translate="no" dir="ltr">safetensors</code> format.</li> <li>
+<strong>GKE Pod with GPUs or TPUs</strong>: runs the vLLM inference server.</li> <li>
+<strong>vLLM inference server</strong>: configured with the <code translate="no" dir="ltr">--load-format=runai_streamer</code> flag, which enables the model streamer functionality.</li> <li>
+<strong>Run:ai Model Streamer</strong>: when vLLM starts, the model streamer reads model weights from the specified <code translate="no" dir="ltr">gs://</code> path in the Cloud Storage bucket. Instead of downloading files to disk, it streams tensor data directly into the accelerator memory of the GKE Pod, where it's immediately available to vLLM for inference.</li> <li>
+<strong>Cloud Storage Rapid Cache (Optional)</strong>: if enabled, <a href="#boost-performance">Rapid Cache</a> caches bucket data in the same zone as the GKE nodes, further accelerating data access for the streamer.</li> </ul> <h2 id="benefits">Benefits</h2> <ul> <li>
+<strong>Reduced cold start times:</strong> the model streamer significantly reduces the time it takes for models to start. It loads the model weights up to six times faster compared to conventional methods. For more information, see <a href="https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/benchmarks.md">Run:ai Model Streamer benchmarks</a>
+</li> <li>
+<strong>Enhanced accelerator utilization:</strong> by minimizing model loading delays, accelerators like GPUs and TPUs can dedicate more time to actual inference tasks, boosting overall efficiency and processing capacity.</li> <li>
+<strong>Streamlined workflow:</strong> the solution described in this document integrates with GKE, enabling inference servers like vLLM or SGLang to directly access models in Cloud Storage buckets.</li> </ul> <h2 id="before-you-begin">Before you begin</h2> <p>Make sure to complete the following prerequisites.</p> <h3 id="select_or_create_a_project_and_enable_the_apis">Select or create a project and enable the APIs</h3> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine, Cloud Storage, Compute Engine, IAM APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine, Cloud Storage, Compute Engine, IAM APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> </cloud-free-trial> <h3 id="set-up-cloud-shell">Set up Cloud Shell</h3> <p>This document uses the Google Cloud CLI and <code translate="no" dir="ltr">kubectl</code> commands to create and manage the resources required for this solution. You can run these commands in Cloud Shell by clicking <strong>Activate Cloud Shell</strong> at the top of the Google Cloud console.</p> <p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> <p>Alternatively, you can <a href="https://docs.cloud.google.com/sdk/docs/install">install and initialize the gcloud CLI</a> in your local shell environment to run the commands. If you want to use a local shell terminal, run the <code translate="no" dir="ltr">gcloud auth login</code> command to authenticate with Google Cloud.</p> <h3 id="grant-iam-roles">Grant IAM roles</h3> <p>Ensure that your Google Cloud account has the following <a href="https://docs.cloud.google.com/iam/docs/understanding-roles">IAM roles</a> on your project so you can create a GKE cluster and manage Cloud Storage:</p> <ul> <li><code translate="no" dir="ltr">roles/container.admin</code></li> <li><code translate="no" dir="ltr">roles/storage.admin</code></li> </ul> <p>To grant these roles, run the following commands:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="user:$(gcloud config get-value account)" \
+    --role="roles/container.admin"
+gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="user:$(gcloud config get-value account)" \
+    --role="roles/storage.admin"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p> <h2 id="prepare-environment">Prepare your environment</h2> <p>This section guides you through setting up your GKE cluster and configuring permissions to access your model in Cloud Storage.</p> <aside class="note"><strong>Note:</strong><span> You must have your AI model in <code translate="no" dir="ltr">safetensors</code> format stored in a Cloud Storage bucket.</span></aside> <h3 id="create-gke-cluster">Create a GKE cluster</h3> <p>The Run:ai Model Streamer can be used with both GKE Autopilot and Standard clusters. Choose the cluster mode that best suits your needs.</p> <ol> <li>
+<p>Set variables for your project and cluster name:</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export CLUSTER_NAME=CLUSTER_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID. You can find your project ID by running the <code translate="no" dir="ltr">gcloud config get-value project</code> command.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: The name of your cluster. For example, <code translate="no" dir="ltr">run-ai-test</code>.</li> </ul>
+</li> <li>
+<p>Create either an Autopilot or a Standard cluster:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>Follow these steps to create a GKE Autopilot cluster:</p> <ol> <li>
+<p>Set the region for your cluster:</p> 
+<pre data-language="">export REGION=REGION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> with the region where you want to create your cluster. For optimal performance, use the same region as your Cloud Storage bucket.</p>
+</li> <li>
+<p>Create the cluster:</p> 
+<pre data-language="">gcloud container clusters create-auto $CLUSTER_NAME \
+    --project=$PROJECT_ID \
+    --location=$REGION
+</pre>
+</li> </ol> <p>Autopilot clusters automatically provision nodes based on workload requirements. When you deploy the vLLM server in a later step, Autopilot will provision the GPU or TPU nodes if required. For more information, see <a href="../../concepts/node-auto-provisioning">About node pool auto-creation</a>.</p></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>Follow these steps to create a GKE Standard cluster:</p> <ol> <li>
+<p>Set the zone for your cluster:</p> 
+<pre data-language="">export ZONE=ZONE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ZONE</var></code> with the zone where you want to create your cluster. For optimal performance, use a zone in the same region as your Cloud Storage bucket.</p>
+</li> <li>
+<p>Create the cluster:</p> 
+<pre data-language="">gcloud container clusters create $CLUSTER_NAME \
+    --project=$PROJECT_ID \
+    --zone=$ZONE \
+    --workload-pool=$PROJECT_ID.svc.id.goog \
+    --num-nodes=1
+</pre>
+</li> </ol></section> </div>
+</li> </ol> <h3 id="create-node-pool">Create a node pool</h3> <p>If you created a Standard cluster, you must create a node pool with GPUs or TPUs. Autopilot clusters automatically provision nodes based on workload requirements. Create a node pool based on the accelerator that you want to use:</p> 
+<pre>*   {GPU}
+
+    Create a node pool with one G2 machine (NVIDIA L4 GPU):
+
+    ```sh
+    gcloud container node-pools create g2-gpu-pool \
+        --cluster=$CLUSTER_NAME \
+        --zone=$ZONE \
+        --machine-type=g2-standard-16 \
+        --num-nodes=1 \
+        --accelerator=type=nvidia-l4
+    ```
+
+*   {TPU}
+
+    Create a node pool with TPU v7x nodes:
+
+    ```sh
+    gcloud container node-pools create tpu7x-pool \
+        --cluster=$CLUSTER_NAME \
+        --zone=$ZONE \
+        --machine-type=tpu7x-standard-4t \
+        --num-nodes=1
+    ```
+</pre> <h3 id="configure-workload-identity">Configure Workload Identity Federation for GKE</h3> <p>Configure Workload Identity Federation for GKE to allow your GKE workloads to securely access the model in your Cloud Storage bucket.</p> <ol> <li>
+<p>Set variables for your Kubernetes service account and namespace:</p> 
+<pre>export KSA_NAME=KSA_NAME
+export NAMESPACE=NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace that you want your workloads to run on. Make sure to use the same namespace to create all the resources in this document.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: the name of the Kubernetes service account that your Pod can use to authenticate to Google Cloud APIs.</li> </ul>
+</li> <li>
+<p>Create a Kubernetes namespace:</p> 
+<pre>kubectl create namespace $NAMESPACE
+</pre>
+</li> <li>
+<p>Create a Kubernetes service account (KSA):</p> 
+<pre>kubectl create serviceaccount $KSA_NAME \
+    --namespace=$NAMESPACE
+</pre>
+<aside class="caution"><strong>Caution:</strong><span> To adhere to the principle of least privileges, avoid reusing this Kubernetes service account in other Pods within the same namespace. Any workload using this service account will unintentionally have access to the specified Cloud Storage bucket.</span></aside>
+</li> <li>
+<p>Grant your KSA the necessary permissions:</p> <ol> <li>
+<p>Set the environment variables:</p> 
+<pre>export BUCKET_NAME=BUCKET_NAME
+export PROJECT_ID=PROJECT_ID
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID \
+    --format 'get(projectNumber)')
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your Cloud Storage bucket that contains your <code translate="no" dir="ltr">safetensors</code> files.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> </ul> <p>The <code translate="no" dir="ltr">PROJECT_NUMBER</code>, <code translate="no" dir="ltr">PROJECT_ID</code>, <code translate="no" dir="ltr">NAMESPACE</code>, and <code translate="no" dir="ltr">KSA_NAME</code> will be used to construct the Workload Identity Federation for GKE principal identifier for your project in the following steps.</p>
+</li> <li>
+<p>Grant the <code translate="no" dir="ltr">roles/storage.bucketViewer</code> role to your KSA to view objects in your Cloud Storage bucket:</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://$BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/$NAMESPACE/sa/$KSA_NAME" \
+    --role="roles/storage.bucketViewer"
+</pre>
+</li> <li>
+<p>Grant the <code translate="no" dir="ltr">roles/storage.objectUser</code> role to your KSA to read, write, and delete objects in your Cloud Storage bucket:</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://$BUCKET_NAME \
+    --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/$NAMESPACE/sa/$KSA_NAME" \
+    --role="roles/storage.objectUser"
+</pre>
+</li> </ol>
+</li> </ol> <p>You have now set up a GKE cluster with GPUs or TPUs and configured Workload Identity Federation for GKE, granting a Kubernetes Service Account the necessary permissions to access your AI model in Cloud Storage. With the cluster and permissions in place, you are ready to deploy the vLLM inference server, which will use this service account to stream model weights with the Run:ai Model Streamer.</p> <h2 id="deploy-vllm-with-runai-model-streamer">Deploy vLLM with the Run:ai Model Streamer</h2> <p>Deploy a Pod that runs the vLLM OpenAI-compatible server, and is configured with the <code translate="no" dir="ltr">--load-format=runai_streamer</code> flag to use the Run:ai Model Streamer. The vLLM version must be 0.11.1 or later for GPUs, and 0.18.0 or later for TPUs.</p> <p>The following sample manifests show how to configure vLLM with the model streamer enabled for a small size model, like <code translate="no" dir="ltr">gemma-2-9b-it</code>.</p> <p>The <code translate="no" dir="ltr">--model-loader-extra-config={"distributed":true}</code> flag enables distributed loading of model weights and is a recommended setting for improving model loading performance from object storage.</p> <p>For more information, see <a href="https://huggingface.co/docs/text-generation-inference/en/conceptual/tensor_parallelism">Tensor parallelism</a> and <a href="https://docs.vllm.ai/en/latest/models/extensions/runai_model_streamer/#tunable-parameters">Tunable parameters</a>.</p> <ol> <li>
+<p>Select the sample manifest based on the accelerator that you want to use:</p> <div> <section><p class="_code-tab"><strong>GPU</strong></p>
+<p>The following sample manifest uses a single NVIDIA L4 GPU. If you're using a large model that requires multiple GPUs, increase the <code translate="no" dir="ltr">--tensor-parallel-size</code> value to the required number of GPUs.</p> <p>Save the following manifest as <code translate="no" dir="ltr">vllm-deployment.yaml</code>. The manifest is designed for flexibility across both Autopilot and Standard clusters.</p> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-streamer-deployment
+  namespace: NAMESPACE
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-streamer
+  template:
+    metadata:
+      labels:
+        app: vllm-streamer
+    spec:
+      serviceAccountName: KSA_NAME
+      containers:
+        - name: vllm-container
+          image: vllm/vllm-openai:v0.11.1
+          command:
+            - python3
+            - -m
+            - vllm.entrypoints.openai.api_server
+          args:
+            - --model=gs://BUCKET_NAME/PATH_TO_MODEL
+            - --load-format=runai_streamer
+            - --model-loader-extra-config={"distributed":true}
+            - --host=0.0.0.0
+            - --port=8000
+            - --disable-log-requests
+            - --tensor-parallel-size=1
+          ports:
+            - containerPort: 8000
+              name: api
+          # startupProbe allows for longer startup times for large models
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 60  # 60 * 10s = 10 minutes timeout
+            periodSeconds: 10
+            initialDelaySeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 3
+            periodSeconds: 10
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: dshm
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      volumes:
+      - emptyDir:
+          medium: Memory
+        name: dshm
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: your Kubernetes namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: your Kubernetes service account name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: your Cloud Storage bucket name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_MODEL</var></code>: the path to your model directory within the bucket, for example, <code translate="no" dir="ltr">models/my-llama</code>.</li> </ul></section> <section><p class="_code-tab"><strong>TPU</strong></p>
+<p>The following sample manifest uses TPU v7x nodes.</p> <p>Save the following manifest as <code translate="no" dir="ltr">vllm-deployment.yaml</code>.</p> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tpu-vllm
+  namespace: NAMESPACE
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tpu-vllm
+  template:
+    metadata:
+      labels:
+        app: tpu-vllm
+    spec:
+      serviceAccountName: KSA_NAME
+      containers:
+      - name: vllm-container
+        image: vllm/vllm-tpu:v0.18.0
+        resources:
+          limits:
+            google.com/tpu: "4"
+        command: ["sh", "-c"]
+        args:
+        - &gt;-
+          python3 -m vllm.entrypoints.openai.api_server
+          --model=gs://BUCKET_NAME/PATH_TO_MODEL
+          --load-format=runai_streamer
+          --tensor-parallel-size=8
+          --port=8000
+        ports:
+        - containerPort: 8000
+        env:
+        - name: VLLM_XLA_CACHE_PATH
+          value: "gs://BUCKET_NAME/PATH_TO_CACHE"
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: your Kubernetes namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: your Kubernetes service account name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: your Cloud Storage bucket name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_MODEL</var></code>: the path to your model directory within the bucket, for example, <code translate="no" dir="ltr">models/my-llama</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_CACHE</var></code>: the path to your XLA compilation cache directory within the bucket, for example, <code translate="no" dir="ltr">models/xla-cache</code>.</li> </ul></section> </div>
+</li> <li>
+<p>Apply the manifest to create the Deployment:</p> 
+<pre>kubectl create -f vllm-deployment.yaml
+</pre>
+</li> </ol> <p>You can generate more vLLM manifests using the <a href="../machine-learning/inference/inference-quickstart">GKE Inference Quickstart</a> tool.</p> <h2 id="verify-deployment">Verify the Deployment</h2> <ol> <li>
+<p>Check the status of the Deployment:</p> 
+<pre>kubectl get deployments -n NAMESPACE
+</pre>
+</li> <li>
+<p>Get the Pod name:</p> 
+<pre>kubectl get pods -n NAMESPACE | grep vllm-streamer
+</pre> <p>Note the name of the Pod starting with <code translate="no" dir="ltr">vllm-streamer-deployment</code>.</p>
+</li> <li>
+<p>To check if the model streamer downloads the model and weights, view the Pod logs:</p> 
+<pre>kubectl logs -f POD_NAME -n NAMESPACE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of the Pod from the previous step. Successful streaming logs look similar to the following:</p> 
+<pre>[RunAI Streamer] Overall time to stream 15.0 GiB of all files: 13.4s, 1.1 GiB/s
+</pre>
+</li> </ol> <aside class="success"><strong>Success:</strong><span> You have successfully deployed a vLLM inference server on GKE, leveraging the Run:ai Model Streamer to accelerate model loading directly from Cloud Storage.</span></aside> <h2 id="boost-performance">Optional: Boost performance with Rapid Cache</h2> <p><a href="https://docs.cloud.google.com/storage/docs/rapid/rapid-cache">Cloud Storage Rapid Cache</a> can further accelerate model loading by caching data closer to your GKE nodes. Caching is especially beneficial when scaling out multiple nodes in the same zone.</p> <p>You enable Rapid Cache for a specific Cloud Storage bucket in a specific Google Cloud zone. To improve performance, the cache's zone must match the zone where your GKE inference Pods run. Your approach depends on whether your Pods run in predictable zones.</p> <ul> <li><p>For GKE Standard zonal clusters, where you know which zone your Pods will run in, enable Rapid Cache for that specific zone.</p></li> <li>
+<p>For regional GKE clusters (both Autopilot and Standard), where Pods can be scheduled across multiple zones, you have the following options:</p> <ul> <li>
+<strong>Enable caching in all zones</strong>: Enable Rapid Cache in every zone within the cluster's region. This ensures a cache is available regardless of where GKE schedules your Pods. Note that you incur costs for each zone where caching is enabled. For more information, see <a href="https://cloud.google.com/storage/pricing#rapid-cache">Rapid Cache pricing</a>.</li> <li>
+<strong>Place Pods into a specific zone</strong>: Use a <code translate="no" dir="ltr">nodeSelector</code> or <code translate="no" dir="ltr">nodeAffinity</code> rule in your workload manifest to <a href="../gke-zonal-topology">constrain your Pods to a single zone</a>. You can then enable Rapid Cache in only that zone. This is a more cost-effective approach if your workload tolerates being restricted to a single zone.</li> </ul>
+</li> </ul> <p>To enable Rapid Cache for the zone where your GKE cluster resides, run the following commands:</p> 
+<pre># Enable the cache
+gcloud storage buckets anywhere-caches create gs://$BUCKET_NAME $ZONE
+
+# Check the status of the cache
+gcloud storage buckets anywhere-caches describe $BUCKET_NAME/$ZONE
+</pre> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used in this document, either delete the project that contains the resources, or keep the project and delete the individual resources.</p> <p>To delete the individual resources, follow these steps:</p> <ol> <li>
+<p>Delete the GKE cluster. This action removes all nodes and workloads.</p> 
+<pre>gcloud container clusters delete CLUSTER_NAME --location=ZONE_OR_REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE_OR_REGION</var></code>: the zone or region of your cluster.</li> </ul>
+</li> <li><p>Disable Rapid Cache, if you enabled it, to avoid ongoing costs. For more information, see <a href="https://docs.cloud.google.com/storage/docs/rapid/use-rapid-cache#disable-cache">Disable a cache</a>.</p></li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="https://gke-ai-labs.dev/docs/tutorials/storage/hf-gcs-transfer/" track-type="how-to" track-name="externalLink" track-metadata-position="body">Load Hugging Face Models into Cloud Storage (experimental)</a> </li> <li>Learn how to <a href="../../tutorials/serve-multiple-gpu">Serve an LLM with multiple GPUs in GKE</a>.</li> <li>Learn more about <a href="../../concepts/gpus">GPUs available on GKE</a>.</li> <li>Learn more about <a href="../../concepts/tpus">TPUs available on GKE</a>.</li> <li>Read the <a href="../../concepts/storage-overview">GKE Storage overview</a>.</li> <li>Learn about <a href="../workload-identity">Configuring Workload Identity Federation</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/run-ai-model-streamer" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/run-ai-model-streamer</a>
+  </p>
+</div>

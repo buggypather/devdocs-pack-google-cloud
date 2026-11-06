@@ -1,0 +1,564 @@
+<h1>Customize GKE Inference Gateway configuration</h1>  <p>This page describes how to customize GKE Inference Gateway deployment.</p> <p>This page is for Networking specialists who are responsible for managing GKE infrastructure, and for platform administrators who manage AI workloads.</p> <p>To manage and optimize inference workloads, you configure advanced features of GKE Inference Gateway.</p> <p>Understand and configure the following advanced features:</p> <ul> <li>To use Model Armor integration, <a href="#ai-safety-checks">configure AI security and safety checks</a>.</li> <li>To enhance GKE Inference Gateway with features like API security, rate limiting, and analytics, <a href="#config-auth-api-management">configure Apigee for authentication and API management</a>.</li> <li>To route requests based on the model name in the request body, <a href="configure-body-based-routing">configure Body-Based Routing</a>.</li> <li>To view metrics and dashboards for GKE Inference Gateway and model servers, and to enable <a href="#logging">HTTP access logging</a>, <a href="#observability">configure observability</a>.</li> <li>To automatically scale your GKE Inference Gateway deployments, <a href="#autoscaling">configure autoscaling</a>.</li> </ul> <h2 id="ai-safety-checks">Configure AI security and safety checks</h2> <p>GKE Inference Gateway integrates with <a href="https://docs.cloud.google.com/security-command-center/docs/model-armor-overview">Model Armor</a> to perform safety checks on prompts and responses for applications that use large language models (LLMs). This integration provides an additional layer of safety enforcement at the infrastructure level that complements application-level safety measures. This enables centralized policy application across all LLM traffic. You can also use <a href="https://docs.nvidia.com/nemo/microservices/latest/set-up/deploy-as-microservices/guardrails/gcp-installation.html">NVIDIA NeMo Guardrails</a> for safety checks.</p> <p>The following diagram illustrates Model Armor integration with GKE Inference Gateway on a GKE cluster:</p> <figure style="text-align: center"> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/inference-gateway-ai-integration.png" border="0" alt="Google Cloud Model Armor integration on a GKE cluster"> <figcaption><strong>Figure: </strong>Model Armor integration on a GKE cluster</figcaption> </figure> <p>To configure AI safety checks, perform the following steps:</p> <ol> <li>
+<p>Prerequisites</p> <ol> <li>
+<a href="https://docs.cloud.google.com/security-command-center/docs/get-started-model-armor#enable-model-armor">Enable the Model Armor service</a> in your Google Cloud project.</li> <li>
+<p>Create the <a href="https://docs.cloud.google.com/security-command-center/docs/manage-model-armor-templates">Model Armor templates</a> using the Model Armor console, Google Cloud CLI, or <a href="https://docs.cloud.google.com/security-command-center/docs/reference/model-armor/rest">API</a>. The following command creates a template named <code translate="no" dir="ltr">llm</code> that logs operations and filters for harmful content.</p> <aside class="note"><strong>Note:</strong><span> Your GKE cluster must be in a region supported by the Model Armor API. For a list of supported locations, see <a href="https://docs.cloud.google.com/security-command-center/docs/regional-endpoints#locations-model-armor">Model Armor API locations</a>. The location you set in the following steps must be the same as your GKE cluster's location.</span></aside>
+<pre># Set environment variables
+PROJECT_ID=$(gcloud config get-value project)
+# Replace &lt;var&gt;CLUSTER_LOCATION&lt;var&gt; with the location of your GKE cluster. For example, `us-central1`.
+LOCATION="CLUSTER_LOCATION"
+MODEL_ARMOR_TEMPLATE_NAME=llm
+
+# Set the regional API endpoint
+gcloud config set api_endpoint_overrides/modelarmor \
+  "https://modelarmor.$LOCATION.rep.googleapis.com/"
+
+# Create the template
+gcloud model-armor templates create $MODEL_ARMOR_TEMPLATE_NAME \
+  --location $LOCATION \
+  --pi-and-jailbreak-filter-settings-enforcement=enabled \
+  --pi-and-jailbreak-filter-settings-confidence-level=MEDIUM_AND_ABOVE \
+  --rai-settings-filters='[{ "filterType": "HATE_SPEECH", "confidenceLevel": "MEDIUM_AND_ABOVE" },{ "filterType": "DANGEROUS", "confidenceLevel": "MEDIUM_AND_ABOVE" },{ "filterType": "HARASSMENT", "confidenceLevel": "MEDIUM_AND_ABOVE" },{ "filterType": "SEXUALLY_EXPLICIT", "confidenceLevel": "MEDIUM_AND_ABOVE" }]' \
+  --template-metadata-log-sanitize-operations \
+  --template-metadata-log-operations
+</pre>
+</li> </ol>
+</li> <li>
+<p>Grant IAM permissions</p> <p>The Service Extensions service account requires permissions to access the necessary resources. Grant the required roles by running the following commands:</p> 
+<pre>PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format 'get(projectNumber)')
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member=serviceAccount:service-$PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/container.admin
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member=serviceAccount:service-$PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/modelarmor.calloutUser
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member=serviceAccount:service-$PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/serviceusage.serviceUsageConsumer
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member=serviceAccount:service-$PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/modelarmor.user
+</pre>
+</li> <li>
+<p>Configure the <code translate="no" dir="ltr">GCPTrafficExtension</code></p> <p>To apply the Model Armor policies to your Gateway, create a <code translate="no" dir="ltr">GCPTrafficExtension</code> resource with the correct metadata format.</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">gcp-traffic-extension.yaml</code>:</p> 
+<pre>kind: GCPTrafficExtension
+apiVersion: networking.gke.io/v1
+metadata:
+name: my-model-armor-extension
+spec:
+targetRefs:
+- group: "gateway.networking.k8s.io"
+  kind: Gateway
+  name: GATEWAY_NAME
+extensionChains:
+- name: my-model-armor-chain1
+  matchCondition:
+    celExpressions:
+      - celMatcher: request.path.startsWith("/")
+  extensions:
+  - name: my-model-armor-service
+    supportedEvents:
+    - RequestHeaders
+    - RequestBody
+    - RequestTrailers
+    - ResponseHeaders
+    - ResponseBody
+    - ResponseTrailers
+    timeout: 1s
+    failOpen: false
+    googleAPIServiceName: "modelarmor.${LOCATION}.rep.googleapis.com"
+    metadata:
+      model_armor_settings: '[{"model": "${MODEL}","model_response_template_id": "projects/${PROJECT_ID}/locations/${LOCATION}/templates/${MODEL_ARMOR_TEMPLATE_NAME}","user_prompt_template_id": "projects/${PROJECT_ID}/locations/${LOCATION}/templates/${MODEL_ARMOR_TEMPLATE_NAME}"}]'
+</pre>
+<aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">model_armor_settings</code> value must be provided as a JSON string. The ${...} variables should be substituted with your specific values for <code translate="no" dir="ltr">LOCATION</code>, <code translate="no" dir="ltr">MODEL</code>, <code translate="no" dir="ltr">PROJECT_ID</code>, and <code translate="no" dir="ltr">MODEL_ARMOR_TEMPLATE_NAME</code>.</span></aside> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: the name of the Gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MODEL_ARMOR_TEMPLATE_NAME</var></code>: the name of your Model Armor template.</li> </ul> <p>The <code translate="no" dir="ltr">gcp-traffic-extension.yaml</code> file includes the following settings:</p> <ul> <li>
+<code translate="no" dir="ltr">targetRefs</code>: specifies the Gateway to which this extension applies.</li> <li>
+<code translate="no" dir="ltr">extensionChains</code>: defines a chain of extensions to be applied to the traffic.</li> <li>
+<code translate="no" dir="ltr">matchCondition</code>: defines the conditions under which the extensions are applied.</li> <li>
+<code translate="no" dir="ltr">extensions</code>: defines the extensions to be applied.</li> <li>
+<code translate="no" dir="ltr">supportedEvents</code>: specifies the events during which the extension is invoked.</li> <li>
+<code translate="no" dir="ltr">timeout</code>: specifies the timeout for the extension.</li> <li>
+<code translate="no" dir="ltr">googleAPIServiceName</code>: specifies the service name for the extension.</li> <li>
+<code translate="no" dir="ltr">metadata</code>: specifies the metadata for the extension, including the <code translate="no" dir="ltr">extensionPolicy</code> and prompt or response sanitization settings.</li> </ul>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>export GATEWAY_NAME="your-gateway-name"
+export MODEL="google/gemma-3-1b-it" # Or your specific model
+envsubst &lt; gcp-traffic-extension.yaml | kubectl apply -f -
+</pre>
+</li> </ol>
+</li> </ol> <p>After you configure the AI safety checks and integrate them with your Gateway, Model Armor automatically filters prompts and responses based on the defined rules.</p> <h2 id="config-auth-api-management">Configure Apigee for authentication and API management</h2> <aside class="note"><strong>Note:</strong><span> Apigee extension is only supported within single cluster inference gateway.</span></aside> <p>GKE Inference Gateway integrates with Apigee to provide authentication, authorization, and API management for your inference workloads. To learn more about the benefits of using Apigee, see <a href="https://docs.cloud.google.com/apigee/docs/api-platform/get-started/what-apigee#key-benefits-of-using-apigee">Key benefits of using Apigee</a>.</p> <p>You can integrate GKE Inference Gateway with Apigee to enhance your GKE Inference Gateway with features such as API security, rate limiting, quotas, analytics, and monetization.</p> <h3 id="prerequisites">Prerequisites</h3> <p>Before you begin, ensure you have the following:</p> <ul> <li>A GKE cluster running version 1.34.* or later.</li> <li>A GKE cluster with GKE Inference Gateway deployed.</li> <li>An <a href="https://docs.cloud.google.com/apigee/docs/api-platform/system-administration/instances#create-a-new-instance">Apigee instance</a> created in the same region as your GKE cluster.</li> <li>The Apigee APIM Operator and its CRDs installed in your GKE cluster. For instructions, see <a href="https://docs.cloud.google.com/apigee/docs/api-platform/apigee-kubernetes/apigee-apim-operator-install">Install the Apigee APIM operator</a>.</li> <li>
+<code translate="no" dir="ltr">kubectl</code> configured to connect to your GKE cluster.</li> <li>
+<code translate="no" dir="ltr">Google Cloud CLI</code> installed and authenticated.</li> </ul> <h3 id="create-apigee-backend-service">Create an <code translate="no" dir="ltr">ApigeeBackendService</code>
+</h3> <p>First, create an <code translate="no" dir="ltr">ApigeeBackendService</code> resource. GKE Inference Gateway uses this to create an <a href="https://docs.cloud.google.com/apigee/docs/api-platform/service-extensions/extension-processor-overview">Apigee Extension Processor</a>.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">my-apigee-backend-service.yaml</code>:</p> 
+<pre>apiVersion: apim.googleapis.com/v1
+kind: ApigeeBackendService
+metadata:
+  name: my-apigee-backend-service
+spec:
+  apigeeEnv: "APIGEE_ENVIRONMENT_NAME"  # optional field
+  defaultSecurityEnabled: true # optional field
+  locations:
+    name: "LOCATION"
+    network: "CLUSTER_NETWORK"
+    subnetwork: "CLUSTER_SUBNETWORK"
+</pre>
+<aside class="note"><strong>Note:</strong><span> The creation of the <code translate="no" dir="ltr">ApigeeBackendService</code> might take a few minutes, during which time it is in the <code translate="no" dir="ltr">CREATING</code> state. If the creation fails, it transitions to the <code translate="no" dir="ltr">CREATE_UPDATE_FAILED</code> state. You can find the error details in the <code translate="no" dir="ltr">ERRORMESSAGE</code> field of the resource's status.</span></aside> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">APIGEE_ENVIRONMENT_NAME</var></code>: The name of your Apigee environment. Note: You don't need to set this field if the <code translate="no" dir="ltr">apigee-apim-operator</code> is installed with the <code translate="no" dir="ltr">generateEnv=TRUE</code> flag. If not, create an Apigee environment by following the instructions in <a href="https://docs.cloud.google.com/apigee/docs/api-platform/fundamentals/environments-working-with#create">Create an environment</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The location of your Apigee instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NETWORK</var></code>: The network of your GKE cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_SUBNETWORK</var></code>: The subnetwork of your GKE cluster.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f my-apigee-backend-service.yaml
+</pre>
+</li> <li>
+<p>Verify that the status has become <code translate="no" dir="ltr">CREATED</code>:</p> 
+<pre>kubectl wait --for=jsonpath='{.status.currentState}'="CREATED" -f my-apigee-backend-service.yaml --timeout=5m
+</pre>
+</li> </ol> <h3 id="config-inference-gateway">Configure GKE Inference Gateway</h3> <p>Configure GKE Inference Gateway to enable the Apigee Extension Processor as a load balancer traffic extension.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">my-apigee-traffic-extension.yaml</code>:</p> 
+<pre>kind: GCPTrafficExtension
+apiVersion: networking.gke.io/v1
+metadata:
+  name: my-apigee-traffic-extension
+spec:
+  targetRefs:
+  - group: "gateway.networking.k8s.io"
+    kind: Gateway
+    name: GATEWAY_NAME
+  extensionChains:
+  - name: my-traffic-extension-chain
+    matchCondition:
+      celExpressions:
+        - celMatcher: request.path.startsWith("/")
+    extensions:
+    - name: my-apigee-extension
+      metadata:
+        # The value for `apigee-extension-processor` must match the name of the `ApigeeBackendService` resource that was applied earlier.
+        apigee-extension-processor: my-apigee-backend-service
+      failOpen: false
+      timeout: 1s
+      supportedEvents:
+      - RequestHeaders
+      - ResponseHeaders
+      - ResponseBody
+      backendRef:
+        group: apim.googleapis.com
+        kind: ApigeeBackendService
+        name: my-apigee-backend-service
+        port: 443
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f my-apigee-traffic-extension.yaml
+</pre>
+</li> <li>
+<p>Wait for the <code translate="no" dir="ltr">GCPTrafficExtension</code> status to become <code translate="no" dir="ltr">Programmed</code>:</p> 
+<pre>kubectl wait --for=jsonpath='{.status.ancestors[0].conditions[?(@.type=="Programmed")].status}'=True -f my-apigee-traffic-extension.yaml --timeout=5m
+</pre>
+</li> </ol> <h3 id="send-authenticated-requests">Send Authenticated Requests using API keys</h3> <ol> <li>
+<p>To find the IP address of your GKE Inference Gateway, inspect the Gateway status:</p> 
+<pre>GW_IP=$(kubectl get gateway/GATEWAY_NAME -o jsonpath='{.status.addresses[0].value}')
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Test a request <em>without</em> authentication. This request should be rejected:</p> 
+<pre>curl -i ${GW_IP}/v1/completions -H 'Content-Type: application/json' -d '{
+"model": "food-review",
+"prompt": "Write as if you were a critic: San Francisco",
+"max_tokens": 100,
+"temperature": 0
+}'
+</pre> <p>You will see a response similar to the following, indicating that the Apigee extension is working:</p> 
+<pre>{"fault":{"faultstring":"Raising fault. Fault name : RF-insufficient-request-raise-fault","detail":{"errorcode":"steps.raisefault.RaiseFault"}}}
+</pre>
+</li> <li><p>Access the Apigee UI and create an API key. For instructions, see <a href="https://docs.cloud.google.com/apigee/docs/api-platform/apigee-kubernetes/apigee-apim-operator-create#test-apim-policy">Create an API key</a>.</p></li> <li>
+<p>Send the API Key in the HTTP request header:</p> 
+<pre>curl -i ${GW_IP}/v1/completions -H 'Content-Type: application/json' -H 'x-api-key: API_KEY' -d '{
+"model": "food-review",
+"prompt": "Write as if you were a critic: San Francisco",
+"max_tokens": 100,
+"temperature": 0
+}'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">API_KEY</var></code> with your API key.</p>
+</li> </ol> <p>For more detailed information on configuring Apigee policies, see <a href="https://docs.cloud.google.com/apigee/docs/api-platform/apigee-kubernetes/apigee-apim-operator-create">Use API management policies with the Apigee APIM Operator for Kubernetes</a>.</p> <h2 id="observability">Configure observability</h2> <p>GKE Inference Gateway provides insights into the health, performance, and behavior of your inference workloads. This helps you to identify and resolve issues, optimize resource utilization, and ensure the reliability of your applications.</p> <p>Google Cloud provides the following Cloud Monitoring dashboards that offer inference observability for GKE Inference Gateway:</p> <ul> <li>
+<a href="#inference-gateway-dashboard"><strong>GKE Inference Gateway dashboard</strong></a>: provides golden metrics for LLM serving, such as request and token throughput, latency, errors, and cache utilization for the <code translate="no" dir="ltr">InferencePool</code>. To see the complete list of available GKE Inference Gateway metrics, see <a href="https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics.md#exposed-metrics">Exposed metrics</a>.</li> <li>
+<a href="#aiml-deployed-models"><strong>AI/ML observability dashboards</strong></a>: provides dashboards for infrastructure usage, DCGM metrics, and vLLM model performance metrics.</li> <li>
+<a href="#model-server-observability"><strong>Model server dashboard</strong></a>: provides a dashboard for golden signals of model server. This lets you monitor the load and performance of the model servers, such as <code translate="no" dir="ltr">KVCache Utilization</code> and <code translate="no" dir="ltr">Queue length</code>.</li> <li>
+<a href="#logs-based-metrics-errors"><strong>Load balancer dashboard</strong></a>: reports metrics from the load balancer, such as requests per second, end-to-end request serving latency, and request-response status codes. These metrics help you understand the performance of end-to-end request serving and identify errors.</li> <li>
+<strong>Data Center GPU Manager (DCGM) metrics</strong>: provides DCGM metrics, such as the performance and utilization of NVIDIA GPUs. You can configure <a href="https://developer.nvidia.com/dcgm">DCGM metrics</a> in Cloud Monitoring. For more information, see <a href="dcgm-metrics#what-is-dcgm">Collect and view DCGM metrics</a>.</li> </ul> <h3 id="inference-gateway-dashboard">View GKE Inference Gateway dashboard</h3> <p>To view the unified <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/llm-d#monitoring-dashboard">llm-d Overview</a> dashboard for GKE Inference Gateway, perform the following steps:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Monitoring</strong> page.</p> <p><a href="https://console.cloud.google.com/monitoring" target="console" track-name="consoleLink" track-type="tasks" class="button button-primary">Go to Monitoring</a> </p>
+</li> <li><p>In the navigation pane, select <strong>Dashboards</strong>.</p></li> <li><p>In the <strong>Integrations</strong> section, select <strong>GMP</strong>.</p></li> <li><p>In the <strong>Cloud Monitoring Dashboard Templates</strong> page, search for "llm-d".</p></li> <li><p>Select the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/llm-d#monitoring-dashboard">llm-d Overview</a> dashboard, which monitors Application Load Balancer, GPU networking, llm-d EPP (<code translate="no" dir="ltr">llm_d_epp_*</code>), and vLLM metrics across both Standalone Mode and Gateway Mode.</p></li> <li><p>Click <strong>Add dashboard to your list</strong> and complete the required fields. Then, click <strong>Add to dashboard list</strong>.</p></li> </ol> <aside class="note"><strong>Note:</strong><span> For legacy standalone Gateway API Inference Extension (v1.5.0 and earlier) or llm-d deployments earlier than v0.8.0 that emit <code translate="no" dir="ltr">inference_objective_*</code> metrics, search for "Gateway" to view the legacy <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/inference-optimized-gateway#monitoring-dashboard">GKE Inference Gateway Prometheus Overview</a> dashboard.</span></aside> <h3 id="aiml-deployed-models">View AI/ML models observability dashboards</h3> <p>To view your deployed models and dashboards for observability metrics of a model, follow these steps:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Deployed Models</strong> page.</p> <p><a href="https://console.cloud.google.com/kubernetes/aiml/deployments/models" target="console" track-name="consoleLink" track-type="tasks" class="button button-primary">Go to Deployed Models</a> </p>
+</li> <li><p>To view details about a specific deployment, including its metrics, logs, and dashboards, click the model name in the list.</p></li> <li>
+<p>In the model details page, click the <strong>Observability</strong> tab to view the following dashboards. If prompted, click <strong>Enable</strong> to enable the dashboard.</p> <ul> <li>The <strong>Infrastructure usage</strong> dashboard displays utilization metrics.</li> <li>The <strong>DCGM</strong> dashboard displays DCGM metrics.</li> <li>If you are using vLLM, then the <strong>Model performance</strong> dashboard is available and displays metrics for the vLLM model performance.</li> </ul>
+</li> </ol> <h3 id="model-server-observability">Configure model server observability dashboard</h3> <aside class="warning"><strong>Warning:</strong><span> If you enable auto-monitoring for your model servers, delete any existing <code translate="no" dir="ltr">PodMonitoring</code> or <code translate="no" dir="ltr">ClusterPodMonitoring</code> instances for the target model servers to avoid double collection of metrics.</span></aside> <p>To collect golden signals from each model server and understand what contributes to GKE Inference Gateway performance, you can configure auto-monitoring for your model servers. This includes model servers such as the following:</p> <ul> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/jetstream">JetStream</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/nvidia-triton">NVIDIA Triton</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/sglang">SGLang</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/tf-serving">TensorFlow Serving</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/tgi">Text Generation <code translate="no" dir="ltr">Inference(TGI)</code></a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/torchserve">TorchServe</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/vllm">vLLM</a></li> </ul> <p>To view the integration dashboards, first ensure you are collecting metrics from your model server. Then, perform the following steps:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Monitoring</strong> page.</p> <p><a href="https://console.cloud.google.com/monitoring" target="console" track-name="consoleLink" track-type="tasks" class="button button-primary">Go to Monitoring</a> </p>
+</li> <li><p>In the navigation pane, select <strong>Dashboards</strong>.</p></li> <li>
+<p>Under <strong>Integrations</strong>, select <strong>GMP</strong>. The corresponding integration dashboards are displayed.</p> <figure style="text-align: center"> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/integration-dashboard-metrics.png" border="0" alt="A view of the integration dashboards"> <figcaption><strong>Figure: </strong>Integration dashboards</figcaption> </figure>
+</li> </ol> <p>For more information, see <a href="configure-automatic-application-monitoring#customize-monitoring">Customize monitoring for applications</a>.</p> <h3 id="cloud-monitoring-alerts-observability">Configure the Cloud Monitoring alerts</h3> <p>To configure Cloud Monitoring alerts for GKE Inference Gateway, perform the following steps:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">alerts.yaml</code> and modify the thresholds as needed:</p> 
+<pre>groups:
+- name: gateway-api-inference-extension
+  rules:
+  - alert: HighInferenceRequestLatencyP99
+    annotations:
+      title: 'High latency (P99) for model {{ $labels.model_name }}'
+      description: 'The 99th percentile request duration for model {{ $labels.model_name }} and target model {{ $labels.target_model_name }} has been consistently above 10.0 seconds for 5 minutes.'
+    expr: histogram_quantile(0.99, rate(inference_model_request_duration_seconds_bucket[5m])) &gt; 10.0
+    for: 5m
+    labels:
+      severity: 'warning'
+  - alert: HighInferenceErrorRate
+    annotations:
+      title: 'High error rate for model {{ $labels.model_name }}'
+      description: 'The error rate for model {{ $labels.model_name }} and target model {{ $labels.target_model_name }} has been consistently above 5% for 5 minutes.'
+    expr: sum by (model_name) (rate(inference_model_request_error_total[5m])) / sum by (model_name) (rate(inference_model_request_total[5m])) &gt; 0.05
+    for: 5m
+    labels:
+      severity: 'critical'
+      impact: 'availability'
+  - alert: HighInferencePoolAvgQueueSize
+    annotations:
+      title: 'High average queue size for inference pool {{ $labels.name }}'
+      description: 'The average number of requests pending in the queue for inference pool {{ $labels.name }} has been consistently above 50 for 5 minutes.'
+    expr: inference_pool_average_queue_size &gt; 50
+    for: 5m
+    labels:
+      severity: 'critical'
+      impact: 'performance'
+  - alert: HighInferencePoolAvgKVCacheUtilization
+    annotations:
+      title: 'High KV cache utilization for inference pool {{ $labels.name }}'
+      description: 'The average KV cache utilization for inference pool {{ $labels.name }} has been consistently above 90% for 5 minutes, indicating potential resource exhaustion.'
+    expr: inference_pool_average_kv_cache_utilization &gt; 0.9
+    for: 5m
+    labels:
+      severity: 'critical'
+      impact: 'resource_exhaustion'
+</pre>
+</li> <li>
+<p>To create alerting policies, run the following command:</p> 
+<pre>gcloud monitoring policies migrate --policies-from-prometheus-alert-rules-yaml=alerts.yaml
+</pre> <p>You see new alert policies in the <a href="https://console.cloud.google.com/monitoring/alerting">Alerting page</a>.</p>
+</li> </ol> <h4 id="modify_alerts">Modify alerts</h4> <p>You can find complete list of latest metrics available in the <a href="https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/metrics.md">kubernetes-sigs/gateway-api-inference-extension GitHub repository</a>, and you can append new alerts to the manifest by using other metrics.</p> <p>To modify the sample alerts, consider the following example:</p> 
+<pre>  - alert: HighInferenceRequestLatencyP99
+    annotations:
+      title: 'High latency (P99) for model {{ $labels.model_name }}'
+      description: 'The 99th percentile request duration for model {{ $labels.model_name }} and target model {{ $labels.target_model_name }} has been consistently above 10.0 seconds for 5 minutes.'
+    expr: histogram_quantile(0.99, rate(inference_model_request_duration_seconds_bucket[5m])) &gt; 10.0
+    for: 5m
+    labels:
+      severity: 'warning'
+</pre> <p>This alert fires if the 99th percentile of the request duration over 5 minutes exceeds 10 seconds. You can modify the <code translate="no" dir="ltr">expr</code> section of the alert to adjust the threshold based on your requirements.</p> <h3 id="logging">Configure logging for GKE Inference Gateway</h3> <p>Configuring logging for GKE Inference Gateway provides detailed information about requests and responses, which is useful for troubleshooting, auditing, and performance analysis. HTTP access logs record every request and response, including headers, status codes, and timestamps. This level of detail can help you identify issues, find errors, and understand the behavior of your inference workloads.</p> <p>To configure logging for GKE Inference Gateway, enable HTTP access logging for each of your <code translate="no" dir="ltr">InferencePool</code> objects.</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">logging-backend-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: logging-backend-policy
+  namespace: NAMESPACE_NAME
+spec:
+  default:
+    logging:
+      enabled: true
+      sampleRate: 500000
+  targetRef:
+    group: inference.networking.x-k8s.io
+    kind: InferencePool
+    name: INFERENCE_POOL_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_NAME</var></code>: the name of the namespace where your <code translate="no" dir="ltr">InferencePool</code> is deployed.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INFERENCE_POOL_NAME</var></code>: the name of the <code translate="no" dir="ltr">InferencePool</code>.</li> </ul>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>kubectl apply -f logging-backend-policy.yaml
+</pre>
+</li> </ol> <p>After you apply this manifest, GKE Inference Gateway enables HTTP access logs for the specified <code translate="no" dir="ltr">InferencePool</code>. You can view these logs in Cloud Logging. The logs include detailed information about each request and response, such as the request URL, headers, response status code, and latency.</p> <h3 id="logs-based-metrics-errors">Create logs-based metrics to view error details</h3> <p>You can use logs-based metrics to analyze your load balancing logs and extract error details. Each GKE Gateway class, such as the <code translate="no" dir="ltr">gke-l7-global-external-managed</code> and <code translate="no" dir="ltr">gke-l7-regional-internal-managed</code> Gateway classes, is backed by a different load balancer. For more information, see <a href="gatewayclass-capabilities#load_balancer">GatewayClass capabilities</a>.</p> <p>Each load balancer has a different monitored resource that you must use when you create a logs-based metric. For more information about the monitored resource for each load balancer, see the following:</p> <ul> <li>
+<strong>For regional external load balancers</strong>: <a href="https://docs.cloud.google.com/load-balancing/docs/https/https-reg-logging-monitoring#view_logs">Logs-based metrics for external HTTP(S) load balancers</a>
+</li> <li>
+<strong>For internal load balancers</strong>: <a href="https://docs.cloud.google.com/load-balancing/docs/l7-internal/monitoring#how_to_view_logs">Logs-based metrics for internal HTTP(S) load balancers</a>
+</li> </ul> <p>To create a logs-based metric to view error details, do the following:</p> <ol> <li>
+<p>Create a JSON file named <code translate="no" dir="ltr">error_detail_metric.json</code> with the following <code translate="no" dir="ltr">LogMetric</code> definition. This configuration creates a metric that extracts the <code translate="no" dir="ltr">proxyStatus</code> field from your load balancer logs.</p> 
+<pre>{
+  "description": "Metric to extract error details from load balancer logs.",
+  "filter": "resource.type=\"MONITORED_RESOURCE\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "INT64",
+    "labels": [
+      {
+        "key": "error_detail",
+        "valueType": "STRING",
+        "description": "The detailed error string from the load balancer."
+      }
+    ]
+  },
+  "labelExtractors": {
+    "error_detail": "EXTRACT(jsonPayload.proxyStatus)"
+  }
+}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">MONITORED_RESOURCE</var></code> with the monitored resource for your load balancer.</p>
+</li> <li><p>Open Cloud Shell or your local terminal where the gcloud CLI is installed.</p></li> <li>
+<p>To create the metric, run the <code translate="no" dir="ltr">gcloud logging metrics create</code> command with the <code translate="no" dir="ltr">--config-from-file</code> flag:</p> 
+<pre>gcloud logging metrics create error_detail_metric \
+    --config-from-file=error_detail_metric.json
+</pre>
+</li> </ol> <p>After the metric is created, you can use it in Cloud Monitoring to view the distribution of errors reported by the load balancer. For more information, see <a href="https://docs.cloud.google.com/logging/docs/logs-based-metrics">Create a logs-based metric</a>.</p> <p>For more information about creating alerts from logs-based metrics, see <a href="https://docs.cloud.google.com/logging/docs/logs-based-metrics/charts-and-alerts#alert-on-lbm">Create an alerting policy on a counter metric</a>.</p> <aside class="note"><strong>Note:</strong><span> Metrics created from logs are not adjusted based on the log sample rate. To ensure that your metrics accurately reflect all requests, either account for the sample rate in your analysis or set the sample rate to 100% by configuring <code translate="no" dir="ltr">sampleRate: 1000000</code> in your <code translate="no" dir="ltr">GCPBackendPolicy</code>.</span></aside> <h2 id="autoscaling">Configure autoscaling</h2> <p>Autoscaling adjusts resource allocation in response to load variations, maintaining performance and resource efficiency by dynamically adding or removing Pods based on demand. For GKE Inference Gateway, this involves horizontal autoscaling of Pods in each <code translate="no" dir="ltr">InferencePool</code>. The GKE Horizontal Pod Autoscaler (HPA) autoscales Pods based on model-server metrics such as <code translate="no" dir="ltr">KVCache Utilization</code>. This approach helps ensure the inference service handles different workloads and query volumes while efficiently managing resource usage.</p> <p>To configure <code translate="no" dir="ltr">InferencePool</code> instances so they autoscale based on metrics produced by GKE Inference Gateway, perform the following steps:</p> <ol> <li><p>Deploy a <code translate="no" dir="ltr">PodMonitoring</code> object in the cluster to collect metrics produced by GKE Inference Gateway. For more information, see <a href="#observability">Configure observability</a>.</p></li> <li>
+<p>Deploy the <strong>Custom Metrics Stackdriver Adapter</strong> to give HPA access to the metrics:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">adapter_new_resource_model.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Namespace
+metadata:
+  name: custom-metrics
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: custom-metrics-stackdriver-adapter
+  namespace: custom-metrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: custom-metrics:system:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: custom-metrics-stackdriver-adapter
+  namespace: custom-metrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: custom-metrics-auth-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+- kind: ServiceAccount
+  name: custom-metrics-stackdriver-adapter
+  namespace: custom-metrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: custom-metrics-resource-reader
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - nodes
+  - nodes/stats
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: custom-metrics-resource-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: custom-metrics-resource-reader
+subjects:
+- kind: ServiceAccount
+  name: custom-metrics-stackdriver-adapter
+  namespace: custom-metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-metrics-stackdriver-adapter
+  labels:
+    run: custom-metrics-stackdriver-adapter
+    k8s-app: custom-metrics-stackdriver-adapter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: custom-metrics-stackdriver-adapter
+      k8s-app: custom-metrics-stackdriver-adapter
+  template:
+    metadata:
+      labels:
+        run: custom-metrics-stackdriver-adapter
+        k8s-app: custom-metrics-stackdriver-adapter
+        kubernetes.io/cluster-service: "true"
+    spec:
+      serviceAccountName: custom-metrics-stackdriver-adapter
+      containers:
+      - image: gcr.io/gke-release/custom-metrics-stackdriver-adapter:v0.15.2-gke.1
+        imagePullPolicy: Always
+        name: pod-custom-metrics-stackdriver-adapter
+        command:
+        - /adapter
+        - --use-new-resource-model=true
+        - --fallback-for-container-metrics=true
+        resources:
+          limits:
+            cpu: 250m
+            memory: 200Mi
+          requests:
+            cpu: 250m
+            memory: 200Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    run: custom-metrics-stackdriver-adapter
+    k8s-app: custom-metrics-stackdriver-adapter
+    kubernetes.io/cluster-service: 'true'
+    kubernetes.io/name: Adapter
+  name: custom-metrics-stackdriver-adapter
+  namespace: custom-metrics
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 443
+  selector:
+    run: custom-metrics-stackdriver-adapter
+    k8s-app: custom-metrics-stackdriver-adapter
+  type: ClusterIP
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.custom.metrics.k8s.io
+spec:
+  insecureSkipTLSVerify: true
+  group: custom.metrics.k8s.io
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  service:
+    name: custom-metrics-stackdriver-adapter
+    namespace: custom-metrics
+  version: v1beta1
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta2.custom.metrics.k8s.io
+spec:
+  insecureSkipTLSVerify: true
+  group: custom.metrics.k8s.io
+  groupPriorityMinimum: 100
+  versionPriority: 200
+  service:
+    name: custom-metrics-stackdriver-adapter
+    namespace: custom-metrics
+  version: v1beta2
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.external.metrics.k8s.io
+spec:
+  insecureSkipTLSVerify: true
+  group: external.metrics.k8s.io
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  service:
+    name: custom-metrics-stackdriver-adapter
+    namespace: custom-metrics
+  version: v1beta1
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-metrics-reader
+rules:
+- apiGroups:
+  - "external.metrics.k8s.io"
+  resources:
+  - "*"
+  verbs:
+  - list
+  - get
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: external-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: external-metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: horizontal-pod-autoscaler
+  namespace: kube-system
+</pre>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>kubectl apply -f adapter_new_resource_model.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>To give adapter permissions to read metrics from the project, run the following command:</p> 
+<pre>$ PROJECT_ID=PROJECT_ID
+$ PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+$ gcloud projects add-iam-policy-binding projects/PROJECT_ID \
+  --role roles/monitoring.viewer \
+  --member=principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/custom-metrics/sa/custom-metrics-stackdriver-adapter
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p>
+</li> <li>
+<p>For each <code translate="no" dir="ltr">InferencePool</code>, deploy one HPA that is similar to the following:</p> 
+<pre>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: INFERENCE_POOL_NAME
+  namespace: INFERENCE_POOL_NAMESPACE
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: INFERENCE_POOL_NAME
+  minReplicas: MIN_REPLICAS
+  maxReplicas: MAX_REPLICAS
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: prometheus.googleapis.com|inference_pool_average_kv_cache_utilization|gauge
+        selector:
+          matchLabels:
+            metric.labels.name: INFERENCE_POOL_NAME
+            resource.labels.cluster: CLUSTER_NAME
+            resource.labels.namespace: INFERENCE_POOL_NAMESPACE
+      target:
+        type: AverageValue
+        averageValue: TARGET_VALUE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INFERENCE_POOL_NAME</var></code>: the name of the <code translate="no" dir="ltr">InferencePool</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INFERENCE_POOL_NAMESPACE</var></code>: the namespace of the <code translate="no" dir="ltr">InferencePool</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MIN_REPLICAS</var></code>: the minimum availability of the <code translate="no" dir="ltr">InferencePool</code> (baseline capacity). HPA keeps this number of replicas up when usage is below the HPA target threshold. Highly available workloads must set this to a value higher than <code translate="no" dir="ltr">1</code> to help ensure continued availability during Pod disruptions.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_REPLICAS</var></code>: the value that constrains the number of accelerators that must be assigned to the workloads hosted in the <code translate="no" dir="ltr">InferencePool</code>. HPA won't increase the number of replicas beyond this value. During peak traffic times, monitor the number of replicas to help ensure that the value of the <code translate="no" dir="ltr">MAX_REPLICAS</code> field provides enough headroom so the workload can scale up to maintain the chosen workload performance characteristics.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_VALUE</var></code>: the value that represents the chosen target <code translate="no" dir="ltr">KV-Cache Utilization</code> per model server. This is a number between 0-100 and is highly dependent on the model server, model, accelerator, and incoming traffic characteristics. You can determine this target value experimentally through load testing and plotting a throughput versus latency graph. Select a chosen throughput and latency combination from the graph, and use the corresponding <code translate="no" dir="ltr">KV-Cache Utilization</code> value as the HPA target. You must tweak and monitor this value closely to achieve chosen price-performance results. You can use <a href="machine-learning/inference-quickstart">GKE Inference Quickstart</a> to determine this value automatically.</li> </ul>
+</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="../concepts/about-gke-inference-gateway">Learn about GKE Inference Gateway</a>.</li> <li>
+<a href="deploy-gke-inference-gateway">Deploy GKE Inference Gateway</a>.</li> <li>
+<a href="gke-inference-gateway-rollout-operations">Manage GKE Inference Gateway roll out operations</a>.</li> <li>
+<a href="../tutorials/serve-with-gke-inference-gateway">Serve with GKE Inference Gateway</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/customize-gke-inference-gateway-configurations" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/customize-gke-inference-gateway-configurations</a>
+  </p>
+</div>

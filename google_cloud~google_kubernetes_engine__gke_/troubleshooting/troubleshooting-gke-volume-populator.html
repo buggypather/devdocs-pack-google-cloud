@@ -1,0 +1,197 @@
+<h1>Troubleshooting GKE Volume Populator data transfer issues</h1>  <p>The <a href="../concepts/about-volume-populator">GKE Volume Populator</a> helps transfer data to GKE clusters. However, issues can arise during the data transfer process that prevent PersistentVolumeClaims (PVCs) from being created or data from being populated correctly.</p> <p>Use this document to resolve common issues encountered when using the GKE Volume Populator. Learn how to troubleshoot data transfer issues by inspecting component status, validating configurations, and resolving resource or permission errors.</p> <p>This information is important for Application developers and Platform admins and operators who use the GKE Volume Populator to seed data into their GKE volumes. For more information about the common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="inspect-temporary-resources">Inspect temporary Kubernetes resources</h2> <p>Here's how GKE Volume Populator uses temporary resources:</p> <ol> <li>A temporary PVC is created in the <code translate="no" dir="ltr">gke-managed-volumepopulator</code> namespace.</li> <li>For each zone involved in the transfer, a transfer Job, PVs, and PVCs are created in your PVC's namespace.</li> <li>After the data transfer is done, GKE Volume Populator automatically removes all these temporary resources.</li> </ol> <p>To inspect the temporary resources, follow these steps:</p> <ol> <li>
+<p>Store the environment variables:</p> 
+<pre>export PVC_NAME=PVC_NAME
+export NAMESPACE=NAMESPACE
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of your <code translate="no" dir="ltr">PersistentVolumeClaim</code> resource.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace where your workloads run.</li> </ul>
+</li> <li>
+<p>Check the status:</p> 
+<pre>export PVC_UID=$(kubectl get pvc ${PVC_NAME} -n ${NAMESPACE} -o jsonpath='{.metadata.uid}')
+export TEMP_PVC=prime-${PVC_UID}
+echo ${TEMP_PVC}
+</pre>
+</li> <li>
+<p>Inspect the temporary PVC in the <code translate="no" dir="ltr">gke-managed-volumepopulator</code> namespace:</p> 
+<pre>kubectl describe pvc ${TEMP_PVC} -n gke-managed-volumepopulator
+</pre>
+</li> <li>
+<p>Get the names of the temporary PVCs in your namespace:</p> 
+<pre>export TEMP_PVC_LIST=($(kubectl get pvc -n "$NAMESPACE" -o json | grep -Eo "\"name\":\s*\"$TEMP_PVC[^\"]*\"" | awk -F'"' '{print $4}'))
+
+for pvc in "${TEMP_PVC_LIST[@]}"; do
+  echo "$pvc"
+done
+</pre>
+</li> <li>
+<p>Inspect the temporary PVCs:</p> 
+<pre>kubectl describe pvc "${TEMP_PVC_LIST[0]}" -n $NAMESPACE
+</pre>
+</li> <li>
+<p>GKE Volume Populator creates a transfer Job in each zone (one in case of a single zone Hyperdisk ML volume and multiple in case of multi-zone Hyperdisk ML volumes). Get the transfer Job name by using the following command:</p> 
+<pre>export TRANSFER_JOB=$(kubectl get pvc "${TEMP_PVC_LIST[0]}" -n "$NAMESPACE" -o "jsonpath={.metadata.annotations['volume-populator\.datalayer\.gke\.io/pd-transfer-requestid']}")
+
+echo $TRANSFER_JOB
+</pre>
+</li> <li>
+<p>Inspect the transfer Job:</p> 
+<pre>kubectl describe job $TRANSFER_JOB -n $NAMESPACE
+</pre>
+</li> <li>
+<p>Get the Pod name from the transfer Job:</p> 
+<pre>export TRANSFER_POD=$(kubectl get pods -n "$NAMESPACE" -l "job-name=$TRANSFER_JOB" -o jsonpath='{.items[0].metadata.name}')
+
+echo $TRANSFER_POD
+</pre>
+</li> <li>
+<p>Inspect the Pod:</p> 
+<pre>kubectl describe pod $TRANSFER_POD -n $NAMESPACE
+</pre> <p>If you create a PVC across multiple zones, the GKE Volume Populator creates distinct temporary PVCs and the transfer Job resources for each specified zone. To inspect the resources for every zone involved in the transfer, replace the <code translate="no" dir="ltr">0</code> of the index for <code translate="no" dir="ltr">TEMP_PVC_LIST</code> with other numbers.</p>
+</li> </ol> <h2 id="workload-identity-enabled">Check if Workload Identity Federation is enabled</h2> <p>Workload Identity Federation allows transfer pods to securely access Google Cloud services. If the transfer Pods are unable to authenticate to Google Cloud, verify that Workload Identity Federation for GKE is enabled on your cluster.</p> <ol> <li>
+<p>To check if the <code translate="no" dir="ltr">workloadIdentityConfig</code> is enabled on your cluster, run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME
+--location=LOCATION \
+--project=PROJECT_ID \
+--format="value(workloadIdentityConfig)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute region or zone of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> </ul>
+</li> <li>
+<p>Look for the following output in the command:</p> 
+<pre>PROJECT_ID.svc.id.goog
+</pre>
+</li> <li><p>If <code translate="no" dir="ltr">workloadIdentityConfig</code> is missing from the output, enable <a href="../how-to/workload-identity#enable_on_clusters_and_node_pools">Workload Identity Federation for GKE</a>.</p></li> </ol> <h2 id="invalid_transfer_path">Invalid transfer path</h2> <p>If you encounter an error similar to the following, the transfer path specified on the <code translate="no" dir="ltr">GCPDatasource</code> resource is incorrect, and the transfer will fail.</p> 
+<pre>ERROR: (gcloud.storage.cp) The following URLs matched no objects or files:
+gs://datasets-pd/llama2-7b-hfa/
+</pre> <p>To resolve this issue, delete the <code translate="no" dir="ltr">GCPDatasource</code> resource, update the <code translate="no" dir="ltr">uri</code> field with the correct value, and re-create the resource.</p> <h2 id="insufficient_permission_to_access_the_bucket">Insufficient permission to access the bucket</h2> <p>If the Kubernetes service account doesn't have access to the bucket URI that's specified in the <code translate="no" dir="ltr">GCPDatasource</code> resource, the transfer job will fail. The error might look similar to the following:</p> 
+<pre>ERROR: (gcloud.storage.cp) [test-gke-dev.svc.id.goog] does not have permission to access b instance [small-bucket-7] (or it may not exist): Caller does not have storage.objects.list access to the Google Cloud Storage bucket. Permission 'storage.objects.list' denied on resource (or it may not exist). This command is authenticated as test-gke-dev.svc.id.goog which is the active account specified by the [core/account] property.
+</pre> <p>To resolve the issue, <a href="../how-to/persistent-volumes/volume-populator-hdml#permissions">grant the necessary permissions</a> to transfer data from the bucket to the disk.</p> 
+<pre>gcloud storage buckets \
+    add-iam-policy-binding gs://GCS_BUCKET \
+     --member "principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/NAMESPACE/sa/KSA_NAME" \
+    --role "ROLE"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GCS_BUCKET</var></code>: your Cloud Storage bucket name.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your Google Cloud project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace where your workloads run.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: the name of your Kubernetes service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: the <a href="https://docs.cloud.google.com/iam/docs/understanding-roles">IAM role</a> that provides the necessary permissions to access the bucket. For example, use <code translate="no" dir="ltr">roles/storage.objectViewer</code> to grant read-only access to the bucket.</li> </ul> <h2 id="error_error_generating_accessibility_requirements">Error: <code translate="no" dir="ltr">error generating accessibility requirements</code>
+</h2> <p>You might see the following transient error when you check the PVC in the <code translate="no" dir="ltr">gke-managed-volumepopulator</code> namespace:</p> 
+<pre>Error: error generating accessibility requirements: no available topology found.
+</pre> <p>If you use a GKE Autopilot cluster or a Standard cluster with node auto-provisioning enabled, this error can occur because no nodes might be <code translate="no" dir="ltr">Ready</code> in your cluster. The error should resolve itself within a few minutes after node auto-provisioning scales up a new node.</p> <h2 id="transfer_pod_is_pending_scheduling_for_a_long_time">Transfer Pod is <code translate="no" dir="ltr">Pending</code> scheduling for a long time</h2> <p>Your PVC event might show that the status of the transfer Pod is <code translate="no" dir="ltr">Pending</code> for a long time.</p> <p>To check the transfer Job events to verify if the scheduling failed for the Job, follow these steps:</p> <ol> <li>
+<p>Describe the PVC:</p> 
+<pre>kubectl describe pvc $PVC_NAME -n $NAMESPACE
+</pre> <p>The output is similar to the following:</p> 
+<pre>Events:
+  Type     Reason             Age                From                Message
+  ----     ------             ----               ----                -------
+Normal   TransferInProgress              1s (x2 over 2s)    gkevolumepopulator-populator                                                                      populateCompleteFn: For PVC pd-pvc79 in namespace default, job with request ID populator-job-0b93fec4-5490-4e02-af32-15b16435d559 is still active with pod status as - Phase: Pending
+</pre>
+</li> <li>
+<p>To inspect the transfer Pod, follow the steps in <a href="#inspect-temporary-resources">Inspect temporary Kubernetes resources</a>.</p> <p>The output is similar to the following:</p> 
+<pre>Events:
+  Type     Reason             Age                From                Message
+  ----     ------             ----               ----                -------
+  Warning  FailedScheduling   2m50s              default-scheduler   0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had volume node affinity conflict. preemption: 0/3 nodes are available: 1 No preemption victims found for incoming pod, 2 Preemption is not helpful for scheduling.
+  Warning  FailedScheduling   37s (x2 over 39s)  default-scheduler   0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had volume node affinity conflict. preemption: 0/3 nodes are available: 1 No preemption victims found for incoming pod, 2 Preemption is not helpful for scheduling.
+  Normal   NotTriggerScaleUp  2m40s              cluster-autoscaler  pod didn't trigger scale-up:
+</pre>
+</li> <li>
+<p>If you see the <code translate="no" dir="ltr">NotTriggerScaleUp</code> message, check if your cluster has node auto-provisioning enabled:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --format="value(autoscaling.enableNodeAutoprovisioning)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute region or zone of your cluster.</li> </ul>
+</li> <li>
+<p>If the output shows as 'False', enable node auto-provisioning by using the following command:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --enable-autoprovisioning \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --min-cpu MINIMUM_CPU \
+    --min-memory MINIMUM_MEMORY \
+    --max-cpu MAXIMUM_CPU \
+    --max-memory MAXIMUM_MEMORY \
+    --autoprovisioning-scopes=https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring,https://www.googleapis.com/auth/devstorage.read_only
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name for the cluster that you're updating to enable node auto-provisioning.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute zone or region for your cluster. For example, <code translate="no" dir="ltr">us-central1-a</code> or <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MINIMUM_CPU</var></code>: the minimum number of vCPUs to auto-provision. For example, <code translate="no" dir="ltr">10</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MINIMUM_MEMORY</var></code>: the minimum amount of memory in GiB to auto-provision. For example, <code translate="no" dir="ltr">200</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAXIMUM_CPU</var></code>: the maximum number of vCPUs to auto-provision. For example, <code translate="no" dir="ltr">100</code>. This limit is the total of the CPU resources across all existing manually created node pools and all the node pools that GKE might automatically create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAXIMUM_MEMORY</var></code>: the maximum amount of memory to auto-provision. For example, <code translate="no" dir="ltr">1000</code>. This limit is the total of the memory resources across all existing, manually created node pools and all the node pools that GKE might automatically create.</li> </ul>
+</li> <li>
+<p>If node auto-provisioning is enabled, verify that <a href="cluster-autoscaler-scale-up#noscaleup-reasons">node auto-provisioning has sufficient autoscaling <code translate="no" dir="ltr">resourceLimits</code></a> to scale up the transfer Job. The transfer Job uses 24 vCPUs by default.</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --format="value(autoscaling.resourceLimits)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute region or zone of your cluster.</li> </ul> <p>The output is similar to the following:</p> 
+<pre>{'maximum': '1000000000', 'resourceType': 'cpu'};{'maximum': '1000000000', 'resourceType': 'memory'};
+</pre>
+</li> <li>
+<p>If node auto-provisioning does not have sufficient autoscaling limits, update the cluster with the correct configuration.</p> 
+<pre>gcloud container clusters update CLUSTER_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID \
+    --enable-autoprovisioning \
+    --max-cpu MAXIMUM_CPU \
+    --max-memory MAXIMUM_MEMORY
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name for the cluster that you're updating to enable node auto-provisioning.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the compute zone or region for your cluster. For example, <code translate="no" dir="ltr">us-central1-a</code> or <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAXIMUM_CPU</var></code>: the maximum number of vCPUs to auto-provision. For example, <code translate="no" dir="ltr">100</code>. This limit is the total of the CPU resources across all existing manually created node pools and all the node pools that GKE might automatically create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAXIMUM_MEMORY</var></code>: the maximum amount of memory to auto-provision. For example, <code translate="no" dir="ltr">1000</code>. This limit is the total of the memory resources across all existing, manually created node pools and all the node pools that GKE might automatically create.</li> </ul>
+</li> <li>
+<p>For Standard clusters without node auto-provisioning enabled, verify that the node you created for the transfer Job has the required compute class label:</p> 
+<pre>kubectl get node -l cloud.google.com/compute-class=gcs-to-hdml-compute-class
+</pre>
+</li> <li>
+<p>If the output doesn't list the node that you created for the transfer Job, add the <code translate="no" dir="ltr">gcs-to-hdml-compute-class</code> compute class label to the node:</p> 
+<pre>kubectl label node NODE_NAME cloud.google.com/compute-class=gcs-to-hdml-compute-class
+</pre> <p>Replace the <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node where you want to add the compute class label.</p>
+</li> </ol> <h2 id="gce_quota_exceeded_error">
+<code translate="no" dir="ltr">GCE quota exceeded</code> error</h2> <p>You might encounter an error message similar to the following when you check the Pod for the transfer Job:</p> 
+<pre>Node scale up in zones us-west1-b associated with this pod failed: GCE quota exceeded. Pod is at risk of not being scheduled.
+</pre> <ol> <li><p>To inspect the transfer Pod, follow the steps in <a href="#inspect-temporary-resources">Inspect temporary Kubernetes resources</a>.</p></li> <li><p>To resolve the error, increase the quota or delete existing resources that might be preventing scale-up. For more information, see <a href="https://docs.cloud.google.com/docs/quotas/troubleshoot">Troubleshoot quota errors</a>.</p></li> </ol> <h2 id="throughput-exceeded-error">Hyperdisk ML <code translate="no" dir="ltr">HDML_TOTAL_THROUGHPUT</code> exceeded error</h2> <p>If the temporary PVC in the <code translate="no" dir="ltr">gke-managed-volumepopulator</code> namespace fails to provision the Hyperdisk ML volume, it's possible that the regional quota for creating the new Hyperdisk ML volume for your data transfer is exceeded.</p> <p>To confirm that the provisioning of the Hyperdisk ML volume failed because of a regional quota issue, inspect the event logs associated with the temporary PVC that was created by the GKE Volume Populator. Follow these steps:</p> <ol> <li>
+<p>Store the relevant environment variables:</p> 
+<pre>export PVC_NAME=PVC_NAME
+export NAMESPACE=NAMESPACE
+</pre> <p>Replace the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PVC_NAME</var></code>: the name of your <code translate="no" dir="ltr">PersistentVolumeClaim</code> resource.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace where your workloads run.</li> </ul>
+</li> <li>
+<p>Check the status of the temporary PVC:</p> 
+<pre>export PVC_UID=$(kubectl get pvc ${PVC_NAME} -n ${NAMESPACE} -o jsonpath='{.metadata.uid}')
+export TEMP_PVC=prime-$PVC_UID
+echo $TEMP_PVC
+kubectl describe pvc $TEMP_PVC -n gke-managed-volumepopulator
+</pre>
+</li> <li>
+<p>Check the PVC events to find the <code translate="no" dir="ltr">QUOTA_EXCEEDED error</code>, which is similar to the following:</p> 
+<pre>Events:
+  Type     Reason                Age                 From                                                                                              Message
+  ----     ------                ----                ----                                                                                              -------
+  Warning  ProvisioningFailed    105s                pd.csi.storage.gke.io_gke-3ef909a7688d424b94a2-d0d9-b185-vm_6a77d057-54e3-415a-8b39-82b666516b6b  failed to provision volume with StorageClass "pd-sc": rpc error: code = Unavailable desc = CreateVolume failed: rpc error: code = Unavailable desc = CreateVolume failed to create single zonal disk pvc-73c69fa8-d23f-4dcb-a244-bcd120a3c221: failed to insert zonal disk: unknown error when polling the operation: rpc error: code = ResourceExhausted desc = operation operation-1739194889804-62dc9dd9a1cae-9d24a5ad-938e5299 failed (QUOTA_EXCEEDED): Quota 'HDML_TOTAL_THROUGHPUT' exceeded.  Limit: 30720.0 in region us-central1
+</pre>
+</li> </ol> <p>To resolve this issue:</p> <ol> <li>
+<a href="https://docs.cloud.google.com/docs/quotas/view-manage">Request additional quota</a> to create new Hyperdisk ML volumes in your project.</li> <li>Delete any unused Hyperdisk ML disks in your project.</li> </ol> <h2 id="no_space_left_on_device">No space left on device</h2> <p>If you see the <code translate="no" dir="ltr">No space left on device</code> error message on your PVC, it means that the Hyperdisk ML volume is full and no more data can be written to it. The error might look similar to the following:</p> 
+<pre>Events:
+  Type     Reason                   Age   From                          Message
+  ----     ------                   ----  ----                          -------
+  Warning  TransferContainerFailed  57m   gkevolumepopulator-populator  populateCompleteFn: For PVC vp-pvc in namespace default, job with request ID populator-job-c2a2a377-6168-4ff1-afc8-c4ca713c43e2 for zone us-central1-c has a failed pod container with message:  on device
+ERROR: Failed to download one or more components of sliced download.
+ERROR: [Errno 28] No space left on device
+</pre> <p>To resolve this issue, delete your PVC, increase the value for <code translate="no" dir="ltr">spec.resources.requests.storage</code> field in your PVC manifest, and re-create the PVC to start the transfer process again.</p> <h2 id="whats_next">What's next</h2> <ul> <li>If you can't find a solution to your problem in the documentation, see <a href="../getting-support">Get support</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/troubleshooting-gke-volume-populator" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/troubleshooting-gke-volume-populator</a>
+  </p>
+</div>

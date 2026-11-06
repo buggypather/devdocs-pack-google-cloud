@@ -1,0 +1,162 @@
+<h1>Concurrency control</h1> <p>This document provides information about using concurrency control with messages published to a topic.</p> <p>Concurrency control helps you override the default number of background (I/O) threads used by the client library to publish messages. This lets publisher clients send messages in parallel.</p> <p>Concurrency control is an available feature in the Pub/Sub <a href="pull#high_client_library">high-level client library</a>. You can also implement your own concurrency control when you're using a <a href="pull#low_client_library">low-level library</a>.</p> <p>Support for concurrency control depends on the programming language of the client library. For language implementations that support parallel threads, such as C++, Go, and Java, the client libraries make a default choice for the number of threads.</p> <p>This page explains the concept of concurrency control and how to set up the feature for your publisher clients. To configure your subscriber clients for concurrency control, see <a href="concurrency-control">Process more messages with concurrency control</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p>Before configuring the publish workflow, ensure you have completed the following tasks:</p> <ul> <li>Learn about <a href="pubsub-basics">topics and the publishing workflow</a>.</li> <li>
+<a href="create-topic">Create a topic</a>.</li> </ul> <h3 id="required_roles">Required roles</h3> <p> To get the permissions that you need to publish messages to a topic, ask your administrator to grant you the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/pubsub#pubsub.publisher">Pub/Sub Publisher </a> (<code translate="no" dir="ltr">roles/pubsub.publisher</code>) IAM role on your topic. For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>You need <a href="access-control">additional permissions</a> to create or update topics and subscriptions.</p> <h2 id="concurrency_control_configurations">Concurrency control configurations</h2> <p>The default values for the concurrency control variables and the names of the variables might differ across client libraries. For example, in the Java client library, the methods to configure concurrency control are <code translate="no" dir="ltr">setExecutorProvider()</code> and <code translate="no" dir="ltr">setChannelProvider()</code>. For more information, see the <a href="https://docs.cloud.google.com/pubsub/docs/reference/libraries#additional_resources" track-type="docs" track-name="internalLink" track-metadata-position="08" track-metadata-end-goal="libraryAPI">API reference documentation</a>.</p> <ul> <li><p><strong>setExecutorProvider()</strong> lets you customize the executor provider used for processing publish responses. For example, you can change the executor provider to one that returns a single, shared executor with a limited number of threads across multiple publisher clients. This configuration helps to limit the number of threads created.</p></li> <li><p><strong>setChannelProvider()</strong> lets you customize the channel provider used for opening connections to Pub/Sub. Typically, you don't configure this value unless you want to use the same channel across multiple publisher clients. Reusing a channel across too many clients might result in <code translate="no" dir="ltr">GOAWAY</code> or <code translate="no" dir="ltr">ENHANCE_YOUR_CALM</code> errors. If you see these errors in your application's logs or <a href="https://docs.cloud.google.com/logging/docs/view/logs-explorer-interface">Cloud Logs</a>, create more channels.</p></li> </ul> <h2 id="concurrency">Code samples for concurrency control</h2> <div> <section><p class="_code-tab"><strong>C++</strong></p>
+
+<p>Before trying this sample, follow the C++ setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/cpp/google-cloud-pubsub/latest/" class="external">Pub/Sub C++ API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace pubsub = ::google::cloud::pubsub;
+using ::google::cloud::future;
+using ::google::cloud::GrpcBackgroundThreadPoolSizeOption;
+using ::google::cloud::Options;
+using ::google::cloud::StatusOr;
+[](std::string project_id, std::string topic_id) {
+  auto topic = pubsub::Topic(std::move(project_id), std::move(topic_id));
+  // Override the default number of background (I/O) threads. By default the
+  // library uses `std::thread::hardware_concurrency()` threads.
+  auto options = Options{}.set&lt;GrpcBackgroundThreadPoolSizeOption&gt;(8);
+  auto publisher = pubsub::Publisher(
+      pubsub::MakePublisherConnection(std::move(topic), std::move(options)));
+
+  std::vector&lt;future&lt;void&gt;&gt; ids;
+  for (char const* data : {"1", "2", "3", "go!"}) {
+    ids.push_back(
+        publisher.Publish(pubsub::MessageBuilder().SetData(data).Build())
+            .then([data](future&lt;StatusOr&lt;std::string&gt;&gt; f) {
+              auto s = f.get();
+              if (!s) return;
+              std::cout &lt;&lt; "Sent '" &lt;&lt; data &lt;&lt; "' (" &lt;&lt; *s &lt;&lt; ")\n";
+            }));
+  }
+  publisher.Flush();
+  // Block until they are actually sent.
+  for (auto&amp; id : ids) id.get();
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Go</strong></p>
+
+<p>The following sample uses the major version of the Go Pub/Sub client library (v2). If you are still using the v1 library, see <a href="https://github.com/googleapis/google-cloud-go/blob/main/pubsub/MIGRATING.md">the migration guide to v2</a>. To see a list of v1 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Go setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/pubsub/v2" class="external">Pub/Sub Go API reference documentation</a>.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+
+	"cloud.google.com/go/pubsub/v2"
+)
+
+func publishSingleGoroutine(w io.Writer, projectID, topicID, msg string) error {
+	// projectID := "my-project-id"
+	// topicID := "my-topic"
+	// msg := "Hello World"
+	ctx := context.Background()
+	client, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("pubsub.NewClient: %w", err)
+	}
+	defer client.Close()
+
+	// client.Publisher can be passed a topic ID (e.g. "my-topic") or
+	// a fully qualified name (e.g. "projects/my-project/topics/my-topic").
+	// If a topic ID is provided, the project ID from the client is used.
+	publisher := client.Publisher(topicID)
+	publisher.PublishSettings.NumGoroutines = 1
+
+	result := publisher.Publish(ctx, &amp;pubsub.Message{Data: []byte(msg)})
+	// Block until the result is returned and a server-generated
+	// ID is returned for the published message.
+	id, err := result.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("Get: %w", err)
+	}
+	fmt.Fprintf(w, "Published a message; msg ID: %v\n", id)
+	return nil
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Java</strong></p>
+
+<p>Before trying this sample, follow the Java setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-pubsub/latest/overview" class="external">Pub/Sub Java API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutures;
+import com.google.api.gax.core.ExecutorProvider;
+import com.google.api.gax.core.InstantiatingExecutorProvider;
+import com.google.cloud.pubsub.v1.Publisher;
+import com.google.protobuf.ByteString;
+import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.TopicName;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+
+public class PublishWithConcurrencyControlExample {
+  public static void main(String... args) throws Exception {
+    // TODO(developer): Replace these variables before running the sample.
+    String projectId = "your-project-id";
+    String topicId = "your-topic-id";
+
+    publishWithConcurrencyControlExample(projectId, topicId);
+  }
+
+  public static void publishWithConcurrencyControlExample(String projectId, String topicId)
+      throws IOException, ExecutionException, InterruptedException {
+    TopicName topicName = TopicName.of(projectId, topicId);
+    Publisher publisher = null;
+    List&lt;ApiFuture&lt;String&gt;&gt; messageIdFutures = new ArrayList&lt;&gt;();
+
+    try {
+      // Provides an executor service for processing messages. The default
+      // `executorProvider` used by the publisher has a default thread count of
+      // 5 * the number of processors available to the Java virtual machine.
+      ExecutorProvider executorProvider =
+          InstantiatingExecutorProvider.newBuilder().setExecutorThreadCount(4).build();
+
+      // `setExecutorProvider` configures an executor for the publisher.
+      publisher = Publisher.newBuilder(topicName).setExecutorProvider(executorProvider).build();
+
+      // schedule publishing one message at a time : messages get automatically batched
+      for (int i = 0; i &lt; 100; i++) {
+        String message = "message " + i;
+        ByteString data = ByteString.copyFromUtf8(message);
+        PubsubMessage pubsubMessage = PubsubMessage.newBuilder().setData(data).build();
+
+        // Once published, returns a server-assigned message id (unique within the topic)
+        ApiFuture&lt;String&gt; messageIdFuture = publisher.publish(pubsubMessage);
+        messageIdFutures.add(messageIdFuture);
+      }
+    } finally {
+      // Wait on any pending publish requests.
+      List&lt;String&gt; messageIds = ApiFutures.allAsList(messageIdFutures).get();
+
+      System.out.println("Published " + messageIds.size() + " messages with concurrency control.");
+
+      if (publisher != null) {
+        // When finished with the publisher, shutdown to free up resources.
+        publisher.shutdown();
+        publisher.awaitTermination(1, TimeUnit.MINUTES);
+      }
+    }
+  }
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Ruby</strong></p>
+
+<p>The following sample uses Ruby Pub/Sub client library v3. If you are still using the v2 library, see <a href="https://github.com/googleapis/google-cloud-ruby/blob/main/google-cloud-pubsub/MIGRATION_GUIDE.md"> the migration guide to v3</a>. To see a list of Ruby v2 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Ruby setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/ruby/google-cloud-pubsub/latest/Google/Cloud/PubSub.html" class="external">Pub/Sub Ruby API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="ruby"># topic_id = "your-topic-id"
+
+pubsub = Google::Cloud::PubSub.new
+publisher = pubsub.publisher topic_id, async: {
+  threads: {
+    # Use exactly one thread for publishing message and exactly one thread
+    # for executing callbacks
+    publish:  1,
+    callback: 1
+  }
+}
+
+publisher.publish_async "This is a test message." do |result|
+  raise "Failed to publish the message." unless result.succeeded?
+  puts "Message published asynchronously."
+end
+
+# Stop the async_publisher to send all queued messages immediately.
+publisher.async_publisher.stop.wait!</pre> </div> </section> </div> <h2 id="whats_next">What's next</h2> <ul> <li><p>To restrict the locations in which Pub/Sub stores message data, see <a href="resource-location-restriction" track-type="docs" track-name="internalLink" track-metadata-position="02" track-metadata-end-goal="restrictPubSubResource">Restricting Pub/Sub resource locations</a>.</p></li> <li><p>To learn more about receiving messages, see <a href="subscriber" track-type="docs" track-name="internalLink" track-metadata-position="03" track-metadata-end-goal="restrictPubSubResource">Choose a subscription type</a>.</p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/pubsub/docs/concurrency-control-messages" class="_attribution-link">https://docs.cloud.google.com/pubsub/docs/concurrency-control-messages</a>
+  </p>
+</div>

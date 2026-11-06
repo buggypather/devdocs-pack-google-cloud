@@ -1,0 +1,287 @@
+<h1>Troubleshoot GKE network observability</h1>  <p>This document provides instructions and diagnostic procedures for diagnosing networking issues in Google Kubernetes Engine (GKE) clusters using GKE Dataplane V2 observability, Hubble, and Cloud Monitoring.</p> <p>For an architectural overview and conceptual best practices, see <a href="../best-practices/network-observability">Best practices for network observability</a>.</p> <h2 id="troubleshooting-decision-tree">Troubleshooting decision tree and core concepts</h2> <p>Before reviewing the procedures, use the following decision matrix to identify which tier of the GKE networking stack is likely causing your issue, and navigate to the corresponding section.</p> <table> <thead> <tr> <th>Symptom or diagnostic question</th> <th>Suspected tier</th> <th>Recommended procedure</th> </tr> </thead> <tbody> <tr> <td>Pods fail to resolve external domains or internal Kubernetes Services (DNS timeouts, <code translate="no" dir="ltr">NXDOMAIN</code>, <code translate="no" dir="ltr">SERVFAIL</code>).</td> <td>Tier 1: Pod and Service (DNS)</td> <td><a href="#diagnose-dns-failures">Diagnose DNS resolution failures</a></td> </tr> <tr> <td>Services cannot communicate; connection timeouts or dropped packets between Pods.</td> <td>Tier 1: Pod and Service (Policy or packet drops)</td> <td><a href="#diagnose-packet-drops">Diagnose packet drops and NetworkPolicy blocks</a></td> </tr> <tr> <td>Workload replicas have uneven traffic load, or Pods log high rates of TCP resets (<code translate="no" dir="ltr">RST</code>).</td> <td>Tier 1: Pod and Service (Load balancing or transport)</td> <td><a href="#diagnose-traffic-imbalance">Diagnose traffic imbalance and TCP resets</a></td> </tr> <tr> <td>General latency, intermittent timeouts, or CNI restarts across nodes.</td> <td>Tier 2: Node and CNI (Kernel)</td> <td><a href="#triage-node-latency">Triage for node-level latency and CNI bottlenecks</a></td> </tr> <tr> <td>Pods cannot reach resources outside GKE (Cloud SQL, external APIs, or other VPCs).</td> <td>Tier 3: VPC and routing</td> <td><a href="#isolate-gke-vpc-connectivity">Isolate GKE versus VPC or external connectivity issues</a></td> </tr> <tr> <td>Need automated path simulation to verify whether firewall rules, routes, or NetworkPolicies block traffic.</td> <td>Tier 3: VPC and routing (Simulation)</td> <td><a href="#diagnose-connectivity-tests">Diagnose connectivity using Connectivity Tests</a></td> </tr> <tr> <td>Need to identify which workloads send traffic to the internet and undergo NAT.</td> <td>Tier 4: External gateway and cost</td> <td><a href="#identify-nat-traffic">Identify NAT traffic (egress to internet)</a></td> </tr> <tr> <td>High inter-zone data transfer costs or need to visualize top talkers without writing SQL queries.</td> <td>Tier 4: External gateway and cost</td> <td><a href="#analyze-traffic-costs">Analyze cluster traffic costs and performance using Flow Analyzer</a></td> </tr> </tbody> </table> <h3 id="core-networking-concepts">Core networking concepts</h3> <p>If you are new to Kubernetes or Google Cloud networking, keep these core concepts in mind:</p> <ul> <li>
+<strong>eBPF (Extended Berkeley Packet Filter):</strong> an operating system technology that allows running secure monitoring and routing programs directly inside the Linux kernel. GKE Dataplane V2 uses eBPF to route packets and enforce NetworkPolicies with minimal performance overhead.</li> <li>
+<strong>IP masquerading (SNAT):</strong> the process of rewriting the source IP address of a packet. When a GKE Pod (which has a private IP address) communicates with the internet or external VPC resources, GKE masquerades (rewrites) the Pod IP address to the node IP address so external systems know how to route the reply.</li> <li>
+<strong>Connection tracking (Conntrack):</strong> a kernel feature that tracks all active network connections. In GKE Dataplane V2 clusters, this tracking is split between two tables: the standard Linux kernel conntrack (used by the <code translate="no" dir="ltr">ip-masq-agent</code>) and a Cilium and GKE Dataplane V2-managed conntrack table stored in an eBPF map. If a node handles too many concurrent connections, either of these tracking tables can fill up (conntrack exhaustion), causing the node to silently drop new packets.</li> <li>
+<strong>Hubble:</strong> the observability engine for GKE Dataplane V2. It runs on top of eBPF and provides real-time visibility into traffic flows, packet drops, and NetworkPolicy evaluation.</li> </ul> <h2 id="layer-1-pod-service">Tier 1: Pod and Service (Application) observability</h2> <p>The Pod and Service tier covers network communication between Pods, Services, and cluster DNS. Issues at this tier typically manifest as application connection timeouts, name resolution failures, or uneven load distribution.</p> <h3 id="diagnose-dns-failures">Diagnose DNS resolution failures</h3> <p>Review the diagnostic scope and prerequisites before troubleshooting DNS issues:</p> <ul> <li>
+<strong>Focus area:</strong> communication between Pods and CoreDNS or NodeLocal DNSCache, DNS latency, upstream DNS resolution timeouts, and FQDN NetworkPolicy validation.</li> <li>
+<strong>Prerequisites:</strong> GKE Dataplane V2 metrics enabled; <code translate="no" dir="ltr">kubectl</code> access.</li> <li>
+<strong>CNI compatibility:</strong> GKE Dataplane V2 (Advanced Datapath) and standard GKE CNI.</li> <li>
+<strong>Symptom:</strong> Pods log <code translate="no" dir="ltr">dial tcp: lookup &lt;domain&gt;: i/o timeout</code>, <code translate="no" dir="ltr">NXDOMAIN</code>, or intermittent latency on outbound API calls.</li> <li>
+<strong>Goal:</strong> determine whether the DNS failure originates inside the cluster (<code translate="no" dir="ltr">kube-dns</code> or NodeLocal DNSCache saturation), a NetworkPolicy blocking UDP or TCP port 53, or upstream network degradation.</li> </ul> <h4 id="step_1_basic_reachability_check">Step 1: Basic reachability check</h4> <p>Before troubleshooting DNS layers, verify whether the destination is reachable directly by using its IP address from inside the affected Pod:</p> 
+<pre># 1. Test raw IP reachability (bypasses DNS entirely)
+kubectl exec -it my-pod -n default -- curl -v --connect-timeout 5 http://10.240.0.10:8080
+
+# 2. Test domain resolution
+kubectl exec -it my-pod -n default -- curl -v --connect-timeout 5 http://my-service.default.svc.cluster.local:8080
+</pre> <ul> <li>
+<strong>If IP connection succeeds but domain fails:</strong> the issue is isolated to the DNS resolution layer. Proceed to Step 2.</li> <li>
+<strong>If both fail:</strong> the issue is network-level routing or policy enforcement. Proceed to <a href="#diagnose-packet-drops">Diagnose packet drops and NetworkPolicy blocks</a>.</li> </ul> <h5 id="check_for_fqdn_networkpolicy_dns_pre-population">Check for FQDN NetworkPolicy DNS pre-population</h5> <p>If your cluster uses FQDN-based NetworkPolicies (<code translate="no" dir="ltr">FQDNNetworkPolicy</code>), verify that the domain name is explicitly permitted. If a Pod queries an external domain that is not pre-populated in the GKE Dataplane V2 DNS proxy cache or allowed by policy, GKE Dataplane V2 blocks egress traffic to the resolved IP address:</p> 
+<pre># Verify whether UDP or TCP port 53 egress is permitted in the Pod's namespace
+kubectl get networkpolicy -n default -o yaml | grep -A 5 -B 2 "port: 53"
+</pre> <h4 id="check-dns-metrics">Step 2: Check DNS metrics in Cloud Monitoring</h4> <p>GKE exposes built-in DNS metrics in Cloud Monitoring under the <code translate="no" dir="ltr">kubernetes.io/networking/dns/</code> prefix.</p> <aside class="important"> <p><strong>Important:</strong> If your cluster uses Cloud DNS for GKE, DNS queries don't traverse <code translate="no" dir="ltr">kube-dns</code> or NodeLocal DNSCache Pods. These <code translate="no" dir="ltr">kube-dns</code> metrics remain flat. Refer to the Cloud DNS documentation for DNS query troubleshooting in that mode.</p> </aside> <p>To check DNS metrics in Cloud Monitoring, do the following:</p> <ol> <li>In the Google Cloud console, navigate to <strong>Cloud Monitoring &gt; Dashboards</strong>.</li> <li>Select the predefined <strong>GKE DNS Observability - Cluster View</strong> dashboard (or navigate to <strong>Metrics Explorer</strong> and filter for <code translate="no" dir="ltr">kubernetes.io/networking/dns/</code>).</li> <li>Evaluate the following primary signals (for NodeLocal DNSCache, replace <code translate="no" dir="ltr">kubedns</code> with <code translate="no" dir="ltr">node_local_dns</code> in the metric path):</li> </ol> <table> <thead> <tr> <th>Metric name</th> <th>Warning threshold</th> <th>Root cause</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">kubernetes.io/networking/dns/kubedns/max_concurrent_rejected_request_count</code></td> <td>&gt; 0</td> <td>Concurrent query limit reached. <code translate="no" dir="ltr">kube-dns</code> or NodeLocal DNSCache is dropping queries.</td> </tr> <tr> <td><code translate="no" dir="ltr">kubernetes.io/networking/dns/kubedns/dns_request_latencies</code></td> <td>p99 &gt; 100ms</td> <td>High end-to-end DNS resolution latency across <code translate="no" dir="ltr">kube-dns</code> or NodeLocal DNSCache.</td> </tr> <tr> <td><code translate="no" dir="ltr">kubernetes.io/networking/dns/kubedns/forwarding_request_latencies</code></td> <td>p99 &gt; 100ms</td> <td>Upstream DNS server latency or saturation.</td> </tr> </tbody> </table> <h5 id="dns_performance_and_timeout_triage_sequence">DNS performance and timeout triage sequence</h5> <p>Follow this triage sequence to diagnose DNS latency, cache misses, and upstream timeouts:</p> <ol> <li>
+<strong>Check cache hit ratio:</strong> query <code translate="no" dir="ltr">kubernetes.io/networking/dns/kubedns/dns_cache_request_count</code> (or <code translate="no" dir="ltr">node_local_dns/dns_cache_request_count</code>) grouped by the <code translate="no" dir="ltr">cache_status</code> label. If <code translate="no" dir="ltr">cache_status="hit"</code> is low and <code translate="no" dir="ltr">cache_status="miss"</code> is high, applications might be issuing non-FQDN queries (such as <code translate="no" dir="ltr">my-service</code> instead of <code translate="no" dir="ltr">my-service.default.svc.cluster.local</code>), causing search path traversal across all entries in <code translate="no" dir="ltr">/etc/resolv.conf</code>.</li> <li>
+<strong>Evaluate upstream latency:</strong> high <code translate="no" dir="ltr">forwarding_request_latencies</code> indicates issues with the upstream DNS server (for example, corporate on-premises DNS reached over Cloud Interconnect or Cloud VPN, or Cloud DNS limits).</li> <li>
+<p><strong>Audit custom DNS overrides:</strong> inspect custom <code translate="no" dir="ltr">kube-dns</code> ConfigMaps for misconfigured stubs or upstream forwards:</p> 
+<pre>kubectl get configmap kube-dns -n kube-system -o yaml
+</pre>
+</li> </ol> <h4 id="step_3_stream_live_dns_traffic_with_hubble_cli">Step 3: Stream live DNS traffic with Hubble CLI</h4> <p>Use the Hubble CLI helper alias to inspect live DNS requests and responses streamed from the node kernel:</p> 
+<pre># 1. Ensure the helper alias is set in your terminal session
+alias gke-hubble="kubectl exec -it -n gke-managed-dpv2-observability deployment/hubble-relay -c hubble-cli -- hubble"
+
+# 2. Observe live DNS (Port 53) traffic for a specific Pod
+gke-hubble observe --pod default/my-pod --port 53
+</pre> <aside class="note"> <p><strong>Note:</strong> Hubble CLI parses DNS headers at the application layer (OSI Layer 7). In the flow output, look for the <code translate="no" dir="ltr">DNS Query</code> and <code translate="no" dir="ltr">DNS Answer</code> fields. If the query displays <code translate="no" dir="ltr">RCODE:
+NXDOMAIN</code> or <code translate="no" dir="ltr">RCODE: SERVFAIL</code>, the DNS server is rejecting or unable to resolve the record.</p> </aside> <h4 id="step_4_validate_the_fix">Step 4: Validate the fix</h4> <p>If concurrent query rejections occurred, apply NodeLocal DNSCache to absorb high-frequency DNS lookups directly on the node without hitting cluster-wide <code translate="no" dir="ltr">kube-dns</code> limits:</p> 
+<pre># Verify NodeLocal DNSCache DaemonSet is running
+kubectl get daemonset node-local-dns -n kube-system
+</pre> <hr> <h3 id="diagnose-packet-drops">Diagnose packet drops and NetworkPolicy blocks</h3> <p>Review the diagnostic scope and prerequisites before investigating packet drops and policy denials:</p> <ul> <li>
+<strong>Focus area:</strong> traffic drops between Pod objects or between Pod and Service objects, NetworkPolicy enforcement, kernel eBPF drop reasons.</li> <li>
+<strong>Prerequisites:</strong> GKE Dataplane V2 Flow Observability enabled; NetworkPolicy logging configured.</li> <li>
+<strong>CNI compatibility:</strong> GKE Dataplane V2 only.</li> <li>
+<strong>Symptom:</strong> application connection attempts fail with <code translate="no" dir="ltr">Connection timed out</code> or <code translate="no" dir="ltr">Connection reset by peer</code>.</li> <li>
+<strong>Goal:</strong> pinpoint the exact NetworkPolicy or eBPF reason dropping packets without trial-and-error changes to security policies.</li> </ul> <h4 id="step_1_monitor_hubble_drop_metrics">Step 1: Monitor Hubble drop metrics</h4> <p>When GKE Dataplane V2 drops a packet, it emits the metric <code translate="no" dir="ltr">hubble_drop_total</code> tagged with the drop reason and source and destination metadata. To monitor Hubble drop metrics, do the following:</p> <ol> <li>
+<p>If not already configured, deploy a Google Cloud Managed Service for Prometheus <code translate="no" dir="ltr">PodMonitoring</code> resource to scrape Hubble metrics:</p> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: hubble-metrics
+  namespace: gke-managed-dpv2-observability
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  endpoints:
+  - port: hubble-metrics
+    interval: 30s
+</pre>
+</li> <li>
+<p>Run the following query in <strong>Cloud Monitoring &gt; Metrics Explorer</strong> to view drops by reason:</p> 
+<pre>sum by (reason) (rate(hubble_drop_total[5m])) &gt; 0
+</pre>
+</li> <li>
+<p>Interpret the common <code translate="no" dir="ltr">reason</code> codes:</p> <ul> <li>
+<code translate="no" dir="ltr">Policy denied</code>: a Kubernetes NetworkPolicy is explicitly or implicitly blocking the connection.</li> <li>
+<code translate="no" dir="ltr">CT: Map insertion failed</code>: the connection tracking (conntrack) table is exhausted.</li> <li>
+<code translate="no" dir="ltr">Unsupported L3 protocol</code>: non-IPv4 or IPv6 packet or corrupted header.</li> </ul>
+</li> </ol> <h4 id="check-networkpolicy-logs">Step 2: Check NetworkPolicy logs in Cloud Logging</h4> <p>NetworkPolicy logging exports structured JSON logs for all policy decisions. To query NetworkPolicy logs in Cloud Logging, do the following:</p> <ol> <li>In the Google Cloud console, navigate to <strong>Cloud Logging &gt; Logs Explorer</strong>.</li> <li>
+<p>Run the following query:</p> 
+<pre>resource.type="k8s_node"
+log_name:"projects/PROJECT_ID/logs/events"
+jsonPayload.connection.verdict="DENY"
+jsonPayload.src.pod_name="my-source-pod"
+</pre>
+</li> <li>
+<p>Inspect the JSON payload:</p> <ul> <li>
+<code translate="no" dir="ltr">jsonPayload.drop_reason</code>: shows why the packet was dropped.</li> <li>
+<code translate="no" dir="ltr">jsonPayload.policies</code>: lists which NetworkPolicies were evaluated. If an empty list is returned with a <code translate="no" dir="ltr">DENY</code> verdict, the namespace is operating in default-deny mode and no policy allowed the traffic.</li> </ul>
+</li> </ol> <p>If no NetworkPolicy logs appear, verify that logging is enabled in the cluster's NetworkLogging custom resource. For example, check that the <code translate="no" dir="ltr">spec.cluster.deny.log</code> field is set to <code translate="no" dir="ltr">true</code>:</p> 
+<pre>kubectl get networklogging default -o yaml
+</pre> <h4 id="step_3_trace_live_drops_with_hubble_cli">Step 3: Trace live drops with Hubble CLI</h4> <p>Stream live drops directly by using Hubble CLI to inspect real-time packets:</p> 
+<pre>gke-hubble observe --verdict DROPPED --namespace default --follow
+</pre> <p>Example output:</p> 
+<pre>TIMESTAMP             SOURCE               DESTINATION          TYPE     VERDICT
+10:14:22.102          default/frontend     default/backend:80   to-stack DROPPED (Policy denied by NetworkPolicy: backend-deny-all)
+</pre> <p>The output indicates the exact NetworkPolicy blocking traffic (<code translate="no" dir="ltr">backend-deny-all</code>).</p> <h4 id="step_4_check_for_conntrack_exhaustion">Step 4: Check for conntrack exhaustion</h4> <p>If the drop reason indicates <code translate="no" dir="ltr">CT: Map insertion failed</code>:</p> <ol> <li>
+<p>Inspect the GKE Dataplane V2 agent log for conntrack table saturation:</p> 
+<pre>kubectl logs -n kube-system daemonset/anetd -c cilium-agent --tail=100 | grep "Conntrack table full"
+</pre>
+</li> <li>
+<p>Check the maximum size of the conntrack table on the affected node:</p> 
+<pre>kubectl exec -it -n kube-system daemonset/anetd -c cilium-agent -- cilium status --all-controllers | grep -i conntrack
+</pre> <p>If the conntrack table is full, scale out your workloads across more nodes or reduce the connection rate from client Pods.</p>
+</li> </ol> <hr> <h3 id="diagnose-traffic-imbalance">Diagnose traffic imbalance and TCP resets</h3> <p>Review the diagnostic scope and prerequisites before troubleshooting traffic imbalance and connection resets:</p> <ul> <li>
+<strong>Focus area:</strong> load balancing unevenness, TCP handshake failures, sudden connection termination.</li> <li>
+<strong>Prerequisites:</strong> GKE Dataplane V2 metrics enabled.</li> <li>
+<strong>CNI compatibility:</strong> GKE Dataplane V2.</li> <li>
+<strong>Symptom:</strong> certain Pod replicas receive excessive traffic while others remain idle; client applications log <code translate="no" dir="ltr">connection reset by peer</code> or <code translate="no" dir="ltr">broken pipe</code>.</li> <li>
+<strong>Goal:</strong> determine whether traffic imbalance is caused by connection stickiness at the transport layer (OSI Layer 4, TCP) versus the application layer (OSI Layer 7, HTTP/2 or gRPC), and identify the source of TCP RST packets.</li> </ul> <h4 id="step_1_compare_pod-level_traffic_flow">Step 1: Compare Pod-level traffic flow</h4> <p>To determine whether traffic is distributed evenly across your replicas, do the following:</p> <ol> <li>
+<p>In Cloud Monitoring, query the ingress flow count across all Pods in a Deployment:</p> 
+<pre>sum by (pod) (rate(pod_flow_ingress_flows_count{destination_workload="my-service"}[5m]))
+</pre>
+</li> <li>
+<p>Evaluate the traffic distribution across Pods. If a single Pod receives the majority of traffic, investigate connection reuse or sticky sessions:</p> <ul> <li>
+<strong>gRPC or HTTP/2:</strong> long-lived TCP connections cause all requests to traverse a single TCP stream to one backend Pod. Transport-layer (OSI Layer 4, TCP) Kubernetes Service routing cannot balance requests inside an established HTTP/2 connection.</li> <li>
+<strong>ClientIP Session Affinity:</strong> verify whether the Service is configured with <code translate="no" dir="ltr">sessionAffinity: ClientIP</code>.</li> <li>
+<strong>Headless Services:</strong> clients might resolve DNS once and cache the single IP address permanently.</li> </ul>
+</li> </ol> <h4 id="step_2_analyze_tcp_reset_metrics">Step 2: Analyze TCP reset metrics</h4> <p>TCP resets (<code translate="no" dir="ltr">RST</code>) terminate connections immediately. They are emitted by the operating system kernel when an endpoint receives a packet for an unknown port, or when an application closes a connection with unread data in the buffer.</p> <p>Run the following MQL query in Cloud Monitoring:</p> 
+<pre>fetch prometheus_target
+| metric 'prometheus.googleapis.com/hubble_tcp_flags_total/counter'
+| filter (metric.flag == 'RST')
+| align rate(1m)
+| every 1m
+| group_by [metric.source, metric.destination, metric.traffic_direction], sum(val())
+</pre> <p>Review the results of the query to determine the source of the reset:</p> <ul> <li>
+<strong>Outgoing RST (traffic_direction=<code translate="no" dir="ltr">egress</code>):</strong> the local Pod is generating the reset. Check if the Pod application is crashing, reaching its connection limit, or actively rejecting the connection.</li> <li>
+<strong>Incoming RST (traffic_direction=<code translate="no" dir="ltr">ingress</code>):</strong> the remote peer (external database, API, or remote Pod) sent the reset. Check destination server health and firewall states.</li> </ul> <h4 id="step_3_stream_tcp_resets_live">Step 3: Stream TCP resets live</h4> <p>Use Hubble CLI to capture the live reset handshake:</p> 
+<pre>gke-hubble observe --type trace --verdict FORWARDED --tcp-flags RST --namespace default
+</pre> <h4 id="step_4_remediation_and_actionable_fixes">Step 4: Remediation and actionable fixes</h4> <p>Apply the following remediation steps depending on the cause of your traffic imbalance or TCP resets:</p> <ul> <li>
+<strong>For application-layer (OSI Layer 7) or gRPC connection stickiness:</strong> <ul> <li>Deploy Cloud Service Mesh to enable application-layer (OSI Layer 7) request-level load balancing.</li> <li>Configure client-side connection limits or keep-alive timeouts (for example, gRPC <code translate="no" dir="ltr">MAX_CONNECTION_AGE</code> and <code translate="no" dir="ltr">MAX_CONNECTION_AGE_GRACE</code>) to force periodic connection re-establishment.</li> </ul>
+</li> <li>
+<strong>For Service IP affinity:</strong> remove <code translate="no" dir="ltr">service.spec.sessionAffinity</code> unless application state strictly requires it.</li> <li>
+<strong>For headless Service DNS caching:</strong> ensure application runtimes (such as JVM <code translate="no" dir="ltr">networkaddress.cache.ttl</code>) don't cache DNS results indefinitely.</li> <li>
+<strong>For application backlog queue overflow:</strong> when an application listen queue is full, the Linux kernel drops incoming SYN packets or sends a TCP RST. Scale out Pod replicas or increase the application listen backlog (<code translate="no" dir="ltr">somaxconn</code>).</li> </ul> <hr> <h2 id="layer-2-node-cni">Tier 2: Node and CNI (Kernel) observability</h2> <p>The node and CNI tier encompasses the host Linux kernel, eBPF programs, and node network interfaces. Bottlenecks at this tier affect all workloads running on the affected node.</p> <h3 id="system-integrity-check">System integrity check: Detect unauthorized patching of anetd</h3> <aside class="caution"> <p><strong>Caution:</strong> Manually modifying or restarting the GKE Dataplane V2 networking DaemonSet (<code translate="no" dir="ltr">anetd</code>) can cause cluster-wide networking outages and violate GKE managed service level objectives.</p> </aside> <p>GKE Dataplane V2 runs as a managed DaemonSet (<code translate="no" dir="ltr">anetd</code>) in the <code translate="no" dir="ltr">kube-system</code> namespace. In Cloud Logging, you can query Kubernetes audit logs to detect whether unauthorized users or automated scripts have patched or restarted <code translate="no" dir="ltr">anetd</code>:</p> 
+<pre>protoPayload.methodName="io.k8s.core.v1.daemonsets.patch" OR
+protoPayload.methodName="io.k8s.core.v1.daemonsets.update"
+protoPayload.resourceName="namespaces/kube-system/daemonsets/anetd"
+</pre> <p>If unauthorized patching is detected, revert the DaemonSet to the default configuration or trigger a node pool recreation to restore managed state.</p> <hr> <h3 id="triage-node-latency">Triage for node-level latency and CNI bottlenecks</h3> <p>Review the diagnostic scope and prerequisites before diagnosing node-level latency and kernel bottlenecks:</p> <ul> <li>
+<strong>Focus area:</strong> host kernel latency, packet drops at the VM interface, GKE Dataplane V2 eBPF agent saturation, conntrack exhaustion.</li> <li>
+<strong>Prerequisites:</strong> Compute Engine VM metrics enabled; <code translate="no" dir="ltr">kubectl</code> access.</li> <li>
+<strong>CNI compatibility:</strong> GKE Dataplane V2 and standard GKE CNI.</li> <li>
+<strong>Symptom:</strong> cross-node traffic experiences latency spikes or random drops, while intra-node traffic remains healthy.</li> <li>
+<strong>Goal:</strong> differentiate between host VM network throttling, Linux kernel drops, and CNI-level bottlenecks.</li> </ul> <h4 id="differentiate-outside-inside-gke">Step 1: Differentiate issues outside GKE from issues inside GKE</h4> <p>Run the <strong>Compute Engine VM baseline test</strong>: Deploy a standalone Compute Engine VM in the same VPC subnet as the GKE cluster nodes. Test connectivity from the VM to the target destination.</p> <ul> <li>
+<strong>If the standalone VM experiences the same packet drops or latency:</strong> the issue is located outside GKE (VPC firewalls, Cloud NAT, Cloud Interconnect, or the external server). Proceed to <a href="#isolate-gke-vpc-connectivity">Isolate GKE versus VPC or external connectivity issues</a>.</li> <li>
+<strong>If the standalone VM communicates normally, but GKE Pods fail:</strong> the issue is inside GKE (node-level eBPF, conntrack, or CNI). Proceed to Step 2.</li> </ul> <aside class="note"> <p><strong>Limitations of the VM baseline test:</strong> This test might not catch intermittent or low-rate drops that only manifest under high aggregate traffic volumes. Additionally, if the issue is isolated to the underlying hardware of a single VM host, other VMs might not reproduce the behavior.</p> </aside> <h4 id="step_2_differentiate_application_issues_from_node_and_cni_tier_issues">Step 2: Differentiate application issues from node and CNI tier issues</h4> <aside class="note"> <p><strong>Troubleshooting custom ip-masq-agent SNAT port collisions:</strong> Clusters using a custom <code translate="no" dir="ltr">ip-masq-agent</code> configuration with the <code translate="no" dir="ltr">--random-fully</code> flag can experience intermittent egress latency. Under high traffic volumes, iptables <code translate="no" dir="ltr">--random-fully</code> might allocate an ephemeral port that collides with an active NodePort, resulting in connection delays. Upgrade <code translate="no" dir="ltr">ip-masq-agent</code> to version 2.11.1 or higher, or remove <code translate="no" dir="ltr">--random-fully</code> to avoid port collisions.</p> </aside> <p>To determine whether latency originates in the application or at the node and CNI tier, do the following:</p> <ol> <li>
+<p><strong>Check application resource saturation:</strong> Verify that the node is not experiencing CPU throttling or memory pressure, which delays packet processing in user space:</p> 
+<pre>kubectl top nodes
+kubectl top pods -n default
+</pre>
+</li> <li>
+<p><strong>Inspect Linux kernel conntrack count:</strong> Check the active conntrack count on the host:</p> 
+<pre># On a node where you have debugging access
+cat /proc/sys/net/netfilter/nf_conntrack_count
+cat /proc/sys/net/netfilter/nf_conntrack_max
+</pre> <p>If <code translate="no" dir="ltr">nf_conntrack_count</code> approaches <code translate="no" dir="ltr">nf_conntrack_max</code>, the host kernel drops new TCP SYN packets.</p>
+</li> </ol> <h4 id="verify-vm-packet-drops">Step 3: Verify VM-level packet drops using Compute Engine telemetry</h4> <p>Google Cloud Compute Engine exports VM-level network interface metrics to Cloud Monitoring.</p> <p>In Cloud Monitoring &gt; Metrics Explorer, query:</p> 
+<pre>sum by (drop_reason) (rate(compute_googleapis_com:instance_network_dropped_packets_count[5m]))
+</pre> <ul> <li>
+<code translate="no" dir="ltr">FQ_CODEL_DROP</code>: packet dropped due to Fair Queuing or CoDel queue saturation (VM egress bandwidth limit exceeded).</li> <li>
+<code translate="no" dir="ltr">FIREWALL_RULE_DROP</code>: packet dropped by a VPC firewall rule.</li> <li>
+<code translate="no" dir="ltr">RATE_LIMIT_DROP</code>: packet dropped because the VM exceeded its network interface maximum packets per second (PPS) quota.</li> </ul> <h4 id="step_4_investigate_kernel-level_drops_using_ebpf">Step 4: Investigate kernel-level drops using eBPF</h4> <p>If VM-level metrics show zero drops, but GKE Pods still drop packets, inspect the GKE Dataplane V2 agent (<code translate="no" dir="ltr">anetd</code>) for eBPF map drops:</p> 
+<pre>kubectl logs -n kube-system daemonset/anetd -c cilium-agent --tail=200 | grep -i "drop"
+</pre> <p>Look for <code translate="no" dir="ltr">ct-map-insertion-failed</code> or <code translate="no" dir="ltr">fib-lookup-failed</code>.</p> <hr> <h2 id="layer-3-vpc-routing">Tier 3: VPC and Routing (Cloud Network) observability</h2> <p>The VPC and cloud routing tier connects GKE nodes to other Google Cloud services, on-premises networks, and the internet. Failures here typically stem from VPC firewall rules, custom routes, or gateway configurations.</p> <h3 id="isolate-gke-vpc-connectivity">Isolate GKE versus VPC or external connectivity issues</h3> <p>Review the diagnostic scope and prerequisites before isolating external network issues from in-cluster failures:</p> <ul> <li>
+<strong>Focus area:</strong> boundary isolation between Kubernetes internal routing and VPC cloud routing.</li> <li>
+<strong>Prerequisites:</strong> gcloud CLI; permissions to create Connectivity Tests.</li> <li>
+<strong>CNI compatibility:</strong> all clusters.</li> <li>
+<strong>Symptom:</strong> Pods fail to connect to an external resource (for example, Cloud SQL, an on-premises API, or a third-party endpoint).</li> <li>
+<strong>Goal:</strong> rapidly determine whether the drop occurs within the GKE node or inside the Google Cloud VPC or external network.</li> </ul> <h4 id="vm-baseline-test">Step 1: The Compute Engine VM baseline test</h4> <p>To deploy a baseline VM and evaluate whether the issue persists outside GKE, do the following:</p> <ol> <li>
+<p>Deploy a temporary Compute Engine VM instance in the same VPC subnet and zone as your GKE node pool:</p> 
+<pre>gcloud compute instances create gke-baseline-tester \
+    --zone=us-central1-a \
+    --subnet=gke-subnet \
+    --machine-type=e2-micro
+</pre>
+</li> <li>
+<p>Connect to the instance using SSH and test connectivity to the destination:</p> 
+<pre>curl -v --connect-timeout 5 https://api.example.com
+</pre>
+</li> <li>
+<p>Evaluate the outcome:</p> <ul> <li>
+<strong>If the Compute Engine VM cannot connect:</strong> the problem is in the VPC or external network (firewall rules, routing tables, Cloud NAT IP exhaustion, or external IP whitelisting).</li> <li>
+<strong>If the Compute Engine VM connects successfully:</strong> the problem is inside GKE (NetworkPolicy blocking egress, non-masqueraded Pod CIDR, or container-level DNS).</li> </ul>
+</li> </ol> <h4 id="run-on-demand-test">Step 2: Run an on-demand Connectivity Tests test</h4> <p>Run a Google Cloud Connectivity Tests test from the node VM to the destination:</p> 
+<pre>gcloud network-management connectivity-tests create test-node-to-dest \
+    --source-instance=projects/PROJECT_ID/zones/us-central1-a/instances/gke-baseline-tester \
+    --destination-ip-address=203.0.113.10 \
+    --destination-port=443 \
+    --protocol=TCP \
+    --round-trip
+</pre> <p><a href="https://docs.cloud.google.com/network-intelligence-center/docs/connectivity-tests/how-to/running-connectivity-tests#viewing-tests">Check the result</a> in the Google Cloud console to identify whether a VPC firewall rule or route is dropping the traffic.</p> <hr> <h3 id="diagnose-connectivity-tests">Diagnose connectivity using Connectivity Tests</h3> <p>Connectivity Tests simulates packet paths across GKE and VPC resources without sending live traffic. This simulation evaluates Service ClusterIP-to-Pod DNAT resolution, GKE Dataplane V2 NetworkPolicy ingress and egress rules, and node IP masquerading (SNAT). Review the diagnostic scope and prerequisites before running automated path simulations:</p> <ul> <li>
+<strong>Focus area:</strong> automated static path simulation for GKE Pods, Services, NetworkPolicies, and VPC routes.</li> <li>
+<strong>Prerequisites:</strong> Network Intelligence Center enabled; Network Management API enabled.</li> <li>
+<strong>CNI compatibility:</strong> GKE Dataplane V2 (enhanced analysis).</li> <li>
+<strong>Symptom:</strong> unexplained connectivity drops where all configurations appear valid upon manual inspection.</li> <li>
+<strong>Goal:</strong> statically simulate and trace the entire packet path from a Pod source to destination, identifying the exact line of policy causing a drop.</li> </ul> <h4 id="scenario-a-blocking-metrics">Scenario A: Verify whether a GKE NetworkPolicy is blocking metrics collection</h4> <p>When scraping metrics from Pods in a secure namespace, Google Cloud Managed Service for Prometheus collectors might be blocked by a default-deny NetworkPolicy:</p> 
+<pre>gcloud network-management connectivity-tests create test-gmp-to-pod \
+    --source-ip-address=10.0.0.15 \
+    --destination-gke-pod=projects/PROJECT_ID/locations/LOCATION/clusters/CLUSTER_NAME/k8s/namespaces/prod/pods/backend-pod \
+    --destination-port=8080 \
+    --protocol=TCP \
+    --round-trip
+</pre> <p>Inspect the test trace in Google Cloud console. If the test terminates at the step <code translate="no" dir="ltr">GKE Network Policy evaluation</code> with <code translate="no" dir="ltr">DROP</code>, an ingress rule must be added to allow traffic from the collector Pods.</p> <h4 id="scenario-b-service-reachability">Scenario B: Verify reachability to a GKE Service</h4> <p>Simulate reachability from a client VM to an internal Kubernetes Service:</p> 
+<pre>gcloud network-management connectivity-tests create test-vm-to-service \
+    --source-instance=projects/PROJECT_ID/zones/us-central1-a/instances/client-vm \
+    --destination-ip-address=10.96.0.100 \
+    --destination-port=80 \
+    --protocol=TCP \
+    --round-trip
+</pre> <p>The simulated trace shows:</p> <ol> <li>VPC route match.</li> <li>VPC firewall egress and ingress allow.</li> <li>Arrival at the GKE node.</li> <li>Service DNAT to backend Pod IP address.</li> <li>Evaluation of Ingress NetworkPolicy on the backend Pod.</li> </ol> <h4 id="scenario_c_diagnose_pod-to-internet_egress_issues">Scenario C: Diagnose Pod-to-internet egress issues</h4> <p>When Pods cannot reach an external API on the internet:</p> <ol> <li>
+<p>Create a test from the Pod to the external public IP address (such as <code translate="no" dir="ltr">8.8.8.8</code>):</p> 
+<pre>gcloud network-management connectivity-tests create test-pod-to-internet \
+    --source-gke-pod=projects/PROJECT_ID/locations/LOCATION/clusters/CLUSTER_NAME/k8s/namespaces/prod/pods/app-pod \
+    --destination-ip-address=8.8.8.8 \
+    --destination-port=53 \
+    --protocol=UDP \
+    --round-trip
+</pre>
+</li> <li>
+<p>Examine the drop point:</p> <ul> <li>
+<strong>Dropped at NetworkPolicy:</strong> the Pod lacks an egress NetworkPolicy permitting traffic to <code translate="no" dir="ltr">0.0.0.0/0</code>.</li> <li>
+<strong>Dropped at VPC Firewall:</strong> a VPC firewall rule denies outbound traffic from the node subnet.</li> <li>
+<strong>Dropped at Cloud NAT or Route:</strong> the subnet lacks a default route to the internet gateway or Cloud NAT is not configured for the subnet.</li> </ul>
+</li> </ol> <hr> <h2 id="layer-4-external-gateway">Tier 4: External Gateway and Cost (Internet and NAT) observability</h2> <p>The external gateway tier manages outbound traffic to public internet destinations through Cloud NAT or external gateways. Observability at this tier helps identify high-egress workloads and control data transfer costs.</p> <h3 id="identify-nat-traffic">Identify NAT traffic (egress to internet)</h3> <p>Review the diagnostic scope and prerequisites before analyzing outbound internet and NAT traffic:</p> <ul> <li>
+<strong>Focus area:</strong> outbound internet traffic, Cloud NAT port utilization, external data transfer costs.</li> <li>
+<strong>Prerequisites:</strong> GKE Dataplane V2 Flow Observability enabled.</li> <li>
+<strong>CNI compatibility:</strong> GKE Dataplane V2.</li> <li>
+<strong>Symptom:</strong> Cloud NAT port exhaustion errors or unexpectedly high outbound internet egress costs.</li> <li>
+<strong>Goal:</strong> identify which specific GKE Pod and Service objects are transmitting traffic to external internet endpoints.</li> </ul> <h4 id="understand-to-stack-world">Step 1: Understand the "to-stack" and "world" concepts in GKE Dataplane V2</h4> <p>In GKE Dataplane V2:</p> <ul> <li>
+<code translate="no" dir="ltr">world</code>: represents any destination outside the GKE cluster and outside the VPC (the public internet).</li> <li>
+<code translate="no" dir="ltr">to-stack</code>: represents packets transitioning from the eBPF container veth interface to the host Linux networking stack to undergo IP masquerade (SNAT) before reaching Cloud NAT.</li> </ul> <h4 id="step_2_stream_and_filter_nat_traffic_with_hubble_cli">Step 2: Stream and filter NAT traffic with Hubble CLI</h4> <p>Stream live outbound internet flows originating from your cluster:</p> 
+<pre># Stream egress flows heading to external internet ("world")
+gke-hubble observe \
+    --traffic-direction egress \
+    --verdict FORWARDED \
+    --to-identity world \
+    --follow
+</pre> <p>Example output:</p> 
+<pre>TIMESTAMP             SOURCE               DESTINATION          TYPE     VERDICT
+10:25:01.120          default/worker-pod   142.250.190.46:443   to-stack FORWARDED
+</pre> <p>To identify the top outbound talkers, you can also pipe Hubble JSON output to <code translate="no" dir="ltr">jq</code> to count external egress flows by Pod:</p> 
+<pre>timeout 60s gke-hubble observe \
+    --traffic-direction egress \
+    --verdict FORWARDED \
+    --to-identity world \
+    -o json | jq -r '.flow.source.namespace + "/" + .flow.source.pod_name' | sort | uniq -c | sort -nr | head -n 10
+</pre> <h4 id="step_3_monitor_external_traffic_using_metrics">Step 3: Monitor external traffic using metrics</h4> <p>In Cloud Monitoring, track the volume of external flows:</p> 
+<pre>fetch prometheus_target
+| metric 'prometheus.googleapis.com/pod_flow_egress_flows_count/counter'
+| filter (metric.destination_identity == 'world')
+| align rate(1m)
+| every 1m
+| group_by [metric.source_workload, metric.source_namespace], sum(val())
+</pre> <hr> <h3 id="analyze-traffic-costs">Analyze cluster traffic costs and performance using Flow Analyzer</h3> <p>Review the diagnostic scope and prerequisites before visualizing traffic flows and cross-zone costs:</p> <ul> <li>
+<strong>Focus area:</strong> cross-zone data transfer costs, top talkers, inter-node traffic visibility without SQL queries.</li> <li>
+<strong>Prerequisites:</strong> VPC Flow Logs enabled with <code translate="no" dir="ltr">INCLUDE_ALL_METADATA</code>; Intranode Visibility enabled; Observability Analytics enabled on the log bucket.</li> <li>
+<strong>CNI compatibility:</strong> all clusters.</li> <li>
+<strong>Symptom:</strong> elevated inter-zone data transfer charges on monthly Google Cloud bills.</li> <li>
+<strong>Goal:</strong> visually identify which GKE workloads are generating cross-zone traffic and optimize placement without querying raw logs.</li> </ul> <h4 id="prerequisites">Prerequisites</h4> <p>To use Flow Analyzer for GKE:</p> <ol> <li>
+<strong>VPC Flow Logs:</strong> must be enabled on the cluster subnet with <code translate="no" dir="ltr">metadata="INCLUDE_ALL_METADATA"</code>.</li> <li>
+<strong>Intranode Visibility:</strong> must be enabled on the cluster so pod-to-pod traffic is exposed to the VPC flow logging pipeline.</li> <li>
+<strong>Log Analytics:</strong> the <code translate="no" dir="ltr">_Default</code> bucket in Cloud Logging must be upgraded to use Observability Analytics.</li> </ol> <aside class="note"> <p><strong>Note:</strong> Flow logs are written to the project that owns the network. In a Shared VPC setup, this project is the host project, not the service project that runs on your GKE cluster. Run Flow Analyzer in the host project, and use the host project ID for <code translate="no" dir="ltr">PROJECT_ID</code> in the Observability Analytics query.</p> </aside> <h4 id="identify-top-talkers">Step 1: Identify GKE top talkers in Flow Analyzer</h4> <p>To view high-volume workloads in Flow Analyzer, do the following:</p> <ol> <li>In the Google Cloud console, go to the <strong>Flow Analyzer</strong> page.</li> <li>Click <strong>Source bucket</strong> and select the log bucket that holds your flow logs. Unless you've routed them elsewhere, this is the <strong>_Default</strong> bucket.</li> <li>In <strong>Traffic aggregation</strong>, select <strong>Source - Destination</strong>.</li> <li>Set the time range for your analysis window.</li> <li>Under <strong>Organize flows by</strong>, select the GKE Pod or workload fields.</li> <li>Click <strong>Run new query</strong>. The <strong>Highest data flows</strong> chart shows which workloads move the most data.</li> </ol> <h4 id="step_2_analyze_inter-zone_traffic_costs">Step 2: Analyze inter-zone traffic costs</h4> <p>Cross-zone traffic incurs data transfer charges. To locate workloads transmitting across zones:</p> <ol> <li>Under <strong>Organize flows by</strong>, select the source zone and destination zone fields.</li> <li>Click <strong>Run new query</strong> and read the <strong>All data flows</strong> table. Rows where the source and destination zones differ are your cross-zone traffic. Flow Analyzer filters match on values, so you can't filter for "not equal"; compare the zone pairs in the results instead.</li> <li>Expand a high-volume zone pair to see the underlying source and destination GKE workloads.</li> </ol> <p><strong>Remediation:</strong></p> <ul> <li>Implement Kubernetes <code translate="no" dir="ltr">topologySpreadConstraints</code> or <code translate="no" dir="ltr">podAffinity</code> to colocate communicating services within the same availability zone.</li> <li>Enable <strong>Topology Aware Routing</strong> (<code translate="no" dir="ltr">service.kubernetes.io/topology-mode:
+Auto</code>) on the Service to keep traffic within the originating zone.</li> </ul> <h4 id="drill-down-log-analytics">Step 3: Drill down to Observability Analytics (For advanced SQL queries)</h4> <p>From Flow Analyzer, click <strong>View in Log Analytics</strong> to run SQL queries against the flow data.</p> <p>The following SQL query calculates top cross-zone Pod talkers:</p> 
+<pre>SELECT
+  JSON_VALUE(json_payload.src_gke_details.pod.workload.workload_name) AS src_workload,
+  JSON_VALUE(json_payload.dest_gke_details.pod.workload.workload_name) AS dest_workload,
+  JSON_VALUE(json_payload.src_instance.zone) AS src_zone,
+  JSON_VALUE(json_payload.dest_instance.zone) AS dest_zone,
+  SUM(CAST(JSON_VALUE(json_payload.bytes_sent) AS INT64)) / 1024 / 1024 / 1024 AS total_gb_sent
+FROM
+  `PROJECT_ID.global._Default._AllLogs`
+WHERE
+  log_name LIKE '%vpc_flows%'
+  AND timestamp &gt;= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  AND JSON_VALUE(json_payload.src_instance.zone) != JSON_VALUE(json_payload.dest_instance.zone)
+GROUP BY
+  1, 2, 3, 4
+ORDER BY
+  total_gb_sent DESC
+LIMIT 20;
+</pre> <hr> <h2 id="hubble-cli-reference">Hubble CLI reference and query cheat sheet</h2> <p>The Hubble CLI streams and filters live network flow data directly from the GKE Dataplane V2 kernel ring buffer.</p> <h3 id="setup_create_a_helper_alias">Setup: Create a helper alias</h3> <p>Because Hubble runs inside the cluster control plane, configure a shell alias to execute Hubble commands without deploying local binaries:</p> 
+<pre>alias gke-hubble="kubectl exec -it -n gke-managed-dpv2-observability deployment/hubble-relay -c hubble-cli -- hubble"
+</pre> <h3 id="common_filtering_recipes">Common filtering recipes</h3> <table> <thead> <tr> <th>Troubleshooting goal</th> <th>Hubble CLI command</th> </tr> </thead> <tbody> <tr> <td>Observe all dropped packets in real time across the cluster</td> <td><code translate="no" dir="ltr">gke-hubble observe --verdict DROPPED --follow</code></td> </tr> <tr> <td>Stream all traffic for a specific Pod in any namespace</td> <td><code translate="no" dir="ltr">gke-hubble observe --pod default/my-pod --follow</code></td> </tr> <tr> <td>Filter traffic between two specific namespaces</td> <td><code translate="no" dir="ltr">gke-hubble observe --from-namespace frontend --to-namespace backend</code></td> </tr> <tr> <td>Isolate traffic on a specific port (such as Port 80)</td> <td><code translate="no" dir="ltr">gke-hubble observe --port 80</code></td> </tr> <tr> <td>Inspect live DNS queries and answers</td> <td><code translate="no" dir="ltr">gke-hubble observe --port 53</code></td> </tr> <tr> <td>View live TCP resets (RST packets)</td> <td><code translate="no" dir="ltr">gke-hubble observe --type trace --verdict FORWARDED --tcp-flags RST</code></td> </tr> <tr> <td>Stream all outbound traffic heading to the public internet</td> <td><code translate="no" dir="ltr">gke-hubble observe --traffic-direction egress --to-identity world</code></td> </tr> <tr> <td>Inspect HTTP application-layer (OSI Layer 7) traffic</td> <td><code translate="no" dir="ltr">gke-hubble observe --protocol http</code></td> </tr> </tbody> </table> <h3 id="advanced_filtering_with_negation_--not">Advanced filtering with negation (<code translate="no" dir="ltr">--not</code>)</h3> <p>You can exclude known high-volume or healthy traffic to focus on anomalies:</p> 
+<pre># Observe drops, but exclude internal kube-system health probes and DNS
+gke-hubble observe \
+    --verdict DROPPED \
+    --not --namespace kube-system \
+    --not --port 53
+</pre> <h3 id="output_formatting_and_jq_integration">Output formatting and jq integration</h3> <p>To process flow records programmatically, output in JSON format:</p> 
+<pre># Extract only source, destination, and drop reason from the last 100 flows
+gke-hubble observe --verdict DROPPED -o json --last 100 | \
+    jq -r '[.time, .flow.source.pod_name, .flow.destination.pod_name, .flow.drop_reason_desc] | @tsv'
+</pre> <h3 id="limitations">Limitations</h3> <p>When using Hubble CLI for live troubleshooting, keep the following technical limitations in mind:</p> <ul> <li>
+<strong>Ephemeral node-local ring buffer:</strong> Hubble flows are stored in an in-memory ring buffer on each individual node. During high-traffic events, older flow logs are overwritten within seconds. For historical analysis, rely on NetworkPolicy logging and VPC Flow Logs in Cloud Logging.</li> <li>
+<strong>No built-in logical OR:</strong> Hubble CLI flags evaluate multiple arguments using logical AND. To search for multiple conditions (such as Port 80 OR Port 443), run separate commands or filter the JSON output using <code translate="no" dir="ltr">jq</code>.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li><a href="../best-practices/network-observability">Best practices for network observability</a></li> <li><a href="../troubleshoot-networking">Troubleshoot GKE networking</a></li> <li><a href="connectivity-issues-in-cluster">Troubleshoot connectivity issues in your cluster</a></li> <li><a href="../concepts/about-dpv2-observability">About GKE Dataplane V2 observability</a></li> <li><a href="https://docs.cloud.google.com/network-intelligence-center/docs/flow-analyzer/manage-flow-analyzer">Troubleshoot data issues in Flow Analyzer</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/network-observability" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/network-observability</a>
+  </p>
+</div>

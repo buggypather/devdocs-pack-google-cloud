@@ -1,0 +1,55 @@
+<h1>Configure Body-Based Routing</h1>  <p>Learn how to configure Body-Based Routing, a capability of GKE Inference Gateway that lets you route inference requests by extracting the model name directly from the HTTP request body.</p> <p>This is particularly useful for applications that adhere to specifications like the OpenAI API, where the model identifier is often embedded within the request payload rather than in headers or URL paths.</p> <h3 id="how-body-based-routing-works">How body-based routing works</h3> <p>GKE Inference Gateway implements Body-Based Routing as an <code translate="no" dir="ltr">ext_proc</code> extension of Envoy proxy. The request flow is designed to integrate seamlessly with your existing Gateway API configurations:</p> <ol> <li>
+<strong>Request reception</strong>: the Layer 7 load balancer receives an incoming inference request.</li> <li>
+<strong>Body parameter extraction</strong>: the Layer 7 load balancer forwards the request to the Body to Header extension. This extension extracts the standard <code translate="no" dir="ltr">model</code> parameter from the HTTP request body.</li> <li>
+<strong>Header injection</strong>: the extracted model parameter's value is then injected as a new request header (with the key <code translate="no" dir="ltr">X-Gateway-Model-Name</code>).</li> <li>
+<strong>Routing decision</strong>: with the model name now available in a request header, the GKE Inference Gateway can use existing Gateway API <code translate="no" dir="ltr">HTTPRoute</code> constructs to make routing decisions. For example, <code translate="no" dir="ltr">HTTPRoute</code> rules can match against the injected header to direct traffic to the appropriate <code translate="no" dir="ltr">InferencePool</code>.</li> <li>
+<strong>Endpoint selection</strong>: the Layer 7 load balancer selects the appropriate <code translate="no" dir="ltr">InferencePool</code> (BackendService) and group of endpoints. It then forwards request and endpoint information to the Endpoint Picker extension for fine-grained endpoint selection within the chosen pool.</li> <li>
+<strong>Final routing</strong>: the request is routed to the specific model replica selected by the Endpoint Picker extension.</li> </ol> <p>This process helps ensure that even when model information is deep within the request body, your GKE Inference Gateway can intelligently route traffic to the correct backend services.</p> <h3 id="configure-body-based-routing">Configure body-based routing</h3> <p>The Body-Based Routing (BBR) extension for GKE Inference Gateway runs as a service that you manage within your Kubernetes cluster. From the perspective of the Layer 7 load balancer, the BBR extension is an external gRPC server. When the load balancer needs to inspect a request body to determine the model name, it makes a gRPC call to the BBR service. The BBR service then processes the request and returns information to the load balancer, such as headers to be injected for routing.</p> <p>To enable body-based routing, deploy the BBR extension as a Pod and integrate it using <code translate="no" dir="ltr">GCPRoutingExtension</code> and <code translate="no" dir="ltr">HTTPRoute</code> resources.</p> <h4 id="prerequisites">Prerequisites</h4> <ul> <li><p>Ensure you have a GKE cluster (version 1.32 or later).</p></li> <li><p>Follow the main guide to <a href="deploy-gke-inference-gateway">configure GKE Inference Gateway</a>.</p></li> </ul> <h4 id="deploy-body-based-router">Deploy the body-based router</h4> <p>The body-based routing extension is deployed as a Kubernetes Deployment and Service, along with a <code translate="no" dir="ltr">GCPRoutingExtension</code> resource within your cluster. You can use Helm for a simplified installation.</p> <p>To deploy the required resources for the body-based router, run the following command:</p> 
+<pre>helm install body-based-router oci://registry.k8s.io/gateway-api-inference-extension/charts/body-based-routing \
+    --set provider.name=gke \
+    --set inferenceGateway.name=GATEWAY_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway resource.</p> <p>This command deploys the following resources:</p> <ul> <li>A Service and a Deployment for the Body-Based Routing extension.</li> <li>A <code translate="no" dir="ltr">GCPRoutingExtension</code> resource and a <code translate="no" dir="ltr">GCPHealthCheckPolicy</code> resource to attach the Body-Based Routing extension to your GKE Gateway resource.</li> </ul> <h4 id="configure-httproute">Configure <code translate="no" dir="ltr">HTTPRoute</code> for model-aware routing</h4> <p>After the extension is deployed and configured, you can define <code translate="no" dir="ltr">HTTPRoute</code> resources that use the injected header (<code translate="no" dir="ltr">X-Gateway-Model-Name</code>) for routing decisions.</p> <p>The following is an example <code translate="no" dir="ltr">HTTPRoute</code> manifest for model-aware routing:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: routes-to-llms
+spec:
+  parentRefs:
+  - name: GATEWAY_NAME
+  rules:
+  - matches:
+    - headers:
+      - type: Exact
+        name: X-Gateway-Model-Name
+        value: chatbot # Matches the extracted model name
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: gemma # Target InferencePool for 'chatbot' model
+      kind: InferencePool
+      group: "inference.networking.k8s.io"
+  - matches:
+    - headers:
+      - type: Exact
+        name: X-Gateway-Model-Name
+        value: sentiment # Matches another extracted model name
+      path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: llama # Target InferencePool for 'sentiment' model
+      kind: InferencePool
+      group: "inference.networking.k8s.io"
+</pre> <p>To apply this manifest to your cluster, save it as <code translate="no" dir="ltr">httproute-for-models.yaml</code> and run the following command:</p> 
+<pre>kubectl apply -f httproute-for-models.yaml
+</pre>
+<aside class="note"><strong>Note:</strong><span> If you need to access your inference pools from different HTTP origins (domains), you can combine body-based routing extensions with <code translate="no" dir="ltr">CORS</code> filters in the same <code translate="no" dir="ltr">HTTPRoute</code>. For more information, see <a href="deploying-gateways#configure-cors">Configure Cross-Origin Resource Sharing (CORS)</a>.</span></aside> <h3 id="considerations-and-limitations">Considerations and limitations</h3> <p>When planning your Body-Based Routing implementation, consider the following:</p> <ul> <li><p><strong>Fail-closed behavior:</strong> the Body-Based Routing extension is designed to operate in a "fail-closed" mode. If the extension is unavailable or fails to process a request, it results in an error (for example, a 404 or 503 response code if no default backend is configured) rather than routing incorrectly. Ensure your deployments are highly available to maintain service reliability.</p></li> <li><p><strong>Request body size and streaming:</strong> processing large HTTP request bodies, especially with streaming enabled, can introduce complexities. If the Envoy proxy is forced to stream the request body (typically for bodies larger than 250 KB), it might be unable to inject new headers. This can lead to routing failures (for example, a 404 error if the header matching rules cannot be applied).</p></li> <li><p><strong>Long-term maintenance:</strong> the Body-Based Routing extension runs as a component within your GKE clusters. You are responsible for its lifecycle management, including upgrades, security patches, and ensuring its continued operation.</p></li> </ul> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="customize-gke-inference-gateway-configurations">Learn how to customize GKE Inference Gateway</a>.</li> <li>
+<a href="deploy-gke-inference-gateway">Read more about GKE Inference Gateway</a>.</li> <li>
+<a href="https://gateway-api.sigs.k8s.io/">Learn more about the Gateway API</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-body-based-routing" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-body-based-routing</a>
+  </p>
+</div>

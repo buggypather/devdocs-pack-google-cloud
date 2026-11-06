@@ -1,0 +1,449 @@
+<h1 id="user-defined-aggregate-functions">User-defined aggregate functions</h1> <p>User-defined aggregate functions (UDAFs) in BigQuery let you build custom aggregation logic using SQL or JavaScript code. You can process your input columns as a group to perform specialized calculations on multiple rows at a time and return the result as a single value.</p> <h2 id="create-sql-udaf">Create a SQL UDAF</h2> <p>This section describes the various ways that you can create a persistent or temporary SQL UDAF in BigQuery.</p> <h3 id="create-persistent-sql-udaf">Create a persistent SQL UDAF</h3> <p>You can create a SQL UDAF that is persistent, meaning that you can reuse the UDAF across multiple queries. Persistent UDAFs are safe to call when they are shared between owners. UDAFs can't mutate data, talk to external systems, or send logs to Google Cloud Observability or similar applications.</p> <p>To create a persistent UDAF, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#sql-create-udaf-function"><code translate="no" dir="ltr">CREATE AGGREGATE FUNCTION</code> statement</a> without the <code translate="no" dir="ltr">TEMP</code> or <code translate="no" dir="ltr">TEMPORARY</code> keyword. You must include the dataset in the function path.</p> <p>For example, the following query creates a persistent UDAF that's called <code translate="no" dir="ltr">ScaledAverage</code>:</p> 
+<pre>CREATE AGGREGATE FUNCTION myproject.mydataset.ScaledAverage(
+  dividend FLOAT64,
+  divisor FLOAT64)
+RETURNS FLOAT64
+AS (
+  AVG(dividend / divisor)
+);</pre> <h3 id="create-temp-sql-udaf">Create a temporary SQL UDAF</h3> <p>You can create a SQL UDAF that is temporary, meaning that the UDAF only exists in the scope of a single query, script, session, or procedure.</p> <p>To create a temporary UDAF, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#sql-create-udaf-function"><code translate="no" dir="ltr">CREATE AGGREGATE FUNCTION</code> statement</a> with the <code translate="no" dir="ltr">TEMP</code> or <code translate="no" dir="ltr">TEMPORARY</code> keyword.</p> <p>For example, the following query creates a temporary UDAF that's called <code translate="no" dir="ltr">ScaledAverage</code>:</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION ScaledAverage(
+  dividend FLOAT64,
+  divisor FLOAT64)
+RETURNS FLOAT64
+AS (
+  AVG(dividend / divisor)
+);</pre> <h3 id="create-sql-udaf_non_agg">Use aggregate and non-aggregate parameters</h3> <p>You can create a SQL UDAF that has both aggregate and non-aggregate parameters.</p> <p>UDAFs normally aggregate function parameters across all rows in a <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#group_by_clause">group</a>. However, you can specify a function parameter as non-aggregate with the <code translate="no" dir="ltr">NOT AGGREGATE</code> keyword.</p> <p>A non-aggregate function parameter is a scalar function parameter with a constant value for all rows in a group. A valid non-aggregate function parameter must be a literal. Inside the UDAF definition, aggregate function parameters can only appear as function arguments to aggregate function calls. References to non-aggregate function parameters can appear anywhere in the UDAF definition.</p> <p>For example, the following function contains an aggregate parameter that's called <code translate="no" dir="ltr">dividend</code>, and a non-aggregate parameter called <code translate="no" dir="ltr">divisor</code>:</p> 
+<pre>-- Create the function.
+CREATE TEMP AGGREGATE FUNCTION ScaledSum(
+  dividend FLOAT64,
+  divisor FLOAT64 NOT AGGREGATE)
+RETURNS FLOAT64
+AS (
+  SUM(dividend) / divisor
+);</pre> <h3 id="default-project-sql-udaf">Use the default project in the function body</h3> <p>In the body of a SQL UDAF, any references to BigQuery entities, such as tables or views, must include the project ID unless the entity resides in the same project that contains the UDAF.</p> <p>For example, consider the following statement:</p> 
+<pre>CREATE AGGREGATE FUNCTION project1.dataset_a.ScaledAverage(
+  dividend FLOAT64,
+  divisor FLOAT64)
+RETURNS FLOAT64
+AS (
+  ( SELECT AVG(dividend / divisor) FROM dataset_a.my_table )
+);</pre> <p>If you run the preceding statement in the <code translate="no" dir="ltr">project1</code> project, the statement succeeds because <code translate="no" dir="ltr">my_table</code> exists in <code translate="no" dir="ltr">project1</code>. However, if you run the preceding statement from a different project, the statement fails. To correct the error, include the project ID in the table reference:</p> 
+<pre>CREATE AGGREGATE FUNCTION project1.dataset_a.ScaledAverage(
+  dividend FLOAT64,
+  divisor FLOAT64)
+RETURNS FLOAT64
+AS (
+  ( SELECT AVG(dividend / divisor) FROM project1.dataset_a.my_table )
+);</pre> <p>You can also reference an entity in a different project or dataset from the one where you create the function:</p> 
+<pre>CREATE AGGREGATE FUNCTION project1.dataset_a.ScaledAverage(
+  dividend FLOAT64,
+  divisor FLOAT64)
+RETURNS FLOAT64
+AS (
+  ( SELECT AVG(dividend / divisor) FROM project2.dataset_c.my_table )
+);</pre> <h2 id="create-javascript-udaf">Create a JavaScript UDAF</h2> <p>This section describes the various ways in which you can create a JavaScript UDAF in BigQuery. There are a few rules to observe when creating a JavaScript UDAF:</p> <ul> <li><p>The body of the JavaScript UDAF must be a quoted string literal that represents the JavaScript code. To learn more about the different types of quoted string literals that you can use, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/lexical#quoted_literals">Formats for quoted literals</a>.</p></li> <li><p>Only certain type encodings are allowed. For more information, see <a href="#javascript-type-encodings">Permitted SQL type encodings in a JavaScript UDAF</a>.</p></li> <li><p>The JavaScript function body must include four JavaScript functions that initialize, aggregate, merge, and finalize the results for the JavaScript UDAF (<code translate="no" dir="ltr">initialState</code>, <code translate="no" dir="ltr">aggregate</code>, <code translate="no" dir="ltr">merge</code>, and <code translate="no" dir="ltr">finalize</code>). For more information, see <a href="#required-javascript-aggregate-functions">Required JavaScript aggregation functions</a>.</p></li> <li><p>Any value returned by the <code translate="no" dir="ltr">initialState</code> function or that is left in the <code translate="no" dir="ltr">state</code> argument after the <code translate="no" dir="ltr">aggregate</code> or <code translate="no" dir="ltr">merge</code> function is called, must be serializable. If you want to work with non-serializable aggregation data, such as functions or symbol fields, you must use the included <code translate="no" dir="ltr">serialize</code> and <code translate="no" dir="ltr">deserialize</code> functions. To learn more, see <a href="#serialize-javascript-udaf">Serialize and deserialize data in a JavaScript UDAF</a>.</p></li> </ul> <h3 id="create-persistent-javascript-udaf">Create a persistent JavaScript UDAF</h3> <p>You can create a JavaScript UDAF that is persistent, meaning that you can reuse the UDAF across multiple queries. Persistent UDAFs are safe to call when they are shared between owners. UDAFs can't mutate data, talk to external systems, or send logs to Google Cloud Observability or similar applications.</p> <p>To create a persistent UDAF, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#javascript-create-udaf-function"><code translate="no" dir="ltr">CREATE AGGREGATE FUNCTION</code> statement</a> without the <code translate="no" dir="ltr">TEMP</code> or <code translate="no" dir="ltr">TEMPORARY</code> keyword. You must include the dataset in the function path.</p> <p>The following query creates a persistent JavaScript UDAF that's called <code translate="no" dir="ltr">SumPositive</code>:</p> 
+<pre>CREATE OR REPLACE AGGREGATE FUNCTION my_project.my_dataset.SumPositive(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS r'''
+
+  export function initialState() {
+    return {sum: 0}
+  }
+  export function aggregate(state, x) {
+    if (x &gt; 0) {
+      state.sum += x;
+    }
+  }
+  export function merge(state, partialState) {
+    state.sum += partialState.sum;
+  }
+  export function finalize(state) {
+    return state.sum;
+  }
+
+''';
+
+-- Call the JavaScript UDAF.
+WITH numbers AS (
+  SELECT * FROM UNNEST([1.0, -1.0, 3.0, -3.0, 5.0, -5.0]) AS x)
+SELECT my_project.my_dataset.SumPositive(x) AS sum FROM numbers;
+
+/*-----*
+ | sum |
+ +-----+
+ | 9.0 |
+ *-----*/</pre> <h3 id="create-temp-javascript-udaf">Create a temporary JavaScript UDAF</h3> <p>You can create a JavaScript UDAF that is temporary, meaning that the UDAF only exists in the scope of a single query, script, session, or procedure.</p> <p>To create a temporary UDAF, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#javascript-create-udaf-function"><code translate="no" dir="ltr">CREATE AGGREGATE FUNCTION</code> statement</a> with the <code translate="no" dir="ltr">TEMP</code> or <code translate="no" dir="ltr">TEMPORARY</code> keyword.</p> <p>The following query creates a temporary JavaScript UDAF that's called <code translate="no" dir="ltr">SumPositive</code>:</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION SumPositive(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS r'''
+
+  export function initialState() {
+    return {sum: 0}
+  }
+  export function aggregate(state, x) {
+    if (x &gt; 0) {
+      state.sum += x;
+    }
+  }
+  export function merge(state, partialState) {
+    state.sum += partialState.sum;
+  }
+  export function finalize(state) {
+    return state.sum;
+  }
+
+''';
+
+-- Call the JavaScript UDAF.
+WITH numbers AS (
+  SELECT * FROM UNNEST([1.0, -1.0, 3.0, -3.0, 5.0, -5.0]) AS x)
+SELECT SumPositive(x) AS sum FROM numbers;
+
+/*-----*
+ | sum |
+ +-----+
+ | 9.0 |
+ *-----*/</pre> <h3 id="create-javascript-udaf_non_agg">Include non-aggregate parameters in a JavaScript UDAF</h3> <p>You can create a JavaScript UDAF that has both aggregate and non-aggregate parameters.</p> <p>UDAFs normally aggregate function parameters across all rows in a <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#group_by_clause">group</a>. However, you can specify a function parameter as non-aggregate with the <code translate="no" dir="ltr">NOT AGGREGATE</code> keyword.</p> <p>A non-aggregate function parameter is a scalar function parameter with a constant value for all rows in a group. A valid non-aggregate function parameter must be a literal. Inside the UDAF definition, aggregate function parameters can only appear as function arguments to aggregate function calls. References to non-aggregate function parameters can appear anywhere in the UDAF definition.</p> <p>In the following example, the JavaScript UDAF contains an aggregate parameter called <code translate="no" dir="ltr">s</code> and a non-aggregate parameter called <code translate="no" dir="ltr">delimiter</code>:</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION JsStringAgg(
+  s STRING,
+  delimiter STRING NOT AGGREGATE)
+RETURNS STRING
+LANGUAGE js
+AS r'''
+
+  export function initialState() {
+    return {strings: []}
+  }
+  export function aggregate(state, s) {
+    state.strings.push(s);
+  }
+  export function merge(state, partialState) {
+    state.strings = state.strings.concat(partialState.strings);
+  }
+  export function finalize(state, delimiter) {
+    return state.strings.join(delimiter);
+  }
+
+''';
+
+-- Call the JavaScript UDAF.
+WITH strings AS (
+  SELECT * FROM UNNEST(["aaa", "bbb", "ccc", "ddd"]) AS values)
+SELECT JsStringAgg(values, '.') AS result FROM strings;
+
+/*-----------------*
+ | result          |
+ +-----------------+
+ | aaa.bbb.ccc.ddd |
+ *-----------------*/</pre> <h3 id="serialize-javascript-udaf">Serialize and deserialize data in a JavaScript UDAF</h3> <p>BigQuery must serialize any object returned by the <code translate="no" dir="ltr">initialState</code> function or that is left in the <code translate="no" dir="ltr">state</code> argument after the <code translate="no" dir="ltr">aggregate</code> or <code translate="no" dir="ltr">merge</code> function is called. BigQuery supports serializing an object if all fields are one of the following:</p> <ul> <li>A JavaScript primitive value (for example: <code translate="no" dir="ltr">2</code>, <code translate="no" dir="ltr">"abc"</code>, <code translate="no" dir="ltr">null</code>, <code translate="no" dir="ltr">undefined</code>).</li> <li>A JavaScript object for which BigQuery supports serializing all field values.</li> <li>A JavaScript array for which BigQuery supports serializing all elements.</li> </ul> <p>The following return values are serializable:</p> 
+<pre>export function initialState() {
+  return {a: "", b: 3, c: null, d: {x: 23} }
+}
+</pre>
+
+<pre>export function initialState() {
+  return {value: 2.3};
+}
+</pre> <p>The following return values are not serializable:</p> 
+<pre>export function initialState() {
+  return {
+    value: function() {return 6;}
+  }
+}
+</pre>
+
+<pre>export function initialState() {
+  return 2.3;
+}
+</pre> <p>If you want to work with non-serializable aggregation states, the JavaScript UDAF must include the <code translate="no" dir="ltr">serialize</code> and <code translate="no" dir="ltr">deserialize</code> functions. The <code translate="no" dir="ltr">serialize</code> function converts the aggregation state into a serializable object; the <code translate="no" dir="ltr">deserialize</code> function converts the serializable object back into an aggregation state.</p> <p>In the following example, an external library calculates sums by using an interface:</p> 
+<pre>export class SumAggregator {
+ constructor() {
+   this.sum = 0;
+ }
+ update(value) {
+   this.sum += value;
+ }
+ getSum() {
+   return this.sum;
+ }
+}</pre> <p>The following query doesn't execute because the <code translate="no" dir="ltr">SumAggregator</code> class object is not BigQuery-serializable, due to the presence of functions inside of the class.</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION F(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS r'''
+
+  class SumAggregator {
+   constructor() {
+     this.sum = 0;
+   }
+
+   update(value) {
+     this.sum += value;
+   }
+
+   getSum() {
+     return this.sum;
+   }
+  }
+
+  export function initialState() {
+   return new SumAggregator();
+  }
+
+  export function aggregate(agg, value) {
+   agg.update(value);
+  }
+
+  export function merge(agg1, agg2) {
+   agg1.update(agg2.getSum());
+  }
+
+  export function finalize(agg) {
+   return agg.getSum();
+  }
+
+''';
+
+--Error: getSum is not a function
+SELECT F(x) AS results FROM UNNEST([1,2,3,4]) AS x;</pre> <p>If you add the <code translate="no" dir="ltr">serialize</code> and <code translate="no" dir="ltr">deserialize</code> functions to the preceding query, the query runs because the <code translate="no" dir="ltr">SumAggregator</code> class object is converted to an object that is BigQuery-serializable and then back to a <code translate="no" dir="ltr">SumAggregator</code> class object again.</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION F(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS r'''
+
+  class SumAggregator {
+   constructor() {
+     this.sum = 0;
+   }
+
+   update(value) {
+     this.sum += value;
+   }
+
+   getSum() {
+     return this.sum;
+   }
+  }
+
+  export function initialState() {
+   return new SumAggregator();
+  }
+
+  export function aggregate(agg, value) {
+   agg.update(value);
+  }
+
+  export function merge(agg1, agg2) {
+   agg1.update(agg2.getSum());
+  }
+
+  export function finalize(agg) {
+   return agg.getSum();
+  }
+
+  export function serialize(agg) {
+   return {sum: agg.getSum()};
+  }
+
+  export function deserialize(serialized) {
+   var agg = new SumAggregator();
+   agg.update(serialized.sum);
+   return agg;
+  }
+
+''';
+
+SELECT F(x) AS results FROM UNNEST([1,2,3,4]) AS x;
+
+/*-----------------*
+ | results         |
+ +-----------------+
+ | 10.0            |
+ *-----------------*/</pre> <p>To learn more about the serialization functions, see <a href="#javascript-serialization-functions">Optional JavaScript serialization functions</a>.</p> <h3 id="include_global_variables_and_custom_functions_in_a_javascript_udaf">Include global variables and custom functions in a JavaScript UDAF</h3> <p>The JavaScript function body can include custom JavaScript code such as JavaScript global variables and custom functions.</p> <p>Global variables are executed when the JavaScript is loaded into BigQuery and before the <code translate="no" dir="ltr">initialState</code> function is executed. Global variables might be useful if you need to perform one-time initialization work that shouldn't repeat for each aggregation group, as would be the case with the <code translate="no" dir="ltr">initialState</code>, <code translate="no" dir="ltr">aggregate</code>, <code translate="no" dir="ltr">merge</code>, and <code translate="no" dir="ltr">finalize</code> functions.</p> <p>Don't use global variables to store aggregation state. Instead, limit aggregation state to objects passed to exported functions. Only use global variables to cache expensive operations that are not specific to any particular aggregation operation.</p> <p>In the following query, the <code translate="no" dir="ltr">SumOfPrimes</code> function calculates a sum, but only prime numbers are included in the calculation. In the JavaScript function body, there are two global variables, <code translate="no" dir="ltr">primes</code> and <code translate="no" dir="ltr">maxTested</code>, that are initialized first. In addition, there is a custom function called <code translate="no" dir="ltr">isPrime</code> that checks if a number is prime.</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION SumOfPrimes(x INT64)
+RETURNS INT64
+LANGUAGE js
+AS r'''
+
+  var primes = new Set([2]);
+  var maxTested = 2;
+
+  function isPrime(n) {
+    if (primes.has(n)) {
+      return true;
+    }
+    if (n &lt;= maxTested) {
+      return false;
+    }
+    for (var k = 2; k &lt; n; ++k) {
+      if (!isPrime(k)) {
+        continue;
+      }
+      if ((n % k) == 0) {
+        maxTested = n;
+        return false;
+      }
+    }
+    maxTested = n;
+    primes.add(n);
+    return true;
+  }
+
+  export function initialState() {
+    return {sum: 0};
+  }
+
+  export function aggregate(state, x) {
+    x = Number(x);
+    if (isPrime(x)) {
+      state.sum += x;
+    }
+  }
+
+  export function merge(state, partialState) {
+    state.sum += partialState.sum;
+  }
+
+  export function finalize(state) {
+    return state.sum;
+  }
+
+''';
+
+-- Call the JavaScript UDAF.
+WITH numbers AS (
+  SELECT * FROM UNNEST([10, 11, 13, 17, 19, 20]) AS x)
+SELECT SumOfPrimes(x) AS sum FROM numbers;
+
+/*-----*
+ | sum |
+ +-----+
+ | 60  |
+ *-----*/</pre> <h3 id="include-javascript-libraries">Include JavaScript libraries</h3> <p>You can extend your JavaScript UDAFs with the <code translate="no" dir="ltr">library</code> option in the <code translate="no" dir="ltr">OPTIONS</code> clause. This option lets you specify external code libraries for the JavaScript UDAF, and then import those libraries with the <code translate="no" dir="ltr">import</code> declaration.</p> <p>In the following example, code in <code translate="no" dir="ltr">bar.js</code> is available to any code in the function body of the JavaScript UDAF:</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION JsAggFn(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+OPTIONS (library = ['gs://foo/bar.js'])
+AS r'''
+
+  import doInterestingStuff from 'bar.js';
+
+  export function initialState() {
+    return ...
+  }
+  export function aggregate(state, x) {
+    var result = doInterestingStuff(x);
+    ...
+  }
+  export function merge(state, partial_state) {
+    ...
+  }
+  export function finalize(state) {
+    return ...;
+  }
+
+''';</pre> <h3 id="required-javascript-structure">Required JavaScript structure</h3> <p>Unlike a JavaScript UDF, where the function body is free-form JavaScript that runs for every row, the function body for a JavaScript UDAF is a JavaScript module that contains some built-in exported functions, which are invoked at various stages in the aggregation process. Some of these built-in functions are required, while others are optional. You can also add your JavaScript functions.</p> <h4 id="required-javascript-aggregate-functions">Required JavaScript aggregation functions</h4> <p>You can include your JavaScript functions, but the JavaScript function body must include the following exportable JavaScript functions:</p> <ul> <li><p><code translate="no" dir="ltr">initialState([nonAggregateParam])</code>: returns a JavaScript object that represents an aggregation state in which no rows have been aggregated yet.</p></li> <li><p><code translate="no" dir="ltr">aggregate(state, aggregateParam[, ...][, nonAggregateParam])</code>: aggregates one row of data, updating state to store the result of the aggregation. Does not return a value.</p></li> <li><p><code translate="no" dir="ltr">merge(state, partialState, [nonAggregateParam])</code>: merges aggregation state <code translate="no" dir="ltr">partialState</code> into aggregation state <code translate="no" dir="ltr">state</code>. This function is used when the engine aggregates different sections of data in parallel and needs to combine the results. Does not return a value.</p></li> <li><p><code translate="no" dir="ltr">finalize(finalState, [nonAggregateParam])</code>: returns the final result of the aggregate function, given a final aggregation state <code translate="no" dir="ltr">finalState</code>.</p></li> </ul> <p>To learn more about the required functions, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#javascript-interface-functions-udaf">Required functions in a JavaScript UDAF</a>.</p> <h4 id="javascript-serialization-functions">Optional JavaScript serialization functions</h4> <p>If you want to work with non-serializable aggregation states, the JavaScript UDAF must provide the <code translate="no" dir="ltr">serialize</code> and <code translate="no" dir="ltr">deserialize</code> functions. The <code translate="no" dir="ltr">serialize</code> function converts the aggregation state to a BigQuery-serializable object; the <code translate="no" dir="ltr">deserialize</code> function converts the BigQuery-serializable object back into an aggregation state.</p> <ul> <li><p><code translate="no" dir="ltr">serialize(state)</code>: returns a serializable object that contains the information in aggregation state, to be deserialized through the <code translate="no" dir="ltr">deserialize</code> function.</p></li> <li><p><code translate="no" dir="ltr">deserialize(serializedState)</code>: deserializes <code translate="no" dir="ltr">serializedState</code> (previously serialized by the <code translate="no" dir="ltr">serialize</code> function) into an aggregation state that can be passed into the <code translate="no" dir="ltr">serialize</code>, <code translate="no" dir="ltr">aggregate</code>, <code translate="no" dir="ltr">merge</code>, or <code translate="no" dir="ltr">finalize</code> functions.</p></li> </ul> <p>To learn more about the built-in JavaScript serialization functions, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#javascript-serialization-functions-udaf">Serialization functions for a JavaScript UDAF</a>.</p> <p>To learn how to serialize and deserialize data with a JavaScript UDAF, see <a href="#serialize-javascript-udaf">Serialize and deserialize data in a JavaScript UDAF</a>.</p> <h3 id="javascript-type-encodings">Permitted SQL type encodings in a JavaScript UDAF</h3> <p>In JavaScript UDAFs, the following supported <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types">GoogleSQL data types</a> represent <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects">JavaScript data types</a> as follows:</p> <table> <thead> <tr> <th>GoogleSQL<br> data type</th> <th>JavaScript<br> data type</th> <th>Notes</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">ARRAY</code></td> <td><code translate="no" dir="ltr">Array</code></td> <td> An array of arrays is not supported. To get around this limitation, use the <code translate="no" dir="ltr">Array&lt;Object&lt;Array&gt;&gt;</code> (JavaScript) and <code translate="no" dir="ltr">ARRAY&lt;STRUCT&lt;ARRAY&gt;&gt;</code> (GoogleSQL) data types. </td> </tr> <tr> <td> <code translate="no" dir="ltr">BIGNUMERIC</code> </td> <td> <code translate="no" dir="ltr">Number</code> or <code translate="no" dir="ltr">String</code> </td> <td> Same as <code translate="no" dir="ltr">NUMERIC</code>. </td> </tr> <tr> <td><code translate="no" dir="ltr">BOOL</code></td> <td><code translate="no" dir="ltr">Boolean</code></td> <td></td> </tr> <tr> <td><code translate="no" dir="ltr">BYTES</code></td> <td><code translate="no" dir="ltr">Uint8Array</code></td> <td></td> </tr> <tr> <td><code translate="no" dir="ltr">DATE</code></td> <td><code translate="no" dir="ltr">Date</code></td> <td></td> </tr> <tr> <td><code translate="no" dir="ltr">FLOAT64</code></td> <td><code translate="no" dir="ltr">Number</code></td> <td></td> </tr> <tr> <td><code translate="no" dir="ltr">INT64</code></td> <td><code translate="no" dir="ltr">BigInt</code></td> <td></td> </tr> <tr> <td><code translate="no" dir="ltr">JSON</code></td> <td>Various types</td> <td> The GoogleSQL <code translate="no" dir="ltr">JSON</code> data type can be converted into a JavaScript <code translate="no" dir="ltr">Object</code>, <code translate="no" dir="ltr">Array</code>, or other GoogleSQL-supported JavaScript data type. </td> </tr> <tr> <td> <code translate="no" dir="ltr">NUMERIC</code> </td> <td> <code translate="no" dir="ltr">Number</code> or <code translate="no" dir="ltr">String</code> </td> <td> If a <code translate="no" dir="ltr">NUMERIC</code> value can be represented exactly as an <a href="https://en.wikipedia.org/wiki/Floating-point_arithmetic#IEEE_754:_floating_point_in_modern_computers">IEEE 754 floating-point</a> value (range <code translate="no" dir="ltr">[-2<sup>53</sup>, 2<sup>53</sup>]</code>), and has no fractional part, it is encoded as a <code translate="no" dir="ltr">Number</code> data type, otherwise it is encoded as a <code translate="no" dir="ltr">String</code> data type. </td> </tr> <tr> <td><code translate="no" dir="ltr">STRING</code></td> <td><code translate="no" dir="ltr">String</code></td> <td></td> </tr> <tr> <td><code translate="no" dir="ltr">STRUCT</code></td> <td><code translate="no" dir="ltr">Object</code></td> <td> Each <code translate="no" dir="ltr">STRUCT</code> field is a named property in the <code translate="no" dir="ltr">Object</code> data type. An unnamed <code translate="no" dir="ltr">STRUCT</code> field is not supported. </td> </tr> <tr> <td><code translate="no" dir="ltr">TIMESTAMP</code></td> <td><code translate="no" dir="ltr">Date</code></td> <td> <code translate="no" dir="ltr">Date</code> contains a microsecond field with the microsecond fraction of <code translate="no" dir="ltr">TIMESTAMP</code>. </td> </tr> </tbody> </table> <aside class="note"><strong>Note:</strong><span> The SQL encodings for JavaScript UDAFs are different from those for JavaScript UDFs.</span></aside> <h2 id="call-udaf">Call a UDAF</h2> <p>This section describes the various ways that you can call a persistent or temporary UDAF after you create it in BigQuery.</p> <aside class="note"><strong>Note:</strong><span> JavaScript UDAF calls don't support the <code translate="no" dir="ltr">ORDER BY</code> clause.</span></aside> <h3 id="call-udaf-persist">Call a persistent UDAF</h3> <p>You can call a persistent UDAF in the same way that you call a built-in aggregate function. For more information, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aggregate-function-calls">Aggregate function calls</a>. You must include the dataset in the function path.</p> <p>In the following example, the query calls a persistent UDAF that's called <code translate="no" dir="ltr">WeightedAverage</code>:</p> 
+<pre>SELECT my_project.my_dataset.WeightedAverage(item, weight, 2) AS weighted_average
+FROM (
+  SELECT 1 AS item, 2.45 AS weight UNION ALL
+  SELECT 3 AS item, 0.11 AS weight UNION ALL
+  SELECT 5 AS item, 7.02 AS weight
+);</pre> <p>A table with the following results is produced:</p> 
+<pre>/*------------------*
+ | weighted_average |
+ +------------------+
+ | 4.5              |
+ *------------------*/
+</pre> <h3 id="call-javascript-udaf-temp">Call a temporary UDAF</h3> <p>You can call a temporary UDAF in the same way that you call a built-in aggregate function. For more information, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aggregate-function-calls">Aggregate function calls</a>.</p> <p>The temporary function must be included in a <a href="multi-statement-queries">multi-statement query</a> or <a href="procedures">procedure</a> that contains the UDAF function call.</p> <p>In the following example, the query calls a temporary UDAF that's called <code translate="no" dir="ltr">WeightedAverage</code>:</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION WeightedAverage(...)
+
+-- Temporary UDAF function call
+SELECT WeightedAverage(item, weight, 2) AS weighted_average
+FROM (
+  SELECT 1 AS item, 2.45 AS weight UNION ALL
+  SELECT 3 AS item, 0.11 AS weight UNION ALL
+  SELECT 5 AS item, 7.02 AS weight
+);</pre> <p>A table with the following results is produced:</p> 
+<pre>/*------------------*
+ | weighted_average |
+ +------------------+
+ | 4.5              |
+ *------------------*/
+</pre> <h3 id="null-values-call-udaf">Ignore or include rows with <code translate="no" dir="ltr">NULL</code> values</h3> <p>When a JavaScript UDAF is called with the <code translate="no" dir="ltr">IGNORE NULLS</code> argument, BigQuery automatically skips over rows for which any aggregate argument evaluates to <code translate="no" dir="ltr">NULL</code>. Such rows are excluded from the aggregation completely and are not passed to the JavaScript <code translate="no" dir="ltr">aggregate</code> function. When <code translate="no" dir="ltr">RESPECT NULLS</code> argument is provided, <code translate="no" dir="ltr">NULL</code> filtration is disabled, and every row is passed to the JavaScript UDAF, regardless of <code translate="no" dir="ltr">NULL</code> values.</p> <p>When neither the <code translate="no" dir="ltr">IGNORE NULLS</code> nor <code translate="no" dir="ltr">RESPECT NULLS</code> argument is provided, the default argument is <code translate="no" dir="ltr">IGNORE NULLS</code>.</p> <p>The following example illustrates the default <code translate="no" dir="ltr">NULL</code> behavior, the <code translate="no" dir="ltr">IGNORE NULLS</code> behavior, and the <code translate="no" dir="ltr">RESPECT NULLS</code> behavior:</p> 
+<pre>CREATE TEMP AGGREGATE FUNCTION SumPositive(x FLOAT64)
+RETURNS FLOAT64
+LANGUAGE js
+AS r'''
+
+  export function initialState() {
+    return {sum: 0}
+  }
+  export function aggregate(state, x) {
+    if (x == null) {
+      // Use 1000 instead of 0 as placeholder for null so
+      // that NULL values passed are visible in the result.
+      state.sum += 1000;
+      return;
+    }
+    if (x &gt; 0) {
+      state.sum += x;
+    }
+  }
+  export function merge(state, partialState) {
+    state.sum += partialState.sum;
+  }
+  export function finalize(state) {
+    return state.sum;
+  }
+
+''';
+
+-- Call the JavaScript UDAF.
+WITH numbers AS (
+  SELECT * FROM UNNEST([1.0, 2.0, NULL]) AS x)
+SELECT
+  SumPositive(x) AS sum,
+  SumPositive(x IGNORE NULLS) AS sum_ignore_nulls,
+  SumPositive(x RESPECT NULLS) AS sum_respect_nulls
+FROM numbers;
+
+/*-----+------------------+-------------------*
+ | sum | sum_ignore_nulls | sum_respect_nulls |
+ +-----+------------------+-------------------+
+ | 3.0 | 3.0              | 1003.0            |
+ *-----+------------------+-------------------*/</pre> <h2 id="delete-udaf">Delete a UDAF</h2> <p>This section describes the various ways that you can delete a persistent or temporary UDAF after you created it in BigQuery.</p> <h3 id="delete-udaf-persist">Delete a persistent UDAF</h3> <p>To delete a persistent UDAF, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#drop_function_statement"><code translate="no" dir="ltr">DROP FUNCTION</code> statement</a>. You must include the dataset in the function path.</p> <p>In the following example, the query deletes a persistent UDAF that's called <code translate="no" dir="ltr">WeightedAverage</code>:</p> 
+<pre>DROP FUNCTION IF EXISTS my_project.my_dataset.WeightedAverage;</pre> <h3 id="delete-udaf-temp">Delete a temporary UDAF</h3> <p>To delete a temporary UDAF, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#drop_function_statement"><code translate="no" dir="ltr">DROP FUNCTION</code> statement</a>.</p> <p>In the following example, the query deletes a temporary UDAF that's called <code translate="no" dir="ltr">WeightedAverage</code>:</p> 
+<pre>DROP FUNCTION IF EXISTS WeightedAverage;</pre> <p>A temporary UDAF expires as soon as the query finishes. The UDAF doesn't need to be deleted unless you want to remove it early from a <a href="multi-statement-queries">multi-statement query</a> or <a href="procedures">procedure</a>.</p> <h2 id="list-udafs">List UDAFs</h2> <p>UDAFs are a type of routine. To list all of the routines in a dataset, see <a href="routines#list_routines">List routines</a>.</p> <h2 id="performance-tips">Performance tips</h2> <p>If you want to improve the performance of your queries, consider the following:</p> <ul> <li>
+<p>Prefilter your input. Processing data in JavaScript is more expensive than in SQL, so it is best to filter the input as much as possible in SQL first.</p> <p>The following query is less efficient because it filters the input by using <code translate="no" dir="ltr">x &gt; 0</code> in the UDAF call:</p> 
+<pre>SELECT JsFunc(x) FROM t;
+</pre> <p>The following query is more efficient because it prefilters the input by using <code translate="no" dir="ltr">WHERE x &gt; 0</code> before the UDAF is called:</p> 
+<pre>SELECT JsFunc(x) FROM t WHERE x &gt; 0;
+</pre>
+</li> <li>
+<p>Use built-in aggregate functions instead of JavaScript when possible. Re-implementing a built-in aggregate function in JavaScript is slower than calling a built-in aggregate function that does the same thing.</p> <p>The following query is less efficient because it implements a UDAF:</p> 
+<pre>SELECT SumSquare(x) FROM t;
+</pre> <p>The following query is more efficient because it implements a built-in function that produces the same results as the previous query:</p> 
+<pre>SELECT SUM(x*x) FROM t;
+</pre>
+</li> <li><p>JavaScript UDAFs are appropriate for more complex aggregation operations, which can't be expressed through built-in functions.</p></li> <li>
+<p>Use memory efficiently. The JavaScript processing environment has limited memory available for each query. JavaScript UDAF queries that accumulate too much local state might fail due to memory exhaustion. Be especially mindful about minimizing the size of aggregation state objects and avoid aggregation states which accumulate large numbers of rows.</p> <p>The following query is not efficient because the <code translate="no" dir="ltr">aggregate</code> function uses an unbounded amount of memory when the number of rows processed gets large.</p> 
+<pre>export function initialState() {
+  return {rows: []};
+}
+export function aggregate(state, x) {
+  state.rows.push(x);
+}
+...
+</pre>
+</li> <li><p>Use partitioned tables when possible. JavaScript UDAFs typically run more efficiently when querying against a partitioned table compared to a non-partitioned table, because a partitioned table stores data in many smaller files compared to a non-partitioned table, thus enabling higher parallelism.</p></li> </ul> <h2 id="limitations">Limitations</h2> <ul> <li><p>UDAFs have the same limitations that apply to UDFs. For details, see <a href="user-defined-functions#limitations">UDF limitations</a>.</p></li> <li><p>Only literals, query parameters, and script variables can be passed in as non-aggregate arguments for a UDAF.</p></li> <li>
+<p>The use of the <code translate="no" dir="ltr">ORDER BY</code> clause in a JavaScript UDAF function call is unsupported.</p> 
+<pre>SELECT MyUdaf(x ORDER BY y) FROM t; -- Error: ORDER BY is unsupported.
+</pre>
+</li> </ul> <h2 id="pricing">Pricing</h2> <p>UDAFs are billed using the standard <a href="https://cloud.google.com/bigquery/pricing">BigQuery pricing</a> model.</p> <h2 id="quotas-and-limits">Quotas and limits</h2> <p>UDAFs have the same quotas and limits that apply to UDFs. For information about UDF quotas, see <a href="https://docs.cloud.google.com/bigquery/quotas#udf_limits">Quotas and limits</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/user-defined-aggregates" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/user-defined-aggregates</a>
+  </p>
+</div>

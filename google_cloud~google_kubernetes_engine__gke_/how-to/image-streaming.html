@@ -1,0 +1,250 @@
+<h1>Use Image streaming to pull container images</h1>  <p>This page shows you how to use <em>Image streaming</em> in Google Kubernetes Engine (GKE) to pull container images by streaming the image data as your applications need it.</p> <p>Autopilot clusters automatically use Image streaming to pull eligible images. The instructions on this page about enabling and disabling image streaming apply to Standard clusters.</p> <h2 id="overview">Overview</h2> <p>Image streaming is a method of pulling container images in which GKE streams data from eligible images as requested by your applications. You can use Image streaming to allow your workloads to initialize without waiting for the entire image to download, which leads to significant improvements in initialization times. The shortened pull time provides you with benefits including the following:</p> <ul> <li>Faster autoscaling</li> <li>Reduced latency when pulling large images</li> <li>Faster Pod startup</li> </ul> <p>With Image streaming, GKE uses a remote filesystem as the root filesystem for any containers that use eligible container images. GKE streams image data from the remote filesystem as needed by your workloads. Without Image streaming, GKE downloads the entire container image onto each node and uses it as the root filesystem for your workloads.</p> <p>While streaming the image data, GKE downloads the entire container image onto the local disk in the background and caches it. GKE then serves future data read requests from the cached image.</p> <p>When you deploy workloads that need to read specific files in the container image, the Image streaming backend serves only those requested files.</p> <h2 id="requirements">Requirements</h2> <p>You must meet the following requirements to use Image streaming in GKE Autopilot and Standard clusters:</p> <ul> <li>
+<p>You must enable the Container File System API.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/apis/library/containerfilesystem.googleapis.com" target="_blank">Enable Container File System API</a></p>
+</li> <li>
+<p>You must use a node image with containerd. Supported options include:</p> <ul> <li>Container-Optimized OS with containerd (<code translate="no" dir="ltr">COS_CONTAINERD</code>): Supported on GKE version 1.30.1-gke.1329000 and later. This is the default for Autopilot nodes. <a href="../concepts/node-images#cos">Learn more about COS</a>.</li> <li>Ubuntu with containerd (<code translate="no" dir="ltr">UBUNTU_CONTAINERD</code>): Supported on GKE version 1.35.0-gke.1403000 and later. <a href="../concepts/node-images#ubuntu">Learn more about Ubuntu node images</a>.</li> </ul>
+</li> <li><p>Your container images must be stored in standard or <a href="https://docs.cloud.google.com/artifact-registry/docs/repositories/remote-overview">remote repositories</a> in Artifact Registry or in public registries on <a href="https://hub.docker.com/">Docker Hub</a>.</p></li> <li><p>If you enable <a href="../concepts/network-isolation#enable-private-nodes">private nodes</a> on your cluster, you must <a href="https://docs.cloud.google.com/vpc/docs/configure-private-google-access#enabling-pga">enable Private Google Access</a> on the subnet for your nodes to access the Image streaming Service.</p></li> <li><p>If VPC Service Controls protects your container images and you use Image streaming, you must also include the Image streaming API (<code translate="no" dir="ltr">containerfilesystem.googleapis.com</code>) in the service perimeter.</p></li> <li><p>If the GKE nodes in the cluster don't use the default service account, you must ensure that your custom service account has the <a href="https://docs.cloud.google.com/iam/docs/understanding-roles">Service Usage Consumer</a> (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code>) IAM role in the project that hosts the container image.</p></li> </ul> <h2 id="limitations">Limitations</h2> <ul> <li>Container images that use the <a href="https://docs.docker.com/registry/spec/manifest-v2-1/">V2 Image Manifest, schema version 1</a> are not eligible.</li> <li>Container images with duplicate layers are not supported. GKE downloads these images without streaming the data. Check your container image for <a href="#check-for-empty-or-duplicate-layers">empty layers or duplicate layers</a>.</li> <li>If your workloads read many files in an image during initialization, you might notice increased initialization times because of the latency added by the remote file reads.</li> <li>If your workloads require a large proportion of the image to be available before code can execute, you might see a delay between the time that the <code translate="no" dir="ltr">kubelet</code> starts the container and the time that the container actually starts to send logs.</li> <li>You might not notice the benefits of Image streaming during the first pull of an eligible image. However, after Image streaming caches the image, future image pulls on any cluster benefit from Image streaming.</li> <li>GKE Standard clusters use the cluster-level configuration to determine whether to enable Image streaming on new node pools created using <a href="node-auto-provisioning">node pool auto-creation</a>. However, you cannot use <a href="workload-separation">workload separation</a> to create node pools with Image streaming enabled when Image streaming is disabled at the cluster level.</li> <li>
+<strong>Kubernetes user namespaces:</strong> Pods configured with user namespaces (<code translate="no" dir="ltr">spec.hostUsers: false</code>) might fail to start on GKE when Image streaming is enabled on large container images. This failure occurs because the default snapshotter doesn't support ID-mapped mounts for user ID (UID) and group ID (GID) remapping, causing container creation to time out during recursive file ownership changes. To work around this issue, create a new node pool by using the <code translate="no" dir="ltr">--node-labels="cloud.google.com/gke-gcfs-v2-forbid=true"</code> flag. This flag disables the default snapshotter and uses the previous snapshotter behavior.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<p>Enable the Container File System API.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/apis/library/containerfilesystem.googleapis.com" target="_blank">Enable Container File System API</a></p>
+</li> <li><p>Ensure that you have an existing Standard cluster. If you need one, <a href="creating-a-regional-cluster">create a Standard cluster</a>.</p></li> </ul> <h2 id="enable-streaming-clusters">Enable Image streaming on clusters</h2> <p>You can enable Image streaming on new or existing Standard clusters by using the gcloud CLI <code translate="no" dir="ltr">--enable-image-streaming</code> flag, or using the Google Cloud console. When you create a cluster with the <code translate="no" dir="ltr">--enable-image-streaming</code> flag, Image streaming will be enabled in the default node pool. New node pools you create will also have Image streaming enabled unless you <a href="#disable_new_node_pools">disable it when creating the node pools</a>.</p> <p>All <a href="../concepts/autopilot-overview">Autopilot</a> clusters use Image streaming to pull eligible images. For instructions, refer to <a href="creating-an-autopilot-cluster#set-version">Set the version and release channel of a new Autopilot cluster</a>. The following instructions only apply to GKE Standard clusters.</p> <p>You can enable Image streaming on existing clusters that meet the <a href="#requirements">requirements</a> using either the gcloud CLI or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To update an existing cluster to use Image streaming, run the following command using the gcloud CLI:</p> 
+<pre data-language="bash">gcloud container clusters update CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="tasks" track-type="consoleLink">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>Click the name of the cluster you want to modify.</p></li> <li><p>On the <strong>Clusters</strong> page, in the <strong>Features</strong> section, click <i class="material-icons" aria-hidden="true" translate="no">edit</i> next to <strong>Image streaming</strong>.</p></li> <li><p>In the <strong>Edit Image streaming</strong> dialog, select the <strong>Enable Image streaming</strong> checkbox.</p></li> <li><p>Click <strong>Save changes</strong>.</p></li> </ol></section> </div> <p>After you modify the cluster, GKE enables Image streaming on your existing node pools automatically by default. If you explicitly enabled or disabled Image streaming on individual node pools, those node pools don't inherit the changes to the cluster-level setting.</p> <p>Changing the Image streaming setting respects maintenance availability when updated at the cluster level, but not at the node pool level.</p> <p>This change requires recreating the nodes, which can cause disruption to your running workloads. For details about this specific change, find the corresponding row in the <a href="../concepts/managing-clusters#manual-changes-respecting-policies">manual changes that recreate the nodes using a node upgrade strategy and respecting maintenance policies</a> table. To learn more about node updates, see <a href="../concepts/managing-clusters#plan-node-disruption">Planning for node update disruptions</a>.</p> <aside class="special"><strong>Important:</strong><span> GKE respects maintenance policies when recreating the nodes for this change using the node upgrade strategy, and depends on <a href="node-upgrades-quota">resource availability</a>. Disabling node auto-upgrades <a href="node-auto-upgrades#disable-only-versions">doesn't prevent this change</a>. To manually apply the changes to the nodes, use the gcloud CLI to call the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/upgrade"><code translate="no" dir="ltr">gcloud container clusters
+upgrade</code></a> command, passing the <code translate="no" dir="ltr">--cluster-version</code> flag with the same GKE version that the node pool is already running.</span></aside> <h3 id="verify-cluster-enabled">Verify Image streaming is enabled on a cluster</h3> <p>You can check whether Image streaming is enabled at the cluster level using either the gcloud CLI or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Run the following command:</p> 
+<pre data-language="bash">gcloud container clusters describe CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --flatten "nodePoolDefaults.nodeConfigDefaults"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul> <p>The setting is enabled if the output is similar to the following:</p> 
+<pre data-language="bash">gcfsConfig:
+  enabled: true
+...
+</pre> <p>The setting is disabled if the output is similar to the following:</p> 
+<pre data-language="bash">gcfsConfig: {}
+...
+</pre></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="tasks" track-type="consoleLink">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>Click the name of the cluster you want to check.</p></li> <li><p>On the <strong>Clusters</strong> page, in the <strong>Features</strong> section, next to <strong>Image streaming</strong> it will show whether the setting is enabled.</p></li> </ol></section> </div> <h2 id="enable_on_node_pools">Enable Image streaming on node pools</h2> <p>By default, node pools inherit the Image streaming setting at the cluster level. You can enable or disable Image streaming on specific node pools using the gcloud CLI.</p> <aside class="note"><strong>Note:</strong><span> When you change the Image streaming setting on a specific node pool, the node pool no longer inherits changes to the cluster-level Image streaming setting.</span></aside> <h3 id="on_a_new_node_pool">On a new node pool</h3> <p>To create a new node pool with Image streaming enabled, run the following command:</p> 
+<pre>gcloud container node-pools create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --image-type=IMAGE_TYPE \
+    --enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster for the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster. Provide a region for regional clusters, or a zone for zonal clusters.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_TYPE</var></code>: the image type, either <code translate="no" dir="ltr">COS_CONTAINERD</code> (Container-Optimized OS) or <code translate="no" dir="ltr">UBUNTU_CONTAINERD</code> (Ubuntu).</li> </ul> <h3 id="on_an_existing_node_pool">On an existing node pool</h3> <p>You can enable Image streaming on existing node pools that meet the <a href="#requirements">requirements</a>.</p> <p>To update an existing node pool to use Image streaming, run the following command:</p> 
+<pre>gcloud container node-pools update POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster for the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul> <p>Changing the Image streaming setting respects maintenance availability when updated at the cluster level, but not at the node pool level.</p> <p>This change requires recreating the nodes, which can cause disruption to your running workloads. For details about this specific change, find the corresponding row in the <a href="../concepts/managing-clusters#manual-changes-strategy-but-no-respect-policies">manual changes that recreate the nodes using a node upgrade strategy without respecting maintenance policies</a> table. To learn more about node updates, see <a href="../concepts/managing-clusters#plan-node-disruption">Planning for node update disruptions</a>.</p> <aside class="caution"><strong>Caution:</strong><span> GKE immediately begins recreating the nodes for this change using the node upgrade strategy, regardless of active maintenance policies. GKE depends on <a href="node-upgrades-quota">resource availability</a> for the change. Disabling node auto-upgrades <a href="node-auto-upgrades#disable-only-versions">doesn't prevent this change</a>. Ensure that your workloads running on the nodes are prepared for disruption before you initiate this change.</span></aside> <h3 id="verify-node-pool-enabled">Verify Image streaming is enabled on a node pool</h3> <p>Check whether Image streaming is enabled for a node pool:</p> 
+<pre>gcloud container node-pools describe POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster for the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul> <p>The setting is enabled if the output is similar to the following:</p> 
+<pre>gcfsConfig:
+  enabled: true
+...
+</pre> <p>The setting is disabled if the output is similar to the following:</p> 
+<pre>gcfsConfig: {}
+...
+</pre> <h2 id="schedule-workload">Schedule a workload using Image streaming</h2> <p>After you enable Image streaming on your cluster, GKE automatically uses Image streaming when pulling eligible container images from Artifact Registry without requiring further configuration.</p> <p>GKE adds the <code translate="no" dir="ltr">cloud.google.com/gke-image-streaming: "true"</code> label to nodes in node pools with Image streaming enabled. On GKE Standard, if you enable or disable Image streaming on specific node pools so that your cluster has a mix of nodes that use Image streaming and nodes that don't, you can use <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/">node selectors</a> in your deployments to control whether GKE schedules your workloads on nodes that use Image streaming.</p> <p>In the following example, you schedule a Deployment that uses a large container image on a cluster with Image streaming enabled. You can then optionally <a href="#compare_normal_pulls">compare the performance to an image pull without Image streaming enabled</a>.</p> <ol> <li>
+<p>Create a new cluster with Image streaming enabled:</p> 
+<pre>gcloud container clusters create CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --enable-image-streaming \
+    --image-type=IMAGE_TYPE
+</pre>
+</li> <li>
+<p>Get credentials for the cluster:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">frontend-deployment.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guestbook
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: guestbook
+        tier: frontend
+    spec:
+      containers:
+      - name: php-redis
+        image: us-docker.pkg.dev/google-samples/containers/gke/gb-frontend:v5
+        env:
+        - name: GET_HOSTS_FROM
+          value: "dns"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        ports:
+        - containerPort: 80
+</pre> <p>The <code translate="no" dir="ltr">gb-frontend</code> container image is 327 MB in size.</p>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f frontend-deployment.yaml
+</pre>
+</li> <li>
+<p>Verify that GKE created the Deployment:</p> 
+<pre>kubectl get pods -l app=guestbook
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAMESPACE    NAME                          READY    STATUS       RESTARTS    AGE
+default      frontend-64bcc69c4b-pgzgm     1/1      Completed    0           3s
+</pre>
+</li> <li>
+<p>Get the Kubernetes event log to see image pull events:</p> 
+<pre>kubectl get events --all-namespaces
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAMESPACE  LAST SEEN  TYPE    REASON          OBJECT                                                 MESSAGE
+default    11m        Normal  Pulling         pod/frontend-64bcc69c4b-pgzgm                          Pulling image "us-docker.pkg.dev/google-samples/containers/gke/gb-frontend:v5"
+default    11m        Normal  Pulled          pod/frontend-64bcc69c4b-pgzgm                          Successfully pulled image "us-docker.pkg.dev/google-samples/containers/gke/gb-frontend:v5" in 1.536908032s
+default    11m        Normal  ImageStreaming  node/gke-riptide-cluster-default-pool-f1552ec4-0pjv    Image us-docker.pkg.dev/google-samples/containers/gke/gb-frontend:v5 is backed by image streaming.
+...
+</pre> <p>In this output:</p> <ul> <li>The <code translate="no" dir="ltr">Pulled</code> event shows the time taken for Image streaming to pull the image.</li> <li>
+<p>The <code translate="no" dir="ltr">ImageStreaming</code> event shows that the node uses Image streaming to serve the container image.</p> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">Reason</code> field displays <code translate="no" dir="ltr">BackedByGCFS</code> instead of <code translate="no" dir="ltr">ImageStreaming</code> in clusters with GKE versions prior to 1.20.9-gke.1000. <code translate="no" dir="ltr">BackedByGCFS</code> also indicates that the image uses Image streaming.</span></aside><aside class="note"><strong>Note:</strong><span> If you run a workload that uses the same image on the same node, GKE uses the local cache of the image instead of streaming the image. You will see <code translate="no" dir="ltr">Container image "us-docker.pkg.dev/google-samples/containers/gke/gb-frontend:v5" already present on machine</code> in the <code translate="no" dir="ltr">Message</code> field for the Pod <code translate="no" dir="ltr">Pulled</code> event. To test the performance of Image streaming again, delete the node and create a new one.</span></aside>
+</li> </ul>
+</li> </ol> <h3 id="compare_normal_pulls">Compare performance with standard image pulls</h3> <p>In this optional example, you create a new cluster with Image streaming disabled and deploy the <code translate="no" dir="ltr">frontend</code> Deployment to compare performance with Image streaming.</p> <ol> <li>
+<p>Create a new cluster with Image streaming disabled:</p> 
+<pre>gcloud container clusters create CLUSTER2_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --image-type=IMAGE_TYPE
+</pre>
+<aside class="note"><strong>Note:</strong><span> By default, GKE creates clusters with Image streaming disabled.</span></aside>
+</li> <li>
+<p>Get credentials for the cluster:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER2_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">frontend</code> Deployment from the previous example:</p> 
+<pre>kubectl apply -f frontend-deployment.yaml
+</pre>
+</li> <li>
+<p>Get the Kubernetes event log:</p> 
+<pre>kubectl get events --all-namespaces
+</pre> <p>The output is similar to the following:</p> 
+<pre> NAMESPACE  LAST SEEN  TYPE    REASON     OBJECT                             MESSAGE
+ default    87s        Normal  Pulled     pod/frontend-64bcc69c4b-qwmfp      Successfully pulled image "us-docker.pkg.dev/google-samples/containers/gke/gb-frontend:v5" in 23.929723476s
+</pre> <p>Notice the time GKE took to pull the entire image. In this example output, GKE needed almost 24 seconds. With Image streaming enabled, GKE only needed 1.5 seconds to pull the image data that the workload required to start.</p>
+</li> </ol> <h2 id="clean_up">Clean up</h2> <p>To avoid charges, delete the clusters you created in the previous examples:</p> 
+<pre>gcloud container clusters delete CLUSTER_NAME CLUSTER2_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your first cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER2_NAME</var></code>: the name of your second cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of the clusters.</li> </ul> <h2 id="disable">Disable Image streaming</h2> <p>If you use GKE Autopilot, you can't disable Image streaming on individual clusters. However, you can disable the Container File System API for the entire project, which disables Image streaming by reverting to standard image pulls.</p> <p>If you use GKE Standard clusters, you can disable Image streaming on individual clusters or specific node pools, as described in the following sections.</p> <h3 id="on_an_existing_cluster">Disable Image streaming on a GKE Standard cluster</h3> <p>You can disable Image streaming on existing GKE Standard clusters using the gcloud CLI or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To disable Image streaming on an existing cluster, run the following command:</p> 
+<pre data-language="bash">gcloud container clusters update CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --no-enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in the Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="tasks" track-type="consoleLink">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>Click the name of the cluster you want to modify.</p></li> <li><p>On the <strong>Clusters</strong> page, under <strong>Features</strong>, click <i class="material-icons" aria-hidden="true" translate="no">edit</i> next to <strong>Image streaming</strong>.</p></li> <li><p>In the <strong>Edit Image streaming</strong> dialog box, clear the <strong>Enable Image streaming</strong> checkbox.</p></li> <li><p>Click <strong>Save changes</strong>.</p></li> </ol></section> </div> <p>Changing the Image streaming setting respects maintenance availability when updated at the cluster level, but not at the node pool level.</p> <p>This change requires recreating the nodes, which can cause disruption to your running workloads. For details about this specific change, find the corresponding row in the <a href="../concepts/managing-clusters#manual-changes-respecting-policies">manual changes that recreate the nodes using a node upgrade strategy and respecting maintenance policies</a> table. To learn more about node updates, see <a href="../concepts/managing-clusters#plan-node-disruption">Planning for node update disruptions</a>.</p> <aside class="special"><strong>Important:</strong><span> GKE respects maintenance policies when recreating the nodes for this change using the node upgrade strategy, and depends on <a href="node-upgrades-quota">resource availability</a>. Disabling node auto-upgrades <a href="node-auto-upgrades#disable-only-versions">doesn't prevent this change</a>. To manually apply the changes to the nodes, use the gcloud CLI to call the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/upgrade"><code translate="no" dir="ltr">gcloud container clusters
+upgrade</code></a> command, passing the <code translate="no" dir="ltr">--cluster-version</code> flag with the same GKE version that the node pool is already running.</span></aside> <h3 id="disable_new_node_pools">On a new node pool</h3> <p>To disable Image streaming when creating a new node pool, specify the <code translate="no" dir="ltr">--no-enable-image-streaming</code> flag, such as in the following command:</p> 
+<pre>gcloud container node-pools create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --no-enable-image-streaming
+</pre> <h3 id="on-auto-created-node-pools">On auto-created node pools</h3> <p>GKE Standard clusters use the cluster-level configuration to determine whether to enable Image streaming on new node pools that were created by using <a href="node-auto-provisioning">node pool auto-creation</a>.</p> <p>With GKE version 1.34.1-gke.1279000 or later, you can also individually control Image streaming on node pools that were created by a <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/computeclass#imageStreaming">ComputeClass</a> by specifying the <code translate="no" dir="ltr">spec.nodePoolConfig.imageStreaming</code> attribute:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: image-streaming-class
+spec:
+  nodePoolConfig:
+    imageStreaming
+      enabled: true
+  priorities:
+  - machineFamily: n4
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <h3 id="on_an_existing_node_pool_2">On an existing node pool</h3> <p>To disable Image streaming on an existing node pool, run the following command:</p> 
+<pre>gcloud container node-pools update NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --no-enable-image-streaming
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster for the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">location</a> of the control plane of your cluster.</li> </ul> <p>Changing the Image streaming setting respects maintenance availability when updated at the cluster level, but not at the node pool level.</p> <p>This change requires recreating the nodes, which can cause disruption to your running workloads. For details about this specific change, find the corresponding row in the <a href="../concepts/managing-clusters#manual-changes-strategy-but-no-respect-policies">manual changes that recreate the nodes using a node upgrade strategy without respecting maintenance policies</a> table. To learn more about node updates, see <a href="../concepts/managing-clusters#plan-node-disruption">Planning for node update disruptions</a>.</p> <aside class="caution"><strong>Caution:</strong><span> GKE immediately begins recreating the nodes for this change using the node upgrade strategy, regardless of active maintenance policies. GKE depends on <a href="node-upgrades-quota">resource availability</a> for the change. Disabling node auto-upgrades <a href="node-auto-upgrades#disable-only-versions">doesn't prevent this change</a>. Ensure that your workloads running on the nodes are prepared for disruption before you initiate this change.</span></aside> <h2 id="memory-reservation">Memory reservation for Image streaming</h2> <p>GKE reserves memory resources for Image streaming in addition to the memory that is reserved for node system components to run. GKE does not reserve additional CPU resources for Image streaming. In GKE Standard clusters, this reservation changes the memory resources that are available for you to request in your Pods. In GKE Autopilot, GKE manages system allocations, so there's no impact to scheduling your workloads.</p> <p>For details about the memory reservations GKE makes for node components, see <a href="../concepts/cluster-architecture#memory_cpu">Standard cluster architecture</a>.</p> <p>In nodes that use Image streaming, GKE makes the following additional memory reservations for new reservations:</p> <ul> <li>No additional memory for machines with less than 1 GiB of memory</li> <li>1% of the first 4 GiB of memory</li> <li>0.8% of the next 4 GiB of memory (up to 8 GiB)</li> <li>0.4% of the next 8 GiB of memory (up to 16 GiB)</li> <li>0.24% of the next 112 GiB of memory (up to 128 GiB)</li> <li>0.08% of any memory above 128 GiB</li> </ul> <aside class="note"><strong>Note:</strong><span> Memory reservations for Image streaming are made on top of existing memory reservations for node system components. For example, the total reserved memory for the first 4 GiB of memory would be 26% (25% for node components and 1% for Image streaming).</span></aside> <h2 id="troubleshooting">Troubleshooting</h2> <p>The following sections provide advice on troubleshooting Image streaming. For advice on troubleshooting standard image pulls, see <a href="../troubleshooting/image-pulls">Troubleshoot image pulls</a>.</p> <h3 id="gke-not-using-image-streaming">GKE doesn't use the Image streaming file system</h3> <p>If your GKE event log doesn't show the Image streaming events, your image is not backed by the remote file system. If GKE previously pulled the image on the node, this is expected behavior because GKE uses the local cache of the image for subsequent pulls instead of using Image streaming. You can verify this by looking for <code translate="no" dir="ltr">Container image <var translate="no">IMAGE_NAME</var> already present on machine</code> in the <code translate="no" dir="ltr">Message</code> field for the Pod <code translate="no" dir="ltr">Pulled</code> event.</p> <p>If you don't see the Image streaming event during the first image pull on the node, ensure that you meet the requirements for Image streaming. If you meet the requirements, you can diagnose the issue by checking the logs of the Image streaming Service (named <code translate="no" dir="ltr">gcfsd</code>):</p> <ol> <li>
+<p>Go to the <strong>Logs Explorer</strong> page in the Google Cloud console:</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs/query" target="console" track-name="tasks" track-type="consoleLink">Go to Logs Explorer</a></p>
+</li> <li>
+<p>In the <strong>Query</strong> field, specify the following query:</p> 
+<pre>logName="projects/PROJECT_ID/logs/gcfsd"
+resource.labels.cluster_name="CLUSTER_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: The name of your project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: The name of your cluster.</li> </ul>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> </ol> <p>You can also check the <code translate="no" dir="ltr">gcfsd</code> logs using Logs Explorer:</p> <ol> <li>
+<p>Go to the <strong>Logs Explorer</strong> in the Google Cloud console:</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs/query" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li>
+<p>In the <strong>Query</strong> field, specify the following query:</p> 
+<pre>logName="projects/PROJECT_ID/logs/gcfsd"
+</pre> <p>Replace <code translate="no" dir="ltr">PROJECT_ID</code> with your Google Cloud project ID.</p>
+</li> </ol> <h4 id="permissiondenied">PermissionDenied</h4> <p>If the <code translate="no" dir="ltr">gcfsd</code> logs display an error message similar to the following, the node doesn't have the correct API scope. GKE pulls container images for workloads without using Image streaming.</p> 
+<pre>level=fatal msg="Failed to create a Container File System client: rpc error:
+code = PermissionDenied desc = failed to probe endpoint: rpc error: code = PermissionDenied
+desc = Request had insufficient authentication scopes."
+</pre> <p>You can fix this by granting the correct scope to the node to allow it to use Image streaming. Add the <code translate="no" dir="ltr">devstorage.read_only</code> scope to the cluster or node pool, similar to the following command:</p> 
+<pre>gcloud container node-pools create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION \
+    --image-type=IMAGE_TYPE \
+    --enable-image-streaming \
+    --scopes="https://www.googleapis.com/auth/devstorage.read_only"
+</pre> <h4 id="failedprecondition">FailedPrecondition</h4> <p>If you notice an error message with <code translate="no" dir="ltr">code = FailedPrecondition</code>, the image wasn't imported to the Image streaming remote file system.</p> <p>You might notice this error if you tried to use Image streaming with an existing node pool. If a node in the node pool already has the container image on-disk, GKE uses the local image instead of using Image streaming to get the image.</p> <p>To fix this, try the following:</p> <ul> <li>Wait a few minutes and try to deploy your workload again.</li> <li>Add new nodes or a new node pool and schedule the workload on those nodes.</li> </ul> <h4 id="invalidargument">InvalidArgument</h4> <p>If you notice an error message with <code translate="no" dir="ltr">code=InvalidArgument</code>, the container image your workload uses is not eligible for Image streaming. Ensure that the image meets the <a href="#requirements">requirements</a>. If your image is not on Artifact Registry, try migrating to Artifact Registry.</p> <h4 id="quota_exceeded"><code translate="no" dir="ltr">backend.FileContent failed</code></h4> <p>The following error might appear when reading container files with Image streaming enabled:</p> 
+<pre>level=error msg="backend.FileContent failed" error="rpc error: code = ResourceExhausted desc = Quota exceeded for quota metric 'Content requests per project per region' and limit 'Content requests per project per region per minute per region' of service 'containerfilesystem.googleapis.com' for consumer 'project_number:PROJECT_NUMBER'." layer_id="sha256:1234567890" module=gcfs_backend offset=0 path=etc/passwd size=4096
+</pre> <p>This error indicates project has exceeded the quota required to read files from the remote container file system service. To help resolve this issue, <a href="https://docs.cloud.google.com/docs/quotas/help/request_increase">request a quota adjustment</a> to increase the following quota values:</p> <ul> <li>Content requests per project per region per minute per region</li> <li>Content requests per project per region</li> </ul> <h3 id="stale-file-handles">Stale file handles after a service restart</h3> <p>If the Image streaming service (<code translate="no" dir="ltr">gcfsd</code>) restarts on a node, running containers that use image streaming might encounter disk I/O errors, such as <code translate="no" dir="ltr">stale file handle</code>, when they try to access files in the container image.</p> <p>To resolve this issue, restart the affected Pods or containers. When the containers restart, GKE re-establishes the connection to the image streaming service. New Pods scheduled to the node after the service restart are not affected.</p> <h3 id="image-download-no-streaming">GKE downloads the image without streaming the data</h3> <p>Container images using <a href="using-cmek">customer-managed encryption keys (CMEK)</a> are only eligible for Image streaming on GKE version 1.25.3-gke.1000 or later. Container images with duplicate layers are not eligible for Image streaming. See the <a href="#limitations">Limitations</a> for more information.</p> <h4 id="check-for-empty-or-duplicate-layers">Checking for empty layers or duplicate layers</h4> <p>To check the container image for empty layers or duplicate layers, run the following command:</p> 
+<pre>docker inspect IMAGE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">IMAGE_NAME</var></code> with the name of the container image.</p> <p>In the output of the command, inspect the entries under <code translate="no" dir="ltr">"Layers"</code>.</p> <p>If one of the entries <strong>exactly matches the following<code translate="no" dir="ltr">"sha256"</code> output</strong>, the container image has an empty layer and is not eligible for Image streaming.</p> 
+<pre data-language="json">
+"Layers": [
+  ...
+  "sha256:a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4",
+  ...
+]
+</pre> <p>If there are duplicate entries like in the following example, the container image has duplicate layers and is not eligible for Image streaming.</p> 
+<pre>"Layers": [
+  "sha256:28699c71935fe3ffa56533db44ad93e5a30322639f7be70d5d614e06a1ae6d9b",
+  ...
+  "sha256:28699c71935fe3ffa56533db44ad93e5a30322639f7be70d5d614e06a1ae6d9b",
+  ...
+]
+</pre> <h3 id="troubleshoot-commands-fail-sym-files">
+<code translate="no" dir="ltr">mv</code> command and <code translate="no" dir="ltr">renameat2</code> system calls fail on symlink files</h3> <p>For GKE nodes running version 1.25 and later, when Image streaming is enabled, the <code translate="no" dir="ltr">mv</code> command and <code translate="no" dir="ltr">renameat2</code> system call might fail on symlink files in container images with the error message "No such device or address". The issue is caused by a regression on recent Linux kernels.</p> <p>These system calls are not common, so the majority of images are not affected by this problem. The issue typically happens on container initialization stages when an application is being prepared to run and move around files. It is not possible to test the image locally, so GKE recommends to use Image streaming on test environments to find the issue before the image is used in production.</p> <p>The fix is available in the following GKE patch versions:</p> <ul> <li>1.25: 1.25.14-gke.1351000 and later</li> <li>1.26: 1.26.9-gke.1345000 and later</li> <li>1.27: 1.27.6-gke.100 and later</li> <li>1.28: 1.28.1-gke.1157000 and later</li> </ul> <p>Alternatively, to mitigate this issue for any affected workloads, you can try replacing the code leading to the <code translate="no" dir="ltr">renameat2</code> system call. If you cannot modify the code, you must <a href="#disable">disable Image streaming</a> on the node pool to mitigate the issue.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="data-container-image-preloading">use secondary boot disks to preload data or container images</a>.</li> <li>Learn how to <a href="../troubleshooting">troubleshoot GKE</a>.</li> <li>Learn about <a href="../concepts/cluster-autoscaler">GKE cluster autoscaling</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/image-streaming" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/image-streaming</a>
+  </p>
+</div>

@@ -1,0 +1,341 @@
+<h1>Serve Gemma using TPUs on GKE with JetStream</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <aside class="note"><strong>Note:</strong><span> vLLM is now the recommended solution for serving LLMs on TPUs in GKE. To get started, see <a href="serve-vllm-tpu">Serve an LLM using TPU Trillium on GKE with vLLM</a>.</span></aside> <p>This tutorial shows you how to serve a <a href="https://ai.google.dev/gemma/docs/">Gemma</a> large language model (LLM) using Tensor Processing Units (TPUs) on Google Kubernetes Engine (GKE). You deploy a prebuilt container with <a href="https://github.com/google/JetStream">JetStream</a> and <a href="https://github.com/google/maxtext">MaxText</a> to GKE. You also configure GKE to load the Gemma 7B weights from Cloud Storage at runtime.</p> <p>This tutorial is intended for Machine learning (ML) engineers, Platform admins and operators, and for Data and AI specialists who are interested in using Kubernetes container orchestration capabilities for serving LLMs. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li><a href="../concepts/choose-cluster-mode">Autopilot mode and Standard mode</a></li> <li>Current TPU version availability with the <a href="https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm#versions">Cloud TPU system architecture</a>
+</li> <li><a href="../concepts/tpus">TPUs in GKE</a></li> </ul> <h2 id="background">Background</h2> <p>This section describes the key technologies used in this tutorial.</p> <h3 id="about-gemma">Gemma</h3> <p><a href="https://ai.google.dev/gemma/docs/">Gemma</a> is a set of openly available, lightweight, generative artificial intelligence (AI) models released under an open license. These AI models are available to run in your applications, hardware, mobile devices, or hosted services. You can use the Gemma models for text generation, however you can also tune these models for specialized tasks.</p> <p>To learn more, see the <a href="https://ai.google.dev/gemma/docs">Gemma documentation</a>.</p> <h3 id="about-tpus">TPUs</h3> <p>TPUs are Google's custom-developed application-specific integrated circuits (ASICs) used to accelerate machine learning and AI models built using frameworks such as <a href="https://www.tensorflow.org/">TensorFlow</a>, <a href="https://pytorch.org/">PyTorch</a>, and <a href="https://github.com/google/jax">JAX</a>.</p> <p>This tutorial covers serving the Gemma 7B model. GKE deploys the model on single-host TPUv5e nodes with TPU topologies configured based on the model requirements for serving prompts with low latency.</p> <h3 id="about-jetstream">JetStream</h3> <p><a href="https://github.com/google/JetStream">JetStream</a> is an open source inference serving framework developed by Google. JetStream enables high-performance, high-throughput, and memory-optimized inference on TPUs and GPUs. It provides advanced performance optimizations, including continuous batching and quantization techniques, to facilitate LLM deployment. JetStream enables PyTorch/XLA and JAX TPU serving to achieve optimal performance.</p> <p>To learn more about these optimizations, refer to the <a href="https://github.com/google/jetstream-pytorch">JetStream PyTorch</a> and <a href="https://github.com/google/JetStream">JetStream MaxText</a> project repositories.</p> <h3 id="about-maxtext">MaxText</h3> <p><a href="https://github.com/google/maxtext">MaxText</a> is a performant, scalable, and adaptable JAX LLM implementation, built on open source JAX libraries such as <a href="https://github.com/google/flax">Flax</a>, <a href="https://github.com/google/orbax">Orbax</a>, and <a href="https://github.com/google-deepmind/optax">Optax</a>. MaxText's decoder-only LLM implementation is written in Python. It leverages the XLA compiler heavily to achieve high performance without needing to build custom kernels.</p> <p>To learn more about the latest models and parameter sizes that MaxText supports, see the <a href="https://github.com/google/maxtext">MaxtText project repository</a>.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ol> <li>Prepare a GKE Autopilot or Standard cluster with the recommended TPU topology based on the model characteristics.</li> <li>Deploy JetStream components on GKE.</li> <li>Get and publish the Gemma 7B instruction tuned model.</li> <li>Serve and interact with the published model.</li> </ol> <h2 id="architecture">Architecture</h2> <p>This section describes the GKE architecture used in this tutorial. The architecture comprises a GKE Autopilot or Standard cluster that provisions TPUs and hosts JetStream components to deploy and serve the models.</p> <p>The following diagram shows you the components of this architecture:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gemma-tpu-jetstream.svg" alt="Architecture of GKE cluster with single-host TPU node pools containing the Maxengine and Max HTTP components."></p> <p>This architecture includes the following components:</p> <ul> <li>A GKE Autopilot or Standard regional cluster.</li> <li>Two single-host TPU slice node pools that host the JetStream deployment.</li> <li>The Service component spreads inbound traffic to all <code translate="no" dir="ltr">JetStream HTTP</code> replicas.</li> <li>
+<code translate="no" dir="ltr">JetStream HTTP</code> is an HTTP server which accepts requests as a wrapper to JetStream's required format and sends it to <a href="https://github.com/google/JetStream/blob/main/jetstream/core/proto/jetstream_pb2_grpc.py">JetStream's GRPC client</a>.</li> <li>
+<code translate="no" dir="ltr">Maxengine</code> is a JetStream server that performs inferencing with continuous batching.</li> </ul> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ul> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> </cloud-free-trial> <li> <p> Make sure that you have the following role or roles on the project: roles/container.admin, roles/iam.serviceAccountAdmin, roles/resourcemanager.projectIamAdmin </p>  <h4 class="showalways" id="check-for-the-roles">Check for the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> <p> In the <b>Principal</b> column, find all rows that identify you or a group that you're included in. To learn which groups you're included in, contact your administrator. </p> </li> <li> For all rows that specify or include you, check the <b>Role</b> column to see whether the list of roles includes the required roles. </li> </ol>   <h4 class="showalways" id="grant-the-roles">Grant the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> Click <span class="material-icons" aria-hidden="true" translate="no">person_add</span> <b>Grant access</b>. </li> <li> <p> In the <b>New principals</b> field, enter your user identifier. This is typically the email address for a Google Account.</p> </li> <li> Click <b>Select a role</b>, then search for the role. </li>
+<li> To grant additional roles, click <span class="material-icons" aria-hidden="true" translate="no">add</span> <b>Add another role</b> and add each additional role. </li> <li> Click <b>Save</b>. </li> </ol>  </li> </ul> <ul> <li>Ensure that you have sufficient quota for eight TPU v5e PodSlice Lite chips. In this tutorial, you use <a href="../how-to/tpus#ensure-quota">on-demand instances</a>.</li> <li>Create a <a href="https://www.kaggle.com/">Kaggle account</a>, if you don't already have one.</li> </ul> <h2 id="model-access">Get access to the model</h2> <p>To get access to the Gemma model for deployment to GKE, you must first sign the license consent agreement.</p> <h3 id="sign-consent">Sign the license consent agreement</h3> <p>You must sign the consent agreement to use Gemma. Follow these instructions:</p> <ol> <li>Access the <a href="https://www.kaggle.com/models/google/gemma">Gemma model consent page</a> on Kaggle.com.</li> <li>Login to Kaggle if you haven't done so already.</li> <li>Click <strong>Request Access</strong>.</li> <li>In the <strong>Choose Account for Consent</strong> section, select <strong>Verify via Kaggle Account</strong> to use your Kaggle account for consent.</li> <li>Accept the model <strong>Terms and Conditions</strong>.</li> </ol> <h3 id="generate-token">Generate an access token</h3> <p>To access the model through Kaggle, you need a Kaggle API token.</p> <p>Follow these steps to generate a new token if you don't have one already:</p> <ol> <li>In your browser, go to <a href="https://www.kaggle.com/settings">Kaggle settings</a>.</li> <li>Under the <strong>API</strong> section, click <strong>Create New Token</strong>.</li> </ol> <p>A file named <code translate="no" dir="ltr">kaggle.json</code> is downloaded.</p> <h2 id="prepare-environment">Prepare the environment</h2> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell">Cloud Shell</a> to manage resources hosted on Google Cloud. Cloud Shell comes preinstalled with the software you'll need for this tutorial, including <a href="https://kubernetes.io/docs/reference/kubectl/"><code translate="no" dir="ltr">kubectl</code></a> and <a href="https://docs.cloud.google.com/sdk/gcloud"> gcloud CLI</a>.</p> <p>To set up your environment with Cloud Shell, follow these steps:</p> <ol> <li><p>In the Google Cloud console, launch a Cloud Shell session by clicking <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Cloud Shell activation icon"> <strong>Activate Cloud Shell</strong> in the <a href="http://console.cloud.google.com">Google Cloud console</a>. This launches a session in the bottom pane of Google Cloud console.</p></li> <li>
+<p>Set the default environment variables:</p> 
+<pre>gcloud config set project PROJECT_ID
+gcloud config set billing/quota_project PROJECT_ID
+export PROJECT_ID=$(gcloud config get project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export CLUSTER_NAME=CLUSTER_NAME
+export BUCKET_NAME=BUCKET_NAME
+export CONTROL_PLANE_LOCATION=CONTROL_PLANE_LOCATION
+export NODE_LOCATION=NODE_LOCATION
+export CLUSTER_VERSION=CLUSTER_VERSION
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">PROJECT_ID</var>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<var translate="no">CLUSTER_NAME</var>: the name of your GKE cluster.</li> <li>
+<var translate="no">BUCKET_NAME</var>: the name of your Cloud Storage bucket. You don't need to specify the <code translate="no" dir="ltr">gs://</code> prefix.</li> <li>
+<var translate="no">CONTROL_PLANE_LOCATION</var>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">region</a> of the control plane of your cluster. This region must contain zones where TPU v5e machine types are available (for example, <code translate="no" dir="ltr">us-west1</code>, <code translate="no" dir="ltr">us-west4</code>, <code translate="no" dir="ltr">us-central1</code>, <code translate="no" dir="ltr">us-east1</code>, <code translate="no" dir="ltr">us-east5</code>, or <code translate="no" dir="ltr">europe-west4</code>). For Autopilot clusters, ensure that you have sufficient <a href="https://docs.cloud.google.com/tpu/docs/regions-zones">TPU v5e zonal resources</a> for your region of choice.</li> <li>(Standard cluster only) <var translate="no">NODE_LOCATION</var>: the zone where the <a href="../concepts/tpus#availability">TPU resources are available</a> (for example, <code translate="no" dir="ltr">us-west4-a</code>). For Autopilot clusters, you don't need to specify this value.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_VERSION</var></code>: the GKE version, which must support the machine type that you want to use. Note that the default GKE version might not have availability for your target TPU. For a list of minimum GKE versions available by TPU machine type, see <a href="../concepts/tpus#availability">TPU availability in GKE</a>.</li> </ul>
+</li> </ol> <h2 id="create-resources">Create and configure Google Cloud resources</h2> <p>Follow these instructions to create the required resources.</p> <aside class="note"><strong>Note:</strong><span> You may need to create a capacity reservation for usage of some accelerators. To learn how to reserve and consume reserved resources, see <a href="../how-to/consuming-reservations">Consuming reserved zonal resources</a>.</span></aside> <h3 id="create-cluster">Create a GKE cluster</h3> <p>You can serve Gemma on TPUs in a GKE Autopilot or Standard cluster. We recommend that you use a Autopilot cluster for a fully managed Kubernetes experience. To choose the GKE mode of operation that's the best fit for your workloads, see <a href="../concepts/choose-cluster-mode">Choose a GKE mode of operation</a>.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>In Cloud Shell, run the following command:</p> 
+<pre data-language="">gcloud container clusters create-auto ${CLUSTER_NAME} \
+  --project=${PROJECT_ID} \
+  --location=${CONTROL_PLANE_LOCATION} \
+  --cluster-version=${CLUSTER_VERSION}
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>Create a regional GKE Standard cluster that uses <a href="../how-to/workload-identity">Workload Identity Federation for GKE</a>.</p> 
+<pre data-language="">gcloud container clusters create ${CLUSTER_NAME} \
+    --enable-ip-alias \
+    --machine-type=e2-standard-4 \
+    --num-nodes=2 \
+    --cluster-version=${CLUSTER_VERSION} \
+    --workload-pool=${PROJECT_ID}.svc.id.goog \
+    --location=${CONTROL_PLANE_LOCATION}
+</pre> <p>The cluster creation might take several minutes.</p>
+</li> <li>
+<p>Run the following command to create a <a href="../concepts/node-pools">node pool</a> for your cluster:</p> 
+<pre data-language="">gcloud container node-pools create gemma-7b-tpu-nodepool \
+  --cluster=${CLUSTER_NAME} \
+  --machine-type=ct5lp-hightpu-8t \
+  --project=${PROJECT_ID} \
+  --num-nodes=2 \
+  --location=${CONTROL_PLANE_LOCATION} \
+  --node-locations=${NODE_LOCATION}
+</pre> <p>GKE creates a TPU v5e node pool with a <code translate="no" dir="ltr">2x4</code> topology and two nodes.</p>
+</li> </ol></section> </div> <h3 id="create-bucket">Create a Cloud Storage bucket</h3> <p>In Cloud Shell, run the following command:</p> 
+<pre>gcloud storage buckets create gs://${BUCKET_NAME} \
+    --location=${CONTROL_PLANE_LOCATION} \
+    --uniform-bucket-level-access
+</pre> <p>This creates a Cloud Storage bucket to store the model files you download from Kaggle.</p> <h3 id="upload-token">Upload the access token to Cloud Shell</h3> <p>In Cloud Shell, you can upload the Kaggle API token to your Google Cloud project:</p> <ol> <li>In Cloud Shell, click <span class="material-icons" aria-hidden="true" translate="no">more_vert</span> <strong>More</strong> <span aria-label="and then">&gt;</span> <strong>Upload</strong>.</li> <li>Select File and click <strong>Choose Files</strong>.</li> <li>Open the <code translate="no" dir="ltr">kaggle.json</code> file.</li> <li>Click <strong>Upload</strong>.</li> </ol> <h3 id="create-credentials">Create a Kubernetes Secret for Kaggle credentials</h3> <p>In Cloud Shell, do the following:</p> <ol> <li>
+<p>Configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster:</p> 
+<pre>gcloud container clusters get-credentials ${CLUSTER_NAME} --location=${CONTROL_PLANE_LOCATION}
+</pre>
+</li> <li>
+<p>Create a Secret to store the Kaggle credentials:</p> 
+<pre>kubectl create secret generic kaggle-secret \
+    --from-file=kaggle.json
+</pre>
+</li> </ol> <h3 id="configure-access">Configure your workloads access using Workload Identity Federation for GKE</h3> <p>Grant the <code translate="no" dir="ltr">default</code> <a href="https://kubernetes.io/docs/concepts/security/service-accounts/">Kubernetes ServiceAccount</a> in the <code translate="no" dir="ltr">default</code> namespace the required IAM roles (<code translate="no" dir="ltr">roles/storage.objectUser</code> and <code translate="no" dir="ltr">roles/storage.insightsCollectorService</code>) to manage Cloud Storage:</p> 
+<pre>gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+    --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/default/sa/default" \
+    --role="roles/storage.objectUser" \
+    --condition=None
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+    --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/default/sa/default" \
+    --role="roles/storage.insightsCollectorService" \
+    --condition=None
+</pre> <h2 id="convert-checkpoints">Convert the model checkpoints</h2> <p>In this section, you create a Job to do the following:</p> <ol> <li>Download the base <a href="https://github.com/google/orbax">Orbax</a> checkpoint from Kaggle.</li> <li>Upload the checkpoint to a Cloud Storage bucket.</li> <li>Convert the checkpoint to a MaxText compatible checkpoint.</li> <li>Unscan the checkpoint to be used for serving.</li> </ol> <h3 id="deploy-conversion-job">Deploy the model checkpoint conversion Job</h3> <p>Follow these instructions to download and convert the Gemma 7B model checkpoint files. This tutorial uses a Kubernetes Job. A Job controller in Kubernetes creates one or more Pods and helps ensure that they successfully execute a specific task.</p> <ol> <li>
+<p>Create the following manifest as <code translate="no" dir="ltr">job-7b.yaml</code>.</p> 
+<pre>apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-loader-7b
+spec:
+  ttlSecondsAfterFinished: 30
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: inference-checkpoint
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/inference-checkpoint:v0.2.5
+        args:
+        - -b=BUCKET_NAME
+        - -m=google/gemma/maxtext/7b-it/2
+        volumeMounts:
+        - mountPath: "/kaggle/"
+          name: kaggle-credentials
+          readOnly: true
+        resources:
+          requests:
+            google.com/tpu: 8
+          limits:
+            google.com/tpu: 8
+      nodeSelector:
+        cloud.google.com/gke-tpu-topology: 2x4
+        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+      volumes:
+      - name: kaggle-credentials
+        secret:
+          defaultMode: 0400
+          secretName: kaggle-secret
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f job-7b.yaml
+</pre>
+</li> <li>
+<p>Wait for the Pod scheduling the Job to begin running:</p> 
+<pre>kubectl get pod -w
+</pre> <p>The output will be similar to the following, this may take a few minutes:</p> 
+<pre>NAME                  READY   STATUS              RESTARTS   AGE
+data-loader-7b-abcd   0/1     ContainerCreating   0          28s
+data-loader-7b-abcd   1/1     Running             0          51s
+</pre> <p>For Autopilot clusters, it may take a few minutes to provision the required TPU resources.</p>
+</li> <li>
+<p>View the logs from the Job:</p> 
+<pre>kubectl logs -f jobs/data-loader-7b
+</pre> <p>When the Job is completed, the output is similar to the following:</p> 
+<pre>Successfully generated decode checkpoint at: gs://BUCKET_NAME/final/unscanned/gemma_7b-it/0/checkpoints/0/items
++ echo -e '\nCompleted unscanning checkpoint to gs://BUCKET_NAME/final/unscanned/gemma_7b-it/0/checkpoints/0/items'
+
+Completed unscanning checkpoint to gs://BUCKET_NAME/final/unscanned/gemma_7b-it/0/checkpoints/0/items
+</pre>
+</li> </ol> <h2 id="deploy-jetstream">Deploy JetStream</h2> <p>In this section, you deploy the JetStream container to serve the Gemma model.</p> <p>Follow these instructions to deploy the Gemma 7B instruction tuned model. This tutorial uses a Kubernetes Deployment. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster..</p> <ol> <li>
+<p>Save the following Deployment manifest as <code translate="no" dir="ltr">jetstream-gemma-deployment.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maxengine-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maxengine-server
+  template:
+    metadata:
+      labels:
+        app: maxengine-server
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-topology: 2x4
+        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+      containers:
+      - name: maxengine-server
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/maxengine-server:v0.2.4
+        args:
+        - model_name=gemma-7b
+        - tokenizer_path=assets/tokenizer.gemma
+        - per_device_batch_size=4
+        - max_prefill_predict_length=1024
+        - max_target_length=2048
+        - async_checkpointing=false
+        - ici_fsdp_parallelism=1
+        - ici_autoregressive_parallelism=-1
+        - ici_tensor_parallelism=1
+        - scan_layers=false
+        - weight_dtype=bfloat16
+        - load_parameters_path=gs://BUCKET_NAME/final/unscanned/gemma_7b-it/0/checkpoints/0/items
+        - prometheus_port=PROMETHEUS_PORT
+        ports:
+        - containerPort: 9000
+        resources:
+          requests:
+            google.com/tpu: 8
+          limits:
+            google.com/tpu: 8
+      - name: jetstream-http
+        image: us-docker.pkg.dev/cloud-tpu-images/inference/jetstream-http:v0.2.4
+        ports:
+        - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jetstream-svc
+spec:
+  selector:
+    app: maxengine-server
+  ports:
+  - protocol: TCP
+    name: jetstream-http
+    port: 8000
+    targetPort: 8000
+  - protocol: TCP
+    name: jetstream-grpc
+    port: 9000
+    targetPort: 9000
+</pre> <p>The manifest sets the following key properties:</p> <ul> <li>
+<code translate="no" dir="ltr">tokenizer_path</code>: the path to your model's tokenizer.</li> <li>
+<code translate="no" dir="ltr">load_parameters_path</code>: the path in the Cloud Storage bucket where your checkpoints are stored.</li> <li>
+<code translate="no" dir="ltr">per_device_batch_size</code>: the decoding batch size per device, where one TPU chip equals one device.</li> <li>
+<code translate="no" dir="ltr">max_prefill_predict_length</code>: the maximum length for the prefill when doing autoregression.</li> <li>
+<code translate="no" dir="ltr">max_target_length</code>: the maximum sequence length.</li> <li>
+<code translate="no" dir="ltr">model_name</code>: the model name (<code translate="no" dir="ltr">gemma-7b</code>).</li> <li>
+<code translate="no" dir="ltr">ici_fsdp_parallelism</code>: the number of shards for fully sharded data parallelism (FSDP).</li> <li>
+<code translate="no" dir="ltr">ici_tensor_parallelism</code>: the number of shards for tensor parallelism.</li> <li>
+<code translate="no" dir="ltr">ici_autoregressive_parallelism</code>: the number of shards for autoregressive parallelism.</li> <li>
+<code translate="no" dir="ltr">prometheus_port</code>: port to expose prometheus metrics. Remove this argument if metrics aren't needed.</li> <li>
+<code translate="no" dir="ltr">scan_layers</code>: scan layers boolean flag (boolean).</li> <li>
+<code translate="no" dir="ltr">weight_dtype</code>: the weight data type (bfloat16).</li> </ul>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f jetstream-gemma-deployment.yaml
+</pre>
+</li> <li>
+<p>Verify the Deployment:</p> 
+<pre>kubectl get deployment
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+maxengine-server                  2/2     2            2           ##s
+</pre> <p>For Autopilot clusters, it may take a few minutes to provision the required TPU resources.</p>
+</li> <li>
+<p>View the HTTP server logs to check that the model has been loaded and compiled. It may take the server a few minutes to complete this operation.</p> 
+<pre>kubectl logs deploy/maxengine-server -f -c jetstream-http
+</pre> <p>The output is similar to the following:</p> 
+<pre>kubectl logs deploy/maxengine-server -f -c jetstream-http
+
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+</pre>
+</li> <li>
+<p>View the MaxEngine logs and verify that the compilation is done.</p> 
+<pre>kubectl logs deploy/maxengine-server -f -c maxengine-server
+</pre> <p>The output is similar to the following:</p> 
+<pre>2024-03-29 17:09:08,047 - jax._src.dispatch - DEBUG - Finished XLA compilation of jit(initialize) in 0.26236414909362793 sec
+2024-03-29 17:09:08,150 - root - INFO - ---------Generate params 0 loaded.---------
+</pre>
+</li> </ol> <h2 id="serve-model">Serve the model</h2> <p>In this section, you interact with the model.</p> <h3 id="setup-port-forwarding">Set up port forwarding</h3> <p>You can access the JetStream Deployment through the <a href="../concepts/service#services_of_type_clusterip">ClusterIP Service</a> that you created in the preceding step. The ClusterIP Services are only reachable from within the cluster. Therefore, to access the Service from outside the cluster, complete the following steps:</p> <p>To establish a port forwarding session, run the following command:</p> 
+<pre>kubectl port-forward svc/jetstream-svc 8000:8000
+</pre>
+<aside class="success"><strong>Success:</strong><span> You've successfully served Gemma using TPUs on GKE with JetStream. You can now interact with the model.</span></aside> <h3 id="test-deployment">Interact with the model using curl</h3> <ol> <li>
+<p>Verify that you can access the JetStream HTTP server by opening a new terminal and running the following command:</p> 
+<pre>curl --request POST \
+--header "Content-type: application/json" \
+-s \
+localhost:8000/generate \
+--data \
+'{
+    "prompt": "What are the top 5 programming languages",
+    "max_tokens": 200
+}'
+</pre> <p>The initial request can take several seconds to complete due to model warmup. The output is similar to the following:</p> 
+<pre>{
+    "response": "\nfor data science in 2023?\n\n**1. Python:**\n- Widely used for data science due to its simplicity, readability, and extensive libraries for data wrangling, analysis, visualization, and machine learning.\n- Popular libraries include pandas, scikit-learn, and matplotlib.\n\n**2. R:**\n- Statistical programming language widely used for data analysis, visualization, and modeling.\n- Popular libraries include ggplot2, dplyr, and caret.\n\n**3. Java:**\n- Enterprise-grade language with strong performance and scalability.\n- Popular libraries include Spark, TensorFlow, and Weka.\n\n**4. C++:**\n- High-performance language often used for data analytics and machine learning models.\n- Popular libraries include TensorFlow, PyTorch, and OpenCV.\n\n**5. SQL:**\n- Relational database language essential for data wrangling and querying large datasets.\n- Popular tools"
+}
+</pre>
+</li> </ol> <h3 id="use-gradio">(Optional) Interact with the model through a Gradio chat interface</h3> <p>In this section, you build a web chat application that lets you interact with your instruction tuned model.</p> <p><a href="https://github.com/gradio-app/gradio">Gradio</a> is a Python library that has a <code translate="no" dir="ltr">ChatInterface</code> wrapper that creates user interfaces for chatbots.</p> <h4 id="deploy-gradio">Deploy the chat interface</h4> <ol> <li>
+<p>In Cloud Shell, save the following manifest as <code translate="no" dir="ltr">gradio.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gradio
+  labels:
+    app: gradio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gradio
+  template:
+    metadata:
+      labels:
+        app: gradio
+    spec:
+      containers:
+      - name: gradio
+        image: us-docker.pkg.dev/google-samples/containers/gke/gradio-app:v1.0.3
+        resources:
+          requests:
+            cpu: "512m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "512Mi"
+        env:
+        - name: CONTEXT_PATH
+          value: "/generate"
+        - name: HOST
+          value: "http://jetstream-svc:8000"
+        - name: LLM_ENGINE
+          value: "max"
+        - name: MODEL_ID
+          value: "gemma"
+        - name: USER_PROMPT
+          value: "&lt;start_of_turn&gt;user\nprompt&lt;end_of_turn&gt;\n"
+        - name: SYSTEM_PROMPT
+          value: "&lt;start_of_turn&gt;model\nprompt&lt;end_of_turn&gt;\n"
+        ports:
+        - containerPort: 7860
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gradio
+spec:
+  selector:
+    app: gradio
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 7860
+  type: ClusterIP
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f gradio.yaml
+</pre>
+</li> <li>
+<p>Wait for the deployment to be available:</p> 
+<pre>kubectl wait --for=condition=Available --timeout=300s deployment/gradio
+</pre>
+</li> </ol> <h4 id="use-chat">Use the chat interface</h4> <ol> <li>
+<p>In Cloud Shell, run the following command:</p> 
+<pre>kubectl port-forward service/gradio 8080:8080
+</pre> <p>This creates a port forward from Cloud Shell to the Gradio service.</p>
+</li> <li><p>Click the <img src="https://docs.cloud.google.com/static/shell/docs/images/web_preview.svg" alt="Web Preview icon"> <strong>Web Preview</strong> button which can be found on the top right of the Cloud Shell taskbar. Click <strong>Preview on Port 8080</strong>. A new tab opens in your browser.</p></li> <li><p>Interact with Gemma using the Gradio chat interface. Add a prompt and click <strong>Submit</strong>.</p></li> </ol> <h2 id="troubleshoot">Troubleshoot issues</h2> <ul> <li>If you get the message <code translate="no" dir="ltr">Empty reply from server</code>, it's possible the container has not finished downloading the model data. <a href="#deploy-jetstream">Check the Pod's logs</a> again for the <code translate="no" dir="ltr">Connected</code> message which indicates that the model is ready to serve.</li> <li>If you see <code translate="no" dir="ltr">Connection refused</code>, verify that your <a href="#setup-port-forwarding">port forwarding is active</a>.</li> </ul> </section>  <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete">Delete the deployed resources</h3> <p>To avoid incurring charges to your Google Cloud account for the resources that you created in this guide, run the following commands and follow the prompts:</p> 
+<pre>gcloud container clusters delete ${CLUSTER_NAME} --location=${CONTROL_PLANE_LOCATION}
+
+gcloud storage rm --recursive gs://BUCKET_NAME
+</pre> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Discover how you can run <a href="../integrations/ai-infra#serve-open-models-on-gke">Gemma models on GKE</a> and how to run optimized AI/ML workloads with <a href="../integrations/ai-infra">GKE platform orchestration capabilities</a>.</li> <li>Learn more about <a href="../concepts/tpus">TPUs in GKE</a>.</li> <li>Explore the JetStream <a href="https://github.com/google/JetStream">GitHub repository</a>.</li> <li>Explore the <a href="https://console.cloud.google.com/vertex-ai/model-garden">Vertex AI Model Garden</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-gemma-tpu-jetstream" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-gemma-tpu-jetstream</a>
+  </p>
+</div>

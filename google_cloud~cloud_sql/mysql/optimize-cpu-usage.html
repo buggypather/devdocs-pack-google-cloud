@@ -1,0 +1,110 @@
+<h1>Optimize high CPU usage in instances</h1>  <p>High CPU utilization in an instance can be caused by various reasons such as increase in workloads, heavy transactions, slow queries, and long running transactions.</p> <p>The underprovisioned instance recommender analyzes CPU utilization. If the CPU utilization levels are at or over 95% for a significant amount of time within the last 30 days, the recommender alerts you and provides additional insights to help resolve the issue.</p> <p>This document explains how to review and optimize a Cloud SQL for MySQL instance if that instance is identified by the underprovisioned instance recommender as having high CPU utilization.</p> <h2 id="use_query_insights_to_identify_queries_that_have_high_cpu_consumption">Use query insights to identify queries that have high CPU consumption</h2> <p><a href="using-query-insights">Query insights</a> helps you detect, diagnose, and prevent query performance problems that might cause high CPU consumption for Cloud SQL databases.</p> <h2 id="use-mysql-database-auditing">Use MySQL database auditing</h2> <p>Use <a href="use-db-audit">MySQL database auditing</a> to view memory and consumption of your instance.</p> <h2 id="recommendations">Recommendations</h2> <p>CPU utilization increases proportionally with workload. To reduce CPU utilization, check the running queries and optimize them. Here are a few steps to check the consumption of CPU.</p> <ol> <li>
+<p>Check <code translate="no" dir="ltr">Threads_running</code> and <code translate="no" dir="ltr">Threads_connected</code></p> <p>Use the following query to see the number of active threads:</p> 
+<pre>&gt; SHOW STATUS like 'Threads_%';
+</pre> <p><code translate="no" dir="ltr">Threads_running</code> is a subset of <code translate="no" dir="ltr">Threads_connected</code>. The rest of the threads are idle. An increase in <code translate="no" dir="ltr">Threads_running</code> would contribute to an increase in CPU usage. It's a good idea to check what's running on those threads.</p>
+</li> <li>
+<p>Check query states</p> <p>Run the <code translate="no" dir="ltr">SHOW PROCESSLIST</code> command to view the ongoing queries. It returns all the connected threads in order and their actively running SQL statement.</p> 
+<pre>mysql&gt; SHOW [FULL] PROCESSLIST;
+</pre> <p>Pay attention to the state and duration columns. Check if there are many queries stuck on the same state.</p> <ul> <li>If many threads show <code translate="no" dir="ltr">Updating</code>, there might be record lock contention. See the next step.</li> <li>If many threads show <code translate="no" dir="ltr">Waiting</code> for table metadata lock, check the query to know the table and then look for a DDL (such as <code translate="no" dir="ltr">ALTER TABLE</code>) that might hold the metadata lock. A DDL might also be waiting for table metadata lock if an early query, such as a long running <code translate="no" dir="ltr">SELECT query</code>, is holding it.</li> </ul>
+</li> <li>
+<p>Check for record lock contention</p> <p>When transactions hold locks on popular index records, they block other transactions requesting the same locks. This might get into a chained effect and cause a number of requests being stuck and an increase in the value of <code translate="no" dir="ltr">Threads_running</code>. To diagnose lock contention, use the <code translate="no" dir="ltr">information_schema.innodb_lock_waits</code> table.</p> <p>The following query lists each blocking transaction and the numbers of associated blocked transactions.</p> 
+<pre>SELECT
+  t.trx_id,
+  t.trx_state,
+  t.trx_started,
+  COUNT(distinct w.requesting_trx_id) AS blocked_trxs
+FROM
+  information_schema.innodb_lock_waits w
+INNER JOIN information_schema.innodb_trx t
+   ON t.trx_id = w.blocking_trx_id
+GROUP BY t.trx_id,t.trx_state, t.trx_started
+ORDER BY t.trx_id;
+</pre> <p>Both a single large DML and many concurrent small DMLs might cause row lock contentions. You can optimize this from the application side by using the following steps:</p> <ul> <li>Avoid long transactions because row locks are held until the transaction ends.</li> <li>Break a single large DML to bite-sized DMLs.</li> <li>Batch a single row DML into small chunks.</li> <li>Minimize contention among threads; for example, if the application code uses a connection pool, assign an ID range to the same thread.</li> </ul>
+</li> <li>
+<p>Find long running transactions</p> <ul> <li>
+<p>Use <code translate="no" dir="ltr">SHOW ENGINE INNODB STATUS</code></p> <p>In the <strong>TRANSACTIONS</strong> section, you can see all the open transactions ordered as earliest to oldest.</p> 
+<pre>mysql&gt; SHOW ENGINE INNODB STATUS\G
+……
+------------
+TRANSACTIONS
+------------
+…
+---TRANSACTION 245762, ACTIVE 262 sec
+2 lock struct(s), heap size 1136, 1 row lock(s), undo log entries 1
+MySQL thread id 9210, OS thread handle 140262286128896, query id 202218 localhost root
+</pre> <p>Start with the oldest transactions and find answers to the following questions:</p> <ul> <li>How long have these transactions been running?</li> <li>How many lock struct(s) and row locks are present?</li> <li>How many undo log entries are there?</li> <li>What are the connecting hosts and users?</li> <li>What is the ongoing SQL statement?</li> </ul>
+</li> <li>
+<p>Use <code translate="no" dir="ltr">information_schema.innodb_trx</code></p> <p>If <code translate="no" dir="ltr">SHOW ENGINE INNODB STATUS</code> was truncated, an alternative way to examine all the open transactions is to use the <code translate="no" dir="ltr">information_schema.innodb_trx</code> table:</p> 
+<pre>SELECT
+ trx_id, trx_state,
+ timestampdiff(second, trx_started, now()) AS active_secs,
+ timestampdiff(second, trx_wait_started, now()) AS wait_secs, trx_tables_in_use,
+ trx_tables_locked,
+ trx_lock_structs,
+ trx_rows_locked,
+ trx_rows_modified,
+ trx_query
+FROM information_schema.innodb_trx
+</pre>
+</li> </ul> <p>If the transactions show the current long running statements, then you can decide to either stop these transactions to reduce the pressure on the server or wait for the critical transactions to complete. If the older transactions are not showing any activities, then go to the next step to find transaction history.</p>
+</li> <li>
+<p>Check SQL statements of the long running transactions</p> <ul> <li>
+<p>Use <code translate="no" dir="ltr">performance_schema</code></p> <p>To use <code translate="no" dir="ltr">performance_schema</code>, you must turn it on first. It is a change that requires an instance restart. After <code translate="no" dir="ltr">performance_schema</code> is on, check that the instruments and consumers are enabled:</p> 
+<pre>SELECT * FROM setup_consumers where name like 'events_statements_history';
+SELECT * FROM setup_instruments where name like 'statement/sql/%';
+
+</pre> <p>If they aren't enabled, enable them:</p> 
+<pre>UPDATE setup_instruments SET ENABLED = 'YES', timed = 'YES' WHERE NAME LIKE 'statement/%';
+UPDATE setup_consumers SET ENABLED = 'YES' WHERE NAME LIKE 'events_statements%';
+</pre> <p>By default, each thread would keep the last 10 events defined by <code translate="no" dir="ltr">performance_schema_events_statements_history_size</code>. Those are generally sufficient to locate the transaction in the application code. This parameter is not dynamic.</p> <p>With the <code translate="no" dir="ltr">mysql thread id</code>, which is <code translate="no" dir="ltr">processlist_id</code>, query the history events:</p> 
+<pre>SELECT
+ t.thread_id,
+ event_name,
+ sql_text,
+ rows_affected,
+ rows_examined,
+ processlist_id,
+ processlist_time,
+ processlist_state
+FROM events_statements_history h
+INNER JOIN threads t
+ON h.thread_id = t.thread_id
+WHERE processlist_id = &lt;mysql thread id&gt;
+ORDER BY event_id;
+</pre>
+</li> <li>
+<p>Use slow query log</p> <p>For debugging, you can capture all the queries that took more than <code translate="no" dir="ltr">N</code> number of seconds into the slow query log. You can enable the slow query logs by editing the instance settings on the instance page of Google Cloud console or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/sql/instances/patch"><code translate="no" dir="ltr">gcloud CLI</code></a> and then see the logs using <a href="https://docs.cloud.google.com/run/docs/logging">logs viewer</a> in the Google Cloud console or <code translate="no" dir="ltr">gloud CLI</code>.</p>
+</li> </ul>
+</li> <li>
+<p>Check semaphore contention</p> <p>In a concurrent environment, mutex and read/write latch on shared resources might be the contention point, which slows the server performance. Moreover, if the semaphore wait time is more than 600 seconds, the system can crash to get out of the stall.</p> <p>To view the semaphore contention, use the following command:</p> 
+<pre>mysql&gt; SHOW ENGINE INNODB STATUS\G
+----------
+SEMAPHORES
+----------
+...
+  --Thread 140396021667584 has waited at row0purge.cc line 862 for 241.00 seconds the semaphore:
+  S-lock on RW-latch at 0x30c03e8 created in file dict0dict.cc line 1183
+  a writer (thread id 140395996489472) has reserved it in mode  exclusive
+  number of readers 0, waiters flag 1, lock_word: 0
+  Last time read locked in file row0purge.cc line 862
+  Last time write locked in file /build/mysql-5.7-FFKPr6/mysql-5.7-5.7.22/storage/innobase/dict/dict0stats.cc line 2376
+...
+</pre> <p>With each semaphore wait, the first line shows the thread that's waiting, the specific semaphore, and the length of time it has waited. If there are frequent semaphore waits when repeatedly running <code translate="no" dir="ltr">SHOW ENGINE INNODB STATUS</code>, especially waits of more than a few seconds, it means that the system is running into concurrency bottlenecks.</p> <p>There are different contention points in different workloads and configurations.</p> <p>When the semaphores are often on btr0sea.c, the adaptive hash indexing might be the source of contention. Try to disable it using Google Cloud console or <code translate="no" dir="ltr">gcloud CLI</code>.</p>
+</li> <li>
+<p>Optimize long <code translate="no" dir="ltr">SELECT</code> queries</p> <p>First, review the query. Identify the goal of the query and the best way to get the results. The best query plan is the one that minimizes data access.</p> <ul> <li>Check the query execution plan:</li> </ul> 
+<pre>mysql&gt; EXPLAIN &lt;the query&gt;;
+</pre> <p>See <a href="https://dev.mysql.com/doc/refman/8.0/en/execution-plan-information.html">MySQL documentation</a> to learn how to interpret the output and evaluate the query efficiency.</p> <ul> <li>Use the right index</li> </ul> <p>Check the key column to see if the expected index is used. If not, update the index statistics:</p> 
+<pre>mysql&gt; analyze table &lt;table_name&gt;
+</pre> <p>Increase the number of sample pages that are used to calculate index statistics. To learn more, see the <a href="https://dev.mysql.com/doc/refman/5.7/en/innodb-performance-optimizer-statistics.html">MySQL documentation</a>.</p> <ul> <li>Make full use of the index</li> </ul> <p>When using a multicolumn index, check the <code translate="no" dir="ltr">key_len</code> columns to see if the index is fully leveraged to filter the records. The leftmost columns need to be equal comparisons, and the index can be used up to and including the first range condition.</p> <ul> <li>Use optimizer hints</li> </ul> <p>Another way to make sure the right index is used is to apply <a href="https://dev.mysql.com/doc/refman/8.0/en/index-hints.html">index hint</a> and <a href="https://dev.mysql.com/doc/refman/8.0/en/join.html">hint for table join order</a>.</p>
+</li> <li>
+<p>Avoid a long history list with READ COMMITTED</p> <p>The history list is the list of unpurged transactions in the undo tablespace. The default isolation level of a transaction is <code translate="no" dir="ltr">REPEATABLE READ</code>, which requires a transaction to read the same snapshot throughout its duration. Hence, a <code translate="no" dir="ltr">SELECT</code> query blocks the purging of undo log records that were made since the query (or transaction) started. A long history list thus slows the query performance. One way to avoid building a long history list is to change the transaction isolation level to <code translate="no" dir="ltr">READ COMMITTED</code>. With <code translate="no" dir="ltr">READ COMMITTED</code>, there is no longer the need to keep the history list for a consistent read view. You can change the transaction isolation level globally for all sessions, for a single session, or for the next single transaction. To learn more, see the <a href="https://dev.mysql.com/doc/refman/5.7/en/set-transaction.html">MySQL documentation</a>.</p>
+</li> <li>
+<p>Tune server configuration</p> <p>There is a lot to say about server configuration. While the full story is beyond the scope of this document, it's worth mentioning that the server also reports various status variables that give hints on how well the related configurations are. For example:</p> <ul> <li>Adjust <code translate="no" dir="ltr">thread_cache_size</code> if <code translate="no" dir="ltr">Threads_created/Connections</code> is big. A proper thread cache would reduce the thread creation time and help highly concurrent workload.</li> <li>Adjust <code translate="no" dir="ltr">table_open_cache</code> if <code translate="no" dir="ltr">Table_open_cache_misses/Table_open_cache_hits</code> is not trivial. Having tables in the table cache saves query execution time and could make a difference in a highly concurrent environment.</li> </ul>
+</li> <li>
+<p>End an unwanted connection</p> <p>You can stop the query if the query seems invalid or it isn't required anymore. To learn how to identify and end the MySQL thread, see <a href="manage-connections#kill">Manage database connections</a>.</p>
+</li> </ol> <p>Lastly, if the CPU usage is still high and the queries form necessary traffic, then consider increasing the CPU resources in your instance to avoid database crash or downtime.</p> <h2 id="whats_next">What's next</h2> <ul> <li><a href="https://docs.cloud.google.com/recommender/docs/recommenders">Google Cloud recommenders</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/mysql/optimize-cpu-usage" class="_attribution-link">https://docs.cloud.google.com/sql/docs/mysql/optimize-cpu-usage</a>
+  </p>
+</div>

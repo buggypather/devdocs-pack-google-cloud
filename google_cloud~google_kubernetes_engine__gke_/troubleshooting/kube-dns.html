@@ -1,0 +1,234 @@
+<h1>Troubleshoot kube-dns in GKE</h1>  <p>If you use kube-dns for service discovery, you might experience connection errors such as <code translate="no" dir="ltr">dial tcp: i/o timeout</code> or <code translate="no" dir="ltr">no such host</code>. Such errors often indicate problems with the kube-dns Pods in the <code translate="no" dir="ltr">kube-system</code> namespace, such as incorrect configurations, resource limitations, or network connectivity issues affecting these Pods.</p> <p>Use this page to diagnose and resolve common issues specific to the kube-dns deployment, helping to ensure reliable DNS resolution for your workloads.</p> <p>This information is important for Platform admins and operators, who are responsible for maintaining core cluster components like kube-dns, and for Application developers, whose applications depend on it to connect with other services within the cluster. For more information about the common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="identify-source">Identify the source of DNS issues in kube-dns</h2> <p>The following sections help you diagnose why kube-dns is having difficulty resolving queries.</p> <h3 id="kube-dns-running">Check if kube-dns Pods are running</h3> <p>Kube-dns Pods are critical for name resolution within the cluster. If they're not running you're likely to experience issues with DNS resolution.</p> <p>To verify that the kube-dns Pods are running without any recent restarts, view the status of these Pods:</p> 
+<pre>kubectl get pods -l k8s-app=kube-dns -n kube-system
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                   READY          STATUS          RESTARTS       AGE
+kube-dns-POD_ID_1      5/5            Running         0              16d
+kube-dns-POD_ID_2      0/5            Terminating     0              16d
+</pre> <p>In this output, <code translate="no" dir="ltr"><var translate="no">POD_ID_1</var></code> and <code translate="no" dir="ltr"><var translate="no">POD_ID_2</var></code> represent unique identifiers that are automatically appended to the kube-dns Pods.</p> <p>If your output shows that any of your kube-dns Pods don't have a status of <code translate="no" dir="ltr">Running</code>, work though the following steps:</p> <ol> <li><p>Use the Admin Activity audit logs to investigate if there's been any recent changes such as cluster or node pool version upgrades, or changes to the kube-dns ConfigMap. To learn more about audit logs, see <a href="../how-to/audit-logging">GKE audit logging information</a>. If you find changes, revert them and view the status of the Pods again.</p></li> <li>
+<p>If you don't find any relevant recent changes, investigate if you're experiencing an OOM error on the node that the kube-dns Pod runs on. If you see an error similar to the following in your Cloud Logging log messages, then these Pods are experiencing an OOM error:</p> 
+<pre>Warning: OOMKilling Memory cgroup out of memory
+</pre> <p>This message indicates that Kubernetes terminated a process due to excessive resource consumption. Kubernetes schedules Pods based on resource requests, but lets Pods consume up to their resource limits. If limits are higher than the requests or there are no limits, the Pod's resource usage can exceed the resources of the system.</p> <p>To resolve this error, you can either delete the problematic workloads, or set memory or CPU limits. To learn more about setting limits, see <a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers">Resource Management for Pods and Containers</a> in the Kubernetes documentation. For more information about OOM events, see <a href="oom-events">Troubleshoot OOM events</a>.</p>
+</li> <li>
+<p>If you don't find any OOM error messages, restart the kube-dns Deployment:</p> 
+<pre>kubectl rollout restart deployment/kube-dns --namespace=kube-system
+</pre> <p>After you've restarted the Deployment, check if your kube-dns Pods are running.</p>
+</li> </ol> <p>If these steps don't work, or all of your kube-dns Pods have a status of <code translate="no" dir="ltr">Running</code>, but you're still having DNS issues, check that the <code translate="no" dir="ltr">/etc/resolv.conf</code> file is configured correctly.</p> <h3 id="check-resolv.conf">Check that <code translate="no" dir="ltr">/etc/resolv.conf</code> is configured correctly</h3> <p>Review the <code translate="no" dir="ltr">/etc/resolv.conf</code> file of the Pods experiencing DNS issues and make sure that the entries it contains are correct:</p> <ol> <li>
+<p>View the <code translate="no" dir="ltr">/etc/resolv.conf</code> file of the Pod:</p> 
+<pre>kubectl exec -it POD_NAME -- cat /etc/resolv.conf
+</pre> <p>Replace <var translate="no">POD_NAME</var> with the name of the Pod that's experiencing DNS issues. If there are multiple Pods that are experiencing issues, repeat the steps in this section for each Pod.</p> <p>If the Pod binary doesn't support the <code translate="no" dir="ltr">kubectl exec</code> command, this command might fail. If this happens, <a href="https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/#create-a-simple-Pod-to-use-as-a-test-environment">create a simple Pod to use as a test environment</a>. This procedure lets you run a test Pod in the same namespace as your problematic Pod.</p>
+</li> <li>
+<p>Verify that the name server IP address in <code translate="no" dir="ltr">/etc/resolv.conf</code> file is correct:</p> <ul> <li>Pods that are using a host network should use the values in the node's <code translate="no" dir="ltr">/etc/resolv.conf</code> file. The name server IP address should be <code translate="no" dir="ltr">169.254.169.254</code>.</li> <li>
+<p>For Pods that aren't using a host network, the kube-dns Service IP address should be the same as the name server IP address. To compare the IP addresses, complete the following steps:</p> <ol> <li>
+<p>Get the IP address of the kube-dns Service:</p> 
+<pre>kubectl get svc kube-dns -n kube-system
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)         AGE
+kube-dns   ClusterIP   192.0.2.10   &lt;none&gt;        53/UDP,53/TCP   64d
+</pre>
+</li> <li><p>Make note of the value in the Cluster IP column. In this example, it's <code translate="no" dir="ltr">192.0.2.10</code>.</p></li> <li>
+<p>Compare the kube-dns Service IP address with the IP address from the <code translate="no" dir="ltr">/etc/resolv.conf</code> file:</p> 
+<pre># cat /etc/resolv.conf
+
+search default.svc.cluster.local svc.cluster.local cluster.local c.PROJECT_NAME google.internal
+nameserver 192.0.2.10
+options ndots:5
+</pre> <p>In this example, the two values match, so an incorrect name server IP address isn't the cause of your problem.</p> <p>However, if the IP addresses don't match, that means that a <a href="https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#pod-dns-config"><code translate="no" dir="ltr">dnsConfig</code></a> field is configured in the manifest of the application Pod.</p> <p>If the value in the <code translate="no" dir="ltr">dnsConfig.nameservers</code> field is correct, investigate your DNS server and make sure it's functioning correctly.</p> <p>If you don't want to use the custom name server, remove the field and perform a rolling restart of the Pod:</p> 
+<pre>kubectl rollout restart deployment POD_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of your Pod.</p>
+</li> </ol>
+</li> </ul>
+</li> <li><p>Verify the <code translate="no" dir="ltr">search</code> and <code translate="no" dir="ltr">ndots</code> entries in <code translate="no" dir="ltr">/etc/resolv.conf</code>. Make sure there are no spelling errors, stale configurations and the failing request points to existing service in the correct namespace.</p></li> </ol> <h3 id="dns-lookup">Perform a DNS lookup</h3> <p>After you've confirmed that <code translate="no" dir="ltr">/etc/resolv.conf</code> is configured correctly and the DNS record is correct, use the dig command-line tool to perform DNS lookups from the Pod that's reporting DNS errors:</p> <ol> <li>
+<p>Directly query a Pod by opening a shell inside of it:</p> 
+<pre>kubectl exec -it POD_NAME -n NAMESPACE_NAME -- SHELL_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: the name of Pod that's reporting DNS errors.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_NAME</var></code>: the namespace that the Pod belongs to.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SHELL_NAME</var></code>: The name of the shell that you want to open. For example, <code translate="no" dir="ltr">sh</code> or <code translate="no" dir="ltr">/bin/bash</code>.</li> </ul> <p>This command might fail if your Pod doesn't permit the <code translate="no" dir="ltr">kubectl exec</code> command or if the Pod doesn't have the dig binary. If this happens, create a test Pod with an image that has dig installed:</p> 
+<pre>kubectl run "test-$RANDOM" ti --restart=Never --image=thockin/dnsutils - bash
+</pre>
+</li> <li>
+<p>Check if the Pod can correctly resolve the internal DNS Service of the cluster:</p> 
+<pre>dig kubernetes
+</pre> <p>Because the <code translate="no" dir="ltr">/etc/resolv.conf</code> file is pointing to the kube-dns Service IP address, when you run this command the DNS server is the kube-dns Service.</p> <p>You should see a successful DNS response with the IP address of the Kubernetes API Service (often something like <code translate="no" dir="ltr">10.96.0.1</code>). If you see <code translate="no" dir="ltr">SERVFAIL</code> or no response, this usually indicates that the kube-dns Pod is unable to resolve the internal service names.</p>
+</li> <li>
+<p>Check if the kube-dns Service can resolve an external domain name:</p> 
+<pre>dig example.com
+</pre>
+</li> <li>
+<p>If you're experiencing difficulties with a particular kube-dns Pod responding to DNS queries, check if that Pod can resolve an external domain name:</p> 
+<pre> dig example.com @KUBE_DNS_POD_IP
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">KUBE_DNS_POD_IP</var></code> with the IP address of the kube-dns Pod. If you don't know the value of this IP address, run the following command:</p> 
+<pre> kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide
+</pre> <p>The IP address is in the <code translate="no" dir="ltr">IP</code> column.</p> <p>If the resolution of the command is successful, then you see <code translate="no" dir="ltr">status: NOERROR</code> and details of the A record as shown in the following example:</p> 
+<pre> ; &lt;&lt;&gt;&gt; DiG 9.16.27 &lt;&lt;&gt;&gt; example.com
+ ;; global options: +cmd
+ ;; Got answer:
+ ;; -&gt;&gt;HEADER&lt;&lt;- opcode: QUERY, status: NOERROR, id: 31256
+ ;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+ ;; OPT PSEUDOSECTION:
+ ; EDNS: version: 0, flags:; udp: 512
+ ;; QUESTION SECTION:
+ ;example.com.                   IN      A
+
+ ;; ANSWER SECTION:
+ example.com.            30      IN      A       93.184.215.14
+
+ ;; Query time: 6 msec
+ ;; SERVER: 10.76.0.10#53(10.76.0.10)
+ ;; WHEN: Tue Oct 15 16:45:26 UTC 2024
+ ;; MSG SIZE  rcvd: 56
+</pre>
+</li> <li>
+<p>Exit the shell:</p> 
+<pre>exit
+</pre>
+</li> </ol> <p>If any of these commands fail, perform a rolling restart of the kube-dns Deployment:</p> 
+<pre>kubectl rollout restart deployment/kube-dns --namespace=kube-system
+</pre> <p>After you've completed the restart, re-try the dig commands and see if they now succeed. If they still fail, proceed to take a packet capture.</p> <h3 id="packet-capture">Take a packet capture</h3> <p>Take a packet capture to verify if the DNS queries are being received and answered appropriately by the kube-dns Pods:</p> <ol> <li>
+<p>Using SSH, connect to the node running the kube-dns Pod. For example:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>VM Instances</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/compute/instances" target="console" track-name="consoleLink" track-type="tasks">Go to VM Instances</a></p>
+</li> <li>
+<p>Locate the node that you want to connect to. If you don't know the name of the node on your kube-dns Pod, run the following command:</p> 
+<pre>kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide
+</pre> <p>The name of the node is listed in the <strong>Node</strong> column.</p>
+</li> <li><p>In the <strong>Connect</strong> column, click <strong>SSH</strong>.</p></li> </ol>
+</li> <li>
+<p>In the terminal, start <a href="https://docs.cloud.google.com/container-optimized-os/docs/how-to/toolbox">toolbox</a>; a pre-installed debugging tool:</p> 
+<pre>toolbox
+</pre>
+</li> <li>
+<p>At the root prompt, install the <code translate="no" dir="ltr">tcpdump</code> package:</p> 
+<pre>apt update -y &amp;&amp; apt install -y tcpdump
+</pre>
+</li> <li>
+<p>Using <code translate="no" dir="ltr">tcpdump</code>, take a packet capture of your DNS traffic:</p> 
+<pre>tcpdump -i eth0 port 53" -w FILE_LOCATION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILE_LOCATION</var></code> with a path to where you want to save the capture.</p>
+</li> <li><p>Review the packet capture. Check if there are packets with destination IP addresses that match the kube-dns Service IP address. This helps ensure that the DNS requests are reaching the right destination for resolution. Failure to see DNS traffic landing on the correct Pods, might indicate presence of a network policy that's blocking the requests.</p></li> </ol> <h3 id="network-policy">Check for a network policy</h3> <p>Restrictive network policies can sometimes disrupt DNS traffic. To verify if a network policy exists in the kube-system namespace, run the following command:</p> 
+<pre>kubectl get networkpolicy -n kube-system
+</pre> <p>If you find a network policy, review it and ensure the policy allows necessary DNS communication. For example, if you have a network policy which blocks all egress traffic, the policy would also block DNS requests.</p> <p>If the output is <code translate="no" dir="ltr">No resources found in kube-system namespace</code> then you don't have any network policies and you can rule this out as the cause of your issue. Investigating logs can help you find more points of failure.</p> <h3 id="query-logging">Enable temporary DNS query logging</h3> <p>To help you identify issues such incorrect DNS responses, temporarily enable debug logging of DNS queries. To enable queries, create a Pod based on an existing kube-dns Pod. Any changes to the kube-dns Deployment are automatically reverted.</p> <p>Enabling temporary DNS query logging is a resource intensive procedure, so we recommend that you delete the Pod you create as soon as you collect a suitable sample of logs.</p> <p>To enable temporary DNS query logging, complete the following steps:</p> <ol> <li>
+<p>Retrieve a kube-dns Pod and store it in variable named <code translate="no" dir="ltr">POD</code>:</p> 
+<pre>POD=$(kubectl -n kube-system get pods --selector=k8s-app=kube-dns -o jsonpath="{.items[0].metadata.name}")
+</pre>
+</li> <li>
+<p>Create a Pod named <code translate="no" dir="ltr">kube-dns-debug</code>. This Pod is a copy of the Pod stored in the <code translate="no" dir="ltr">POD</code> variable, but with dnsmasq logging enabled. This command doesn't modify the original kube-dns Pod:</p> 
+<pre>kubectl apply -f &lt;(kubectl get pod -n kube-system ${POD} -o json | jq -e '
+
+(
+
+(.spec.containers[] | select(.name == "dnsmasq") | .args) += ["--log-queries"]
+
+)
+
+| (.metadata.name = "kube-dns-debug")
+
+| (del(.metadata.labels."pod-template-hash"))
+
+')
+</pre>
+</li> <li>
+<p>Inspect the logs:</p> 
+<pre>kubectl logs -f --tail 100 -c dnsmasq -n kube-system kube-dns-debug
+</pre> <p>You can also see the queries in Cloud Logging.</p>
+</li> <li>
+<p>After you finish viewing DNS query logs, delete the <code translate="no" dir="ltr">kube-dns-debug</code> Pod:</p> 
+<pre>kubectl -n kube-system delete pod kube-dns-debug
+</pre>
+</li> </ol> <h3 id="kube-dns-pod">Investigate the kube-dns Pod</h3> <p>Review how kube-dns Pods receive and resolve DNS queries with Cloud Logging.</p> <p>To view log entries related to the kube-dns Pod, complete the following steps:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li>
+<p>In the query pane, enter the following filter to view events related to the kube-dns container:</p> 
+<pre>resource.type="k8s_container"
+resource.labels.namespace_name="kube-system"
+resource.labels.pod_name:"kube-dns"
+resource.labels.cluster_name="CLUSTER_NAME"
+resource.labels.location="CLUSTER_LOCATION"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster that the kube-dns Pod belongs to.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_LOCATION</var></code>: the location of your cluster.</li> </ul>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> <li>
+<p>Review the output. The following example output shows one possible error that you might see:</p> 
+<pre>{
+   "timestamp": "2024-10-10T15:32:16.789Z",
+   "severity": "ERROR",
+   "resource": {
+      "type": "k8s_container",
+      "labels": {
+      "namespace_name": "kube-system",
+      "pod_name": "kube-dns",
+      "cluster_name": "CLUSTER_NAME",
+      "location": "CLUSTER_LOCATION"
+      }
+   },
+   "message": "Failed to resolve 'example.com': Timeout."
+},
+</pre> <p>In this example, kube-dns couldn't resolve <code translate="no" dir="ltr">example.com</code> in a reasonable time. This type of error can be caused by multiple issues. For example, the upstream server might be incorrectly configured in the kube-dns ConfigMap, or there might be high network traffic.</p>
+</li> </ol> <p>If you don't have Cloud Logging enabled, view the Kubernetes logs instead:</p> 
+<pre>Pod=$(kubectl get Pods -n kube-system -l k8s-app=kube-dns -o name | head -n1)
+kubectl logs -n kube-system $Pod -c dnsmasq
+kubectl logs -n kube-system $Pod -c kubedns
+kubectl logs -n kube-system $Pod -c sidecar
+</pre> <h3 id="kube-dns-configmap">Investigate recent changes in the kube-dns ConfigMap</h3> <p>If you suddenly encounter DNS resolution failures in your cluster, one cause is an incorrect configuration change made to the kube-dns ConfigMap. In particular, configuration changes to the stub domains and upstream servers definitions can cause issues.</p> <p>To check for updates to the stub domain settings, complete the following steps:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li>
+<p>In the query pane, enter the following query:</p> 
+<pre>resource.labels.cluster_name="clouddns"
+resource.type="k8s_container"
+resource.labels.namespace_name="kube-system"
+labels.k8s-pod/k8s-app="kube-dns" jsonPayload.message=~"Updated stubDomains to"
+</pre>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> <li>
+<p>Review the output. If there have been any updates, the output is similar to the following:</p> 
+<pre>Updated stubDomains to map[example.com: [8.8.8.8 8.8.4.4 1.1.3.3 1.0.8.111]]
+</pre> <p>If you see an update, expand the result to learn more about the changes. Verify that any stub domains and their corresponding upstream DNS servers are correctly defined. Incorrect entries here can lead to resolution failures for those domains.</p>
+</li> </ol> <p>To check for changes to the upstream server, complete the following steps:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li>
+<p>In the query pane, enter the following query:</p> 
+<pre>resource.labels.cluster_name="clouddns"
+resource.type="k8s_container" resource.labels.namespace_name="kube-system"
+labels.k8s-pod/k8s-app="kube-dns" jsonPayload.message=~"Updated upstreamNameservers to"
+</pre>
+</li> <li><p>Click <strong>Run query</strong>.</p></li> <li>
+<p>Review the output. If there have been any changes, the output is similar to the following:</p> 
+<pre>Updated upstreamNameservers to [8.8.8.8]
+</pre> <p>Expand the result to learn more about the changes. Verify that the list of upstream DNS servers is accurate and that these servers are reachable from your cluster. If these servers are unavailable or misconfigured, general DNS resolution might fail.</p>
+</li> </ol> <p>If you've checked for changes to the stub domains and upstream servers, but didn't find any results, check for all changes with the following filter:</p> 
+<pre>resource.type="k8s_cluster"
+protoPayload.resourceName:"namespaces/kube-system/configmaps/kube-dns"
+protoPayload.methodName=~"io.k8s.core.v1.configmaps."
+</pre> <p>Review any listed changes to see if they've caused the error.</p> <h3 id="contact-support">Contact Cloud Customer Care</h3> <p>If you've worked through the preceding sections, but still can't diagnose the cause of your issue, <a href="https://docs.cloud.google.com/support/docs/customer-care-procedures#manage_a_support_case">contact Cloud Customer Care</a>.</p> <h2 id="common-issues">Resolve common issues</h2> <p>If you've experienced a specific error or issue, use the advice in the following sections.</p> <h3 id="intermittent-timeouts">Issue: Intermittent DNS timeouts</h3> <p>If you notice intermittent DNS resolution timeouts that occur when there's an increase in DNS traffic or when business hours start, try the following solutions to optimize your DNS performance:</p> <ul> <li><p>Check the number of kube-dns Pods running on the cluster and compare it to the total number of GKE nodes. If there aren't enough resources, consider <a href="../how-to/nodelocal-dns-cache#scaling_up_kube-dns">scaling up</a> the kube-dns Pods.</p></li> <li><p>To improve average DNS lookup time, enable <a href="../how-to/nodelocal-dns-cache#enable">NodeLocal DNS Cache</a>.</p></li> <li>
+<p>DNS resolution to external names can overload the kube-dns Pod. To reduce the number of queries, adjust the <code translate="no" dir="ltr">ndots</code> setting in the <code translate="no" dir="ltr">/etc/resolv.conf</code> file. <code translate="no" dir="ltr">ndots</code> represents the number of dots that must appear in a domain name to resolve a query before the initial absolute query.</p> <p>The following example is the <code translate="no" dir="ltr">/etc/resolv.conf</code> file of an application Pod:</p> 
+<pre>search default.svc.cluster.local svc.cluster.local cluster.local c.PROJECT_ID.internal google.internal
+nameserver 10.52.16.10
+options ndots:5
+</pre> <p>In this example, kube-dns looks for five dots in the domain that's queried. If the Pod makes a DNS resolution call for <code translate="no" dir="ltr">example.com</code>, then your logs look similar to the following example:</p> 
+<pre>"A IN example.com.default.svc.cluster.local." NXDOMAIN
+"A IN example.com.svc.cluster.local." NXDOMAIN
+"A IN example.com.cluster.local." NXDOMAIN
+"A IN example.com.google.internal." NXDOMAIN
+"A IN example.com.c.PROJECT_ID.internal." NXDOMAIN
+"A IN example.com." NOERROR
+</pre> <p>To resolve this issue, either change the value of ndots to <code translate="no" dir="ltr">1</code> to look only for a single dot or append a dot (<code translate="no" dir="ltr">.</code>) at the end of the domain that you query or use. For example:</p> 
+<pre>dig example.com.
+</pre>
+</li> </ul> <h3 id="intermittent-query-failure">Issue: DNS queries fail intermittently from some nodes</h3> <p>If you notice DNS queries failing intermittently from some nodes, you might see the following symptoms:</p> <ul> <li>When you run dig commands to the kube-dns Service IP address or Pod IP address, the DNS queries fail intermittently with timeouts.</li> <li>Running dig commands from a Pod on the same node as the kube-dns Pod fails.</li> </ul> <p>To resolve this issue, complete the following steps:</p> <ol> <li>Perform a <a href="https://docs.cloud.google.com/network-intelligence-center/docs/connectivity-tests/how-to/running-connectivity-tests">Connectivity Test</a>. Set the problematic Pod or node as the source, and destination as the IP address of the kube-dns Pod. This lets you check if you have the required firewall rules in place to allow this traffic.</li> <li>
+<p>If the test is not successful, and traffic is being blocked by a firewall rule, use Cloud Logging to list any manual changes made to the firewall rules. Look for changes that block a specific kind of traffic:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>Logs Explorer</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/logs" target="console" track-name="consoleLink" track-type="tasks">Go to Logs Explorer</a></p>
+</li> <li>
+<p>In the query pane, enter the following query:</p> 
+<pre>logName="projects/project-name/logs/cloudaudit.googleapis.com/activity"
+resource.type="gce_firewall_rule"
+</pre>
+</li> <li>
+<p>Click <strong>Run query</strong>. Use the output of the query to determine if any changes have been made. If you notice any errors, correct them and reapply the firewall rule.</p> <p>Make sure you don't make changes to any <a href="../concepts/firewall-rules#cluster-fws">automated firewall rules</a>.</p>
+</li> </ol>
+</li> <li><p>If there haven't been any changes to the firewall rules, check the node pool version and make sure it's compatible with the control plane and other working node pools. If any of the cluster's node pools are more than two minor versions older than the control plane, this might be causing issues. For more information about this incompatibility, see <a href="upgrades#node-version-incompatible">Node version not compatible with control plane version</a>.</p></li> <li><p>To determine if the requests are being sent to the correct kube-dns service IP, capture network traffic on the problematic node and filter for port 53 (DNS traffic). Capture traffic on the kube-dns Pods themselves to see if the requests are reaching the intended Pods and if they're being successfully resolved.</p></li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li><p>For general information about diagnosing Kubernetes DNS issues, see <a href="https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/">Debugging DNS Resolution</a>.</p></li> <li>
+<p>If you can't find a solution to your problem in the documentation, see <a href="../getting-support" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Get support</a> for further help, including advice on the following topics:</p> <ul> <li>Opening a support case by contacting <a href="https://cloud.google.com/support-hub" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Cloud Customer Care</a>.</li> <li>Getting support from the community by <a href="http://stackoverflow.com/questions/tagged/google-kubernetes-engine" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">asking questions on StackOverflow</a> and using the <code translate="no" dir="ltr">google-kubernetes-engine</code> tag to search for similar issues. You can also join the <a href="https://googlecloud-community.slack.com/messages/C0B9GKTKJ/" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">#kubernetes-engine</code> Slack channel</a> for more community support.</li> <li>Opening issues or feature requests by using the <a href="https://docs.cloud.google.com/support/docs/issue-trackers" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">public issue tracker</a>.</li> </ul>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/kube-dns" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/kube-dns</a>
+  </p>
+</div>

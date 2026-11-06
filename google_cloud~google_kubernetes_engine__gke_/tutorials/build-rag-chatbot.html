@@ -1,0 +1,1272 @@
+<h1>Build a RAG chatbot with GKE and Cloud Storage</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial shows you how to integrate a large language model (LLM) application based on retrieval-augmented generation (RAG) with PDF files that you upload to a Cloud Storage bucket.</p> <p>This guide uses a database as a storage and semantic search engine that holds the representations (embeddings) of the uploaded documents. You use the <a href="https://www.langchain.com/">Langchain framework</a> to interact with the embeddings and you use Gemini models available through Vertex AI.</p> <p>Langchain is a popular open-source Python framework that simplifies many machine learning tasks and has interfaces to integrate with different vector databases and AI services.</p> <p>This tutorial is intended for cloud platform <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks#admins">administrators and architects</a>, <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks#data-ai-ml-engineer">ML engineers</a>, and MLOps (DevOps) professionals interested in deploying RAG LLM applications to GKE and Cloud Storage.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <p>In this tutorial, you learn how to:</p> <ul> <li>Build and deploy an application to create and store document embeddings in a vector database.</li> <li>Automate the application to trigger new document uploads to a Cloud Storage bucket.</li> <li>Deploy a chatbot application that uses semantic search to answer questions based on the document content.</li> </ul> <h2 id="architecture">Deployment architecture</h2> <p>In this tutorial, you create a Cloud Storage bucket, an Eventarc trigger, and the following Services:</p> <ul> <li>
+<code translate="no" dir="ltr">embed-docs</code>: Eventarc triggers this Service every time a user uploads a new document to the Cloud Storage bucket. The Service starts a <a href="https://kubernetes.io/docs/concepts/workloads/controllers/job/">Kubernetes Job</a> which creates embeddings for the uploaded document and inserts the embeddings into a vector database.</li> <li>
+<code translate="no" dir="ltr">chatbot</code>: This Service answers natural language questions about the uploaded documents using semantic search and the <a href="https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/gemini">Gemini API</a>.</li> </ul> <p>The following diagram shows the process of uploading and vectorizing documents:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/rag-architecture-embedding.svg" alt></p> <p>In the diagram, the user uploads files into the Cloud Storage bucket. Eventarc subscribes to object <code translate="no" dir="ltr">metadataUpdated</code> events for the bucket and uses Eventarc's event forwarder, which is a Kubernetes workload, to call the <code translate="no" dir="ltr">embed-docs</code> Service when you upload a new document. The Service then creates embeddings for the uploaded document. The <code translate="no" dir="ltr">embed-docs</code> Service stores the embeddings in a vector database using the Vertex AI embedding model.</p> <p>The following diagram shows the process of asking questions about the uploaded document content using the <code translate="no" dir="ltr">chatbot</code> Service:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/rag-architecture-asking-llm-model.svg" alt></p> <p>Users can ask questions using natural language, and the chatbot generates answers based solely on the content of the uploaded files. The chatbot retrieves context from the vector database using semantic search, then sends the question and context to Gemini.</p> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing">GKE</a></li> <li><a href="https://cloud.google.com/storage/pricing">Cloud Storage</a></li> <li><a href="https://cloud.google.com/build/pricing">Cloud Build</a></li> <li><a href="https://cloud.google.com/eventarc/pricing">Eventarc</a></li> <li><a href="https://cloud.google.com/artifact-registry/pricing">Artifact Registry</a></li> <li><a href="https://cloud.google.com/vertex-ai/pricing">Vertex AI</a></li> <li><a href="https://cloud.google.com/pubsub/pricing">Pub/Sub</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell/docs" track-type="quickstart" track-name="cloudShell" track-metadata-position="body" track-metadata-end-goal="cloudShellLanding">Cloud Shell</a> to run commands. Cloud Shell is a shell environment for managing resources hosted on Google Cloud. Cloud Shell comes preinstalled with the <a href="https://docs.cloud.google.com/sdk/gcloud" track-type="quickstart" track-name="gcloudOverview" track-metadata-position="body" track-metadata-end-goal="useGcloud">Google Cloud CLI</a>, <a href="https://kubernetes.io/docs/reference/kubectl/">kubectl</a>, and <a href="https://docs.cloud.google.com/docs/terraform">Terraform</a> command-line tools. If you don't use Cloud Shell, install the Google Cloud CLI.</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Vertex AI, Cloud Build, Eventarc, Artifact Registry APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable aiplatform.googleapis.com cloudbuild.googleapis.com eventarc.googleapis.com artifactregistry.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Vertex AI, Cloud Build, Eventarc, Artifact Registry APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable aiplatform.googleapis.com cloudbuild.googleapis.com eventarc.googleapis.com artifactregistry.googleapis.com</pre>
+</li> </div> </cloud-free-trial> <li> <p> Grant roles to your user account. Run the following command once for each of the following IAM roles: <code translate="no" dir="ltr">eventarc.admin</code> </p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID --member="user:USER_IDENTIFIER" --role=ROLE</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USER_IDENTIFIER</var></code>: The identifier for your user account. For example, <code translate="no" dir="ltr">myemail@example.com</code>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: The IAM role that you grant to your user account.</li> </ul> </li> </ol> </section> <div id="tutorial-content"> <h2 id="create-cluster">Create a cluster</h2> <p>Create a Qdrant, Elasticsearch, or Postgres cluster:</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p>
+<p>Follow the instructions in <a href="deploy-qdrant">Deploy a Qdrant vector database on GKE</a> to create a Qdrant cluster running on an Autopilot mode or Standard mode GKE cluster.</p></section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p>
+<p>Follow the instructions in <a href="deploy-elasticsearch">Deploy an Elasticsearch vector database on GKE</a> to create an Elasticsearch cluster running on an Autopilot mode or Standard mode GKE cluster.</p></section> <section><p class="_code-tab"><strong>PGVector</strong></p>
+<p>Follow the instructions in <a href="deploy-pgvector">Deploy a PostgreSQL vector database on GKE</a> to create a Postgres cluster with PGVector running on an Autopilot mode or Standard mode GKE cluster.</p></section> <section><p class="_code-tab"><strong>Weaviate</strong></p>
+<p>Follow the instructions to <a href="deploy-weaviate">Deploy a Weaviate vector database on GKE</a> to create a Weaviate cluster running on an Autopilot or Standard mode GKE cluster.</p></section> </div> <h2 id="environment">Set up your environment</h2> <p>Set up your environment with Cloud Shell:</p> <ol> <li>
+<p>Set environment variables for your project:</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p>
+
+<pre data-language="">export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=qdrant
+export CONTROL_PLANE_LOCATION=us-central1
+export REGION=us-central1
+export DB_NAMESPACE=qdrant
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p></section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p>
+
+<pre data-language="">export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=elasticsearch
+export CONTROL_PLANE_LOCATION=us-central1
+export REGION=us-central1
+export DB_NAMESPACE=elastic
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p></section> <section><p class="_code-tab"><strong>PGVector</strong></p>
+
+<pre data-language="">export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=postgres
+export CONTROL_PLANE_LOCATION=us-central1
+export REGION=us-central1
+export DB_NAMESPACE=pg-ns
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p></section> <section><p class="_code-tab"><strong>Weaviate</strong></p>
+
+<pre data-language="">export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=weaviate
+export CONTROL_PLANE_LOCATION=us-central1
+export REGION=us-central1
+export DB_NAMESPACE=weaviate
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</p></section> </div>
+</li> <li>
+<p>Verify that your GKE cluster is running:</p> 
+<pre>gcloud container clusters list --project=${PROJECT_ID} --location=${CONTROL_PLANE_LOCATION}
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                    LOCATION        MASTER_VERSION      MASTER_IP     MACHINE_TYPE  NODE_VERSION        NUM_NODES STATUS
+[KUBERNETES_CLUSTER_PREFIX]-cluster   us-central1   1.30.1-gke.1329003  &lt;EXTERNAL IP&gt; e2-standard-2 1.30.1-gke.1329003   6        RUNNING
+</pre>
+</li> <li>
+<p>Clone the sample code repository from GitHub:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+</pre>
+</li> <li>
+<p>Navigate to the <code translate="no" dir="ltr">databases</code> directory:</p> 
+<pre>cd kubernetes-engine-samples/databases
+</pre>
+</li> </ol> <h2 id="prepare-infrastructure">Prepare your infrastructure</h2> <p>Create an Artifact Registry repository, build Docker images, and push Docker images to Artifact Registry:</p> <ol> <li>
+<p>Create an Artifact Registry repository:</p> 
+<pre>gcloud artifacts repositories create ${KUBERNETES_CLUSTER_PREFIX}-images \
+    --repository-format=docker \
+    --location=${REGION} \
+    --description="Vector database images repository" \
+    --async
+</pre>
+</li> <li>
+<p>Set the <code translate="no" dir="ltr">storage.objectAdmin</code> and <code translate="no" dir="ltr">artifactregistry.admin</code> permissions on the Compute Engine service account to use <a href="https://docs.cloud.google.com/sdk/gcloud/reference/builds/submit">Cloud Build</a> to build and push Docker images for the <code translate="no" dir="ltr">embed-docs</code> and <code translate="no" dir="ltr">chatbot</code> Services.</p> 
+<pre>export PROJECT_NUMBER=PROJECT_NUMBER
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID}  \
+--member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+--role="roles/storage.objectAdmin"
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID}  \
+--member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+--role="roles/artifactregistry.admin"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> with your Google Cloud project number.</p>
+</li> <li>
+<p>Build Docker images for the <code translate="no" dir="ltr">embed-docs</code> and <code translate="no" dir="ltr">chatbot</code> Services. The <code translate="no" dir="ltr">embed-docs</code> image contains Python code for both the application that receives Eventarc forwarder requests and the embedding job.</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p>
+
+<pre data-language="">export DOCKER_REPO="${REGION}-docker.pkg.dev/${PROJECT_ID}/${KUBERNETES_CLUSTER_PREFIX}-images"
+gcloud builds submit qdrant/docker/chatbot --region=${REGION} \
+  --tag ${DOCKER_REPO}/chatbot:1.0 --async
+gcloud builds submit qdrant/docker/embed-docs --region=${REGION} \
+  --tag ${DOCKER_REPO}/embed-docs:1.0 --async
+</pre></section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p>
+
+<pre data-language="">export DOCKER_REPO="${REGION}-docker.pkg.dev/${PROJECT_ID}/${KUBERNETES_CLUSTER_PREFIX}-images"
+gcloud builds submit elasticsearch/docker/chatbot --region=${REGION} \
+  --tag ${DOCKER_REPO}/chatbot:1.0 --async
+gcloud builds submit elasticsearch/docker/embed-docs --region=${REGION} \
+  --tag ${DOCKER_REPO}/embed-docs:1.0 --async
+</pre></section> <section><p class="_code-tab"><strong>PGVector</strong></p>
+
+<pre data-language="">export DOCKER_REPO="${REGION}-docker.pkg.dev/${PROJECT_ID}/${KUBERNETES_CLUSTER_PREFIX}-images"
+gcloud builds submit postgres-pgvector/docker/chatbot --region=${REGION} \
+  --tag ${DOCKER_REPO}/chatbot:1.0 --async
+gcloud builds submit postgres-pgvector/docker/embed-docs --region=${REGION} \
+  --tag ${DOCKER_REPO}/embed-docs:1.0 --async
+</pre></section> <section><p class="_code-tab"><strong>Weaviate</strong></p>
+
+<pre data-language="">export DOCKER_REPO="${REGION}-docker.pkg.dev/${PROJECT_ID}/${KUBERNETES_CLUSTER_PREFIX}-images"
+gcloud builds submit weaviate/docker/chatbot --region=${REGION} \
+  --tag ${DOCKER_REPO}/chatbot:1.0 --async
+gcloud builds submit weaviate/docker/embed-docs --region=${REGION} \
+  --tag ${DOCKER_REPO}/embed-docs:1.0 --async
+</pre></section> </div>
+</li> <li>
+<p>Verify the images:</p> 
+<pre>gcloud artifacts docker images list $DOCKER_REPO \
+    --project=$PROJECT_ID \
+    --format="value(IMAGE)"
+</pre> <p>The output is similar to the following:</p> 
+<pre>$REGION-docker.pkg.dev/$PROJECT_ID/${KUBERNETES_CLUSTER_PREFIX}-images/chatbot
+$REGION-docker.pkg.dev/$PROJECT_ID/${KUBERNETES_CLUSTER_PREFIX}-images/embed-docs
+</pre>
+</li> <li>
+<p>Deploy a <a href="https://kubernetes.io/docs/concepts/security/service-accounts/">Kubernetes Service Account</a> with permissions to run Kubernetes Jobs:</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p>
+
+<pre data-language="">sed "s/&lt;PROJECT_ID&gt;/$PROJECT_ID/;s/&lt;CLUSTER_PREFIX&gt;/$KUBERNETES_CLUSTER_PREFIX/" qdrant/manifests/05-rag/service-account.yaml | kubectl -n qdrant apply -f -
+</pre></section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p>
+
+<pre data-language="">sed "s/&lt;PROJECT_ID&gt;/$PROJECT_ID/;s/&lt;CLUSTER_PREFIX&gt;/$KUBERNETES_CLUSTER_PREFIX/" elasticsearch/manifests/05-rag/service-account.yaml | kubectl -n elastic apply -f -
+</pre></section> <section><p class="_code-tab"><strong>PGVector</strong></p>
+
+<pre data-language="">sed "s/&lt;PROJECT_ID&gt;/$PROJECT_ID/;s/&lt;CLUSTER_PREFIX&gt;/$KUBERNETES_CLUSTER_PREFIX/" postgres-pgvector/manifests/03-rag/service-account.yaml | kubectl -n pg-ns apply -f -
+</pre></section> <section><p class="_code-tab"><strong>Weaviate</strong></p>
+
+<pre data-language="">sed "s/&lt;PROJECT_ID&gt;/$PROJECT_ID/;s/&lt;CLUSTER_PREFIX&gt;/$KUBERNETES_CLUSTER_PREFIX/" weaviate/manifests/04-rag/service-account.yaml | kubectl -n weaviate apply -f -
+</pre></section> </div>
+</li> <li>
+<p>When using Terraform to create the GKE cluster and have <code translate="no" dir="ltr">create_service_account</code> set as true, a separate service account will be created and used by the cluster and nodes. Grant <code translate="no" dir="ltr">artifactregistry.serviceAgent</code> role to this Compute Engine service account to allow the nodes to pull image from the Artifact Registry created for <code translate="no" dir="ltr">embed-docs</code> and <code translate="no" dir="ltr">chatbot</code>.</p> 
+<pre>export CLUSTER_SERVICE_ACCOUNT=$(gcloud container clusters describe ${KUBERNETES_CLUSTER_PREFIX}-cluster \
+--location=${CONTROL_PLANE_LOCATION} \
+--format="value(nodeConfig.serviceAccount)")
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID}  \
+--member="serviceAccount:${CLUSTER_SERVICE_ACCOUNT}" \
+--role="roles/artifactregistry.serviceAgent"
+</pre> <p>Without granting access to the service account, your nodes might experience permission issue when trying to pull image from the Artifact Registry when deploying the <code translate="no" dir="ltr">embed-docs</code> and <code translate="no" dir="ltr">chatbot</code> Services.</p>
+</li> <li>
+<p>Deploy a Kubernetes Deployment for the <code translate="no" dir="ltr">embed-docs</code> and <code translate="no" dir="ltr">chatbot</code> Services. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster.:</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p>
+
+<pre data-language="">sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" qdrant/manifests/05-rag/chatbot.yaml | kubectl -n qdrant apply -f -
+sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" qdrant/manifests/05-rag/docs-embedder.yaml | kubectl -n qdrant apply -f -
+</pre></section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p>
+
+<pre data-language="">sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" elasticsearch/manifests/05-rag/chatbot.yaml | kubectl -n elastic apply -f -
+sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" elasticsearch/manifests/05-rag/docs-embedder.yaml | kubectl -n elastic apply -f -
+</pre></section> <section><p class="_code-tab"><strong>PGVector</strong></p>
+
+<pre data-language="">sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" postgres-pgvector/manifests/03-rag/chatbot.yaml | kubectl -n pg-ns apply -f -
+sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" postgres-pgvector/manifests/03-rag/docs-embedder.yaml | kubectl -n pg-ns apply -f -
+</pre></section> <section><p class="_code-tab"><strong>Weaviate</strong></p>
+
+<pre data-language="">sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" weaviate/manifests/04-rag/chatbot.yaml | kubectl -n weaviate apply -f -
+sed "s|&lt;DOCKER_REPO&gt;|$DOCKER_REPO|" weaviate/manifests/04-rag/docs-embedder.yaml | kubectl -n weaviate apply -f -
+</pre></section> </div>
+</li> <li>
+<p>Enable Eventarc triggers for GKE:</p> 
+<pre>gcloud eventarc gke-destinations init
+</pre> <p>When prompted, enter <code translate="no" dir="ltr">y</code>.</p>
+</li> <li>
+<p>Deploy the Cloud Storage bucket and create an Eventarc trigger using Terraform:</p> 
+<pre>export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=vector-database/terraform/cloud-storage init
+terraform -chdir=vector-database/terraform/cloud-storage apply \
+  -var project_id=${PROJECT_ID} \
+  -var region=${REGION} \
+  -var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX} \
+  -var db_namespace=${DB_NAMESPACE}
+</pre> <p>When prompted, type <code translate="no" dir="ltr">yes</code>. It might take several minutes for the command to complete.</p> <p>Terraform creates the following resources:</p> <ul> <li>A Cloud Storage bucket to upload the documents</li> <li>An Eventarc trigger</li> <li>A Google Cloud Service Account named <code translate="no" dir="ltr">service_account_eventarc_name</code> with permission to use Eventarc.</li> <li>A Google Cloud Service Account named <code translate="no" dir="ltr">service_account_bucket_name</code> with permission to read the bucket and access Vertex AI models.</li> </ul> <p>The output is similar to the following:</p> 
+<pre>... # Several lines of output omitted
+
+Apply complete! Resources: 15 added, 0 changed, 0 destroyed.
+
+... # Several lines of output omitted
+</pre>
+</li> </ol> <h2 id="load-documents-run-chatbot">Load documents and run chatbot queries</h2> <p>Upload the demo documents and run queries to search over the demo documents using the chatbot:</p> <ol> <li>
+<p>Upload the example <code translate="no" dir="ltr">carbon-free-energy.pdf</code> document to your bucket:</p> 
+<pre>gcloud storage cp vector-database/documents/carbon-free-energy.pdf gs://${PROJECT_ID}-${KUBERNETES_CLUSTER_PREFIX}-training-docs
+</pre>
+</li> <li>
+<p>Verify the document embedder job completed successfully:</p> 
+<pre>kubectl get job -n ${DB_NAMESPACE}
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                            COMPLETIONS   DURATION   AGE
+docs-embedder1716570453361446   1/1           32s        71s
+</pre>
+</li> <li>
+<p>Get the external IP address of the load balancer:</p> 
+<pre>export EXTERNAL_IP=$(kubectl -n ${DB_NAMESPACE} get svc chatbot --output jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo http://${EXTERNAL_IP}:80
+</pre>
+</li> <li>
+<p>Open the external IP address in your web browser:</p> 
+<pre>http://EXTERNAL_IP
+</pre> <p>The chatbot responds with a message similar to the following:</p> 
+<pre>How can I help you?
+</pre>
+</li> <li>
+<p>Ask questions about the content of the uploaded documents. If the chatbot cannot find anything, it answers <code translate="no" dir="ltr">I don't know</code>. For example, you could ask the following:</p> 
+<pre>You: Hi, what are Google plans for the future?
+</pre> <p>An example output from the chatbot is similar to the following:</p> 
+<pre>Bot: Google intends to run on carbon-free energy everywhere, at all times by 2030. To achieve this, it will rely on a combination of renewable energy sources, such as wind and solar, and carbon-free technologies, such as battery storage.
+</pre>
+</li> <li>
+<p>Ask the chatbot a question that is out of context of the uploaded document. For example, you could ask the following:</p> 
+<pre>You: What are Google plans to colonize Mars?
+</pre> <p>An example output from the chatbot is similar to the following:</p> 
+<pre>Bot: I don't know. The provided context does not mention anything about Google's plans to colonize Mars.
+</pre>
+</li> </ol> <h2 id="about-application-code">About the application code</h2> <p>This section explains how the application code works. There are three scripts inside the Docker images:</p> <ul> <li>
+<code translate="no" dir="ltr">endpoint.py</code>: receives Eventarc events on each document upload and starts the Kubernetes Jobs to process them.</li> <li>
+<code translate="no" dir="ltr">embedding-job.py</code>: downloads documents from the bucket, creates embeddings, and insert embeddings into the vector database.</li> <li>
+<code translate="no" dir="ltr">chat.py</code>: runs queries over the content of stored documents.</li> </ul> <p>The diagram shows the process of generating answers using the documents data:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/rag-application-code.svg" alt></p> <p>In the diagram, the application loads a PDF file, splits the file into chunks, then vectors, then sends the vectors to a vector database. Later, a user asks a question to the chatbot. The RAG chain uses semantic search to search the vector database, then returns the context along with the question to the LLM. The LLM answers the question, and stores the question into chat history.</p> <h3 id="about_endpointpy">About <code translate="no" dir="ltr">endpoint.py</code>
+</h3> <p>This file processes messages from Eventarc, creates a Kubernetes Job for embedding the document, and accepts request from anywhere on port 5001</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from flask import Flask, jsonify
+from flask import request
+import logging
+import sys,os, time
+from kubernetes import client, config, utils
+import kubernetes.client
+from kubernetes.client.rest import ApiException
+
+
+app = Flask(__name__)
+@app.route('/check')
+def message():
+    return jsonify({"Message": "Hi there"})
+
+
+@app.route('/', methods=['POST'])
+def bucket():
+    request_data = request.get_json()
+    print(request_data)
+    bckt = request_data['bucket']
+    f_name = request_data['name']
+    id = request_data['generation'] 
+    kube_create_job(bckt, f_name, id)
+    return "ok"
+
+# Set logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
+# Setup K8 configs
+config.load_incluster_config()
+def kube_create_job_object(name, container_image, bucket_name, f_name, namespace="qdrant", container_name="jobcontainer", env_vars={}):
+
+    body = client.V1Job(api_version="batch/v1", kind="Job")
+    body.metadata = client.V1ObjectMeta(namespace=namespace, name=name)
+    body.status = client.V1JobStatus()
+
+    template = client.V1PodTemplate()
+    template.template = client.V1PodTemplateSpec()
+    env_list = [
+        client.V1EnvVar(name="QDRANT_URL", value=os.getenv("QDRANT_URL")),
+        client.V1EnvVar(name="COLLECTION_NAME", value="training-docs"), 
+        client.V1EnvVar(name="FILE_NAME", value=f_name), 
+        client.V1EnvVar(name="BUCKET_NAME", value=bucket_name),
+        client.V1EnvVar(name="APIKEY", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(key="api-key", name="qdrant-database-apikey"))), 
+    ]
+
+    container = client.V1Container(name=container_name, image=container_image, env=env_list)
+    template.template.spec = client.V1PodSpec(containers=[container], restart_policy='Never', service_account='embed-docs-sa')
+
+    body.spec = client.V1JobSpec(backoff_limit=3, ttl_seconds_after_finished=60, template=template.template)
+    return body
+def kube_test_credentials():
+    try: 
+        api_response = api_instance.get_api_resources()
+        logging.info(api_response)
+    except ApiException as e:
+        print("Exception when calling API: %s\n" % e)
+
+def kube_create_job(bckt, f_name, id):
+    container_image = os.getenv("JOB_IMAGE")
+    namespace = os.getenv("JOB_NAMESPACE")
+    name = "docs-embedder" + id
+    body = kube_create_job_object(name, container_image, bckt, f_name)
+    v1=client.BatchV1Api()
+    try: 
+        v1.create_namespaced_job(namespace, body, pretty=True)
+    except ApiException as e:
+        print("Exception when calling BatchV1Api-&gt;create_namespaced_job: %s\n" % e)
+    return
+
+if __name__ == '__main__':
+    app.run('0.0.0.0', port=5001, debug=True)
+</pre> </div> </section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from flask import Flask, jsonify
+from flask import request
+import logging
+import sys,os, time
+from kubernetes import client, config, utils
+import kubernetes.client
+from kubernetes.client.rest import ApiException
+
+
+app = Flask(__name__)
+@app.route('/check')
+def message():
+    return jsonify({"Message": "Hi there"})
+
+
+@app.route('/', methods=['POST'])
+def bucket():
+    request_data = request.get_json()
+    print(request_data)
+    bckt = request_data['bucket']
+    f_name = request_data['name']
+    id = request_data['generation'] 
+    kube_create_job(bckt, f_name, id)
+    return "ok"
+
+# Set logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
+# Setup K8 configs
+config.load_incluster_config()
+
+def kube_create_job_object(name, container_image, bucket_name, f_name, namespace="elastic", container_name="jobcontainer", env_vars={}):
+
+    body = client.V1Job(api_version="batch/v1", kind="Job")
+    body.metadata = client.V1ObjectMeta(namespace=namespace, name=name)
+    body.status = client.V1JobStatus()
+
+    template = client.V1PodTemplate()
+    template.template = client.V1PodTemplateSpec()
+    env_list = [
+        client.V1EnvVar(name="ES_URL", value=os.getenv("ES_URL")),
+        client.V1EnvVar(name="INDEX_NAME", value="training-docs"), 
+        client.V1EnvVar(name="FILE_NAME", value=f_name), 
+        client.V1EnvVar(name="BUCKET_NAME", value=bucket_name),
+        client.V1EnvVar(name="PASSWORD", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(key="elastic", name="elasticsearch-ha-es-elastic-user"))), 
+    ]
+
+    container = client.V1Container(name=container_name, image=container_image, image_pull_policy='Always', env=env_list)
+    template.template.spec = client.V1PodSpec(containers=[container], restart_policy='Never', service_account='embed-docs-sa')
+
+    body.spec = client.V1JobSpec(backoff_limit=3, ttl_seconds_after_finished=60, template=template.template)
+    return body
+
+def kube_test_credentials():
+    try: 
+        api_response = api_instance.get_api_resources()
+        logging.info(api_response)
+    except ApiException as e:
+        print("Exception when calling API: %s\n" % e)
+
+def kube_create_job(bckt, f_name, id):
+    container_image = os.getenv("JOB_IMAGE")
+    namespace = os.getenv("JOB_NAMESPACE")
+    name = "docs-embedder" + id
+    body = kube_create_job_object(name, container_image, bckt, f_name)
+    v1=client.BatchV1Api()
+    try: 
+        v1.create_namespaced_job(namespace, body, pretty=True)
+    except ApiException as e:
+        print("Exception when calling BatchV1Api-&gt;create_namespaced_job: %s\n" % e)
+    return
+
+if __name__ == '__main__':
+    app.run('0.0.0.0', port=5001, debug=True)
+</pre> </div> </section> <section><p class="_code-tab"><strong>PGVector</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from flask import Flask, jsonify
+from flask import request
+import logging
+import sys,os, time
+from kubernetes import client, config, utils
+import kubernetes.client
+from kubernetes.client.rest import ApiException
+
+
+app = Flask(__name__)
+@app.route('/check')
+def message():
+    return jsonify({"Message": "Hi there"})
+
+
+@app.route('/', methods=['POST'])
+def bucket():
+    request_data = request.get_json()
+    print(request_data)
+    bckt = request_data['bucket']
+    f_name = request_data['name']
+    id = request_data['generation'] 
+    kube_create_job(bckt, f_name, id)
+    return "ok"
+
+# Set logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
+# Setup K8 configs
+config.load_incluster_config()
+def kube_create_job_object(name, container_image, bucket_name, f_name, namespace="pg-ns", container_name="jobcontainer", env_vars={}):
+
+    body = client.V1Job(api_version="batch/v1", kind="Job")
+    body.metadata = client.V1ObjectMeta(namespace=namespace, name=name)
+    body.status = client.V1JobStatus()
+
+    template = client.V1PodTemplate()
+    template.template = client.V1PodTemplateSpec()
+    env_list = [
+        client.V1EnvVar(name="POSTGRES_HOST", value=os.getenv("POSTGRES_HOST")),
+        client.V1EnvVar(name="DATABASE_NAME", value="app"), 
+        client.V1EnvVar(name="COLLECTION_NAME", value="training-docs"), 
+        client.V1EnvVar(name="FILE_NAME", value=f_name), 
+        client.V1EnvVar(name="BUCKET_NAME", value=bucket_name),
+        client.V1EnvVar(name="PASSWORD", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(key="password", name="gke-pg-cluster-app"))), 
+        client.V1EnvVar(name="USERNAME", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(key="username", name="gke-pg-cluster-app"))), 
+    ]
+
+    container = client.V1Container(name=container_name, image=container_image, image_pull_policy='Always', env=env_list)
+    template.template.spec = client.V1PodSpec(containers=[container], restart_policy='Never', service_account='embed-docs-sa')
+
+    body.spec = client.V1JobSpec(backoff_limit=3, ttl_seconds_after_finished=60, template=template.template)
+    return body
+def kube_test_credentials():
+    try: 
+        api_response = api_instance.get_api_resources()
+        logging.info(api_response)
+    except ApiException as e:
+        print("Exception when calling API: %s\n" % e)
+
+def kube_create_job(bckt, f_name, id):
+    container_image = os.getenv("JOB_IMAGE")
+    namespace = os.getenv("JOB_NAMESPACE")
+    name = "docs-embedder" + id
+    body = kube_create_job_object(name, container_image, bckt, f_name)
+    v1=client.BatchV1Api()
+    try: 
+        v1.create_namespaced_job(namespace, body, pretty=True)
+    except ApiException as e:
+        print("Exception when calling BatchV1Api-&gt;create_namespaced_job: %s\n" % e)
+    return
+
+if __name__ == '__main__':
+    app.run('0.0.0.0', port=5001, debug=True)
+</pre> </div> </section> <section><p class="_code-tab"><strong>Weaviate</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from flask import Flask, jsonify
+from flask import request
+import logging
+import sys,os, time
+from kubernetes import client, config, utils
+import kubernetes.client
+from kubernetes.client.rest import ApiException
+
+
+app = Flask(__name__)
+@app.route('/check')
+def message():
+    return jsonify({"Message": "Hi there"})
+
+
+@app.route('/', methods=['POST'])
+def bucket():
+    request_data = request.get_json()
+    print(request_data)
+    bckt = request_data['bucket']
+    f_name = request_data['name']
+    id = request_data['generation'] 
+    kube_create_job(bckt, f_name, id)
+    return "ok"
+
+# Set logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
+# Setup K8 configs
+config.load_incluster_config()
+def kube_create_job_object(name, container_image, bucket_name, f_name, namespace, container_name="jobcontainer", env_vars={}):
+
+    body = client.V1Job(api_version="batch/v1", kind="Job")
+    body.metadata = client.V1ObjectMeta(namespace=namespace, name=name)
+    body.status = client.V1JobStatus()
+
+    template = client.V1PodTemplate()
+    template.template = client.V1PodTemplateSpec()
+    env_list = [
+        client.V1EnvVar(name="WEAVIATE_ENDPOINT", value=os.getenv("WEAVIATE_ENDPOINT")),
+        client.V1EnvVar(name="WEAVIATE_GRPC_ENDPOINT", value=os.getenv("WEAVIATE_GRPC_ENDPOINT")),
+        client.V1EnvVar(name="FILE_NAME", value=f_name), 
+        client.V1EnvVar(name="BUCKET_NAME", value=bucket_name),
+        client.V1EnvVar(name="APIKEY", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(key="AUTHENTICATION_APIKEY_ALLOWED_KEYS", name="apikeys"))), 
+    ]
+
+    container = client.V1Container(name=container_name, image=container_image, image_pull_policy='Always', env=env_list)
+    template.template.spec = client.V1PodSpec(containers=[container], restart_policy='Never', service_account='embed-docs-sa')
+
+    body.spec = client.V1JobSpec(backoff_limit=3, ttl_seconds_after_finished=60, template=template.template)
+    return body
+def kube_test_credentials():
+    try: 
+        api_response = api_instance.get_api_resources()
+        logging.info(api_response)
+    except ApiException as e:
+        print("Exception when calling API: %s\n" % e)
+
+def kube_create_job(bckt, f_name, id):
+    container_image = os.getenv("JOB_IMAGE")
+    namespace = os.getenv("JOB_NAMESPACE")
+    name = "docs-embedder" + id
+    body = kube_create_job_object(name, container_image, bckt, f_name, namespace)
+    v1=client.BatchV1Api()
+    try: 
+        v1.create_namespaced_job(namespace, body, pretty=True)
+    except ApiException as e:
+        print("Exception when calling BatchV1Api-&gt;create_namespaced_job: %s\n" % e)
+    return
+
+if __name__ == '__main__':
+    app.run('0.0.0.0', port=5001, debug=True)
+</pre> </div> </section> </div> <h3 id="about_embedding-jobpy">About <code translate="no" dir="ltr">embedding-job.py</code>
+</h3> <p>This file processes documents and sends them to the vector database.</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import ChatVertexAI
+from langchain.prompts import ChatPromptTemplate
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain.memory import ConversationBufferWindowMemory
+from langchain_community.vectorstores import Qdrant
+from qdrant_client import QdrantClient
+import streamlit as st
+import os
+
+vertexAI = ChatVertexAI(model_name=os.getenv("VERTEX_AI_MODEL_NAME", "gemini-2.5-flash-preview-04-17"), streaming=True, convert_system_message_to_human=True)
+prompt_template = ChatPromptTemplate.from_messages(
+    [
+        ("system", "You are a helpful assistant who helps in finding answers to questions using the provided context."),
+        ("human", """
+        The answer should be based on the text context given in "text_context" and the conversation history given in "conversation_history" along with its Caption: \n
+        Base your response on the provided text context and the current conversation history to answer the query.
+        Select the most relevant information from the context.
+        Generate a draft response using the selected information. Remove duplicate content from the draft response.
+        Generate your final response after adjusting it to increase accuracy and relevance.
+        Now only show your final response!
+        If you do not know the answer or context is not relevant, response with "I don't know".
+
+        text_context:
+        {context}
+
+        conversation_history:
+        {history}
+
+        query:
+        {query}
+        """),
+    ]
+)
+
+embedding_model = VertexAIEmbeddings("text-embedding-005")
+
+client = QdrantClient(
+    url=os.getenv("QDRANT_URL"),
+    api_key=os.getenv("APIKEY"),
+)
+collection_name = os.getenv("COLLECTION_NAME")
+vector_search = Qdrant(client, collection_name, embeddings=embedding_model)
+def format_docs(docs):
+    return "\n\n".join([d.page_content for d in docs])
+
+st.title("🤖 Chatbot")
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [{"role": "ai", "content": "How can I help you?"}]
+if "memory" not in st.session_state:
+    st.session_state["memory"] = ConversationBufferWindowMemory(
+        memory_key="history",
+        ai_prefix="Bob",
+        human_prefix="User",
+        k=3,
+    )
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+if chat_input := st.chat_input():
+    with st.chat_message("human"):
+        st.write(chat_input)
+        st.session_state.messages.append({"role": "human", "content": chat_input})
+
+    found_docs = vector_search.similarity_search(chat_input)
+    context = format_docs(found_docs)
+
+    prompt_value = prompt_template.format_messages(name="Bob", query=chat_input, context=context, history=st.session_state.memory.load_memory_variables({}))
+    with st.chat_message("ai"):
+        with st.spinner("Typing..."):
+            content = ""
+            with st.empty():
+                for chunk in vertexAI.stream(prompt_value):
+                    content += chunk.content
+                    st.write(content)
+            st.session_state.messages.append({"role": "ai", "content": content})
+
+    st.session_state.memory.save_context({"input": chat_input}, {"output": content})
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from elasticsearch import Elasticsearch
+from langchain_community.vectorstores.elasticsearch import ElasticsearchStore
+from google.cloud import storage
+import os
+
+bucketname = os.getenv("BUCKET_NAME")
+filename = os.getenv("FILE_NAME")
+
+storage_client = storage.Client()
+bucket = storage_client.bucket(bucketname)
+blob = bucket.blob(filename)
+blob.download_to_filename("/documents/" + filename)
+
+loader = PyPDFLoader("/documents/" + filename)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+documents = loader.load_and_split(text_splitter)
+
+embeddings = VertexAIEmbeddings("text-embedding-005")
+
+client = Elasticsearch(
+    [os.getenv("ES_URL")], 
+    verify_certs=False, 
+    ssl_show_warn=False,
+    basic_auth=("elastic", os.getenv("PASSWORD"))
+)
+
+db = ElasticsearchStore.from_documents(
+    documents,
+    embeddings,
+    es_connection=client,
+    index_name=os.getenv("INDEX_NAME")
+)
+db.client.indices.refresh(index=os.getenv("INDEX_NAME"))
+
+print(filename + " was successfully embedded") 
+print(f"# of vectors = {len(documents)}")
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>PGVector</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores.pgvector import PGVector
+from google.cloud import storage
+import os
+bucketname = os.getenv("BUCKET_NAME")
+filename = os.getenv("FILE_NAME")
+
+storage_client = storage.Client()
+bucket = storage_client.bucket(bucketname)
+blob = bucket.blob(filename)
+blob.download_to_filename("/documents/" + filename)
+
+loader = PyPDFLoader("/documents/" + filename)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+documents = loader.load_and_split(text_splitter)
+for document in documents:
+    document.page_content = document.page_content.replace('\x00', '')
+
+embeddings = VertexAIEmbeddings("text-embedding-005")
+
+CONNECTION_STRING = PGVector.connection_string_from_db_params(
+    driver="psycopg2",
+    host=os.environ.get("POSTGRES_HOST"),
+    port=5432,
+    database=os.environ.get("DATABASE_NAME"),
+    user=os.environ.get("USERNAME"),
+    password=os.environ.get("PASSWORD"),
+)
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME")
+
+db = PGVector.from_documents(
+    embedding=embeddings,
+    documents=documents,
+    collection_name=COLLECTION_NAME,
+    connection_string=CONNECTION_STRING,
+    use_jsonb=True
+)
+
+print(filename + " was successfully embedded") 
+print(f"# of vectors = {len(documents)}")
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>Weaviate</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import weaviate
+from weaviate.connect import ConnectionParams
+from langchain_weaviate.vectorstores import WeaviateVectorStore
+from google.cloud import storage
+import os
+bucketname = os.getenv("BUCKET_NAME")
+filename = os.getenv("FILE_NAME")
+
+storage_client = storage.Client()
+bucket = storage_client.bucket(bucketname)
+blob = bucket.blob(filename)
+blob.download_to_filename("/documents/" + filename)
+
+loader = PyPDFLoader("/documents/" + filename)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+documents = loader.load_and_split(text_splitter)
+
+embeddings = VertexAIEmbeddings("text-embedding-005")
+
+auth_config = weaviate.auth.AuthApiKey(api_key=os.getenv("APIKEY"))
+client = weaviate.WeaviateClient(
+    connection_params=ConnectionParams.from_params(
+        http_host=os.getenv("WEAVIATE_ENDPOINT"),
+        http_port="80",
+        http_secure=False,
+        grpc_host=os.getenv("WEAVIATE_GRPC_ENDPOINT"),
+        grpc_port="50051",
+        grpc_secure=False,
+    ),
+    auth_client_secret=auth_config
+)
+client.connect()
+if not client.collections.exists("trainingdocs"):
+    collection = client.collections.create(name="trainingdocs")
+db = WeaviateVectorStore.from_documents(documents, embeddings, client=client, index_name="trainingdocs")
+
+print(filename + " was successfully embedded") 
+print(f"# of vectors = {len(documents)}")
+
+</pre> </div> </section> </div> <h3 id="about_chatpy">About <code translate="no" dir="ltr">chat.py</code>
+</h3> <p>This file configures the model to answer questions using only the provided context and previous answers. If the context or conversation history does not match any data, the model returns <code translate="no" dir="ltr">I don't know</code>.</p> <div> <section><p class="_code-tab"><strong>Qdrant</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from flask import Flask, jsonify
+from flask import request
+import logging
+import sys,os, time
+from kubernetes import client, config, utils
+import kubernetes.client
+from kubernetes.client.rest import ApiException
+
+
+app = Flask(__name__)
+@app.route('/check')
+def message():
+    return jsonify({"Message": "Hi there"})
+
+
+@app.route('/', methods=['POST'])
+def bucket():
+    request_data = request.get_json()
+    print(request_data)
+    bckt = request_data['bucket']
+    f_name = request_data['name']
+    id = request_data['generation'] 
+    kube_create_job(bckt, f_name, id)
+    return "ok"
+
+# Set logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
+# Setup K8 configs
+config.load_incluster_config()
+def kube_create_job_object(name, container_image, bucket_name, f_name, namespace="qdrant", container_name="jobcontainer", env_vars={}):
+
+    body = client.V1Job(api_version="batch/v1", kind="Job")
+    body.metadata = client.V1ObjectMeta(namespace=namespace, name=name)
+    body.status = client.V1JobStatus()
+
+    template = client.V1PodTemplate()
+    template.template = client.V1PodTemplateSpec()
+    env_list = [
+        client.V1EnvVar(name="QDRANT_URL", value=os.getenv("QDRANT_URL")),
+        client.V1EnvVar(name="COLLECTION_NAME", value="training-docs"), 
+        client.V1EnvVar(name="FILE_NAME", value=f_name), 
+        client.V1EnvVar(name="BUCKET_NAME", value=bucket_name),
+        client.V1EnvVar(name="APIKEY", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(key="api-key", name="qdrant-database-apikey"))), 
+    ]
+
+    container = client.V1Container(name=container_name, image=container_image, env=env_list)
+    template.template.spec = client.V1PodSpec(containers=[container], restart_policy='Never', service_account='embed-docs-sa')
+
+    body.spec = client.V1JobSpec(backoff_limit=3, ttl_seconds_after_finished=60, template=template.template)
+    return body
+def kube_test_credentials():
+    try: 
+        api_response = api_instance.get_api_resources()
+        logging.info(api_response)
+    except ApiException as e:
+        print("Exception when calling API: %s\n" % e)
+
+def kube_create_job(bckt, f_name, id):
+    container_image = os.getenv("JOB_IMAGE")
+    namespace = os.getenv("JOB_NAMESPACE")
+    name = "docs-embedder" + id
+    body = kube_create_job_object(name, container_image, bckt, f_name)
+    v1=client.BatchV1Api()
+    try: 
+        v1.create_namespaced_job(namespace, body, pretty=True)
+    except ApiException as e:
+        print("Exception when calling BatchV1Api-&gt;create_namespaced_job: %s\n" % e)
+    return
+
+if __name__ == '__main__':
+    app.run('0.0.0.0', port=5001, debug=True)
+</pre> </div> </section> <section><p class="_code-tab"><strong>Elasticsearch</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import ChatVertexAI
+from langchain.prompts import ChatPromptTemplate
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain.memory import ConversationBufferWindowMemory
+from elasticsearch import Elasticsearch
+from langchain_community.vectorstores.elasticsearch import ElasticsearchStore
+import streamlit as st
+import os
+
+vertexAI = ChatVertexAI(model_name=os.getenv("VERTEX_AI_MODEL_NAME", "gemini-2.5-flash-preview-04-17"), streaming=True, convert_system_message_to_human=True)
+prompt_template = ChatPromptTemplate.from_messages(
+    [
+        ("system", "You are a helpful assistant who helps in finding answers to questions using the provided context."),
+        ("human", """
+        The answer should be based on the text context given in "text_context" and the conversation history given in "conversation_history" along with its Caption: \n
+        Base your response on the provided text context and the current conversation history to answer the query.
+        Select the most relevant information from the context.
+        Generate a draft response using the selected information. Remove duplicate content from the draft response.
+        Generate your final response after adjusting it to increase accuracy and relevance.
+        Now only show your final response!
+        If you do not know the answer or context is not relevant, response with "I don't know".
+
+        text_context:
+        {context}
+
+        conversation_history:
+        {history}
+
+        query:
+        {query}
+        """),
+    ]
+)
+
+embedding_model = VertexAIEmbeddings("text-embedding-005")
+
+client = Elasticsearch(
+    [os.getenv("ES_URL")], 
+    verify_certs=False, 
+    ssl_show_warn=False,
+    basic_auth=("elastic", os.getenv("PASSWORD"))
+)
+vector_search = ElasticsearchStore(
+    index_name=os.getenv("INDEX_NAME"),
+    es_connection=client,
+    embedding=embedding_model
+)
+
+def format_docs(docs):
+    return "\n\n".join([d.page_content for d in docs])
+
+st.title("🤖 Chatbot")
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [{"role": "ai", "content": "How can I help you?"}]
+
+if "memory" not in st.session_state:
+    st.session_state["memory"] = ConversationBufferWindowMemory(
+        memory_key="history",
+        ai_prefix="Bot",
+        human_prefix="User",
+        k=3,
+    )
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+if chat_input := st.chat_input():
+    with st.chat_message("human"):
+        st.write(chat_input)
+        st.session_state.messages.append({"role": "human", "content": chat_input})
+
+    found_docs = vector_search.similarity_search(chat_input)
+    context = format_docs(found_docs)
+
+    prompt_value = prompt_template.format_messages(name="Bot", query=chat_input, context=context, history=st.session_state.memory.load_memory_variables({}))
+    with st.chat_message("ai"):
+        with st.spinner("Typing..."):
+            content = ""
+            with st.empty():
+                for chunk in vertexAI.stream(prompt_value):
+                    content += chunk.content
+                    st.write(content)
+            st.session_state.messages.append({"role": "ai", "content": content})
+
+    st.session_state.memory.save_context({"input": chat_input}, {"output": content})
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>PGVector</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import ChatVertexAI
+from langchain.prompts import ChatPromptTemplate
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain.memory import ConversationBufferWindowMemory
+from langchain_community.vectorstores.pgvector import PGVector
+import streamlit as st
+import os
+
+vertexAI = ChatVertexAI(model_name=os.getenv("VERTEX_AI_MODEL_NAME", "gemini-2.5-flash-preview-04-17"), streaming=True, convert_system_message_to_human=True)
+prompt_template = ChatPromptTemplate.from_messages(
+    [
+        ("system", "You are a helpful assistant who helps in finding answers to questions using the provided context."),
+        ("human", """
+        The answer should be based on the text context given in "text_context" and the conversation history given in "conversation_history" along with its Caption: \n
+        Base your response on the provided text context and the current conversation history to answer the query.
+        Select the most relevant information from the context.
+        Generate a draft response using the selected information. Remove duplicate content from the draft response.
+        Generate your final response after adjusting it to increase accuracy and relevance.
+        Now only show your final response!
+        If you do not know the answer or context is not relevant, response with "I don't know".
+
+        text_context:
+        {context}
+
+        conversation_history:
+        {history}
+
+        query:
+        {query}
+        """),
+    ]
+)
+
+embedding_model = VertexAIEmbeddings("text-embedding-005")
+
+CONNECTION_STRING = PGVector.connection_string_from_db_params(
+    driver="psycopg2",
+    host=os.environ.get("POSTGRES_HOST"),
+    port=5432,
+    database=os.environ.get("DATABASE_NAME"),
+    user=os.environ.get("USERNAME"),
+    password=os.environ.get("PASSWORD"),
+)
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME"),
+
+vector_search = PGVector(
+    collection_name=COLLECTION_NAME,
+    connection_string=CONNECTION_STRING,
+    embedding_function=embedding_model,
+)
+
+def format_docs(docs):
+    return "\n\n".join([d.page_content for d in docs])
+
+st.title("🤖 Chatbot")
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [{"role": "ai", "content": "How can I help you?"}]
+
+if "memory" not in st.session_state:
+    st.session_state["memory"] = ConversationBufferWindowMemory(
+        memory_key="history",
+        ai_prefix="Bot",
+        human_prefix="User",
+        k=3,
+    )
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+if chat_input := st.chat_input():
+    with st.chat_message("human"):
+        st.write(chat_input)
+        st.session_state.messages.append({"role": "human", "content": chat_input})
+
+    found_docs = vector_search.similarity_search(chat_input)
+    context = format_docs(found_docs)
+
+    prompt_value = prompt_template.format_messages(name="Bot", query=chat_input, context=context, history=st.session_state.memory.load_memory_variables({}))
+    with st.chat_message("ai"):
+        with st.spinner("Typing..."):
+            content = ""
+            with st.empty():
+                for chunk in vertexAI.stream(prompt_value):
+                    content += chunk.content
+                    st.write(content)
+            st.session_state.messages.append({"role": "ai", "content": content})
+
+    st.session_state.memory.save_context({"input": chat_input}, {"output": content})
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>Weaviate</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language=""># Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from langchain_google_vertexai import ChatVertexAI
+from langchain.prompts import ChatPromptTemplate
+from langchain_google_vertexai import VertexAIEmbeddings
+from langchain.memory import ConversationBufferWindowMemory
+import weaviate
+from weaviate.connect import ConnectionParams
+from langchain_weaviate.vectorstores import WeaviateVectorStore
+import streamlit as st
+import os
+
+vertexAI = ChatVertexAI(model_name=os.getenv("VERTEX_AI_MODEL_NAME", "gemini-2.5-flash-preview-04-17"), streaming=True, convert_system_message_to_human=True)
+prompt_template = ChatPromptTemplate.from_messages(
+    [
+        ("system", "You are a helpful assistant who helps in finding answers to questions using the provided context."),
+        ("human", """
+        The answer should be based on the text context given in "text_context" and the conversation history given in "conversation_history" along with its Caption: \n
+        Base your response on the provided text context and the current conversation history to answer the query.
+        Select the most relevant information from the context.
+        Generate a draft response using the selected information. Remove duplicate content from the draft response.
+        Generate your final response after adjusting it to increase accuracy and relevance.
+        Now only show your final response!
+        If you do not know the answer or context is not relevant, response with "I don't know".
+
+        text_context:
+        {context}
+
+        conversation_history:
+        {history}
+
+        query:
+        {query}
+        """),
+    ]
+)
+
+embedding_model = VertexAIEmbeddings("text-embedding-005")
+
+auth_config = weaviate.auth.AuthApiKey(api_key=os.getenv("APIKEY"))
+client = weaviate.WeaviateClient(
+    connection_params=ConnectionParams.from_params(
+        http_host=os.getenv("WEAVIATE_ENDPOINT"),
+        http_port="80",
+        http_secure=False,
+        grpc_host=os.getenv("WEAVIATE_GRPC_ENDPOINT"),
+        grpc_port="50051",
+        grpc_secure=False,
+    ),
+    auth_client_secret=auth_config
+)
+client.connect()
+
+vector_search = WeaviateVectorStore.from_documents([],embedding_model,client=client, index_name="trainingdocs")
+
+def format_docs(docs):
+    return "\n\n".join([d.page_content for d in docs])
+
+st.title("🤖 Chatbot")
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [{"role": "ai", "content": "How can I help you?"}]
+
+if "memory" not in st.session_state:
+    st.session_state["memory"] = ConversationBufferWindowMemory(
+        memory_key="history",
+        ai_prefix="Bot",
+        human_prefix="User",
+        k=3,
+    )
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+
+if chat_input := st.chat_input():
+    with st.chat_message("human"):
+        st.write(chat_input)
+        st.session_state.messages.append({"role": "human", "content": chat_input})
+
+    found_docs = vector_search.similarity_search(chat_input)
+    context = format_docs(found_docs)
+
+    prompt_value = prompt_template.format_messages(name="Bot", query=chat_input, context=context, history=st.session_state.memory.load_memory_variables({}))
+    with st.chat_message("ai"):
+        with st.spinner("Typing..."):
+            content = ""
+            with st.empty():
+                for chunk in vertexAI.stream(prompt_value):
+                    content += chunk.content
+                    st.write(content)
+            st.session_state.messages.append({"role": "ai", "content": content})
+
+    st.session_state.memory.save_context({"input": chat_input}, {"output": content})
+
+</pre> </div> </section> </div> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <p>The easiest way to avoid billing is to delete the project you created for this tutorial.</p> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> <p>If you deleted the project, your clean up is complete. If you didn't delete the project, proceed to delete the individual resources.</p> <h3 id="delete_individual_resources">Delete individual resources</h3> <ol> <li>
+<p>Delete the Artifact Registry repository:</p> 
+<pre>gcloud artifacts repositories delete ${KUBERNETES_CLUSTER_PREFIX}-images \
+    --location=${REGION} \
+    --async
+</pre> <p>When prompted, type <code translate="no" dir="ltr">y</code>.</p>
+</li> <li>
+<p>Delete the Cloud Storage bucket and the Eventarc trigger:</p> 
+<pre>export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=vector-database/terraform/cloud-storage destroy \
+  -var project_id=${PROJECT_ID} \
+  -var region=${REGION} \
+  -var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX} \
+  -var db_namespace=${DB_NAMESPACE}
+</pre> <p>When prompted, type <code translate="no" dir="ltr">yes</code>.</p> <p>Eventarc requires that you have a valid endpoint target both during creation and during deletion.</p>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn about the <a href="../concepts/database-options">best practices for deploying databases on GKE</a>.</li> <li>Discover solutions for running <a href="../integrations/data">data-intensive workloads with GKE</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/build-rag-chatbot" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/build-rag-chatbot</a>
+  </p>
+</div>

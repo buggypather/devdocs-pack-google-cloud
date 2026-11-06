@@ -1,0 +1,77 @@
+<h1>Publish hedging</h1> <p>High tail latency when publishing messages can be caused by transient network delays or temporary server-side slowness. Publish hedging lets a Pub/Sub publisher client send a backup (hedged) publish request in parallel if an in-flight request does not complete within a configured delay, using whichever response returns first.</p> <p>This document provides information about using publish hedging with messages published to a topic.</p> <h2 id="before-you-begin">Before you begin</h2> <p>Before configuring the publish workflow, ensure you have completed the following tasks:</p> <ul> <li>Learn about <a href="pubsub-basics">topics and the publishing workflow</a>.</li> <li>
+<a href="create-topic">Create a topic</a>.</li> </ul> <h3 id="required-roles">Required roles</h3> <p> To get the permissions that you need to send hedged publish requests to a topic, ask your administrator to grant you the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/pubsub#pubsub.publisher">Pub/Sub Publisher </a> (<code translate="no" dir="ltr">roles/pubsub.publisher</code>) IAM role on the topic. For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>You need <a href="access-control">additional permissions</a> to create or update topics and subscriptions.</p> <h2 id="about-publish-hedging">About publish hedging</h2> <p>Hedging settings control how and when the Pub/Sub client libraries send hedged publish requests. Publish hedging is disabled by default. When enabled, the client libraries have the following hedging settings:</p> <ul> <li>
+<strong>Hedge delay</strong>: the amount of time that a client library waits before sending an additional publish request in parallel if the previous request has not completed. The default value is 1 second, and the configured value must be between 100 milliseconds and 10 seconds.</li> <li>
+<strong>Maximum tokens</strong>: the maximum number of tokens that a client library can accumulate for sending hedged publish requests. Each hedged publish request consumes 1 token. The default value is 50, and the configured value must be between 1 and 250.</li> <li>
+<strong>Refill ratio</strong>: the number of tokens added for each successful publish request. This value controls the maximum fraction of publish requests that can be hedged over time. For example, a refill ratio of 0.1 allows up to 10% of publish requests to be hedged. The default value is 0.1, and the configured value must be between 0.001 and 0.2.</li> </ul> <p>To hedge publish requests, the hedge delay must be shorter than both the initial request timeout and the total timeout in the publisher's <a href="retry-requests">retry settings</a>. If not, the publisher client will fail to initialize. When publish hedging is enabled, the client library sends publish requests as follows:</p> <ul> <li>If an in-flight publish request doesn't complete within the hedge delay and at least one token is available, the client library consumes one token and sends an additional publish request for the same batch of messages in parallel while keeping the initial request outstanding.</li> <li>If none of the in-flight requests complete after another hedge delay, the client library continues sending additional hedged requests at intervals of the hedge delay while tokens remain available and the total timeout has not expired.</li> <li>As soon as any in-flight publish request for the batch succeeds, the client library completes the publish operation, cancels any remaining in-flight attempts for that batch, and increases the available tokens by the refill ratio, up to the maximum tokens.</li> </ul> <h2 id="hedge-publish-request">Hedge a publish request</h2> <p>Unlike <a href="retry-requests">retry requests</a>, which wait for an in-flight publish request to fail or time out, publish hedging keeps the initial request outstanding while sending a concurrent hedged request. This reduces tail latency without prematurely canceling requests that are about to succeed.</p> <p>Because multiple requests for the same batch of messages can be in flight concurrently, more than one attempt might succeed before the remaining attempts are canceled, as publish request cancellation is best-effort. As a result, you might receive duplicate messages with different message IDs, which can increase client network traffic and Pub/Sub costs for publishing and delivering those duplicates. See <a href="troubleshooting#troubleshoot-duplicates-redeliveries">"Troubleshoot duplicate, redelivered, or missing messages"</a> for tips on handling duplicate messages.</p> <p>If a service degradation causes a sustained increase in latency or errors, the maximum tokens and refill ratio settings prevent hedged publish rates from becoming too high. Because tokens are only added when publish requests succeed, sustained slowness or errors quickly deplete the available tokens and automatically throttle hedged requests.</p> <p>This sample code demonstrates creating a publisher with custom hedging settings. Not all client libraries support publish hedging; see the <a href="https://docs.cloud.google.com/pubsub/docs/reference/libraries#additional_resources" track-type="docs" track-name="internalLink" track-metadata-position="08" track-metadata-end-goal="libraryAPI">API Reference documentation</a> for your chosen language.</p> <div> <section><p class="_code-tab"><strong>Java</strong></p>
+
+<p>Before trying this sample, follow the Java setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-pubsub/latest/overview" class="external">Pub/Sub Java API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.cloud.pubsub.v1.HedgingSettings;
+import com.google.cloud.pubsub.v1.Publisher;
+import com.google.protobuf.ByteString;
+import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.TopicName;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+
+public class PublishWithHedgingSettingsExample {
+  public static void main(String... args) throws Exception {
+    // TODO(developer): Replace these variables before running the sample.
+    String projectId = "your-project-id";
+    String topicId = "your-topic-id";
+
+    publishWithHedgingSettingsExample(projectId, topicId);
+  }
+
+  public static void publishWithHedgingSettingsExample(String projectId, String topicId)
+      throws IOException, ExecutionException, InterruptedException {
+    TopicName topicName = TopicName.of(projectId, topicId);
+    Publisher publisher = null;
+
+    try {
+      // Hedging settings configures how and when the publisher sends multiple concurrent publish
+      // requests to reduce tail latency.
+      Duration hedgeDelay = Duration.ofMillis(500); // default: 1000 ms (1 second)
+      int maxTokens = 100; // default: 50
+      float refillRatio = 0.05f; // default: 0.1
+
+      HedgingSettings hedgingSettings =
+          HedgingSettings.newBuilder()
+              .setHedgeDelay(hedgeDelay)
+              .setMaxTokens(maxTokens)
+              .setRefillRatio(refillRatio)
+              .build();
+
+      // Create a publisher instance with hedging settings bound to the topic
+      publisher = Publisher.newBuilder(topicName).setHedgingSettings(hedgingSettings).build();
+
+      String message = "Hello world!";
+      ByteString data = ByteString.copyFromUtf8(message);
+      PubsubMessage pubsubMessage = PubsubMessage.newBuilder().setData(data).build();
+
+      // Once published, returns a server-assigned message id (unique within the topic)
+      ApiFuture&lt;String&gt; messageIdFuture = publisher.publish(pubsubMessage);
+      String messageId = messageIdFuture.get();
+      System.out.println("Published a message with hedging settings: " + messageId);
+
+    } finally {
+      if (publisher != null) {
+        // When finished with the publisher, shutdown to free up resources.
+        publisher.shutdown();
+        publisher.awaitTermination(1, TimeUnit.MINUTES);
+      }
+    }
+  }
+}</pre> </div> </section> </div> <h2 id="hedge-ordering">Publish hedging with ordering keys</h2> <p>Publish hedging cannot be used with <a href="ordering">message ordering</a>. Because publish hedging sends concurrent publish requests for the same batch of messages, the Pub/Sub service might receive and process those requests out of order. If you enable both message ordering and publish hedging on a publisher client, creating the publisher fails with an error.</p> <h2 id="best-practices">Tips and best practices</h2> <p>Consider the following best practices when configuring publish hedging:</p> <ul> <li>
+<strong>Use hedging for transient tail latency</strong>: Publish hedging is designed to smooth out short-lived latency spikes caused by temporary network delays or brief server-side slowness. Don't rely on hedging to mitigate sustained outages or persistent errors.</li> <li>
+<strong>Hedging with retry policies</strong>: Set a larger initial request timeout in your <a href="retry-requests">retry settings</a> alongside a shorter hedge delay. Short, aggressive timeouts cancel requests prematurely and trigger full retries, discarding work already underway on the server. A larger timeout allows the original request to complete if it is only slightly delayed.</li> <li>
+<strong>Client-side flow control and hedging</strong>: Publish hedging does not resolve client-side delays, such as CPU contention or thread starvation. If high publish latency is caused by messages queuing in client memory, using <a href="flow-control-messages">flow control</a> to manage queue sizes may help, though host resource constraints should be addressed as well.</li> <li>
+<strong>Monitor publish latency and throughput metrics</strong>: Use Monitoring metric graphs such as <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z#pubsub/topic/send_request_latencies"><code translate="no" dir="ltr">topic/send_request_latencies</code></a> to identify tail latency spikes and determine whether hedging may help. High rates of <code translate="no" dir="ltr">CANCELLED</code> errors might indicate that your request deadlines are configured too low. When tuned effectively, publish hedging keeps message throughput and <a href="https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z#pubsub/topic/byte_cost">topic byte cost</a> approximately constant even during publish tail latency.</li> </ul> <h2 id="whats-next">What's next</h2> <p>To learn how to configure advanced publishing options, see the following:</p> <ul> <li><p><a href="retry-requests">Retry requests</a></p></li> <li><p><a href="compress-messages">Compress messages</a></p></li> <li><p><a href="flow-control-messages">Flow control</a></p></li> <li><p><a href="concurrency-control-messages">Concurrency control</a></p></li> <li><p><a href="batch-messaging">Batch messaging</a></p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/pubsub/docs/publish-hedging" class="_attribution-link">https://docs.cloud.google.com/pubsub/docs/publish-hedging</a>
+  </p>
+</div>

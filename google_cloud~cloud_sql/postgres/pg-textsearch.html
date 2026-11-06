@@ -1,0 +1,75 @@
+<h1>Full-text search using pg_textsearch</h1>  <p>The <a href="https://www.tigerdata.com/blog/pg-textsearch-bm25-full-text-search-postgres"><code translate="no" dir="ltr">pg_textsearch</code></a> extension in Cloud SQL for PostgreSQL provides full-text search using the industry-standard <a href="https://en.wikipedia.org/wiki/Okapi_BM25">BM25 (Best Matching 25)</a> scoring algorithm to deliver highly accurate relevance scoring. The extension is an <a href="https://github.com/timescale/pg_textsearch">open-source project</a> available on GitHub.</p> <p>The <code translate="no" dir="ltr">pg_textsearch</code> extension requires PostgreSQL 17 or later.</p> <p>Because <code translate="no" dir="ltr">pg_textsearch</code> supports inverse document frequency, term frequency saturation, and document length normalization, it can produce more relevant results than PostgreSQL's built-in <code translate="no" dir="ltr">ts_rank</code> function. Also, because it operates directly on standard PostgreSQL storage pages, you don't have to install an external engine like Elasticsearch, or worry about dual-cluster maintenance and data synchronization. Using <code translate="no" dir="ltr">pg_textsearch</code>, you can build robust, scalable, and highly relevant search experiences without leaving the PostgreSQL ecosystem.</p> <h2 id="different_ways_to_search">Different ways to search</h2> <p>There are several options for text searching in Cloud SQL for PostgreSQL:</p> <ul> <li>
+<p><strong>Exact matching</strong>: With standard SQL search, you use the <code translate="no" dir="ltr">LIKE</code> and <code translate="no" dir="ltr">ILIKE</code> statements to scan for an exact sequence of characters. An example query would be, <code translate="no" dir="ltr">ILIKE '%smart fitness watches%'</code>, which would find instances like:</p> <ul> <li>"Explore our new <em>smart fitness watches</em> on sale."</li> <li>"<em>Smart fitness watches</em> make great gifts."</li> </ul> <p>However, it would fail to find:</p> <ul> <li>"Runners want a <em>smart</em> waterproof <em>fitness watch</em>."</li> <li>"This <em>watch</em> is particularly <em>smart</em> about <em>fitness</em>."</li> </ul>
+</li> <li>
+<p><strong>Full text search</strong>: Using the BM25 algorithm and <code translate="no" dir="ltr">tsvector</code>, full text search breaks text into root words, ignores filter words, and scores relevance. It understands language rules, including plurals and grammar, and takes into account word frequency. A full text search for <code translate="no" dir="ltr">smart AND fitness AND watches</code> would find the instances that the example exact matching query would miss, and also more complicated instances like these:</p> <ul> <li>"A <em>smart watch</em> is perfect for your daily <em>fitness</em> routine."</li> <li>"Not every <em>watch</em> is this <em>smart</em> when it comes to <em>fitness</em>."</li> </ul> <p>However, it would fail to find:</p> <ul> <li>"An intelligent health-aware <em>watch</em> can help your exercise program."</li> <li>"This intelligent exercise-tracking band is a bargain."</li> </ul>
+</li> <li><p><strong>Semantic search</strong>: Using AI models, semantic search converts text into vectors and measures similarity distance. It understands meaning, intent, context, synonyms, and related concepts. A semantic search for <code translate="no" dir="ltr">smart
+fitness watches</code> would find the example instances that the other search methods would miss. It would understand that an "intelligent health-aware watch" is the same as a "smart fitness watch", and that an "intelligent exercize-tracking band" could also be relevant. It might mistakenly match a pedometer band if it didn't prioritize "watch" sufficiently.</p></li> </ul> <h2 id="install_the_pg_textsearch_extension">Install the <code translate="no" dir="ltr">pg_textsearch</code> extension</h2> <p>Take the following steps to install and enable <code translate="no" dir="ltr">pg_textsearch</code>:</p> <ol> <li><p>Set the <a href="pg-textsearch"><code translate="no" dir="ltr">cloudsql.enable_pg_textsearch</code></a> flag to <code translate="no" dir="ltr">on</code> as described in <a href="flags#config">Configure database flags</a>. This adds <code translate="no" dir="ltr">pg_textsearch</code> to the <code translate="no" dir="ltr">shared_preload_libraries</code>.</p></li> <li>
+<p>Install the <code translate="no" dir="ltr">pg_textsearch</code> extension</p> 
+<pre>  CREATE EXTENSION pg_textsearch;
+</pre>
+</li> <li>
+<p>Verify the installation:</p> 
+<pre>  SELECT extversion FROM pg_extension WHERE extname = 'pg_textsearch'
+</pre>
+</li> </ol> <h2 id="search_using_pg_textsearch">Search using <code translate="no" dir="ltr">pg_textsearch</code>
+</h2> <p>Suppose the following sample table has been filled with data:</p> 
+<pre>CREATE TABLE documents (
+    doc_id TEXT PRIMARY KEY,
+    content TEXT,
+    text_embedding vector(3072)
+    GENERATED ALWAYS AS (embedding('gemini-embedding-001', content)) STORED 
+  );
+</pre> <p>Before using full text search, first create a BM25 index:</p> 
+<pre>CREATE INDEX idx_docs_bm25
+      ON documents
+      USING bm25 (content)
+      WITH (text_config = 'english');
+</pre> <p>You can then make a full text search query like this:</p> 
+<pre>SELECT doc_id, content, content &lt;@&gt; 'database system'
+      AS score FROM documents
+      ORDER BY content &lt;@&gt; 'database system'
+      ASC LIMIT 5;
+</pre> <h2 id="perform_hybrid_searches_using_pg_textsearch_and_vector">Perform hybrid searches using <code translate="no" dir="ltr">pg_textsearch</code> and <code translate="no" dir="ltr">vector</code>
+</h2> <p>You can use <code translate="no" dir="ltr">pg_textsearch</code> together with the <code translate="no" dir="ltr">vector</code> semantic search extension to perform hybrid searches. Install the <code translate="no" dir="ltr">vector</code> semantic search extension like this:</p> 
+<pre>CREATE EXTENSION IF NOT EXISTS vector CASCADE;
+</pre> <p>Make a hybrid semantic and full text search query like this:</p> 
+<pre>WITH
+  -- Semantic search results
+  vector_search AS (
+    SELECT doc_id,
+      RANK () OVER (ORDER BY text_embedding &lt;=&gt;
+                             google_ml.embedding('gemini-embedding-001',
+                                                 'database')::VECTOR ) AS rank
+      FROM documents
+      ORDER BY text_embedding &lt;=&gt; google_ml.embedding('gemini-embedding-001',
+                                                      'database')::VECTOR
+    LIMIT 10
+  ),
+  -- Full text search results
+  text_search AS (
+    SELECT doc_id,
+      RANK () OVER (ORDER BY content &lt;@&gt; 'database' ASC) AS rank
+    FROM documents
+    ORDER BY content &lt;@&gt; 'database' ASC
+    LIMIT 10
+  )
+  -- RRF combining both semantic and full text search results
+  SELECT
+    COALESCE(vector_search.doc_id, text_search.doc_id) AS id,
+    COALESCE(1.0 / (60 + vector_search.rank), 0.0) +
+    COALESCE(1.0 / (60 + text_search.rank), 0.0) AS rrf_score
+  FROM vector_search
+    FULL OUTER JOIN text_search ON vector_search.doc_id = text_search.doc_id
+  ORDER BY rrf_score DESC
+  LIMIT 5;
+</pre> <h2 id="flags_for_configuring_the_pg_textsearch_extension">Flags for configuring the <code translate="no" dir="ltr">pg_textsearch</code> extension</h2> <p>Use the following flags to configure <code translate="no" dir="ltr">pg_textsearch</code> full text search:</p> <ul> <li>
+<a href="https://github.com/timescale/pg_textsearch"><code translate="no" dir="ltr">pg_textsearch.bulk_load_threshold</code></a>: Terms per transaction before auto-spill. Set to 0 to disable. Default: 100,000.</li> <li>
+<a href="https://github.com/timescale/pg_textsearch"><code translate="no" dir="ltr">pg_textsearch.compress_segments</code></a>: Compress posting blocks in new segments. Default: <code translate="no" dir="ltr">on</code>.</li> <li>
+<a href="https://github.com/timescale/pg_textsearch"><code translate="no" dir="ltr">pg_textsearch.default_limit</code></a>: The maximum number of documents scored when no <code translate="no" dir="ltr">LIMIT</code> clause is present. Default: 1,000.</li> <li>
+<a href="https://github.com/timescale/pg_textsearch"><code translate="no" dir="ltr">pg_textsearch.memtable_pages_threshold</code></a>: Number of pages to chain before auto-spill. Set to 0 to disable. Default: 64.</li> <li>
+<a href="https://github.com/timescale/pg_textsearch"><code translate="no" dir="ltr">pg_textsearch.segments_per_level</code></a>: Segments per level before automatic compaction occurs. Range: 2-64. Default: 8.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/postgres/pg-textsearch" class="_attribution-link">https://docs.cloud.google.com/sql/docs/postgres/pg-textsearch</a>
+  </p>
+</div>

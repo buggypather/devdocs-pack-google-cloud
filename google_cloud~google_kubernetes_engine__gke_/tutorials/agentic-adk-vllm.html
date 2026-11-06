@@ -1,0 +1,230 @@
+<h1>Deploy an agentic AI application on GKE with the Agent Development Kit (ADK) and a self-hosted LLM</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <aside class="note"><strong>Note:</strong><span> This tutorial demonstrates a legacy approach that executes agentic AI application code in standard, un-isolated Pods. To isolate untrusted code from your host kernel and internal, refer to our <a href="https://codelabs.developers.google.com/codelabs/gke/ai-agents-on-gke">Deploying Secure AI Agents on GKE</a>, <a href="https://codelabs.developers.google.com/next26/code-generation-agent-gke">Code Generation Agent on GKE</a>, and <a href="https://codelabs.developers.google.com/codelabs/gke/high-performance-distributed-rl-sandbox">High-Performance Distributed Reinforcement Learning on GKE</a> codelabs instead.</span></aside> <p>This tutorial demonstrates how to deploy and manage containerized agentic AI/ML applications by using Google Kubernetes Engine (GKE). By combining the Google Agent Development Kit (ADK) with a self-hosted large language model (LLM) like Llama 3.1 served by vLLM, you can operationalize AI agents efficiently and at scale while maintaining full control over the model stack. This tutorial walks you through the end-to-end process of taking a Python-based agent from development to production deployment on a GKE Autopilot cluster with GPU acceleration.</p> <p>This tutorial is intended for Machine learning (ML) engineers, Developers, and Cloud architects who are interested in using Kubernetes container orchestration capabilities for serving agentic AI/ML applications. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <aside class="note"><strong>Note:</strong><span> The approach in this tutorial requires provisioning a GKE cluster with GPU hardware to run the LLM, which is different from the Vertex AI approach, where model inference is handled by Google's managed infrastructure. For more information about the Vertex AI approach, see <a href="agentic-adk-vertex">Deploy an agentic AI application on GKE with the ADK and Vertex AI</a>.</span></aside> <p>Before you begin, ensure you are familiar with the following:</p> <ul> <li><a href="https://docs.cloud.google.com/kubernetes-engine/docs">GKE</a></li> <li><a href="https://www.cloudskillsboost.google/focuses/1029">Containerization with Docker</a></li> </ul> <h2 id="background">Background</h2> <p>This section describes the key technologies used in this tutorial.</p> <h3 id="google-agent-development-kit-adk" class="hide-from-toc">Agent Development Kit (ADK)</h3> <p>Agent Development Kit (ADK) is a flexible and modular framework for developing and deploying AI agents. Although it's optimized for Gemini and the Google ecosystem, ADK doesn't require you to use a specific model or deployment, and is built for compatibility with other frameworks. ADK was designed to make agent development feel more like software development, to make it easier for developers to create, deploy, and orchestrate agentic architectures that range from basic tasks to complex workflows.</p> <p>For more information, see the <a href="https://google.github.io/adk-docs/">ADK documentation</a>.</p> <h3 id="gke-managed-kubernetes-service" class="hide-from-toc">GKE managed Kubernetes service</h3> <p>Google Cloud offers a range of services, including GKE, which is well-suited to deploying and managing AI/ML workloads. GKE is a managed Kubernetes service that simplifies deploying, scaling, and managing containerized applications. GKE provides the necessary infrastructure—including scalable resources, distributed computing, and efficient networking—to handle the computational demands of LLMs.</p> <p>For more information about key Kubernetes concepts, see <a href="../learn/get-started-with-kubernetes">Start learning about Kubernetes</a>. For more information about the GKE and how it helps you scale, automate, and manage Kubernetes, see <a href="../concepts/kubernetes-engine-overview">GKE overview</a>.</p> <h3 id="vllm" class="hide-from-toc">vLLM</h3> <p>vLLM is a highly optimized open source LLM serving framework that can increase serving throughput on GPUs, with features such as the following:</p> <ul> <li>Optimized transformer implementation with <a href="https://huggingface.co/docs/text-generation-inference/en/conceptual/paged_attention">PagedAttention</a>.</li> <li>Continuous batching to improve the overall serving throughput.</li> <li>Tensor parallelism and distributed serving on multiple GPUs.</li> </ul> <p>For more information, see the <a href="https://docs.vllm.ai/en/latest/">vLLM documentation</a>.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <p>This tutorial shows you how to do the following:</p> <ol> <li>Set up your Google Cloud environment.</li> <li>Provision a GPU-enabled GKE cluster.</li> <li>Deploy a Llama 3.1 model by using the vLLM inference server.</li> <li>Build a container image for your ADK-based agent.</li> <li>Deploy the agent to the GKE cluster and connect it to the self-hosted LLM.</li> <li>Test your deployed agent.</li> </ol> <h2 id="architecture">Architecture</h2> <p>This tutorial presents a scalable architecture for deploying agentic AI applications on GKE. The ADK agent application runs on a standard CPU node pool and the self-hosted LLM (Llama 3.1 on vLLM) runs on a GPU-enabled node pool, both within the same GKE cluster. This architecture separates the agent's application logic from the LLM inference workload, which allows each component to be scaled and managed independently.</p> <figure> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/adk-vllm-architecture.svg" alt="This diagram illustrates a scalable architecture for deploying agentic AI applications on GKE, separating the agent's application logic from the large language model (LLM) inference workload for independent scaling and management. The architecture consists of two core components: the ADK agent application running on a standard CPU node pool and the self-hosted LLM (Llama 3.1 on vLLM) running on a GPU-enabled node pool, both within the same GKE cluster."> <figcaption><b>Figure 1</b>: A scalable architecture for deploying agentic AI on GKE.</figcaption> </figure> <p>The architecture has two core components, each on its own GKE Deployment:</p> <ul> <li><p><strong>ADK agent application</strong>: your agent's custom-built business logic and tools (like <code translate="no" dir="ltr">get_weather</code>) are in a container image. The image runs on a standard CPU node pool and communicates with the LLM using an internal Kubernetes service.</p></li> <li><p><strong>Self-hosted LLM (Llama 3.1 on vLLM)</strong>: the Llama 3.1 model runs on a dedicated vLLM server on a GPU-enabled node pool. This deployment uses a public container image (<code translate="no" dir="ltr">vllm/vllm-openai:v0.8.5</code>) that's configured to download and serve the specified model from Hugging Face when the container starts. The agent communicates with this server through a REST API exposed by the <code translate="no" dir="ltr">vllm-llama3-service</code> Kubernetes service.</p></li> </ul> <p>Both the ADK agent and the vLLM deployments run on the same GKE cluster. This colocation within a single cluster simplifies networking, management, and deployment while still allowing for specialized hardware assignment for components of the application.</p> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p>This tutorial uses the following billable components of Google Cloud:</p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE</a></li> <li><a href="https://cloud.google.com/artifact-registry/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">Artifact Registry</a></li> <li><a href="https://cloud.google.com/build/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">Cloud Build</a></li> </ul> <p>Review the pricing for each service to understand potential costs.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ul> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the required APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> </cloud-free-trial> <li> <p> Make sure that you have the following role or roles on the project: roles/container.admin, roles/iam.serviceAccountAdmin, roles/artifactregistry.admin, roles/cloudbuild.builds.editor, roles/resourcemanager.projectIamAdmin </p>  <h4 class="showalways" id="check-for-the-roles">Check for the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> <p> In the <b>Principal</b> column, find all rows that identify you or a group that you're included in. To learn which groups you're included in, contact your administrator. </p> </li> <li> For all rows that specify or include you, check the <b>Role</b> column to see whether the list of roles includes the required roles. </li> </ol>   <h4 class="showalways" id="grant-the-roles">Grant the roles</h4> <ol> <li> <p> In the Google Cloud console, go to the <b>IAM</b> page. </p> <a href="https://console.cloud.google.com/projectselector/iam-admin/iam" class="button button-primary" target="console" track-name="consoleLink" track-type="quickstart" track-metadata-position="body">Go to IAM</a> </li> <li> Select the project. </li> <li> Click <span class="material-icons" aria-hidden="true" translate="no">person_add</span> <b>Grant access</b>. </li> <li> <p> In the <b>New principals</b> field, enter your user identifier. This is typically the email address for a Google Account.</p> </li> <li> Click <b>Select a role</b>, then search for the role. </li>
+<li> To grant additional roles, click <span class="material-icons" aria-hidden="true" translate="no">add</span> <b>Add another role</b> and add each additional role. </li> <li> Click <b>Save</b>. </li> </ol>  </li> <li>Obtain a <a href="https://huggingface.co/docs/hub/en/security-tokens">read-access token from Hugging Face</a> to download the Llama model. You also need to request access to the <a href="https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct">Llama 3.1 model</a>. </li> </ul> </section> <div id="tutorial-content"> <h2 id="prepare-environment">Prepare the environment</h2> <p>This tutorial uses Cloud Shell to manage resources hosted on Google Cloud. Cloud Shell comes preinstalled with the software you need for this tutorial, including <code translate="no" dir="ltr">kubectl</code>, <code translate="no" dir="ltr">terraform</code>, and the <code translate="no" dir="ltr">Google Cloud CLI</code>.</p> <p>To set up your environment with Cloud Shell, follow these steps:</p> <ol> <li>In the Google Cloud console, launch a Cloud Shell session and click <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Cloud Shell activation icon"> <strong>Activate Cloud Shell</strong>. This action launches a session in a Google Cloud console pane.</li> <li>
+<p>Set the default environment variables:</p> 
+<pre>gcloud config set project PROJECT_ID
+export GOOGLE_CLOUD_REGION=REGION
+export PROJECT_ID=PROJECT_ID
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">PROJECT_ID</var>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<var translate="no">REGION</var>: the Google Cloud region (for example, <code translate="no" dir="ltr">us-east4</code>) to provision your GKE cluster, Artifact Registry, and other regional resources. Make sure to specify a region that supports L4 GPUs and G2 machine type instances. To check for region availability, see <a href="https://docs.cloud.google.com/compute/docs/gpus/gpu-regions-zones">GPU regions and zones</a> in the Compute Engine documentation.</li> </ul>
+</li> </ol> <h3 id="clone-project">Clone the sample project</h3> <ol> <li>
+<p>From your Cloud Shell terminal, clone the tutorial's sample code repository:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples.git
+</pre>
+</li> <li>
+<p>Navigate to the tutorial directory:</p> 
+<pre>cd kubernetes-engine-samples/ai-ml/adk-vllm
+</pre>
+</li> </ol> <h3 id="create-configure-gcp-resources">Create and configure Google Cloud resources</h3> <p>To deploy your agent, you first need to provision the necessary Google Cloud resources. You can create the GKE cluster and Artifact Registry repository using either the gcloud CLI or Terraform.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>This section provides gcloud CLI commands to set up your GKE cluster and Artifact Registry.</p> <ol> <li>
+<p><strong>Create a GKE cluster</strong>: You can deploy your containerized agentic application in a GKE Autopilot or Standard cluster. Use an Autopilot cluster for a fully managed Kubernetes experience. To choose the GKE mode of operation that best fits your workloads, see <a href="../concepts/choose-cluster-mode">About GKE modes of operation</a>.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>In Cloud Shell, run the following command:</p> 
+<pre data-language="">gcloud container clusters create-auto CLUSTER_NAME \
+    --location=$GOOGLE_CLOUD_REGION
+</pre> <p>Replace <var translate="no">CLUSTER_NAME</var> with the name of your GKE cluster.</p> <p>With Autopilot, GKE automatically provisions nodes based on your workload's resource requests. The GPU required for the LLM is requested in the <code translate="no" dir="ltr">deploy-llm.yaml</code> manifest by using a <code translate="no" dir="ltr">nodeSelector</code>.</p> <p>To add a <code translate="no" dir="ltr">nodeSelector</code> request the <code translate="no" dir="ltr">nvidia-l4</code> GPU, follow these steps:</p> <ol> <li>Open <code translate="no" dir="ltr">kubernetes-engine-samples/ai-ml/adk-vllm/deploy-llm/deploy-llm.yaml</code> in an editor.</li> <li>
+<p>Add the following <code translate="no" dir="ltr">nodeSelector</code> under <code translate="no" dir="ltr">spec.template.spec</code>:</p> 
+<pre data-language="">nodeSelector:
+cloud.google.com/gke-accelerator: nvidia-l4
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>In Cloud Shell, create a Standard cluster by running the following command:</p> 
+<pre data-language="">gcloud container clusters create CLUSTER_NAME \
+    --location=$GOOGLE_CLOUD_REGION
+</pre> <p>Replace <var translate="no">CLUSTER_NAME</var> with the name of your GKE cluster.</p>
+</li> <li>
+<p>Create a GPU-enabled <a href="../concepts/node-pools">node pool</a> for your cluster by running the following command:</p> 
+<pre data-language="">gcloud container node-pools create gpu-node-pool \
+    --cluster=CLUSTER_NAME \
+    --location=$GOOGLE_CLOUD_REGION \
+    --machine-type=g2-standard-8 \
+    --accelerator=type=nvidia-l4,count=1 \
+    --enable-gvnic
+</pre> <p>The <code translate="no" dir="ltr">deploy-llm.yaml</code> file specifies an <code translate="no" dir="ltr">nvidia-l4</code> GPU, which is available in the G2 machine series. For more information about this machine type, see <a href="https://docs.cloud.google.com/compute/docs/gpus#h100-gpus">GPU machine types</a> in the Compute Engine documentation.</p>
+</li> </ol></section> </div>
+</li> <li>
+<p><strong>Create an Artifact Registry repository</strong>: Create an Artifact Registry repository to securely store and manage your agent's Docker container image.</p> 
+<pre data-language="bash">gcloud artifacts repositories create REPO_NAME \
+    --repository-format=docker \
+    --location=$GOOGLE_CLOUD_REGION
+</pre> <p>Replace <var translate="no">REPO_NAME</var> with the name of the Artifact Registry repository you want to use (for example, <code translate="no" dir="ltr">adk-repo</code>).</p>
+</li> <li>
+<p><strong>Get the repository URL</strong>: To verify the full path to your repository, run this command. You'll use this format to tag your Docker image when you build the agent image.</p> 
+<pre data-language="bash">gcloud artifacts repositories describe REPO_NAME \
+    --location $GOOGLE_CLOUD_REGION
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>This section describes how to use the Terraform configuration included in the sample repository to provision your Google Cloud resources automatically.</p> <ol> <li>
+<p><strong>Navigate to the Terraform directory</strong>: The <code translate="no" dir="ltr">\terraform</code> directory contains all the necessary configuration files to create the GKE cluster and other required resources.</p> 
+<pre data-language="">cd terraform
+</pre>
+</li> <li>
+<p><strong>Create a Terraform variables file</strong>: Copy the provided example variables file (<code translate="no" dir="ltr">example_vars.tfvars</code>) to create your own <code translate="no" dir="ltr">vars.tfvars</code> file.</p> 
+<pre data-language="">cp example_vars.tfvars vars.tfvars
+</pre> <p>Open the <code translate="no" dir="ltr">vars.tfvars</code> file in an editor and replace the placeholder values with your specific configuration. At a minimum, you must replace <var translate="no">PROJECT_ID</var> with your Google Cloud project ID and <var translate="no">CLUSTER_NAME</var> with the name of your GKE cluster.</p>
+</li> <li>
+<p><strong>Initialize Terraform</strong>: To download the necessary provider plugins for Google Cloud, run this command.</p> 
+<pre data-language="">terraform init
+</pre>
+</li> <li>
+<p><strong>Review the execution plan</strong>: This command shows the infrastructure changes Terraform will make.</p> 
+<pre data-language="">terraform plan -var-file=vars.tfvars
+</pre>
+</li> <li>
+<p><strong>Apply the configuration</strong>: To create the resources in your Google Cloud project, execute the Terraform plan. Confirm with <code translate="no" dir="ltr">yes</code> when prompted.</p> 
+<pre data-language="">terraform apply -var-file=vars.tfvars
+</pre>
+</li> </ol> <p>After you run these commands, Terraform provisions your GKE cluster and Artifact Registry repository, and configures the necessary IAM roles and service accounts, including Workload Identity Federation for GKE.</p> <p>To learn more about using Terraform, see <a href="../resources/use-terraform-gke">Provision GKE resources with Terraform</a>.</p></section> </div> <h3 id="configure-kubectl">Configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster</h3> <p>To configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster, run the following command:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=${GOOGLE_CLOUD_REGION}
+</pre> <p>Replace <var translate="no">CLUSTER_NAME</var> with the name of your GKE cluster.</p> <h2 id="build-the-agent-image">Build the agent image</h2> <p>After you create the infrastructure using either gcloud CLI or Terraform, follow these steps to build your agent application.</p> <ol> <li>
+<p><strong>Grant the required IAM role for Cloud Build</strong>: The Cloud Build service requires permissions to push the agent's container image to Artifact Registry. Grant the <code translate="no" dir="ltr">roles/artifactregistry.writer</code> role to the Compute Engine default service account, which is used by Cloud Build.</p> <ol> <li>
+<p>Construct the email for the Compute Engine default service account:</p> 
+<pre>export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+export COMPUTE_SA_EMAIL=${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
+</pre>
+</li> <li>
+<p>Grant the <code translate="no" dir="ltr">roles/artifactregistry.writer</code> role to the service account:</p> 
+<pre>gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member=serviceAccount:${COMPUTE_SA_EMAIL} \
+    --role=roles/artifactregistry.writer
+</pre>
+</li> </ol>
+</li> <li>
+<p><strong>Build and push the agent container image</strong>: From the project root directory (<code translate="no" dir="ltr">adk/llama/vllm</code>), build your Docker image and push it to your Artifact Registry by running these commands.</p> 
+<pre>export IMAGE_URL="${GOOGLE_CLOUD_REGION}-docker.pkg.dev/${PROJECT_ID}/REPO_NAME/adk-agent:latest"
+gcloud builds submit --tag $IMAGE_URL
+</pre>
+</li> <li>
+<p><strong>Verify that the image has been pushed</strong>: After the build process completes successfully, verify that your agent's container image was pushed to Artifact Registry by listing the images in your repository.</p> 
+<pre>gcloud artifacts docker images list ${GOOGLE_CLOUD_REGION}-docker.pkg.dev/${PROJECT_ID}/REPO_NAME
+</pre> <p>You should see an output that lists the image you just pushed and tagged as <code translate="no" dir="ltr">latest</code>.</p>
+</li> </ol> <h2 id="deploy-the-model">Deploy the model</h2> <p>After setting up your GKE cluster and building the agent image, the next step is to deploy the self-hosted Llama 3.1 model to your cluster. To do this, deploy a pre-configured vLLM inference server that pulls the model from Hugging Face and serves it internally within the cluster.</p> <ol> <li>
+<p><strong>Create a Kubernetes secret for Hugging Face credentials</strong>: To allow the GKE cluster to download the gated Llama 3.1 model, you must provide your <a href="https://huggingface.co/docs/hub/security-tokens">Hugging Face token</a> as a Kubernetes secret. The <code translate="no" dir="ltr">deploy-llm.yaml</code> manifest is configured to use this secret for authentication.</p> 
+<pre>kubectl create secret generic hf-secret \
+    --from-literal=hf-token-secret=HUGGING_FACE_TOKEN
+</pre> <p>Replace <var translate="no">HUGGING_FACE_TOKEN</var> with your token.</p>
+</li> <li>
+<p><strong>View the manifest</strong>: From your project root directory (<code translate="no" dir="ltr">adk/llama/vllm</code>), navigate to the <code translate="no" dir="ltr">/deploy-llm</code> directory that contains the model Deployment manifest.</p> 
+<pre>cd deploy-llm
+</pre>
+</li> <li>
+<p><strong>Apply the manifest</strong>: Run the following command to apply the <code translate="no" dir="ltr">deploy-llm.yaml</code> manifest to your cluster.</p> 
+<pre>kubectl apply -f deploy-llm.yaml
+</pre> <p>The command creates three Kubernetes resources:</p> <ul> <li>A Deployment that runs the vLLM server, configured to use the <code translate="no" dir="ltr">meta-llama/Llama-3.1-8B-Instruct</code> model.</li> <li>A Service named <code translate="no" dir="ltr">vllm-llama3-service</code> that exposes the vLLM server on an internal cluster IP address, allowing the ADK agent to communicate with it.</li> <li>A ConfigMap containing a Jinja chat template required by the Llama 3.1 model.</li> </ul>
+</li> <li>
+<p><strong>Verify the model Deployment</strong>: The vLLM server pulls the model files from Hugging Face. This process can take several minutes. You can monitor the status of the Pod to ensure its readiness.</p> <ol> <li>
+<p>Wait for the Deployment to become available.</p> 
+<pre>kubectl wait --for=condition=available --timeout=600s deployment/vllm-llama3-deployment
+</pre>
+</li> <li>
+<p>View the logs from the running Pod to confirm that the server started successfully.</p> 
+<pre>export LLM_POD=$(kubectl get pods -l app=vllm-llama3 -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -f $LLM_POD
+</pre> <p>The deployment is ready when you see log output similar to the following, indicating the LLM server has started and the API routes are available:</p> 
+<pre>INFO 07-16 14:15:16 api_server.py:129] Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+</pre>
+</li> <li>
+<p>Send a request directly to the model server to confirm that the LLM is ready. To do this, open a new Cloud Shell terminal and run the following command to forward the <code translate="no" dir="ltr">vllm-llama3-service</code> to your local machine:</p> 
+<pre>kubectl port-forward service/vllm-llama3-service 8000:8000
+</pre>
+</li> <li>
+<p>In another terminal, send a sample request to the model's API endpoint by using <code translate="no" dir="ltr">curl</code>. For example:</p> 
+<pre>curl -X POST http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "prompt": "Hello!",
+    "max_tokens": 10
+  }'
+</pre> <p>If the command returns a successful JSON response, your LLM is ready. You can now terminate the port-forward process by returning to its terminal window and pressing <code translate="no" dir="ltr">Ctrl+C</code>, then proceed to deploy the agent.</p>
+</li> </ol>
+</li> </ol> <h2 id="deploy-the-agent-application">Deploy the agent application</h2> <p>The next step is to deploy the ADK-based agent application.</p> <ol> <li>
+<p><strong>Navigate to the <code translate="no" dir="ltr">/deploy-agent</code> directory</strong>: From your project root directory (<code translate="no" dir="ltr">adk/llama/vllm</code>), navigate to the <code translate="no" dir="ltr">/deploy-agent</code> directory that contains the agent's source code and deployment manifest.</p> 
+<pre>cd ../deploy-agent
+</pre>
+</li> <li>
+<p><strong>Update the agent deployment manifest</strong>:</p> <ol> <li>
+<p>The sample <code translate="no" dir="ltr">deploy-agent.yaml</code> manifest file contains a placeholder for your project ID in the container image URL. You must replace the placeholder with your Google Cloud project ID.</p> 
+<pre>image: us-central1-docker.pkg.dev/PROJECT_ID/adk-repo/adk-agent:latest
+</pre> <p>To perform this substitution in place, you can run the following command:</p> 
+<pre>sed -i "s/&lt;PROJECT_ID&gt;/$PROJECT_ID/g" deploy-agent.yaml
+</pre>
+</li> <li>
+<p>Make sure the <code translate="no" dir="ltr">readinessProbe</code> path is set to <code translate="no" dir="ltr">/</code> instead of <code translate="no" dir="ltr">/dev-ui</code>. To perform this substitution in place, you can run the following command:</p> 
+<pre>sed -i "s|path: /dev-ui/|path: /|g" deploy-agent.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p><strong>Apply the manifest</strong>: Run the following command to apply the <code translate="no" dir="ltr">deploy-agent.yaml</code> manifest to your cluster.</p> 
+<pre>kubectl apply -f deploy-agent.yaml
+</pre> <p>This command creates two Kubernetes resources:</p> <ul> <li>A Deployment named <code translate="no" dir="ltr">adk-agent</code> that runs your custom-built agent container image.</li> <li>A Service named <code translate="no" dir="ltr">adk-agent</code> of type NodePort that exposes the agent application so it can be accessed for testing.</li> </ul>
+</li> <li>
+<p><strong>Verify the agent deployment</strong>: Check the status of the Pod to ensure it is running correctly.</p> <ol> <li>
+<p>Wait for the Deployment to become available:</p> 
+<pre>kubectl wait --for=condition=available --timeout=300s deployment/adk-agent
+</pre>
+</li> <li>
+<p>View the logs from the running agent Pod:</p> 
+<pre>export AGENT_POD=$(kubectl get pods -l app=adk-agent -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -f $AGENT_POD
+</pre>
+</li> </ol>
+</li> </ol> <p>The deployment is successful when you see log output similar to the following, indicating that the Uvicorn server is running and ready to accept requests:</p> 
+<pre>INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+</pre> <h2 id="test-your-deployed-agent">Test your deployed agent</h2> <p>After successfully deploying both the vLLM server and the agent application, you can test the end-to-end functionality by interacting with the agent's web UI.</p> <aside class="note"><strong>Note:</strong><span> This tutorial uses the LLM to determine which tool to call based on your prompt, but the tool itself uses hardcoded mock data for simplicity instead of a live API. The agent's <code translate="no" dir="ltr">get_weather</code> tool retrieves weather information from a predefined dictionary for "paris," "ottawa," and "tokyo," instead of a real-time external service.</span></aside> <ol> <li>
+<p><strong>Forward the agent's service to your local machine</strong>: The <code translate="no" dir="ltr">adk-agent</code> service is of type <code translate="no" dir="ltr">NodePort</code>, but the most direct way to access it from your Cloud Shell environment is to use the <code translate="no" dir="ltr">kubectl port-forward</code> command. Create a secure tunnel to the agent's Pod by running this command.</p> 
+<pre>kubectl port-forward $AGENT_POD 8001:8001
+</pre>
+</li> <li><p><strong>Access the agent's web UI</strong>: In Cloud Shell, click the <strong>Web Preview</strong> button and select <strong>Preview on port 8001</strong>. A new browser tab opens, displaying the agent's chat interface.</p></li> <li>
+<p><strong>Interact with the agent</strong>: Ask the agent a question that will invoke its <code translate="no" dir="ltr">get_weather</code> tool. For example:</p> 
+<pre>What's the weather like in Tokyo?
+</pre> <p>The agent will first call the LLM to understand the intent and identify the need to use the <code translate="no" dir="ltr">get_weather</code> tool. Then, it will execute the tool with "Tokyo" as the parameter. Finally, it will use the tool's output to generate a response. You should see a response similar to the following:</p> 
+<pre>  The weather in Tokyo is 25°C and sunny.
+</pre>
+</li> <li>
+<p><strong>(Optional) Verify the tool call in the logs</strong>: You can observe the agent's interaction with the LLM and the tool execution by viewing the logs of the respective Pods.</p> <ol> <li>
+<p><strong>Agent Pod logs</strong>: In a new terminal, view the logs of the <code translate="no" dir="ltr">adk-agent</code> Pod. You see the tool call and its result.</p> 
+<pre>kubectl logs -f $AGENT_POD
+</pre> <p>The output shows the tool being called and the result being processed.</p>
+</li> <li>
+<p><strong>LLM Pod logs</strong>: View the logs of the <code translate="no" dir="ltr">vllm-llama3-deployment</code> Pod to see the incoming request from the agent.</p> 
+<pre>kubectl logs -f $LLM_POD
+</pre> <p>The logs shows the full prompt sent by the agent to the LLM, including the system message, your query, and the definition of the <code translate="no" dir="ltr">get_weather</code> tool.</p>
+</li> </ol>
+</li> </ol> <p>After you finish testing, you can terminate the <code translate="no" dir="ltr">port-forward</code> process by returning to its terminal window and pressing <code translate="no" dir="ltr">Ctrl+C</code>.</p> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h2 id="delete-resources">Delete the deployed resources</h2> <p>To avoid incurring charges to your Google Cloud account for the resources that you created in this tutorial, run the following commands:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>If you used the gcloud CLI to create your resources, run the following commands to delete the GKE cluster and the Artifact Registry repository, and return the service account's permissions to its original state.</p> 
+<pre data-language="bash">gcloud container clusters delete CLUSTER_NAME \
+    --location=$GOOGLE_CLOUD_REGION
+
+gcloud artifacts repositories delete REPO_NAME \
+    --location=$GOOGLE_CLOUD_REGION
+
+gcloud projects remove-iam-policy-binding $PROJECT_ID \
+    --member=serviceAccount:${COMPUTE_SA_EMAIL} \
+    --role=roles/artifactregistry.writer
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>If you used Terraform to provision your infrastructure, you can destroy all the resources by running a single command from within the <code translate="no" dir="ltr">/terraform</code> directory.</p> <ol> <li>
+<p>From your project root directory (<code translate="no" dir="ltr">adk/llama/vllm</code>), navigate to the <code translate="no" dir="ltr">/terraform</code> directory:</p> 
+<pre data-language="">cd terraform
+</pre>
+</li> <li>
+<p>Run this command to remove all resources defined in your Terraform configuration files:</p> 
+<pre data-language="">terraform destroy
+</pre>
+</li> </ol></section> </div> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn how to configure <a href="../concepts/horizontalpodautoscaler">Horizontal Pod Autoscaler (HPA)</a> to automatically adjust your agent's resources on-demand.</li> <li>Learn how to configure <a href="https://docs.cloud.google.com/iap/docs/concepts-overview">Identity-Aware Proxy (IAP)</a> for your web applications running on Google Cloud, providing centralized authorization for access to your agent's UI.</li> <li>Learn how to use <a href="../concepts/observability">Cloud Logging and Cloud Monitoring</a> to gain insights into your agent's performance and health within your GKE cluster.</li> <li>Explore experimental samples in <a href="https://gke-ai-labs.dev/docs/agentic/">GKE AI Labs</a> that can help you use GKE to accelerate your agentic AI initiatives.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/agentic-adk-vllm" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/agentic-adk-vllm</a>
+  </p>
+</div>

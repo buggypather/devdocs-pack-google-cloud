@@ -1,0 +1,101 @@
+<h1>Optimize high CPU usage in instances</h1>  <p>This document explains how to review and optimize a Cloud SQL for SQL Server instance if that instance is identified by the underprovisioned instance recommender as having high CPU usage.</p> <p>If an instance vCPU is not sized properly, it can become a source of contention. To check if the CPU is a bottleneck or underprovisioned, use the queries in this document.</p> <h2 id="use_query_insights_to_identify_queries_that_have_high_cpu_consumption_3">Use query insights to identify queries that have high CPU consumption</h2> <p><a href="using-query-insights">Query insights</a> helps you detect, diagnose, and prevent query performance problems for Cloud SQL databases.</p> <h2 id="check_the_average_task_count">Check the average task count</h2> <p>Execute this query a couple times to check the average task count. If the average task count is consistently high, then the instance might be facing CPU pressure.</p> 
+<pre>
+SELECT AVG(current_tasks_count) AS [Avg Task Count],
+AVG(work_queue_count) AS [Avg Work Queue Count],
+AVG(runnable_tasks_count) AS [Avg Runnable Task Count],
+AVG(pending_disk_io_count) AS [Avg Pending DiskIO Count],
+GETDATE() AS [System Time]
+FROM sys.dm_os_schedulers WITH (NOLOCK)
+WHERE scheduler_id &lt; 255 OPTION (RECOMPILE);
+</pre> <h2 id="determine_if_there_is_a_need_to_add_more_vcpus">Determine if there is a need to add more vCPUs</h2> <p>Under certain conditions, you might want to increase the vCPU. Use this query to determine if there is a need to add more vCPUs.</p> 
+<pre>-- Shows queries where max and average CPU time exceeds 200 ms and executed more than 1000 times
+DECLARE @cputime_threshold_microsec INT = 200*1000
+DECLARE @execution_count INT = 1000
+SELECT qs.total_worker_time/1000 total_cpu_time_ms,
+      qs.max_worker_time/1000 max_cpu_time_ms,
+      (qs.total_worker_time/1000)/execution_count average_cpu_time_ms,
+      qs.execution_count,
+      q.[text]
+FROM sys.dm_exec_query_stats qs CROSS APPLY sys.dm_exec_sql_text(plan_handle)
+AS q
+WHERE (qs.total_worker_time/execution_count &gt; @cputime_threshold_microsec
+       OR qs.max_worker_time &gt; @cputime_threshold_microsec )
+       AND execution_count &gt; @execution_count
+       ORDER BY qs.total_worker_time DESC
+</pre> <h2 id="check_for_missing_indexes">Check for missing indexes</h2> <p>Check for missing indexes using the following query. Test these indexes on a non-production instance to see how they affect CPU performance.</p> 
+<pre>SELECT
+CONVERT(
+  decimal(18, 2), migs.user_seeks * migs.avg_total_user_cost * (migs.avg_user_impact * 0.01))
+  AS [index_advantage],
+CONVERT(nvarchar(25), migs.last_user_seek, 20) AS [last_user_seek],
+mid.[statement] AS [Database.Schema.Table],
+COUNT(1) OVER (PARTITION BY mid.[statement]) AS [missing_indexes_for_table],
+COUNT(1)
+  OVER (PARTITION BY mid.[statement], mid.equality_columns)
+  AS [similar_missing_indexes_for_table],
+mid.equality_columns,
+mid.inequality_columns,
+mid.included_columns,
+migs.user_seeks,
+CONVERT(decimal(18, 2), migs.avg_total_user_cost) AS [avg_total_user_cost],
+migs.avg_user_impact
+FROM sys.dm_db_missing_index_group_stats AS migs WITH(NOLOCK)
+INNER JOIN sys.dm_db_missing_index_groups AS mig WITH(NOLOCK)
+ON migs.group_handle = mig.index_group_handle
+INNER JOIN sys.dm_db_missing_index_details AS mid WITH(NOLOCK)
+ON mig.index_handle = mid.index_handle
+ORDER BY index_advantage DESC
+</pre> <h2 id="check_for_indexes_that_have_too_much_overhead">Check for indexes that have too much overhead</h2> <p>Adding an index can help with optimization but can also add a performance overhead contributing to higher usage in CPU and memory. Review the indexes returned that have a very high number of writes compared to a very low number of reads and consider removing them.</p> 
+<pre>SELECT
+ SCHEMA_NAME(o.[schema_id]) AS [Schema Name],
+ OBJECT_NAME(s.[object_id]) AS [TABLE Name],
+ i.name AS [Index Name],
+ i.index_id,
+ i.is_disabled,
+ i.is_hypothetical,
+ i.has_filter,
+ i.fill_factor,
+ s.user_updates AS [Total Writes],
+ s.user_seeks + s.user_scans + s.user_lookups AS [Total Reads],
+ s.user_updates - (s.user_seeks + s.user_scans + s.user_lookups) AS [Difference]
+FROM sys.dm_db_index_usage_stats AS s WITH(NOLOCK)
+INNER JOIN sys.indexes AS i WITH(NOLOCK) ON s.[object_id] = i.[object_id]
+AND i.index_id = s.index_id
+INNER JOIN sys.objects AS o WITH(NOLOCK) ON i.[object_id] = o.[object_id]
+WHERE
+ OBJECTPROPERTY(s.[object_id], 'IsUserTable') = 1
+ AND s.database_id = DB_ID()
+ AND s.user_updates &gt; (s.user_seeks + s.user_scans + s.user_lookups)
+ AND i.index_id &gt; 1
+ AND i.[type_desc] = N'NONCLUSTERED'
+ AND i.is_primary_key = 0
+ AND i.is_unique_constraint = 0
+ AND i.is_unique = 0
+ORDER BY [Difference] DESC, [Total Writes] DESC, [Total Reads] ASC
+</pre> <h2 id="find_the_top_queries_consuming_most_of_the_cpu">Find the top queries consuming most of the CPU</h2> <p>Review the top 20 queries by CPU usage or worker time. These are the queries based on the query execution stats that use most of the CPU. These stats are aggregated over time and are linked to the plans in the cache.</p> 
+<pre>SELECT
+top 20
+SUBSTRING(qt.TEXT, (qs.statement_start_offset/2)+1,
+((CASE qs.statement_end_offset
+WHEN -1 THEN DATALENGTH(qt.TEXT)
+ELSE qs.statement_end_offset
+END - qs.statement_start_offset)/2)+1),
+qs.execution_count,
+qs.total_logical_reads, qs.last_logical_reads,
+qs.total_logical_writes, qs.last_logical_writes,
+qs.total_worker_time,
+qs.last_worker_time,
+qs.total_elapsed_time/1000000 total_elapsed_time_in_S,
+qs.last_elapsed_time/1000000 last_elapsed_time_in_S,
+qs.last_execution_time,
+qp.query_plan
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+ORDER BY qs.total_worker_time DESC -- CPU time
+</pre> <h2 id="check_for_implicit_conversions_in_query_plans">Check for implicit conversions in query plans</h2> <p>This operation is expensive and usually shows up as a warning in the query execution plan. The message usually has a warning that says it might affect <code translate="no" dir="ltr">CardinalityEstimate</code> in the query plan choice. You can identify implicit conversions when viewing the query plans in <a href="https://docs.microsoft.com/en-us/sql/ssms/sql-server-management-studio-ssms">SQL Server Management Studio (SSMS)</a>.</p> <h2 id="whats_next">What's next</h2> <ul> <li><a href="https://docs.cloud.google.com/recommender/docs/recommenders">Google Cloud recommenders</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/sqlserver/optimize-cpu-usage" class="_attribution-link">https://docs.cloud.google.com/sql/docs/sqlserver/optimize-cpu-usage</a>
+  </p>
+</div>

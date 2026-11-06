@@ -1,0 +1,162 @@
+<h1>Accelerate read performance of stateful workloads with GKE Data Cache</h1>  This guide describes how you can improve the performance of read-heavy stateful applications by using GKE Data Cache in your Google Kubernetes Engine (GKE) clusters. GKE Data Cache is a managed block storage solution that speeds up read operations for your stateful applications, like databases, that run on GKE. <p>You can use Data Cache only with GKE Standard clusters. This guide walks you through enabling GKE Data Cache when you create a new GKE Standard cluster or a node pool, and provisioning GKE attached disks with Data Cache acceleration.</p> <h2 id="about-gke-data-cache">About GKE Data Cache</h2> <p>With GKE Data Cache, you can use Local SSDs on your GKE nodes as a cache layer for your persistent storage, like Persistent Disks or Hyperdisks. Using Local SSDs reduces disk read latency and increase the queries per second (QPS) for your stateful workloads while minimizing memory requirements. GKE Data Cache supports all types of <a href="https://docs.cloud.google.com/compute/docs/disks/persistent-disks#disk-types">Persistent Disk</a> or <a href="../../concepts/hyperdisk">Hyperdisk</a> as backing disks.</p> <p>To use GKE Data Cache for your application, configure your GKE node pool with attached Local SSDs. You can configure GKE Data Cache to use all or part of the attached Local SSD. Local SSDs that are used by the GKE Data Cache solution are <a href="https://docs.cloud.google.com/compute/docs/disks/disk-encryption">encrypted at rest by using standard Google Cloud encryption</a>.</p> <h3 id="benefits">Benefits</h3> <p>GKE Data Cache offers the following benefits:</p> <ul> <li>Increased rate of queries handled per second for conventional databases, like MySQL or Postgres, and vector databases.</li> <li>Improved read performance for stateful applications by minimizing disk latency.</li> <li>Faster data hydration and rehydration because the SSDs are local to the node. <em>Data hydration</em> refers to the initial process of loading the necessary data from persistent storage onto the Local SSD. <em>Data rehydration</em> refers to the process of restoring the data on the Local SSDs after a node is recycled.</li> </ul> <h3 id="deployment-architecture">Deployment architecture</h3> <p>The following diagram shows an example of a GKE Data Cache configuration with two Pods that each run an app. The Pods run on the same GKE node. Each Pod uses a separate Local SSD and a backing persistent disk.</p> <figure id="image-1"> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-data-cache.png" width="500" alt="Deployment architecture for GKE Data Cache"> <figcaption><b>Figure 1.</b> Deployment architecture for GKE Data Cache. </figcaption> </figure> <h3 id="deployment-modes">Deployment modes</h3> <p>You can set up GKE Data Cache in one of two modes:</p> <ul> <li>
+<strong>Writethrough</strong> (Recommended): When your application writes data, the data is written <em>synchronously</em> to both the cache and the underlying persistent disk. The <code translate="no" dir="ltr">writethrough</code> mode prevents data loss, and is suitable for most production workloads.</li> <li>
+<strong>Writeback</strong>: When your application writes data, the data is written only to the cache. Then, the data is written to the persistent disk <em>asynchronously</em> (in the background). The <code translate="no" dir="ltr">writeback</code> mode improves write performance, and is suitable for workloads that rely on speed. However this mode affects reliability. If the node unexpectedly shuts down, unflushed cache data will be lost.</li> </ul> <h2 id="objectives">Objectives</h2> <p>In this guide, you learn how to:</p> <ul> <li>
+<a href="#configure-data-cache">Create an underlying GKE infrastructure</a> to use GKE Data Cache.</li> <li>
+<a href="#create-node-pool-with-local-ssds">Create a dedicated node pool</a> with attached Local SSDs.</li> <li>
+<a href="#create-data-cache-storageclass">Create a StorageClass</a> for dynamically provisioning a <a href="../../concepts/persistent-volumes#persistentvolumes">PersistentVolume</a> (PV) when a Pod requests it through a <a href="../../concepts/persistent-volumes#persistentvolumeclaims">PersistentVolumeClaim</a> (PVC).</li> <li>
+<a href="#request-storage-with-pvc">Create a PVC</a> to request a PV.</li> <li>
+<a href="#create-deployment">Create a Deployment</a> that uses a PVC to ensure that your application has access to persistent storage even after a Pod restarts, and during rescheduling.</li> </ul> <h2 id="requirements">Requirements and planning</h2> <p>Ensure that you meet the following requirements for using GKE Data Cache:</p> <ul> <li>Your GKE cluster must be running version 1.32.3-gke.1440000 or later.</li> <li>Your node pools must use machine types that support Local SSDs. For more information, see <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#machine-series-lssd">Machine series support</a>.</li> </ul> <aside class="note"><strong>Note:</strong><span> You can configure GKE Data Cache only on <em>new</em> persistent disks after you request a new persistent volume that uses a <a href="#request-storage-with-pvc">PersistentVolumeClaim</a>. You can't configure GKE Data Cache on existing persistent disks.</span></aside> <p><strong>Planning</strong></p> <p>Consider these aspects when you plan storage capacity for GKE Data Cache:</p> <ul> <li>The maximum number of Pods per node that'll use GKE Data Cache concurrently.</li> <li>The expected cache size requirements of Pods that'll use GKE Data Cache.</li> <li>The total capacity of Local SSDs available on your GKE nodes. For information about which machine types have Local SSDs attached by default and which machine types require you to attach Local SSDs, see <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#choose_number_local_ssds">Choose a valid number of Local SSD disks</a>.</li> <li>For third or later-generation machine types (which have a default number of Local SSDs attached), note that the Local SSDs for Data Cache are reserved out of the <em>total available</em> Local SSDs on that machine.</li> <li>The file system overhead that can reduce the usable space on Local SSDs. For example, even if you have a node that has two Local SSDs with 750 GiB of total raw capacity, the available space for all Data Cache volumes might be less because of file system overhead. Some Local SSD capacity is <a href="../../concepts/plan-node-sizes#local_ephemeral_storage_reservation">reserved for system use</a>.</li> </ul> <h2 id="limitations">Limitations</h2> <p><strong>Incompatibility with Backup for GKE</strong></p> <p>To maintain data integrity in scenarios such as disaster recovery or application migration, you might need to back up and restore your data. If you use <a href="../../add-on/backup-for-gke/concepts/backup-for-gke">Backup for GKE</a> to restore a PVC that is configured to use Data Cache, the restore process fails. This failure occurs because the restore process does not correctly propagate the necessary data cache parameters from the original StorageClass.</p> <aside class="caution"><strong>Caution:</strong><span> Trying to manually back up and restore a PVC from a snapshot can result in data loss.</span></aside> <h2 id="pricing">Pricing</h2> <p>You are billed for the total provisioned capacity of your Local SSDs and the attached persistent disks. You are charged per GiB per month.</p> <p>For more information, see <a href="https://docs.cloud.google.com/compute/disks-image-pricing#disk" track-type="concepts" track-name="internalLink" track-metadata-position="body">Disk pricing</a> in the Compute Engine documentation.</p> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Review the <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#choose_number_local_ssds">machine types that support Local SSDs</a> for your node pool.</li> </ul> <h2 id="configure-data-cache">Configure GKE nodes for using Data Cache</h2> <p>To begin using GKE Data Cache for accelerated storage, your nodes must have the necessary Local SSD resources. This section shows commands to provision Local SSDs and enable GKE Data Cache when you create a new GKE cluster or add a new node pool to an existing cluster. You can't update an existing node pool to use Data Cache. If you want to use Data Cache on an existing cluster, add a new node pool to the cluster.</p> <div> <section><p class="_code-tab"><strong>On a new cluster</strong></p>
+<p>To create a GKE cluster with Data Cache configured, use the following command:</p> 
+<pre data-language="">gcloud container clusters create CLUSTER_NAME \
+    --location=LOCATION \
+    --machine-type=MACHINE_TYPE \
+    --data-cache-count=DATA_CACHE_COUNT \
+    # Optionally specify additional Local SSDs, or skip this flag
+    --ephemeral-storage-local-ssd count=LOCAL_SSD_COUNT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster. Provide a unique name for the GKE cluster that you're creating.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Google Cloud region or zone for the new cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type to use from a second, third, or later-generation machine series for your cluster, such as <a href="https://docs.cloud.google.com/compute/docs/general-purpose-machines#n2_machine_types"><code translate="no" dir="ltr">n2-standard-2</code></a> or <a href="https://docs.cloud.google.com/compute/docs/general-purpose-machines#c3_machine_types"><code translate="no" dir="ltr">c3-standard-4-lssd</code></a>. This field is required because the Local SSD can't be used with the default <code translate="no" dir="ltr">e2-medium</code> type. For more information, see available <a href="https://docs.cloud.google.com/compute/docs/machine-resource#vm_terminology">machine series</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATA_CACHE_COUNT</var></code>: the number of Local SSD volumes to dedicate <em>exclusively</em> for Data Cache on each node in the default node pool. Each of these Local SSDs has a capacity of 375 GiB. The maximum number of volumes <a href="https://docs.cloud.google.com/compute/docs/disks#local_ssd_machine_type_restrictions">varies by machine type and region</a>. Note that some Local SSD capacity is <a href="../../concepts/plan-node-sizes#local_ephemeral_storage_reservation">reserved for system use</a>.</li> <li>
+<p>(Optional) <code translate="no" dir="ltr"><var translate="no">LOCAL_SSD_COUNT</var></code>: the number of Local SSD volumes to provision for other ephemeral storage needs. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create#--ephemeral-storage-local-ssd"><code translate="no" dir="ltr">--ephemeral-storage-local-ssd count</code></a> flag if you want to provision additional Local SSDs that aren't used for Data Cache.</p> <p>Note the following for the third or later-generation machine types:</p> <ul> <li>Third or later-generation machine types have a specific number of Local SSDs attached by default. The <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#choose_number_local_ssds">number of Local SSDs</a> that are attached to each node depends on the machine type you specify.</li> <li>If you plan to use the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd count</code> flag for additional ephemeral storage, make sure to set the value of <code translate="no" dir="ltr">DATA_CACHE_COUNT</code> to a number that's <strong>less</strong> than the <strong>total available</strong> Local SSD disks on the machine. The total available Local SSD count includes the default attached disks and any new disks that you add using the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd count</code> flag.</li> </ul>
+</li> </ul> <p>This command creates a GKE cluster that runs on a second, third, or later-generation machine type for its default node pool, provisions Local SSDs for Data Cache, and optionally provisions additional Local SSDs for other ephemeral storage needs, if specified.</p> <p>These settings apply only to the default node pool.</p></section> <section><p class="_code-tab"><strong>On an existing cluster</strong></p>
+<p>To use Data Cache on an existing cluster, you must create a new node pool with Data Cache configured.</p> <p>To create a GKE node pool with Data Cache configured, use the following command:</p> 
+<pre data-language="">gcloud container node-pool create NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --machine-type=MACHINE_TYPE \
+    --data-cache-count=DATA_CACHE_COUNT \
+    # Optionally specify additional Local SSDs, or skip this flag
+    --ephemeral-storage-local-ssd count=LOCAL_SSD_COUNT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of the node pool. Provide a unique name for the node pool that you're creating.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of an existing GKE cluster where you want to create the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the same Google Cloud region or zone as your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type to use from a second, third, or later-generation machine series for your cluster, such as <a href="https://docs.cloud.google.com/compute/docs/general-purpose-machines#n2_machine_types"><code translate="no" dir="ltr">n2-standard-2</code></a> or <a href="https://docs.cloud.google.com/compute/docs/general-purpose-machines#c3_machine_types"><code translate="no" dir="ltr">c3-standard-4-lssd</code></a>. This field is required, as Local SSD can't be used with the default <code translate="no" dir="ltr">e2-medium</code> type. For more information, see available <a href="https://docs.cloud.google.com/compute/docs/machine-resource#vm_terminology">machine series</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATA_CACHE_COUNT</var></code>: the number of Local SSD volumes to dedicate <em>exclusively</em> for Data Cache on each node in the node pool. Each of these Local SSDs has a capacity of 375 GiB. The maximum number of volumes <a href="https://docs.cloud.google.com/compute/docs/disks#local_ssd_machine_type_restrictions">varies by machine type and region</a>. Note that some Local SSD capacity is <a href="../../concepts/plan-node-sizes#local_ephemeral_storage_reservation">reserved for system use</a>.</li> <li>
+<p>(Optional) <code translate="no" dir="ltr"><var translate="no">LOCAL_SSD_COUNT</var></code>: the number of Local SSD volumes to provision for other ephemeral storage needs. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/clusters/create#--ephemeral-storage-local-ssd"><code translate="no" dir="ltr">--ephemeral-storage-local-ssd count</code></a> flag if you want to provision additional Local SSDs that aren't used for Data Cache.</p> <p>Note the following for the third or later-generation machine types:</p> <ul> <li>Third or later-generation machine types have a specific number of Local SSDs attached by default. The <a href="https://docs.cloud.google.com/compute/docs/disks/local-ssd#choose_number_local_ssds">number of Local SSDs</a> that are attached to each node depends on the machine type you specify.</li> <li>If you plan to use the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd count</code> flag for additional ephemeral storage, make sure to set the <code translate="no" dir="ltr">DATA_CACHE_COUNT</code> to <strong>less</strong> than the <strong>total available</strong> Local SSD disks on the machine. The total available Local SSD count includes the default attached disks and any new disks that you add using the <code translate="no" dir="ltr">--ephemeral-storage-local-ssd count</code> flag.</li> </ul>
+</li> </ul> <p>This command creates a GKE node pool that runs on a second, third, or later-generation machine type, provisions Local SSDs for Data Cache, and optionally provisions additional Local SSDs for other ephemeral storage needs, if specified.</p></section> </div> <h2 id="provision-data-cache-for-persistent-storage">Provision Data Cache for persistent storage on GKE</h2> <p>This section provides an example of how to enable the performance benefits of GKE Data Cache for your stateful applications.</p> <h3 id="create-node-pool-with-local-ssds">Create a node pool with Local SSDs for Data Cache</h3> <p>Start by creating a new node pool with attached Local SSDs in your GKE cluster. GKE Data Cache uses the Local SSDs to accelerate the attached persistent disks' performance.</p> <p>The following command creates a node pool that uses a second-generation machine, <code translate="no" dir="ltr">n2-standard-2</code>:</p> 
+<pre>gcloud container node-pools create datacache-node-pool \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION \
+    --num-nodes=2 \
+    --data-cache-count=1 \
+    --machine-type=n2-standard-2
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the cluster. Specify the GKE cluster where you're creating the new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the same Google Cloud region or zone as your cluster.</li> </ul> <p>This command creates a node pool with the following specifications:</p> <ul> <li>
+<code translate="no" dir="ltr">--num-nodes=2</code>: sets the initial number of nodes in this pool to two.</li> <li>
+<code translate="no" dir="ltr">--data-cache-count=1</code>: specifies one Local SSD per node dedicated to GKE Data Cache.</li> </ul> <p>The total number of Local SSDs that are provisioned for this node pool is two because each node is provisioned with one Local SSD.</p> <h3 id="create-data-cache-storageclass">Create a Data Cache StorageClass</h3> <p>Create a Kubernetes <a href="../../concepts/persistent-volumes#storageclasses"><code translate="no" dir="ltr">StorageClass</code></a> that tells GKE how to dynamically provision a persistent volume that uses Data Cache.</p> <p>Use the following manifest to create and apply a <code translate="no" dir="ltr">StorageClass</code> named <code translate="no" dir="ltr">pd-balanced-data-cache-sc</code>:</p> 
+<pre>kubectl apply -f - &lt;&lt;EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: pd-balanced-data-cache-sc
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+  data-cache-mode: writethrough
+  data-cache-size: "100Gi"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+EOF
+</pre> <p><code translate="no" dir="ltr">StorageClass</code> parameters for Data Cache include the following:</p> <ul> <li>
+<code translate="no" dir="ltr">type</code>: specifies the underlying disk type for the persistent volume. For more options, see the supported <a href="https://docs.cloud.google.com/compute/docs/disks/persistent-disks#disk-types">Persistent Disk types</a> or <a href="../../concepts/hyperdisk">Hyperdisk types</a>.</li> <li>
+<code translate="no" dir="ltr">data-cache-mode</code>: uses the recommended <code translate="no" dir="ltr">writethrough</code> mode. For more information, see <a href="#deployment-modes">Deployment modes</a>.</li> <li>
+<code translate="no" dir="ltr">data-cache-size</code>: sets the Local SSD capacity to 100 GiB, which is used as a read cache for each PVC.</li> </ul> <h3 id="request-storage-with-pvc">Request storage with a PersistentVolumeClaim (PVC)</h3> <p>Create a PVC that references the <code translate="no" dir="ltr">pd-balanced-data-cache-sc</code> StorageClass that you created. The PVC requests a persistent volume with Data Cache enabled.</p> <p>Use the following manifest to create a PVC named <code translate="no" dir="ltr">pvc-data-cache</code> that requests a persistent volume of at least 300 GiB with <code translate="no" dir="ltr">ReadWriteOnce</code> access.</p> 
+<pre>kubectl apply -f - &lt;&lt;EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-data-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 300Gi
+  storageClassName: pd-balanced-data-cache-sc
+EOF
+</pre> <h3 id="create-deployment">Create a Deployment that uses the PVC</h3> <p>Create a Deployment named <code translate="no" dir="ltr">postgres-data-cache</code> that runs a Pod which uses the <code translate="no" dir="ltr">pvc-data-cache</code> PVC that you created earlier. The <code translate="no" dir="ltr">cloud.google.com/gke-data-cache-count</code> node selector ensures that the Pod is scheduled onto a node that has the Local SSD resources that are necessary for using GKE Data Cache.</p> <p>Create and apply the following manifest to configure a Pod that deploys a Postgres web server by using the PVC:</p> 
+<pre>kubectl apply -f - &lt;&lt;EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+ name: postgres-data-cache
+ labels:
+   name: database
+   app: data-cache
+spec:
+ replicas: 1
+ selector:
+   matchLabels:
+     service: postgres
+     app: data-cache
+ template:
+   metadata:
+     labels:
+       service: postgres
+       app: data-cache
+   spec:
+     nodeSelector:
+       cloud.google.com/gke-data-cache-disk: "1"
+     containers:
+     - name: postgres
+       image: postgres:14-alpine
+       volumeMounts:
+       - name: pvc-data-cache-vol
+         mountPath: /var/lib/postgresql/data2
+         subPath: postgres
+       env:
+       - name: POSTGRES_USER
+         value: admin
+       - name: POSTGRES_PASSWORD
+         value: password
+     restartPolicy: Always
+     volumes:
+     - name: pvc-data-cache-vol
+       persistentVolumeClaim:
+         claimName: pvc-data-cache
+EOF
+</pre> <p>Confirm that the Deployment was successfully created:</p> 
+<pre>kubectl get deployment
+</pre> <p>It might take a few minutes for the Postgres container to complete provisioning and display a <code translate="no" dir="ltr">READY</code> status.</p> <h2 id="verify-data-cache-provisioning">Verify Data Cache provisioning</h2> <p>After you create your Deployment, confirm that the persistent storage with Data Cache is correctly provisioned.</p> <ol> <li>
+<p>To verify that your <code translate="no" dir="ltr">pvc-data-cache</code> is successfully bound to a persistent volume, run the following command:</p> 
+<pre>kubectl get pvc pvc-data-cache
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME             STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS                VOLUMEATTRIBUTESCLASS   AGE
+pvc-data-cache   Bound    pvc-e9238a16-437e-45d7-ad41-410c400ae018   300Gi      RWO            pd-balanced-data-cache-sc   &lt;unset&gt;                 10m
+</pre>
+</li> <li>
+<p>To confirm that the Logical Volume Manager (LVM) Group for Data Cache was created on the node, follow these steps:</p> <ol> <li>
+<p>Get the Pod name of the PDCSI driver on that node:</p> 
+<pre>NODE_NAME=$(kubectl get pod --output json |  jq '.items[0].spec.nodeName' | sed 's/\"//g')
+kubectl get po -n kube-system -o wide | grep ^pdcsi-node | grep $NODE_NAME
+</pre> <p>From the output, copy the name of the <code translate="no" dir="ltr">pdcsi-node</code> Pod.</p>
+</li> <li>
+<p>View PDCSI driver logs for LVM Group creation:</p> 
+<pre>PDCSI_POD_NAME="PDCSI-NODE_POD_NAME"
+kubectl logs -n kube-system $PDCSI_POD_NAME gce-pd-driver | grep "Volume group creation"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PDCSI-NODE_POD_NAME</var></code> with the actual Pod name that you copied in the previous step.</p> <p>The output is similar to the following:</p> 
+<pre>Volume group creation succeeded for LVM_GROUP_NAME
+</pre>
+</li> </ol>
+</li> </ol> <p>This message confirms that the LVM configuration for Data Cache is set up correctly on the node.</p> <h2 id="clean_up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account, delete the storage resources you created in this guide.</p> <ol> <li>
+<p>Delete the Deployment.</p> 
+<pre>kubectl delete deployment postgres-data-cache
+</pre>
+</li> <li>
+<p>Delete the PersistentVolumeClaim.</p> 
+<pre>kubectl delete pvc pvc-data-cache
+</pre>
+</li> <li>
+<p>Delete the node pool.</p> 
+<pre>gcloud container node-pools delete datacache-node-pool \
+    --cluster CLUSTER_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code> with the name of the cluster where you created the node pool that uses Data Cache.</p>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>See <a href="../../troubleshooting/storage">Troubleshooting storage in GKE</a>.</li> <li>Read more about the <a href="https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver">Persistent Disk CSI driver on GitHub</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/data-cache" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/data-cache</a>
+  </p>
+</div>

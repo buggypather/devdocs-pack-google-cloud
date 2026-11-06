@@ -1,0 +1,264 @@
+<h1>Apply custom Pod-level security policies using Gatekeeper</h1>  <p>This page shows you how to use the Gatekeeper admission controller to apply Pod-level security controls to your Google Kubernetes Engine (GKE) clusters. On this page, you learn how to use Gatekeeper to apply constraints that let you apply security policies to help you meet security requirements for your organization.</p> <p>This page is for Security specialists who want to apply security controls to their GKE clusters. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before reading this page, ensure that you're familiar with the following concepts:</p> <ul> <li>
+<a href="https://github.com/open-policy-agent/gatekeeper">General overview of Gatekeeper</a>.</li> <li>
+<a href="https://www.openpolicyagent.org/">General overview of Open Policy Agent (OPA), which is used by Gatekeeper</a>.</li> </ul> <h2 id="overview">Gatekeeper overview</h2> <p>Gatekeeper is an admission controller that validates requests to create and update Pods on Kubernetes clusters, using the Open Policy Agent (OPA).</p> <p>Using Gatekeeper allows administrators to define policies with a <em>constraint</em>, which is a set of conditions that permit or deny deployment behaviors in Kubernetes. You can then enforce these policies on a cluster using a <code translate="no" dir="ltr">ConstraintTemplate</code>. This document provides examples for restricting the security capabilities of workloads to ensure enforce, test, and audit security policies using Gatekeeper.</p> <p>Gatekeeper can also:</p> <ul> <li>
+<strong>Roll out policies:</strong> Enforce policy in a gradual, scoped manner to limit the risk of disrupting workloads.</li> <li>
+<strong>Dry-run policy changes:</strong> Provide mechanisms for testing policy impact and range prior to enforcement.</li> <li>
+<strong>Audit existing policies:</strong> Ensure the application of security controls to new and existing workloads (audit controls).</li> </ul> <h2 id="concepts">Key Gatekeeper concepts</h2> <p>Gatekeeper introduces two concepts in order to provide administrators with a powerful and flexible means of controlling their cluster: <strong>constraints</strong>, and <strong>constraint templates</strong>, both of which are concepts inherited from the Open Policy Agent <a href="https://github.com/open-policy-agent/frameworks/tree/master/constraint" class="external">Constraint Framework</a>.</p> <p><strong>Constraints</strong> are the representation of your security policy—they define the requirements and range of enforcement. <strong>Constraint templates</strong> are reusable statements (written in <a href="https://www.openpolicyagent.org/docs/latest/#rego" class="external">Rego</a>) that apply logic to evaluate specific fields in Kubernetes objects, based on requirements defined in constraints.</p> <p>For example, you might have a constraint that declares allowable seccomp profiles that can be applied to Pods in a specific namespace, and a comparable constraint template that provides the logic for extracting these values and handling enforcement.</p> <p>The following constraint template, from the <a href="https://github.com/open-policy-agent/gatekeeper-library/tree/master/library/pod-security-policy" class="external">Gatekeeper repository</a>, checks for the existence of <code translate="no" dir="ltr">securityContext.privileged</code> in a Pod specification:</p> 
+<pre>apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8spspprivilegedcontainer
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPSPPrivilegedContainer
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8spspprivileged
+
+        violation[{"msg": msg, "details": {}}] {
+            c := input_containers[_]
+            c.securityContext.privileged
+            msg := sprintf("Privileged container is not allowed: %v, securityContext: %v", [c.name, c.securityContext])
+        }
+        input_containers[c] {
+            c := input.review.object.spec.containers[_]
+        }
+        input_containers[c] {
+            c := input.review.object.spec.initContainers[_]
+        }
+</pre> <p>To extend the previous constraint template example, the following constraint defines the scope (<code translate="no" dir="ltr">kinds</code>) for the specific enforcement of this constraint template in a <code translate="no" dir="ltr">dryrun</code> mode:</p> 
+<pre>apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivilegedContainer
+metadata:
+  name: psp-privileged-container
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+</pre> <p>With Gatekeeper, you can create your own constraints and constraint templates to meet your specific needs. You can also use a <a href="https://github.com/open-policy-agent/gatekeeper-library/tree/master/library/pod-security-policy" class="external">standard set of constraints and constraint templates</a> in the <a href="https://github.com/open-policy-agent/gatekeeper/tree/master/library" class="external">Gatekeeper repository</a> that have been defined to enable quick adoption and security enforcement. Each constraint is also accompanied with example Pod configurations.</p> <p>Google Cloud provides a managed, officially supported version of open source Gatekeeper named <a href="https://docs.cloud.google.com/anthos-config-management/docs/concepts/policy-controller">Policy Controller</a>. Google doesn't officially support the open source Gatekeeper project.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h2 id="enable-policy-controller">Enable Gatekeeper on a cluster with Policy Controller</h2> <p><a href="https://docs.cloud.google.com/anthos-config-management/docs/concepts/policy-controller">Policy Controller</a> is a policy engine built on the <a href="https://github.com/open-policy-agent/gatekeeper">Gatekeeper</a> open source project. Google recommends the use of Policy Controller because it includes additional features to help enforce policy at scale, including policy-as-code, multi-cluster support, integration with Cloud Logging, and ability to view policy status in the Google Cloud console. Policy Controller is available with GKE, but you can <a href="https://open-policy-agent.github.io/gatekeeper/website/docs/install/">install Gatekeeper</a> on your cluster instead.</p> <p>To enable Policy Controller on a cluster, follow the <a href="https://docs.cloud.google.com/anthos-config-management/docs/how-to/installing-policy-controller">Policy Controller installation guide</a>.</p> <h2 id="enable_constraints_and_constraint_templates">Enable constraints and constraint templates</h2> <p>Gatekeeper and its constraint templates can be installed and enabled without adversely impacting existing or new workloads. For this reason, it's recommended that all applicable Pod security constraint templates be applied to the cluster.</p> <p>Additionally, Gatekeeper constraints can be implemented to enforce controls for specific objects, such as namespaces and Pods.</p> <p>Observe the example below that limits the scope to <strong><em>Pods</em></strong> located in the <strong><em>production</em></strong> namespace by defining them in the constraint match statement:</p> 
+<pre>...
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - "production"
+</pre> <p>For more information about the available options for <code translate="no" dir="ltr">Constraint</code> and <code translate="no" dir="ltr">ConstraintTemplate</code> objects, see <a href="https://open-policy-agent.github.io/gatekeeper/website/docs/howto">How to use Gatekeeper</a>.</p> <h3 id="testing_policies">Test policies</h3> <p>Introducing new policies to existing clusters can have adverse behavior, for example by restricting existing workloads. One of the benefits of using Gatekeeper for Pod security is the ability to test the effectiveness and impact a policy will have without making actual changes, using a dry-run mode. This allows for policy configuration to be tested against running clusters without enforcement. Policy violations are logged and identified without interference.</p> <p>The following steps demonstrate how a developer, operator, or administrator can apply constraint templates and constraints to determine their effectiveness or potential impact:</p> <ol> <li>
+<p>Apply the Gatekeeper config for replicating data for audit and dry-run functionality:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: "gatekeeper-system"
+spec:
+  sync:
+    syncOnly:
+      - group: ""
+        version: "v1"
+        kind: "Namespace"
+      - group: ""
+        version: "v1"
+        kind: "Pod"
+EOF
+</pre>
+</li> <li>
+<p>With no constraints applied, run a workload with elevated privileges:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    securityContext:
+      privileged: true
+EOF
+</pre>
+</li> <li>
+<p>Load the previous <code translate="no" dir="ltr">k8spspprivilegedcontainer</code> constraint template:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8spspprivilegedcontainer
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPSPPrivilegedContainer
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8spspprivileged
+
+        violation[{"msg": msg, "details": {}}] {
+            c := input_containers[_]
+            c.securityContext.privileged
+            msg := sprintf("Privileged container is not allowed: %v, securityContext: %v", [c.name, c.securityContext])
+        }
+        input_containers[c] {
+            c := input.review.object.spec.containers[_]
+        }
+        input_containers[c] {
+            c := input.review.object.spec.initContainers[_]
+        }
+EOF
+</pre>
+</li> <li>
+<p>Create a new constraint to extend this constraint template. This time, set the <code translate="no" dir="ltr">enforcementAction</code> to <code translate="no" dir="ltr">dryrun</code>:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivilegedContainer
+metadata:
+  name: psp-privileged-container
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+EOF
+</pre>
+</li> <li>
+<p>With Gatekeeper synchronizing running object data, and passively checking for violations, confirm if any violations were found by checking the <code translate="no" dir="ltr">status</code> of the constraint:</p> 
+<pre>kubectl get k8spspprivilegedcontainer.constraints.gatekeeper.sh/psp-privileged-container -o yaml
+</pre>
+
+<pre>apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivilegedContainer
+metadata:
+...
+ name: psp-privileged-container
+...
+spec:
+ enforcementAction: dryrun
+ match:
+   kinds:
+   - apiGroups:
+     - ""
+     kinds:
+     - Pod
+status:
+ auditTimestamp: "2019-12-15T22:19:54Z"
+ byPod:
+ - enforced: true
+   id: gatekeeper-controller-manager-0
+ violations:
+ - enforcementAction: dryrun
+   kind: Pod
+   message: 'Privileged container is not allowed: nginx, securityContext: {"privileged":
+     true}'
+   name: nginx
+   namespace: default
+</pre>
+</li> <li>
+<p>To confirm that the policy doesn't interfere with deployments, run another privileged Pod:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privpod
+  labels:
+    app: privpod
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    securityContext:
+      privileged: true
+EOF
+</pre> <p>This new Pod will be successfully deployed.</p>
+</li> <li>
+<p>To clean up the resources created in this section, run the following commands:</p> 
+<pre>kubectl delete k8spspprivilegedcontainer.constraints.gatekeeper.sh/psp-privileged-container
+kubectl delete constrainttemplate k8spspprivilegedcontainer
+kubectl delete pod/nginx
+kubectl delete pod/privpod
+</pre>
+</li> </ol> <h3 id="enforcing_policies">Enforce policies</h3> <p>Now that you can confirm the validity and impact of a policy without impacting existing or new workloads, you can implement a policy with full enforcement.</p> <p>Building on the examples used to validate the policy above, the following steps demonstrate how a developer, operator, or administrator can apply constraint templates and constraints to enforce a policy:</p> <ol> <li>
+<p>Load the <code translate="no" dir="ltr">k8spspprivilegedcontainer</code> constraint template mentioned earlier:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8spspprivilegedcontainer
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPSPPrivilegedContainer
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8spspprivileged
+
+        violation[{"msg": msg, "details": {}}] {
+            c := input_containers[_]
+            c.securityContext.privileged
+            msg := sprintf("Privileged container is not allowed: %v, securityContext: %v", [c.name, c.securityContext])
+        }
+        input_containers[c] {
+            c := input.review.object.spec.containers[_]
+        }
+        input_containers[c] {
+            c := input.review.object.spec.initContainers[_]
+        }
+EOF
+</pre>
+</li> <li>
+<p>Create a new constraint to extend this constraint template. This time, don't set the <code translate="no" dir="ltr">enforcementAction</code> key. By default, the <code translate="no" dir="ltr">enforcementAction</code> key is set to <code translate="no" dir="ltr">deny</code>:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivilegedContainer
+metadata:
+  name: psp-privileged-container
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+EOF
+</pre>
+</li> <li>
+<p>Attempt to deploy a container that declares privileged permissions:</p> 
+<pre>kubectl create -f- &lt;&lt;EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    securityContext:
+      privileged: true
+EOF
+</pre> <p>The following error message should be received:</p> 
+<pre>Error from server ([denied by psp-privileged-container] Privileged container is not allowed:
+nginx, securityContext: {"privileged": true}): error when creating "STDIN": admission webhook "validation.gatekeeper.sh" denied the request: [denied by psp-privileged-container]
+Privileged container is not allowed: nginx, securityContext: {"privileged": true}
+</pre>
+</li> <li>
+<p>To clean up, run the following commands:</p> 
+<pre>kubectl delete k8spspprivilegedcontainer.constraints.gatekeeper.sh/psp-privileged-container
+kubectl delete constrainttemplate k8spspprivilegedcontainer
+</pre>
+</li> </ol> <h2 id="alternatives_to_gatekeeper">Alternatives to Gatekeeper</h2> <p>Gatekeeper lets you declare and apply custom Pod-level security policies. You can also use Kubernetes' built-in <a href="podsecurityadmission"><code translate="no" dir="ltr">PodSecurity</code> admission controller</a> to apply predefined Pod-level security policies. These predefined policies are aligned with the levels defined by the <a href="https://kubernetes.io/docs/concepts/security/pod-security-standards/">Pod Security Standards</a>.</p> <h2 id="whats_next">What's next</h2> <p>Gatekeeper provides an incredibly powerful means to enforce and validate security on GKE clusters using declarative policies. Gatekeeper's use extends beyond security however, and can be used in other aspects of administration and operations.</p> <ul> <li><a href="https://github.com/open-policy-agent/gatekeeper#how-to-use-gatekeeper">How to use Gatekeeper</a></li> <li><a href="https://github.com/open-policy-agent/gatekeeper/tree/master/demo">Gatekeeper demonstrations</a></li> <li><a href="https://github.com/open-policy-agent/gatekeeper-library">Gatekeeper examples</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-security-policies-with-gatekeeper" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-security-policies-with-gatekeeper</a>
+  </p>
+</div>

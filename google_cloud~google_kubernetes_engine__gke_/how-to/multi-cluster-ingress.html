@@ -1,0 +1,693 @@
+<h1>Deploying Ingress across clusters</h1>  <p>This page shows you how to deploy an Ingress that serves an application across multiple GKE clusters. To learn more about Multi Cluster Ingress, see <a href="../concepts/multi-cluster-ingress">Multi Cluster Ingress</a>.</p> <p>For a detailed comparison between Multi Cluster Ingress (MCI), Multi-cluster Gateway (MCG), and load balancer with Standalone Network Endpoint Groups (LB and Standalone NEGs), see <a href="../concepts/choose-mc-lb-api">Choose your multi-cluster load balancing API for GKE</a>.</p> <h2 id="before_you_begin">Before you begin</h2> <p>This document assumes that you created clusters in a fleet and set the <code translate="no" dir="ltr">gke-us</code> cluster as the config cluster for Multi Cluster Ingress, as described in <a href="multi-cluster-ingress-setup">Setting up Multi Cluster Ingress</a>. To verify this cluster configuration, follow these steps:</p> <ol> <li>
+<p>Confirm that your project has two clusters that are members of a fleet:</p> 
+<pre>gcloud container clusters list \
+    --format="table(name, location, fleet.project:label=FLEET, status)" \
+    --project=FLEET_HOST_PROJECT
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FLEET_HOST_PROJECT</var></code> with the project ID of the fleet host project.</p> <p>The output is similar to the following:</p> 
+<pre>NAME      LOCATION          FLEET                                   STATUS
+gke-eu    europe-west1      FLEET_NAME   RUNNING
+gke-us    us-central1       FLEET_NAME   RUNNING
+</pre> <p>In this output, <code translate="no" dir="ltr"><var translate="no">FLEET_NAME</var></code> is the name of the fleet.</p>
+</li> <li>
+<p>Connect to the <code translate="no" dir="ltr">gke-us</code> config cluster:</p> 
+<pre>gcloud container clusters get-credentials gke-us \
+    --location=us-central1 \
+    --project=CLUSTER_PROJECT
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_PROJECT</var></code> with the project ID of the project that contains the <code translate="no" dir="ltr">gke-us</code> cluster.</p>
+</li> <li>
+<p>Verify that the Kubernetes CustomResourceDefinitions for Multi Cluster Ingress are installed in the <code translate="no" dir="ltr">gke-us</code> cluster:</p> 
+<pre>kubectl get crds | grep multicluster
+</pre> <p>The output is similar to the following:</p> 
+<pre>multiclusteringresses.networking.gke.io       2026-05-12T16:39:52Z
+multiclusterservices.networking.gke.io        2026-05-12T16:39:53Z
+</pre> <p>If the output is empty, disable and enable Multi Cluster Ingress for the fleet:</p> <ol> <li>
+<p>Disable Multi Cluster Ingress:</p> 
+<pre>gcloud container fleet ingress disable \
+    --project=FLEET_HOST_PROJECT
+</pre>
+</li> <li>
+<p>Enable Multi Cluster Ingress for the fleet and specify the <code translate="no" dir="ltr">gke-us</code> cluster as the config cluster:</p> 
+<pre>gcloud container fleet ingress enable \
+    --config-membership=gke-us \
+    --location=us-central1 \
+    --project=CLUSTER_PROJECT
+</pre> <p>After you enable Multi Cluster Ingress, verify that the CustomResourceDefinitions are installed in the <code translate="no" dir="ltr">gke-us</code> cluster by running the <code translate="no" dir="ltr">kubectl get crds</code> command.</p>
+</li> </ol>
+</li> </ol> <h2 id="deployment_tutorial">Deployment tutorial</h2> <p>In the following tasks, you will deploy a fictional app named <code translate="no" dir="ltr">whereami</code> and a <code translate="no" dir="ltr">MultiClusterIngress</code> in two clusters. The Ingress provides a shared virtual IP (VIP) address for the app deployments.</p> <h3 id="creating_the_namespace">Creating the Namespace</h3> <p>Because fleets have the property of <a href="../concepts/multi-cluster-ingress#namespace_sameness">namespace sameness</a>, we recommend that you coordinate Namespace creation and management across clusters so identical Namespaces are owned and managed by the same group. You can create Namespaces per team, per environment, per application, or per application component. Namespaces can be as granular as necessary, as long as a Namespace <code translate="no" dir="ltr">ns1</code> in one cluster has the same meaning and usage as <code translate="no" dir="ltr">ns1</code> in another cluster.</p> <p>In this example, you create a <code translate="no" dir="ltr">whereami</code> Namespace for each application in each cluster.</p> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">namespace.yaml</code> that has the following content:</p> 
+<pre>apiVersion: v1
+kind: Namespace
+metadata:
+  name: whereami
+</pre>
+<aside class="note"><strong>Note:</strong><span> You can use <code translate="no" dir="ltr">kubectl config use-context</code> to switch between clusters when deploying resources. Use <code translate="no" dir="ltr">kubectl config get-contexts</code> to see which ones are available. You can use <code translate="no" dir="ltr">kubectl config rename-context</code> to rename contexts to more human-friendly names.</span></aside>
+</li> <li>
+<p>Switch to the gke-us context:</p> 
+<pre>kubectl config use-context gke-us
+</pre>
+</li> <li>
+<p>Create the Namespace:</p> 
+<pre>kubectl apply -f namespace.yaml
+</pre>
+</li> <li>
+<p>Switch to the gke-eu context:</p> 
+<pre>kubectl config use-context gke-eu
+</pre>
+</li> <li>
+<p>Create the Namespace:</p> 
+<pre>kubectl apply -f namespace.yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>namespace/whereami created
+</pre>
+</li> </ol> <h3 id="deploying_the_app">Deploying the app</h3> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">deploy.yaml</code> that has the following content:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whereami-deployment
+  namespace: whereami
+  labels:
+    app: whereami
+spec:
+  selector:
+    matchLabels:
+      app: whereami
+  template:
+    metadata:
+      labels:
+        app: whereami
+    spec:
+      containers:
+      - name: frontend
+        image: us-docker.pkg.dev/google-samples/containers/gke/whereami:v1
+        ports:
+        - containerPort: 8080
+</pre>
+</li> <li>
+<p>Switch to the gke-us context:</p> 
+<pre>kubectl config use-context gke-us
+</pre>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">whereami</code> app:</p> 
+<pre>kubectl apply -f deploy.yaml
+</pre>
+</li> <li>
+<p>Switch to the gke-eu context:</p> 
+<pre>kubectl config use-context gke-eu
+</pre>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">whereami</code> app:</p> 
+<pre>kubectl apply -f deploy.yaml
+</pre>
+</li> <li>
+<p>Verify that the <code translate="no" dir="ltr">whereami</code> app has successfully deployed in each cluster:</p> 
+<pre>kubectl get deployment --namespace whereami
+</pre> <p>The output should be similar to the following in both clusters:</p> 
+<pre>NAME           READY   UP-TO-DATE   AVAILABLE   AGE
+whereami-deployment   1/1     1            1           12m
+</pre>
+</li> </ol> <h3 id="deploying_through_the_config_cluster">Deploying through the config cluster</h3> <p>Now that the application is deployed across <code translate="no" dir="ltr">gke-us</code> and <code translate="no" dir="ltr">gke-eu</code>, you will deploy a load balancer by deploying <code translate="no" dir="ltr">MultiClusterIngress</code> and <code translate="no" dir="ltr">MultiClusterService</code> resources in the config cluster. These are the multi-cluster equivalents of Ingress and Service resources.</p> <p>In the <a href="multi-cluster-ingress-setup#specifying_a_config_cluster">setup guide</a>, you configured the <code translate="no" dir="ltr">gke-us</code> cluster as the config cluster. The config cluster is used to deploy and configure Ingress across all clusters.</p> <ol> <li>
+<p>Set the context to the config cluster.</p> 
+<pre>kubectl config use-context gke-us
+</pre>
+<aside class="note"><strong>Note:</strong><span> Only one cluster can be the active config cluster at any time. You can deploy <code translate="no" dir="ltr">MultiClusterIngress</code> and <code translate="no" dir="ltr">MultiClusterService</code> resources to other clusters, but they won't be seen or processed by the Multi Cluster Ingress controller.</span></aside>
+</li> </ol> <h4 id="multiclusterservice">MultiClusterService</h4> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">mcs.yaml</code> that has the following content:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterService
+metadata:
+  name: whereami-mcs
+  namespace: whereami
+spec:
+  template:
+    spec:
+      selector:
+        app: whereami
+      ports:
+      - name: web
+        protocol: TCP
+        port: 8080
+        targetPort: 8080
+</pre>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">MultiClusterService</code> resource that matches the <code translate="no" dir="ltr">whereami</code> app:</p> 
+<pre>kubectl apply -f mcs.yaml
+</pre>
+</li> <li>
+<p>Verify that the <code translate="no" dir="ltr">whereami-mcs</code> resource has successfully deployed in the config cluster:</p> 
+<pre>kubectl get mcs -n whereami
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME       AGE
+whereami-mcs   9m26s
+</pre> <p>This <code translate="no" dir="ltr">MultiClusterService</code> creates a derived headless Service in every cluster that matches Pods with <code translate="no" dir="ltr">app: whereami</code>. You can see that one exists in the <code translate="no" dir="ltr">gke-us</code> cluster <code translate="no" dir="ltr">kubectl get service -n whereami</code>.</p> <p>The output is similar to the following:</p> 
+<pre>NAME                                TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)          AGE
+mci-whereami-mcs-svc-lgq966x5mxwwvvum   ClusterIP   None          &lt;none&gt;        8080/TCP         4m59s
+</pre>
+</li> </ol> <p>A similar headless Service will also exist in <code translate="no" dir="ltr">gke-eu</code>. These local Services are used to dynamically select Pod endpoints to program the global Ingress load balancer with backends.</p> <h4 id="multiclusteringress">MultiClusterIngress</h4> <ol> <li>
+<p>Create a file named <code translate="no" dir="ltr">mci.yaml</code> that has the following content:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterIngress
+metadata:
+  name: whereami-ingress
+  namespace: whereami
+spec:
+  template:
+    spec:
+      backend:
+        serviceName: whereami-mcs
+        servicePort: 8080
+</pre> <p>Note that this configuration routes all traffic to the <code translate="no" dir="ltr">MultiClusterService</code> named <code translate="no" dir="ltr">whereami-mcs</code> that exists in the <code translate="no" dir="ltr">whereami</code> namespace.</p>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">MultiClusterIngress</code> resource that references <code translate="no" dir="ltr">whereami-mcs</code> as a backend:</p> 
+<pre>kubectl apply -f mci.yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>multiclusteringress.networking.gke.io/whereami-ingress created
+</pre> <p>Note that <code translate="no" dir="ltr">MultiClusterIngress</code> has the same schema as the Kubernetes Ingress. The Ingress resource semantics are also the same with the exception of the <code translate="no" dir="ltr">backend.serviceName</code> field.</p>
+</li> </ol> <p>The <code translate="no" dir="ltr">backend.serviceName</code> field in a <code translate="no" dir="ltr">MultiClusterIngress</code> references a <code translate="no" dir="ltr">MultiClusterService</code> in the fleet API rather than a Service in a Kubernetes cluster. This means that any of the settings for Ingress, such as TLS termination, settings can be configured in the same way.</p> <h2 id="deployment_validation">Validating a successful deployment status</h2> <p>Google Cloud Load Balancer deployment might take several minutes to deploy for new load balancers. Updating existing load balancers completes faster because new resources don't need to be deployed. The <code translate="no" dir="ltr">MultiClusterIngress</code> resource details the underlying Compute Engine resources that have been created on behalf of the <code translate="no" dir="ltr">MultiClusterIngress</code>.</p> <ol> <li>
+<p>Verify that deployment has succeeded:</p> 
+<pre>kubectl describe mci whereami-ingress -n whereami
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         whereami-ingress
+Namespace:    whereami
+Labels:       &lt;none&gt;
+Annotations:  kubectl.kubernetes.io/last-applied-configuration:
+                {"apiVersion":"networking.gke.io/v1","kind":"MultiClusterIngress","metadata":{"annotations":{},"name":"whereami-ingress","namespace":"whe...
+API Version:  networking.gke.io/v1
+Kind:         MultiClusterIngress
+Metadata:
+  Creation Timestamp:  2020-04-10T23:35:10Z
+  Finalizers:
+    mci.finalizer.networking.gke.io
+  Generation:        2
+  Resource Version:  26458887
+  Self Link:         /apis/networking.gke.io/v1/namespaces/whereami/multiclusteringresses/whereami-ingress
+  UID:               62bec0a4-8a08-4cd8-86b2-d60bc2bda63d
+Spec:
+  Template:
+    Spec:
+      Backend:
+        Service Name:  whereami-mcs
+        Service Port:  8080
+Status:
+  Cloud Resources:
+    Backend Services:
+      mci-8se3df-8080-whereami-whereami-mcs
+    Firewalls:
+      mci-8se3df-default-l7
+    Forwarding Rules:
+      mci-8se3df-fw-whereami-whereami-ingress
+    Health Checks:
+      mci-8se3df-8080-whereami-whereami-mcs
+    Network Endpoint Groups:
+      zones/europe-west1-b/networkEndpointGroups/k8s1-e4adffe6-whereami-mci-whereami-mcs-svc-lgq966x5m-808-88670678
+      zones/us-central1-b/networkEndpointGroups/k8s1-a6b112b6-whereami-mci-whereami-mcs-svc-lgq966x5m-808-609ab6c6
+    Target Proxies:
+      mci-8se3df-whereami-whereami-ingress
+    URL Map:  mci-8se3df-whereami-whereami-ingress
+  VIP:        34.98.102.37
+Events:
+  Type    Reason  Age                    From                              Message
+  ----    ------  ----                   ----                              -------
+  Normal  ADD     3m35s                  multi-cluster-ingress-controller  whereami/whereami-ingress
+  Normal  UPDATE  3m10s (x2 over 3m34s)  multi-cluster-ingress-controller  whereami/whereami-ingress
+</pre> <p>There are several fields that indicate the status of this Ingress deployment:</p> <ul> <li><p><code translate="no" dir="ltr">Events</code> is the first place to look. If an error has occurred it will be listed here.</p></li> <li><p><code translate="no" dir="ltr">Cloud Resource</code>lists the Compute Engine resources like forwarding rules, backend services, and firewall rules that have been created by the Multi Cluster Ingress controller. If these are not listed it means that they have not been created yet. You can inspect individual Compute Engine resources with the Console or <code translate="no" dir="ltr">gcloud</code> command to get its status.</p></li> <li><p><code translate="no" dir="ltr">VIP</code> lists an IP address when one has been allocated. Note that the load balancer may not yet be processing traffic even though the VIP exists. If you don't see a VIP after a couple minutes, or if the load balancer is not serving a 200 response within 10 minutes, see <a href="troubleshooting-and-ops">Troubleshooting and operations</a>.</p></li> </ul> <p>If the output events are <code translate="no" dir="ltr">Normal</code>, then the <code translate="no" dir="ltr">MultiClusterIngress</code> deployment is likely successful, but the only way to determine that the full traffic path is functional is to test it.</p>
+</li> <li>
+<p>Validate that the application is serving on the VIP with the <code translate="no" dir="ltr">/ping</code> endpoint:</p> 
+<pre>curl INGRESS_VIP/ping
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">INGRESS_VIP</var></code> with the virtual IP (VIP) address.</p> <p>The output is similar to the following:</p> 
+<pre>{
+"cluster_name": "gke-us",
+"host_header": "34.120.175.141",
+"pod_name": "whereami-deployment-954cbf78-mtlpf",
+"pod_name_emoji": "😎",
+"project_id": "my-project",
+"timestamp": "2021-11-29T17:01:59",
+"zone": "us-central1-b"
+}
+</pre> <p>The output should indicate the region and backend of the application.</p>
+</li> <li>
+<p>You can also go to the <code translate="no" dir="ltr">http://<var translate="no">INGRESS_VIP</var></code> URL in your browser to see a graphical version of the application that shows the region that it's being served from.</p> <p>The cluster that the traffic is forwarded to depends on your location. The GCLB is designed to forward client traffic to the closest available backend with capacity.</p>
+</li> </ol> <h2 id="resource_specs">Resource specs</h2> <h3 id="multiclusterservice_spec">MultiClusterService spec</h3> <p>The <code translate="no" dir="ltr">MultiClusterService</code> definition consists of two pieces:</p> <ol> <li><p>A <code translate="no" dir="ltr">template</code> section that defines the Service to be created in the Kubernetes clusters. Note that while the <code translate="no" dir="ltr">template</code> section contains fields supported in a typical Service, there are only two fields that are supported in a <code translate="no" dir="ltr">MultiClusterService</code>: <code translate="no" dir="ltr">selector</code> and <code translate="no" dir="ltr">ports</code>. The other fields are ignored.</p></li> <li><p>An optional <code translate="no" dir="ltr">clusters</code> section that defines which clusters receive traffic and the load balancing properties for each cluster. If no <code translate="no" dir="ltr">clusters</code> section is specified or if no clusters are listed, all clusters are used by default.</p></li> </ol> <p>The following manifest describes a standard <code translate="no" dir="ltr">MultiClusterService</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterService
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  template:
+    spec:
+      selector:
+        app: POD_LABEL
+      ports:
+      - name: web
+        protocol: TCP
+        port: PORT
+        targetPort: TARGET_PORT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAME</var></code>: the name of the <code translate="no" dir="ltr">MultiClusterService</code>. This name is referenced by the <code translate="no" dir="ltr">serviceName</code> field in the <code translate="no" dir="ltr">MultiClusterIngress</code> resources.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the Kubernetes Namespace that the <code translate="no" dir="ltr">MultiClusterService</code> is deployed in. It must match be in the same Namespace as the <code translate="no" dir="ltr">MultiClusterIngress</code> and the Pods across all clusters in the fleet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_LABEL</var></code>: the label that determines which pods are selected as backends for this <code translate="no" dir="ltr">MultiClusterService</code> across all clusters in the fleet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PORT</var></code>: must match with the port referenced by the <code translate="no" dir="ltr">MultiClusterIngress</code> that references this <code translate="no" dir="ltr">MultiClusterService</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_PORT</var></code>: the port that is used to send traffic to the Pod from the GCLB. A NEG is created in each cluster with this port as its serving port.</li> </ul> <h3 id="multiclusteringress_spec">MultiClusterIngress spec</h3> <p>The following <code translate="no" dir="ltr">mci.yaml</code> describes the load balancer frontend:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterIngress
+metadata:
+  name: NAME
+  namespace: NAMESPACE
+spec:
+  template:
+    spec:
+      backend:
+       serviceName: DEFAULT_SERVICE
+       servicePort: PORT
+      rules:
+        - host: HOST_HEADER
+          http:
+            paths:
+            - path: PATH
+              backend:
+                serviceName: SERVICE
+                servicePort: PORT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAME</var></code>: the name of the <code translate="no" dir="ltr">MultiClusterIngress</code> resource.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the Kubernetes Namespace that the <code translate="no" dir="ltr">MultiClusterIngress</code> is deployed in. It must be in the same Namespace as the <code translate="no" dir="ltr">MultiClusterService</code> and the Pods across all clusters in the fleet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DEFAULT_SERVICE</var></code>: acts as the default backend for all traffic that does not match any host or path rules. This is a required field and a default backend must be specified in the <code translate="no" dir="ltr">MultiClusterIngress</code> even if there are other host or path matches configured.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PORT</var></code>: any valid port number. This must match with the <code translate="no" dir="ltr">port</code> field of the <code translate="no" dir="ltr">MultiClusterService</code> resources.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">HOST_HEADER</var></code>: matches traffic by the HTTP host header field. The <code translate="no" dir="ltr">host</code> field is optional.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH</var></code>: matches traffic by the path of the HTTP URL. The <code translate="no" dir="ltr">path</code> field is optional.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of a <code translate="no" dir="ltr">MultiClusterService</code> that is deployed in the same Namespace and config cluster as this <code translate="no" dir="ltr">MultiClusterIngress</code>.</li> </ul> <h2 id="features">Multi Cluster Ingress features</h2> <p>This section shows you how to configure additional Multi Cluster Ingress features.</p> <h3 id="cluster_selection">Cluster selection</h3> <p>By default, Services derived from Multi Cluster Ingress are scheduled on every member cluster. However, you may want to apply ingress rules to specific clusters. Some use-cases include:</p> <ul> <li>Applying Multi Cluster Ingress to all clusters but the config cluster for isolation of the config cluster.</li> <li>Migrating workloads between clusters in a blue-green fashion.</li> <li>Routing to application backends that only exist in a subset of clusters.</li> <li>Using a single L7 VIP for host or path routing to backends that live on different clusters.</li> </ul> <p>Cluster selection lets you select clusters by region or name in the <code translate="no" dir="ltr">MultiClusterService</code> object. This controls which clusters your <code translate="no" dir="ltr">MultiClusterIngress</code> is pointing to and where the derived Services are scheduled. Clusters within the same fleet and region shouldn't have the same name so that clusters can be referenced uniquely.</p> <ol> <li>
+<p>Open <code translate="no" dir="ltr">mcs.yaml</code></p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterService
+metadata:
+  name: whereami-mcs
+  namespace: whereami
+spec:
+  template:
+    spec:
+      selector:
+        app: whereami
+      ports:
+      - name: web
+        protocol: TCP
+        port: 8080
+        targetPort: 8080
+</pre> <p>This specification creates Derived Services in all clusters, the default behavior.</p>
+</li> <li>
+<p>Append the following lines in the clusters section:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterService
+metadata:
+  name: whereami-mcs
+  namespace: whereami
+spec:
+  template:
+    spec:
+      selector:
+        app: whereami
+      ports:
+      - name: web
+        protocol: TCP
+        port: 8080
+        targetPort: 8080
+  clusters:
+  - link: "us-central1-b/gke-us"
+  - link: "europe-west1-b/gke-eu"
+</pre> <p>This example creates Derived Service resources only in gke-us and gke-eu clusters. You must select clusters to selectively apply ingress rules. If the "clusters" section of the <code translate="no" dir="ltr">MultiClusterService</code> is not specified or if no clusters are listed, it is interpreted as the default "all" clusters.</p>
+</li> </ol> <h3 id="https_support">HTTPS support</h3> <p>The Kubernetes <a href="https://kubernetes.io/docs/concepts/configuration/secret/" track-name="k8sLink" track-type="tasks" class="external">Secret</a> supports HTTPS. Before enabling HTTPS support, you must create a static IP address. This static IP allows HTTP and HTTPS to share the same IP address. For more information, see <a href="#static">Creating a static IP</a>.</p> <p>Once you have created a static IP address, you can create a Secret.</p> <aside class="note"><strong>Note:</strong><span> The public key certificate must be .PEM encoded and match the given private key.</span></aside> <ol> <li>
+<p>Create a Secret:</p> 
+<pre>kubectl -n whereami create secret tls SECRET_NAME --key PATH_TO_KEYFILE --cert PATH_TO_CERTFILE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SECRET_NAME</var></code> with the name of your Secret.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_KEYFILE</var></code> with the path to the TLS key file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_CERTFILE</var></code> with the path to the TLS certificate file.</li> </ul>
+</li> <li>
+<p>Update the <code translate="no" dir="ltr">mci.yaml</code> file with the Secret name:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterIngress
+metadata:
+  name: whereami-ingress
+  namespace: whereami
+  annotations:
+    networking.gke.io/static-ip: STATIC_IP_ADDRESS
+spec:
+  template:
+    spec:
+      backend:
+        serviceName: whereami-mcs
+        servicePort: 8080
+      tls:
+      - secretName: SECRET_NAME
+</pre> <p>Replace the <code translate="no" dir="ltr"><var translate="no">SECRET_NAME</var></code> with the name of your Secret. The <code translate="no" dir="ltr"><var translate="no">STATIC_IP_ADDRESS</var></code> is the IP address or the complete URL of the address you allocated in the <a href="#static">Creating a static IP</a> section.</p>
+</li> <li>
+<p>Redeploy the <code translate="no" dir="ltr">MultiClusterIngress</code> resource:</p> 
+<pre>kubectl apply -f mci.yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>multiclusteringress.networking.gke.io/whereami-ingress configured
+</pre>
+</li> </ol> <h3 id="backendconfig_support">BackendConfig support</h3> <p>The following BackendConfig CRD lets you customize settings on the Compute Engine BackendService resource:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: whereami-health-check-cfg
+  namespace: whereami
+spec:
+  healthCheck:
+    checkIntervalSec: [int]
+    timeoutSec: [int]
+    healthyThreshold: [int]
+    unhealthyThreshold: [int]
+    type: [HTTP | HTTPS | HTTP2 | TCP]
+    port: [int]
+    requestPath: [string]
+  timeoutSec: [int]
+  connectionDraining:
+    drainingTimeoutSec: [int]
+  sessionAffinity:
+    affinityType: [CLIENT_IP | CLIENT_IP_PORT_PROTO | CLIENT_IP_PROTO | GENERATED_COOKIE | HEADER_FIELD | HTTP_COOKIE | NONE]
+    affinityCookieTtlSec: [int]
+  cdn:
+    enabled: [bool]
+    cachePolicy:
+      includeHost: [bool]
+      includeQueryString: [bool]
+      includeProtocol: [bool]
+      queryStringBlacklist: [string list]
+      queryStringWhitelist: [string list]
+  securityPolicy:
+    name: ca-how-to-security-policy
+  logging:
+    enable: [bool]
+    sampleRate: [float]
+  iap:
+    enabled: [bool]
+    oauthclientCredentials:
+      secretName: [string]
+</pre> <p>To use BackendConfig, attach it on your <code translate="no" dir="ltr">MultiClusterService</code> resource using an annotation:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterService
+metadata:
+  name: whereami-mcs
+  namespace: whereami
+  annotations:
+    cloud.google.com/backend-config: '{"ports": {"8080":"whereami-health-check-cfg"}}'
+spec:
+ template:
+   spec:
+     selector:
+       app: whereami
+     ports:
+     - name: web
+       protocol: TCP
+       port: 8080
+       targetPort: 8080
+</pre> <p>For more information about BackendConfig semantics, see <a href="../concepts/backendconfig#associating_a_service_port_with_a_backendconfig">Associating a service port with a BackendConfig</a>.</p> <h3 id="grpc_support">gRPC support</h3> <p>Configuring gRPC applications on Multi Cluster Ingress requires very specific setup. Here are some tips to make sure your load balancer is configured properly:</p> <ol> <li>Make sure that the traffic from the load balancer to your application is HTTP/2. Use <a href="#application_protocols">application protocols</a> to configure this.</li> <li>Make sure that your application is properly configured for SSL since this is a <a href="https://docs.cloud.google.com/load-balancing/docs/https#protocol_to_the_backends">requirement</a> of HTTP/2. Note that using self-signed certs is acceptable.</li> <li>You must turn off mTLS on your application because mTLS is <a href="https://docs.cloud.google.com/load-balancing/docs/https#client_communications_with_the_load_balancer">not supported</a> for L7 external load balancers.</li> </ol> <h2 id="resource_lifecycle">Resource lifecycle</h2> <h3 id="configuration_changes">Configuration changes</h3> <p><code translate="no" dir="ltr">MultiClusterIngress</code> and <code translate="no" dir="ltr">MultiClusterService</code> resources behave as standard Kubernetes objects, so changes to the objects are asynchronously reflected in the system. Any changes that result in an invalid configuration cause associated Google Cloud objects to remain unchanged and raise an error in the object event stream. Errors associated with the configuration will be reported as events.</p> <h3 id="managing_kubernetes_resources">Managing Kubernetes resources</h3> <p>Deleting the Ingress object tears down the HTTP(S) load balancer so traffic is no longer forwarded to any defined <code translate="no" dir="ltr">MultiClusterService</code>.</p> <p>Deleting the <code translate="no" dir="ltr">MultiClusterService</code> removes the associated derived services in each of the clusters.</p> <h3 id="managing_clusters">Managing clusters</h3> <p>The set of clusters targeted by the load balancer can be changed by adding or removing clusters from the fleet.</p> <p>For example, to remove the <code translate="no" dir="ltr">gke-eu</code> cluster as a backend for an ingress, run:</p> 
+<pre>gcloud container fleet memberships unregister CLUSTER_NAME \
+  --gke-uri=URI
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">URI</var></code>: the URI of the GKE cluster.</li> </ul> <p>To add a cluster in Europe, run:</p> 
+<pre>gcloud container fleet memberships register europe-cluster \
+  --context=europe-cluster --enable-workload-identity
+</pre> <p>You can find out more about cluster registration options in <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke">Register a GKE cluster</a>.</p> <p>Note that registering or unregistering a cluster changes its status as a backend for all Ingresses. Unregistering the <code translate="no" dir="ltr">gke-eu</code> cluster removes it as an available backend for all Ingresses you create. The reverse is true for registering a new cluster.</p> <aside class="note"><strong>Note:</strong><span> If you want to delete a fleet member cluster, ensure you unregister the cluster before you delete it. Failure to do so could result in unexpected behavior.</span></aside> <h3 id="disabling">Disabling Multi Cluster Ingress</h3> <p>Before disabling Multi Cluster Ingress you must ensure that you first delete your <code translate="no" dir="ltr">MultiClusterIngress</code> and <code translate="no" dir="ltr">MultiClusterService</code> resources and verify any associated networking resources are deleted.</p> <p>Then, to disable Multi Cluster Ingress, use the following command:</p> 
+<pre>gcloud container fleet ingress disable
+</pre> <p>If you don't delete <code translate="no" dir="ltr">MultiClusterIngress</code> and <code translate="no" dir="ltr">MultiClusterService</code> resources before disabling Multi Cluster Ingress, you might encounter an error similar to the following:</p> 
+<pre>Feature has associated resources that should be cleaned up before deletion.
+</pre> <p>If you want to force disable Multi Cluster Ingress, use the following command:</p> 
+<pre>gcloud container fleet ingress disable --force
+</pre>
+<aside class="note"><strong>Note:</strong><span> Force disabling might result in unexpected behavior. It is not recommended to force disable for production environments.</span></aside> <h2 id="annotations">Annotations</h2> <p>The following annotations are supported on <code translate="no" dir="ltr">MultiClusterIngress</code> and <code translate="no" dir="ltr">MultiClusterService</code> resources.</p> <h4 id="multiclusteringress_annotations">MultiClusterIngress Annotations</h4> <table> <thead> <tr> <th><strong>Annotation</strong></th> <th><strong>Description</strong></th> </tr> </thead> <tbody> <tr> <td style="white-space: nowrap;">networking.gke.io/frontend-config</td> <td>References a <a href="ingress-configuration#configuring_ingress_features_through_frontendconfig_parameters">FrontendConfig resource</a> in the same Namespace as the MultiClusterIngress resource.</td> </tr> <tr> <td style="white-space: nowrap;">networking.gke.io/static-ip</td> <td>Refers to the literal IP address of a global static IP.</td> </tr> <tr> <td style="white-space: nowrap;">networking.gke.io/pre-shared-certs</td> <td>Refers to a global SSLCertificate resource.</td> </tr> </tbody> </table> <h4 id="multiclusterservice_annotations">MultiClusterService Annotations</h4> <table> <thead> <tr> <th><strong>Annotation</strong></th> <th><strong>Description</strong></th> </tr> </thead> <tbody> <tr> <td style="white-space: nowrap;">networking.gke.io/app-protocols</td> <td>Use this annotation to set the protocol for communication between the load balancer and the application. Possible protocols are HTTP, HTTPS, and HTTP/2. See <a href="../concepts/ingress-xlb#https_tls_between_load_balancer_and_your_application">HTTPS between load balancer and your application</a> and <a href="ingress-http2">HTTP/2 for load balancing with Ingress</a>.</td> </tr> <tr> <td style="white-space: nowrap;">cloud.google.com/backend-config</td> <td>Use this annotation to configure the backend service associated with a servicePort. For more information, see <a href="ingress-configuration">Ingress configuration</a>.</td> </tr> </tbody> </table> <h3 id="ssl_policies_and_https_redirects">SSL Policies and HTTPS Redirects</h3> <p>You can use the FrontendConfig resource to configure SSL policies and HTTPS redirects. SSL policies allow you to specify which cipher suites and TLS versions are accepted by the load balancer. HTTPS redirects allow you to enforce the redirection from HTTP or port 80 to HTTPS or port 443. The following steps configure an SSL policy and HTTPS redirect together. Note that they can also be configured independently.</p> <ol> <li>
+<p>Create an <a href="https://docs.cloud.google.com/load-balancing/docs/use-ssl-policies#creating_an_ssl_policy_with_a_google-managed_profile">SSL policy</a> that will reject requests using a version lower than TLS v1.2.</p> 
+<pre>gcloud compute ssl-policies create tls-12-policy \
+ --profile MODERN \
+ --min-tls-version 1.2 \
+ --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the project ID where your GKE clusters are running.</p>
+</li> <li>
+<p>View your policy to ensure it has been created.</p> 
+<pre>gcloud compute ssl-policies list --project=PROJECT_ID
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME           PROFILE  MIN_TLS_VERSION
+tls-12-policy  MODERN   TLS_1_2
+</pre>
+</li> <li>
+<p>Create a certificate for <code translate="no" dir="ltr">foo.example.com</code> as in <a href="deploying-gateways#creating_and_storing_a_tls_certificate">the example</a>. Once you have the <code translate="no" dir="ltr">key.pem</code> and <code translate="no" dir="ltr">cert.pem</code>, store these credentials as a Secret that will be referenced by the MultiClusterIngress resource.</p> 
+<pre>kubectl -n whereami create secret tls SECRET_NAME --key key.pem --cert cert.pem
+</pre>
+</li> <li>
+<p>Save the following FrontendConfig resource as <code translate="no" dir="ltr">frontendconfig.yaml</code>. See <a href="ingress-configuration#configuring_ingress_features_through_frontendconfig_parameters">Configuring FrontendConfig resources</a> for more information on the supported fields within a FrontendConfig.</p> 
+<pre>apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: frontend-redirect-tls-policy
+  namespace: whereami
+spec:
+  sslPolicy: tls-12-policy
+  redirectToHttps:
+    enabled: true
+</pre> <p>This FrontendConfig will enable HTTPS redirects and an SSL policy that enforces a minimum TLS version of 1.2.</p>
+</li> <li>
+<p>Deploy <code translate="no" dir="ltr">frontendconfig.yaml</code> into your config cluster.</p> 
+<pre>kubectl apply -f frontendconfig.yaml --context MCI_CONFIG_CLUSTER
+</pre> <p>Replace the <code translate="no" dir="ltr"><var translate="no">MCI_CONFIG_CLUSTER</var></code> with the name of your <a href="multi-cluster-ingress-setup#specifying_a_config_cluster">config cluster</a>.</p>
+</li> <li>
+<p>Save the following MultiClusterIngress as <code translate="no" dir="ltr">mci-frontendconfig.yaml</code>.</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterIngress
+metadata:
+  name: foo-ingress
+  namespace: whereami
+  annotations:
+    networking.gke.io/frontend-config: frontend-redirect-tls-policy
+    networking.gke.io/static-ip: STATIC_IP_ADDRESS
+spec:
+  template:
+    spec:
+      backend:
+        serviceName: default-backend
+        servicePort: 8080
+      rules:
+      - host: foo.example.com
+        http:
+          paths:
+            - backend:
+                serviceName: whereami-mcs
+                servicePort: 8080
+      tls:
+      - secretName: SECRET_NAME
+</pre> <ul> <li>Replace <code translate="no" dir="ltr"><var translate="no">STATIC_IP_ADDRESS</var></code> with a static global IP address that you have already provisioned.</li> <li>Replace <code translate="no" dir="ltr"><var translate="no">SECRET_NAME</var></code> with the Secret where your <code translate="no" dir="ltr">foo.example.com</code> certificate is stored.</li> </ul> <p>There are two requirements when enabling HTTPS redirects:</p> <ul> <li>TLS must be enabled, either through the <code translate="no" dir="ltr">spec.tls</code> field or through the pre-shared certificate annotation <code translate="no" dir="ltr">networking.gke.io/pre-shared-certs</code>. The MultiClusterIngress won't deploy if HTTPS redirects is enabled but HTTPS is not.</li> <li>A static IP must be referenced through the <code translate="no" dir="ltr">networking.gke.io/static-ip</code> annotation. Static IPs are required when enabling HTTPS on a MultiClusterIngress.</li> </ul> <aside class="note"><strong>Note:</strong><span> Deployment of the application or MultiClusterService is not shown in this example, but they must also be created for this to fully work.</span></aside>
+</li> <li>
+<p>Deploy the MultiClusterIngress to your config cluster.</p> 
+<pre>kubectl apply -f mci-frontendconfig.yaml --context MCI_CONFIG_CLUSTER
+</pre>
+</li> <li>
+<p>Wait a minute or two and inspect <code translate="no" dir="ltr">foo-ingress</code>.</p> 
+<pre>kubectl describe mci foo-ingress --context MCI_CONFIG_CLUSTER
+</pre> <p>A successful output resembles the following:</p> <ul> <li>The <code translate="no" dir="ltr">Cloud Resources</code> status is populated with resource names</li> <li>The <code translate="no" dir="ltr">VIP</code> field is populated with the load balancer IP address</li> </ul> 
+<pre>Name:         foobar-ingress
+Namespace:    whereami
+
+...
+
+Status:
+  Cloud Resources:
+    Backend Services:
+      mci-otn9zt-8080-whereami-bar
+      mci-otn9zt-8080-whereami-default-backend
+      mci-otn9zt-8080-whereami-foo
+    Firewalls:
+      mci-otn9zt-default-l7
+    Forwarding Rules:
+      mci-otn9zt-fw-whereami-foobar-ingress
+      mci-otn9zt-fws-whereami-foobar-ingress
+    Health Checks:
+      mci-otn9zt-8080-whereami-bar
+      mci-otn9zt-8080-whereami-default-backend
+      mci-otn9zt-8080-whereami-foo
+    Network Endpoint Groups:
+      zones/europe-west1-b/networkEndpointGroups/k8s1-1869d397-multi-cluste-mci-default-backend-svc--80-9e362e3d
+      zones/europe-west1-b/networkEndpointGroups/k8s1-1869d397-multi-cluster--mci-bar-svc-067a3lzs8-808-89846515
+      zones/europe-west1-b/networkEndpointGroups/k8s1-1869d397-multi-cluster--mci-foo-svc-820zw3izx-808-8bbcb1de
+      zones/us-central1-b/networkEndpointGroups/k8s1-a63e24a6-multi-cluste-mci-default-backend-svc--80-a528cc75
+      zones/us-central1-b/networkEndpointGroups/k8s1-a63e24a6-multi-cluster--mci-bar-svc-067a3lzs8-808-36281739
+      zones/us-central1-b/networkEndpointGroups/k8s1-a63e24a6-multi-cluster--mci-foo-svc-820zw3izx-808-ac733579
+    Target Proxies:
+      mci-otn9zt-whereami-foobar-ingress
+      mci-otn9zt-whereami-foobar-ingress
+    URL Map:  mci-otn9zt-rm-whereami-foobar-ingress
+  VIP:        34.149.29.76
+Events:
+  Type     Reason  Age                From                              Message
+  ----     ------  ----               ----                              -------
+  Normal   UPDATE  38m (x5 over 62m)  multi-cluster-ingress-controller  whereami/foobar-ingress
+</pre>
+</li> <li>
+<p>Verify that HTTPS redirects function correctly by sending an HTTP request through <code translate="no" dir="ltr">curl</code>.</p> 
+<pre>curl VIP
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">VIP</var></code> with the MultiClusterIngress IP address.</p> <p>The output should show that the request was redirected to the HTTPS port which indicates that redirects are functioning correctly.</p>
+</li> <li>
+<p>Verify that the TLS policy functions correctly by sending an HTTPS request using TLS version 1.1. Because DNS is not configured for this domain, use the <code translate="no" dir="ltr">--resolve</code> option to tell <code translate="no" dir="ltr">curl</code> to resolve the IP address directly.</p> 
+<pre>curl https://foo.example.com --resolve foo.example.com:443:VIP --cacert CERT_FILE -v
+</pre> <p>This step requires the certificate PEM file used to secure the MultiClusterIngress. A successful output will look similar to the following:</p> 
+<pre>...
+* SSL connection using TLSv1.2 / ECDHE-RSA-CHACHA20-POLY1305
+* ALPN, server accepted to use h2
+* Server certificate:
+*  subject: O=example; CN=foo.example.com
+*  start date: Sep  1 10:32:03 2021 GMT
+*  expire date: Aug 27 10:32:03 2022 GMT
+*  common name: foo.example.com (matched)
+*  issuer: O=example; CN=foo.example.com
+*  SSL certificate verify ok.
+* Using HTTP2, server supports multi-use
+* Connection state changed (HTTP/2 confirmed)
+* Copying HTTP/2 data in stream buffer to connection buffer after upgrade: len=0
+* Using Stream ID: 1 (easy handle 0x7fa10f00e400)
+&gt; GET / HTTP/2
+&gt; Host: foo.example.com
+&gt; User-Agent: curl/7.64.1
+&gt; Accept: */*
+&gt;
+* Connection state changed (MAX_CONCURRENT_STREAMS == 100)!
+&lt; HTTP/2 200
+&lt; content-type: application/json
+&lt; content-length: 308
+&lt; access-control-allow-origin: *
+&lt; server: Werkzeug/1.0.1 Python/3.8.6
+&lt; date: Wed, 01 Sep 2021 11:39:06 GMT
+&lt; via: 1.1 google
+&lt; alt-svc: clear
+&lt;
+{"cluster_name":"gke-us","host_header":"foo.example.com","metadata":"foo","node_name":"gke-gke-us-default-pool-22cb07b1-r5r0.c.mark-church-project.internal","pod_name":"foo-75ccd9c96d-dkg8t","pod_name_emoji":"👞","project_id":"mark-church-project","timestamp":"2021-09-01T11:39:06","zone":"us-central1-b"}
+* Connection #0 to host foo.example.com left intact
+* Closing connection 0
+</pre> <p>The response code is 200 and TLSv1.2 is being used which indicates that everything is functioning properly.</p> <p>Next you can verify that the SSL policy enforces the correct TLS version by attempting to connect with TLS 1.1. Your SSL policy must be configured for a minimum version of 1.2 for this step to work.</p>
+</li> <li>
+<p>Send the same request from the previous step, but enforce a TLS version of 1.1.</p> 
+<pre>curl https://foo.example.com --resolve foo.example.com:443:VIP -v \
+  --cacert CERT_FILE \
+  --tls-max 1.1
+</pre> <p>A successful output will look similar to the following:</p> 
+<pre>* Added foo.example.com:443:34.149.29.76 to DNS cache
+* Hostname foo.example.com was found in DNS cache
+*   Trying 34.149.29.76...
+* TCP_NODELAY set
+* Connected to foo.example.com (34.149.29.76) port 443 (#0)
+* ALPN, offering h2
+* ALPN, offering http/1.1
+* successfully set certificate verify locations:
+*   CAfile: cert.pem
+  CApath: none
+* TLSv1.1 (OUT), TLS handshake, Client hello (1):
+* TLSv1.1 (IN), TLS alert, protocol version (582):
+* error:1400442E:SSL routines:CONNECT_CR_SRVR_HELLO:tlsv1 alert protocol version
+* Closing connection 0
+curl: (35) error:1400442E:SSL routines:CONNECT_CR_SRVR_HELLO:tlsv1 alert protocol version
+</pre> <p>The failure to complete the TLS handshake indicates that the SSL policy has blocked TLS 1.1 successfully.</p>
+</li> </ol> <h3 id="static">Creating a static IP</h3> <ol> <li>
+<p>Allocate a static IP:</p> 
+<pre>gcloud compute addresses create ADDRESS_NAME --global
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ADDRESS_NAME</var></code> with the name of the static IP to allocate.</p> <p>The output contains the complete URL of the address you created, similar to the following:</p> 
+<pre>Created [https://www.googleapis.com/compute/v1/projects/PROJECT_ID/global/addresses/ADDRESS_NAME].
+</pre>
+</li> <li>
+<p>View the IP address you just created:</p> 
+<pre>gcloud compute addresses list
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME          ADDRESS/RANGE  TYPE      STATUS
+ADDRESS_NAME  STATIC_IP_ADDRESS  EXTERNAL  RESERVED
+</pre> <p>This output includes:</p> <ul> <li>The <code translate="no" dir="ltr"><var translate="no">ADDRESS_NAME</var></code> you defined.</li> <li>The <code translate="no" dir="ltr"><var translate="no">STATIC_IP_ADDRESS</var></code> allocated.</li> </ul>
+</li> <li>
+<p>Update the <code translate="no" dir="ltr">mci.yaml</code> file with the static IP:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: MultiClusterIngress
+metadata:
+  name: whereami-ingress
+  namespace: whereami
+  annotations:
+    networking.gke.io/static-ip: STATIC_IP_ADDRESS
+spec:
+  template:
+    spec:
+      backend:
+        serviceName: whereami-mcs
+        servicePort: 8080
+</pre> <p>Replace the <code translate="no" dir="ltr"><var translate="no">STATIC_IP_ADDRESS</var></code> with either:</p> <ul> <li>The allocated IP address, similar to: <code translate="no" dir="ltr">34.102.201.47</code>
+</li> <li>The complete URL of the address you created, similar to: <code translate="no" dir="ltr">"https://www.googleapis.com/compute/v1/projects/<var translate="no">PROJECT_ID</var>/global/addresses/<var translate="no">ADDRESS_NAME</var>"</code>
+</li> </ul> <p>The <code translate="no" dir="ltr"><var translate="no">STATIC_IP_ADDRESS</var></code> is not the resource name (<code translate="no" dir="ltr"><var translate="no">ADDRESS_NAME</var></code>).</p>
+</li> <li>
+<p>Redeploy the <code translate="no" dir="ltr">MultiClusterIngress</code> resource:</p> 
+<pre>kubectl apply -f mci.yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>multiclusteringress.networking.gke.io/whereami-ingress configured
+</pre>
+</li> <li><p>Follow the steps in <a href="#deployment_validation">Validating a successful deployment status</a> to verify that the deployment is serving on the <code translate="no" dir="ltr"><var translate="no">STATIC_IP_ADDRESS</var></code>.</p></li> </ol> <h3 id="pre-shared_certificates">Pre-shared certificates</h3> <p><a href="ingress-multi-ssl#using_pre-shared_certificates">Pre-shared certificates</a> are certificates uploaded to Google Cloud that can be used by the load balancer for TLS termination instead of certificates stored in Kubernetes Secrets. These certificates are uploaded out of band from GKE to Google Cloud and referenced by a <code translate="no" dir="ltr">MultiClusterIngress</code> resource. Multiple certificates, either through pre-shared certs or Kubernetes secrets, are also supported.</p> <p>Using the certificates in Multi Cluster Ingress requires the <code translate="no" dir="ltr">networking.gke.io/pre-shared-certs</code> annotation and the names of the certs. When multiple certificates are specified for a given <code translate="no" dir="ltr">MultiClusterIngress</code>, a predetermined order governs which cert is presented to the client.</p> <p>You can list the available SSL certificates by running:</p> 
+<pre>gcloud compute ssl-certificates list
+</pre> <p>The following example describes client traffic to one of the specified hosts that matches the Common Name of the pre-shared certs so the respective certificate that matches the domain name will be presented.</p> 
+<pre>kind: MultiClusterIngress
+metadata:
+  name: shopping-service
+  namespace: whereami
+  annotations:
+    networking.gke.io/pre-shared-certs: "domain1-cert, domain2-cert"
+spec:
+  template:
+    spec:
+      rules:
+      - host: my-domain1.gcp.com
+        http:
+          paths:
+          - backend:
+              serviceName: domain1-svc
+              servicePort: 443
+      - host: my-domain2.gcp.com
+        http:
+          paths:
+          - backend:
+              serviceName: domain2-svc
+              servicePort: 443
+</pre> <h3 id="google-managed_certificates">Google-managed Certificates</h3> <p><a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/google-managed-certs">Google-managed Certificates</a> are supported on <code translate="no" dir="ltr">MultiClusterIngress</code> resources through the <code translate="no" dir="ltr">networking.gke.io/pre-shared-certs</code> annotation. Multi Cluster Ingress supports the attachment of Google-managed certificates to a <code translate="no" dir="ltr">MultiClusterIngress</code> resource, however unlike single-cluster Ingress, the <a href="managed-certs#setting_up_the_managed_certificate">declarative generation of a Kubernetes <code translate="no" dir="ltr">ManagedCertificate</code> resource</a> is not supported on <code translate="no" dir="ltr">MultiClusterIngress</code> resources. The original creation of the Google-managed certificate must be done directly through the <code translate="no" dir="ltr">compute ssl-certificates create</code> API before you can attach it to a <code translate="no" dir="ltr">MultiClusterIngress</code>. That can be done following these steps:</p> <ol> <li>
+<p>Create a Google-managed Certificate as <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/google-managed-certs#create-ssl">in step 1 here.</a> Don't move to step 2 as Multi Cluster Ingress will attach this certificate for you.</p> 
+<pre>gcloud compute ssl-certificates create my-google-managed-cert \
+    --domains=my-domain.gcp.com \
+    --global
+</pre>
+</li> <li>
+<p>Reference the name of the certificate in your <code translate="no" dir="ltr">MultiClusterIngress</code> using the <code translate="no" dir="ltr">networking.gke.io/pre-shared-certs</code> annotation.</p> 
+<pre>kind: MultiClusterIngress
+metadata:
+name: shopping-service
+namespace: whereami
+annotations:
+  networking.gke.io/pre-shared-certs: "my-google-managed-cert"
+spec:
+template:
+  spec:
+    rules:
+    - host: my-domain.gcp.com
+      http:
+        paths:
+        - backend:
+            serviceName: my-domain-svc
+            servicePort: 8080
+</pre>
+</li> </ol> <p>The preceding manifest attaches the certificate to your <code translate="no" dir="ltr">MultiClusterIngress</code> so that it can terminate traffic for your backend GKE clusters. Google Cloud will <a href="https://docs.cloud.google.com/load-balancing/docs/ssl-certificates/google-managed-certs#renewal">automatically renew your certificate</a> prior to certificate expiry. Renewals occur transparently and does not require any updates to Multi Cluster Ingress.</p> <h3 id="application_protocols">Application protocols</h3> <p>The connection from the load balancer proxy to your application uses HTTP by default. Using <code translate="no" dir="ltr">networking.gke.io/app-protocols</code> annotation, you can configure the load balancer to use HTTPS or HTTP/2 when it forwards requests to your application. In the <code translate="no" dir="ltr">annotation</code> field of the following example, <code translate="no" dir="ltr">http2</code> refers to the <code translate="no" dir="ltr">MultiClusterService</code> port name and <code translate="no" dir="ltr">HTTP2</code> refers to the protocol that the load balancer uses.</p> 
+<pre>kind: MultiClusterService
+metadata:
+  name: shopping-service
+  namespace: whereami
+  annotations:
+    networking.gke.io/app-protocols: '{"http2":"HTTP2"}'
+spec:
+  template:
+    spec:
+      ports:
+      - port: 443
+        name: http2
+</pre> <h3 id="backendconfig">BackendConfig</h3> <p>Refer to the section <a href="#backendconfig_support">above</a> on how to configure the annotation.</p> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="../concepts/network-overview">Read the GKE network overview</a>.</li> <li>Learn more about <a href="../tutorials/http-balancer">setting up HTTP Load Balancing with Ingress</a>.</li> <li>Implement <a href="https://github.com/GoogleCloudPlatform/gke-networking-recipes/tree/main/ingress/multi-cluster/mci-https-e2e" class="external">Multi Cluster Ingress with end to end HTTPS</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/multi-cluster-ingress" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/multi-cluster-ingress</a>
+  </p>
+</div>

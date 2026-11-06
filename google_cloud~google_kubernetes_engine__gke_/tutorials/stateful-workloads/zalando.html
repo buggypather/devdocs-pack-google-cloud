@@ -1,0 +1,396 @@
+<h1>Deploy PostgreSQL to GKE using Zalando</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>The guide shows you how to use the <a href="https://github.com/zalando/postgres-operator">Zalando Postgres operator</a> to deploy Postgres clusters to Google Kubernetes Engine (GKE).</p> <p><a href="https://www.postgresql.org/">PostgreSQL</a> is a powerful, open source object-relational database system with several decades of active development that has earned it a strong reputation for reliability, feature robustness, and performance.</p> <p>This guide is intended for platform administrators, cloud architects, and operations professionals interested in running PostgreSQL as a database application on GKE instead of using <a href="../../concepts/database-options">Cloud SQL for PostgreSQL</a>.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Plan and deploy GKE infrastructure for Postgres</li> <li>Deploy and configure the Zalando Postgres operator</li> <li>Configure Postgres using the operator to ensure availability, security, observability and performance</li> </ul> <h3 id="benefits">Benefits</h3> <p>Zalando offers the following benefits:</p> <ul> <li>A declarative and Kubernetes-native way to manage and configure the PostgreSQL clusters</li> <li>High availability provided by <a href="https://patroni.readthedocs.io/en/latest/">Patroni</a>
+</li> <li>Backup management support using <a href="https://postgres-operator.readthedocs.io/en/latest/administrator/#google-cloud-platform-setup">Cloud Storage buckets</a>
+</li> <li>Rolling updates on Postgres cluster changes, including quick minor version updates</li> <li>Declarative <a href="https://github.com/zalando/postgres-operator/blob/master/docs/user.md#defining-database-roles-in-the-operator">User</a> management with password generation and rotation using custom resources</li> <li>Support for <a href="https://postgres-operator.readthedocs.io/en/latest/user/#custom-tls-certificates">TLS</a>, certificate rotation, and <a href="https://postgres-operator.readthedocs.io/en/latest/user/#connection-pooler">connection pools</a>
+</li> <li>Cluster <a href="https://postgres-operator.readthedocs.io/en/latest/user/#clone-directly">cloning</a> and data replication</li> </ul> <h3 id="deployment-architecture">Deployment architecture</h3> <p>In this tutorial, you use the Zalando Postgres operator to deploy and configure a highly available Postgres cluster to GKE. The cluster has one leader replica and two standby (read-only) replicas managed by <a href="https://github.com/zalando/patroni">Patroni</a>. Patroni is an open source solution maintained by Zalando to provide high-availability and auto-failover capabilities to Postgres. In case of leader failure, one standby replica is automatically promoted to a leader role.</p> <p>You also deploy a highly available regional GKE cluster for Postgres, with multiple &gt;Kubernetes nodes spread across several availability zones. This setup helps ensure fault tolerance, scalability, and geographic redundancy. It allows for rolling updates and maintenance while providing SLAs for uptime and availability. For more information, see <a href="../../concepts/regional-clusters">Regional clusters</a>.</p> <p>The following diagram shows a Postgres cluster running on multiple nodes and zones in a GKE cluster:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-zalando-postgresql.svg" alt></p> <p>In the diagram, the Postgres <code translate="no" dir="ltr">StatefulSet</code> is deployed across three nodes in three different zones. You can control how GKE deploys to nodes by setting the required Pod <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity">affinity and anti-affinity</a> rules on the <a href="https://github.com/zalando/postgres-operator/blob/master/manifests/complete-postgres-manifest.yaml"><code translate="no" dir="ltr">postgresql</code></a> custom resource specification. If one zone fails, using the recommended configuration, GKE reschedules Pods on other available nodes in your cluster. For persisting data, you use SSD disks (<code translate="no" dir="ltr">premium-rwo</code> <a href="../../how-to/persistent-volumes/gce-pd-csi-driver#create_a_storageclass">StorageClass</a>), which are <a href="https://docs.cloud.google.com/compute/docs/disks/performance">recommended</a> in most cases for highly loaded databases due to their <a href="https://docs.cloud.google.com/compute/docs/disks/performance#type_comparison">low latency and high IOPS</a>.</p> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/compute/disks-image-pricing">Compute Engine</a></li> <li><a href="https://cloud.google.com/kubernetes-engine/pricing/">GKE</a></li> <li><a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p><a href="https://docs.cloud.google.com/shell">Cloud Shell</a> is preinstalled with the software you need for this tutorial, including <a href="https://kubernetes.io/docs/reference/kubectl/"><code translate="no" dir="ltr">kubectl</code></a>, the <a href="https://docs.cloud.google.com/sdk/gcloud">gcloud CLI</a>, <a href="https://helm.sh/">Helm</a>, and <a href="https://docs.cloud.google.com/docs/terraform">Terraform</a>. If you don't use Cloud Shell, you must install the gcloud CLI.</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Compute Engine, IAM, GKE, Backup for GKE APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable compute.googleapis.com iam.googleapis.com container.googleapis.com gkebackup.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Compute Engine, IAM, GKE, Backup for GKE APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable compute.googleapis.com iam.googleapis.com container.googleapis.com gkebackup.googleapis.com</pre>
+</li> </div> </cloud-free-trial> <li> <p> Grant roles to your user account. Run the following command once for each of the following IAM roles: <code translate="no" dir="ltr">roles/storage.objectViewer, roles/container.admin, roles/iam.serviceAccountAdmin, roles/compute.admin, roles/gkebackup.admin, roles/monitoring.viewer
+</code> </p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID --member="user:USER_IDENTIFIER" --role=ROLE</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USER_IDENTIFIER</var></code>: The identifier for your user account. For example, <code translate="no" dir="ltr">myemail@example.com</code>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: The IAM role that you grant to your user account.</li> </ul> </li> </ol> </section> <div id="tutorial-content"> <h3 id="envsetup">Set up your environment</h3> <p>To set up your environment, follow these steps</p> <ol> <li>
+<p>Set environment variables:</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=postgres
+export REGION=us-central1
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</p>
+</li> <li>
+<p>Clone the GitHub repository:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+</pre>
+</li> <li>
+<p>Change to the working directory:</p> 
+<pre>cd kubernetes-engine-samples/databases/postgres-zalando
+</pre>
+</li> </ol> <h2 id="create-cluster">Create your cluster infrastructure</h2> <p>In this section, you run a Terraform script to create a private, highly-available, regional GKE cluster.</p> <p>You can install the operator using a <a href="../../concepts/choose-cluster-mode" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Standard or Autopilot</a> cluster.</p> <div> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>The following diagram shows a private regional Standard GKE cluster deployed across three different zones:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-zalando-standard-architecture.svg" alt></p> <p>Deploy this infrastructure:</p> 
+<pre data-language="">export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=terraform/gke-standard init
+terraform -chdir=terraform/gke-standard apply \
+  -var project_id=${PROJECT_ID} \
+  -var region=${REGION} \
+  -var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>When prompted, type <code translate="no" dir="ltr">yes</code>. It might take several minutes for this command to complete and for the cluster to show a ready status.</p> <p>Terraform creates the following resources:</p> <ul> <li>A VPC network and private subnet for the Kubernetes nodes</li> <li>A router to access the internet through NAT</li> <li>A private GKE cluster in the <code translate="no" dir="ltr">us-central1</code> region</li> <li>A node pools with auto scaling enabled (one to two nodes per zone, one node per zone minimum)</li> <li>A <code translate="no" dir="ltr">ServiceAccount</code> with logging and monitoring permissions</li> <li>Backup for GKE for disaster recovery</li> <li>Google Cloud Managed Service for Prometheus for cluster monitoring</li> </ul> <p>The output is similar to the following:</p> 
+<pre data-language="">...
+Apply complete! Resources: 14 added, 0 changed, 0 destroyed.
+...
+</pre></section> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>The following diagram shows a private regional Autopilot GKE cluster:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-zalando-autopilot-architecture.svg" alt></p> <p>Deploy the infrastructure:</p> 
+<pre data-language="">export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=terraform/gke-autopilot init
+terraform -chdir=terraform/gke-autopilot apply \
+  -var project_id=${PROJECT_ID} \
+  -var region=${REGION} \
+  -var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>When prompted, type <code translate="no" dir="ltr">yes</code>. It might take several minutes for this command to complete and for the cluster to show a ready status.</p> <p>Terraform creates the following resources:</p> <ul> <li>A VPC network and private subnet for the Kubernetes nodes</li> <li>A router to access the internet through NAT</li> <li>A private GKE cluster in the <code translate="no" dir="ltr">us-central1</code> region</li> <li>A <code translate="no" dir="ltr">ServiceAccount</code> with logging and monitoring permission</li> <li>Google Cloud Managed Service for Prometheus for cluster monitoring</li> </ul> <p>The output is similar to the following:</p> 
+<pre data-language="">...
+Apply complete! Resources: 12 added, 0 changed, 0 destroyed.
+...
+</pre></section> </div> <h3 id="connect-to-the-cluster">Connect to the cluster</h3> <p>Configure <code translate="no" dir="ltr">kubectl</code> to communicate with the cluster:</p> 
+<pre>gcloud container clusters get-credentials ${KUBERNETES_CLUSTER_PREFIX}-cluster --location ${REGION}
+</pre> <h2 id="deploy-operator">Deploy the Zalando operator to your cluster</h2> <p>Deploy the Zalando operator to your Kubernetes cluster using a Helm chart.</p> <ol> <li>
+<p>Add the Zalando operator Helm Chart repository:</p> 
+<pre>helm repo add postgres-operator-charts https://opensource.zalando.com/postgres-operator/charts/postgres-operator
+</pre>
+</li> <li>
+<p>Create a namespace for the Zalando operator and the Postgres cluster:</p> 
+<pre>kubectl create ns postgres
+kubectl create ns zalando
+</pre>
+</li> <li>
+<p>Deploy the Zalando operator using the Helm command-line tool:</p> 
+<pre>helm install postgres-operator postgres-operator-charts/postgres-operator -n zalando \
+    --set configKubernetes.enable_pod_antiaffinity=true \
+    --set configKubernetes.pod_antiaffinity_preferred_during_scheduling=true \
+    --set configKubernetes.pod_antiaffinity_topology_key="topology.kubernetes.io/zone" \
+    --set configKubernetes.spilo_fsgroup="103"
+</pre> <p>You can't configure <code translate="no" dir="ltr">podAntiAffinity</code> settings directly on the custom resource representing the Postgres cluster. Instead, set <code translate="no" dir="ltr">podAntiAffinity</code> settings globally for all Postgres clusters in the operator settings.</p>
+</li> <li>
+<p>Check the deployment status of the Zalando operator using Helm:</p> 
+<pre>helm ls -n zalando
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                 NAMESPACE    REVISION    UPDATED                                STATUS      CHART                       APP VERSION
+postgres-operator    zalando     1           2023-10-13 16:04:13.945614 +0200 CEST    deployed    postgres-operator-1.10.1    1.10.1
+</pre>
+</li> </ol> <h2 id="deploy-postgres">Deploy Postgres</h2> <p>The basic configuration for the Postgres cluster instance includes the following components:</p> <ul> <li>Three Postgres replicas: one leader and two standby replicas.</li> <li>CPU resource allocation of one CPU request and two CPU limits, with 4 GB memory requests and limits.</li> <li>Tolerations, <code translate="no" dir="ltr">nodeAffinities</code>, and <code translate="no" dir="ltr">topologySpreadConstraints</code> configured for each workload, ensuring proper distribution across Kubernetes nodes, utilizing their respective node pools and different availability zones.</li> </ul> <p>This configuration represents the minimal setup required to create a production-ready Postgres cluster.</p> <p>The following manifest describes a Postgres cluster:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: "acid.zalan.do/v1"
+kind: postgresql
+metadata:
+  name: my-cluster
+spec:
+  dockerImage: ghcr.io/zalando/spilo-15:3.0-p1
+  teamId: "my-team"
+  numberOfInstances: 3
+  users:
+    mydatabaseowner:
+    - superuser
+    - createdb
+    myuser: []
+  databases:
+    mydatabase: mydatabaseowner
+  postgresql:
+    version: "15"
+    parameters:
+      shared_buffers: "32MB"
+      max_connections: "10"
+      log_statement: "all"
+      password_encryption: scram-sha-256
+  volume:
+    size: 5Gi
+    storageClass: premium-rwo
+  enableShmVolume: true
+  podAnnotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+  tolerations:
+  - key: "app.stateful/component"
+    operator: "Equal"
+    value: "postgres-operator"
+    effect: NoSchedule
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 1
+      preference:
+        matchExpressions:
+        - key: "app.stateful/component"
+          operator: In
+          values:
+          - "postgres-operator"
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  sidecars:
+    - name: exporter
+      image: quay.io/prometheuscommunity/postgres-exporter:v0.14.0
+      args:
+      - --collector.stat_statements
+      ports:
+      - name: exporter
+        containerPort: 9187
+        protocol: TCP
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256M
+        requests:
+          cpu: 100m
+          memory: 256M
+      env:
+      - name: "DATA_SOURCE_URI"
+        value: "localhost/postgres?sslmode=require"
+      - name: "DATA_SOURCE_USER"
+        value: "$(POSTGRES_USER)"
+      - name: "DATA_SOURCE_PASS"
+        value: "$(POSTGRES_PASSWORD)"</pre> </div> <p>This manifest has the following fields:</p> <ul> <li>
+<code translate="no" dir="ltr">spec.teamId</code>: a prefix for the cluster objects that you choose</li> <li>
+<code translate="no" dir="ltr">spec.numberOfInstances</code>: the total number of instances for a cluster</li> <li>
+<code translate="no" dir="ltr">spec.users</code>: the user list with <a href="https://www.postgresql.org/docs/current/sql-createrole.html">privileges</a>
+</li> <li>
+<code translate="no" dir="ltr">spec.databases</code>: the database list in the format <code translate="no" dir="ltr">dbname: ownername</code>
+</li> <li>
+<code translate="no" dir="ltr">spec.postgresql</code>: postgres parameters</li> <li>
+<code translate="no" dir="ltr">spec.volume</code>: Persistent Disk parameters</li> <li>
+<code translate="no" dir="ltr">spec.tolerations</code>: the tolerations Pod template that allows cluster Pods to be scheduled on <code translate="no" dir="ltr">pool-postgres</code> nodes</li> <li>
+<code translate="no" dir="ltr">spec.nodeAffinity</code>: the <code translate="no" dir="ltr">nodeAffinity</code> Pod template that tells GKE that cluster Pods prefer to be scheduled on <code translate="no" dir="ltr">pool-postgres</code> nodes.</li> <li>
+<code translate="no" dir="ltr">spec.resources</code>: requests and limits for cluster Pods</li> <li>
+<code translate="no" dir="ltr">spec.sidecars</code>: a list of sidecar containers, which contains <code translate="no" dir="ltr">postgres-exporter</code>
+</li> </ul> <p>For more information, see <a href="https://postgres-operator.readthedocs.io/en/latest/reference/cluster_manifest/">Cluster manifest reference</a> in the Postgres documentation.</p> <h3 id="create-basic-cluster">Create a basic Postgres cluster</h3> <ol> <li>
+<p>Create a new Postgres cluster using the basic configuration:</p> 
+<pre>kubectl apply -n postgres -f manifests/01-basic-cluster/my-cluster.yaml
+</pre> <p>This command creates a PostgreSQL Custom Resource of the Zalando operator with:</p> <ul> <li>CPU and memory requests and limits</li> <li>Taints and affinities to distribute the provisioned Pod replicas across GKE nodes.</li> <li>A database</li> <li>Two users with database owner permissions</li> <li>A user with no permissions</li> </ul>
+</li> <li>
+<p>Wait for GKE to start the required workloads:</p> 
+<pre>kubectl wait pods -l cluster-name=my-cluster  --for condition=Ready --timeout=300s -n postgres
+</pre> <p>This command might take a few minutes to complete.</p>
+</li> <li>
+<p>Verify that GKE created the Postgres workloads:</p> 
+<pre>kubectl get pod,svc,statefulset,deploy,pdb,secret -n postgres
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                    READY   STATUS  RESTARTS   AGE
+pod/my-cluster-0                        1/1     Running   0         6m41s
+pod/my-cluster-1                        1/1     Running   0         5m56s
+pod/my-cluster-2                        1/1     Running   0         5m16s
+pod/postgres-operator-db9667d4d-rgcs8   1/1     Running   0         12m
+
+NAME                        TYPE        CLUSTER-IP  EXTERNAL-IP   PORT(S)   AGE
+service/my-cluster          ClusterIP   10.52.12.109   &lt;none&gt;       5432/TCP   6m43s
+service/my-cluster-config   ClusterIP   None        &lt;none&gt;      &lt;none&gt;  5m55s
+service/my-cluster-repl     ClusterIP   10.52.6.152 &lt;none&gt;      5432/TCP   6m43s
+service/postgres-operator   ClusterIP   10.52.8.176 &lt;none&gt;      8080/TCP   12m
+
+NAME                        READY   AGE
+statefulset.apps/my-cluster   3/3   6m43s
+
+NAME                                READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/postgres-operator   1/1     1           1           12m
+
+NAME                                                MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+poddisruptionbudget.policy/postgres-my-cluster-pdb   1              N/A             0                   6m44s
+
+NAME                                                            TYPE                DATA   AGE
+secret/my-user.my-cluster.credentials.postgresql.acid.zalan.do  Opaque              2   6m45s
+secret/postgres.my-cluster.credentials.postgresql.acid.zalan.do   Opaque            2   6m44s
+secret/sh.helm.release.v1.postgres-operator.v1                  helm.sh/release.v1   1      12m
+secret/standby.my-cluster.credentials.postgresql.acid.zalan.do  Opaque              2   6m44s
+secret/zalando.my-cluster.credentials.postgresql.acid.zalan.do  Opaque              2   6m44s
+</pre>
+</li> </ol> <p>The operator creates the following resources:</p> <ul> <li>A Postgres StatefulSet, which controls three Pod replicas for Postgres</li> <li>A <code translate="no" dir="ltr">PodDisruptionBudgets</code>, ensuring a minimum of one available replica</li> <li>The <code translate="no" dir="ltr">my-cluster</code> Service, which targets the leader replica only</li> <li>The <code translate="no" dir="ltr">my-cluster-repl</code> Service, which exposes the Postgres port for incoming connections and for replication between Postgres replicas</li> <li>The <code translate="no" dir="ltr">my-cluster-config</code> headless Service, to get the list of running Postgres Pod replicas</li> <li>Secrets with user credentials for accessing the database and replication between Postgres nodes</li> </ul> <h2 id="authenticate-to-postgres">Authenticate to Postgres</h2> <p>You can create Postgres users and assign them database permissions. For example, the following manifest describes a custom resource that assigns users and roles:</p> 
+<pre>apiVersion: "acid.zalan.do/v1"
+kind: postgresql
+metadata:
+  name: my-cluster
+spec:
+  ...
+  users:
+    mydatabaseowner:
+    - superuser
+    - createdb
+    myuser: []
+  databases:
+    mydatabase: mydatabaseowner
+</pre> <p>In this manifest:</p> <ul> <li>The <code translate="no" dir="ltr">mydatabaseowner</code> user has the <a href="https://www.postgresql.org/docs/16/sql-createrole.html"><code translate="no" dir="ltr">SUPERUSER</code> and <code translate="no" dir="ltr">CREATEDB</code></a> roles, which permit full administrator rights (i.e. manage Postgres configuration, create new databases, tables, and users). You shouldn't share this user with clients. For example Cloud SQL <a href="https://docs.cloud.google.com/sql/docs/postgres/users">doesn't allow</a> customers to have access to users with the <code translate="no" dir="ltr">SUPERUSER</code> role.</li> <li>The <code translate="no" dir="ltr">myuser</code> user has no roles assigned. This follows the <a href="https://wiki.postgresql.org/wiki/Client_Authentication">best practice</a> of using the <code translate="no" dir="ltr">SUPERUSER</code> to create users with least privileges. Granular rights are granted to <code translate="no" dir="ltr">myuser</code> by <code translate="no" dir="ltr">mydatabaseowner</code>. To maintain security, you should only share <code translate="no" dir="ltr">myuser</code> credentials with client applications.</li> </ul> <h3 id="store-passwords">Store passwords</h3> <p>You should use the <code translate="no" dir="ltr">scram-sha-256</code> <a href="https://www.postgresql.org/docs/current/auth-password.html">recommended method for storing passwords</a>. For example, the following manifest describes a custom resource that specifies <code translate="no" dir="ltr">scram-sha-256</code> encryption using the <code translate="no" dir="ltr">postgresql.parameters.password_encryption</code> field:</p> 
+<pre>apiVersion: "acid.zalan.do/v1"
+kind: postgresql
+metadata:
+  name: my-cluster
+spec:
+  ...
+  postgresql:
+    parameters:
+      password_encryption: scram-sha-256
+</pre> <h3 id="rotate-credentials">Rotate user credentials</h3> <p>You can <a href="https://postgres-operator.readthedocs.io/en/latest/administrator/#password-rotation-in-k8s-secrets">rotate user credentials</a> that are stored in Kubernetes Secrets with Zalando. For example, the following manifest describes a custom resource that defines user credential rotation using the <code translate="no" dir="ltr">usersWithSecretRotation</code> field:</p> 
+<pre>apiVersion: "acid.zalan.do/v1"
+kind: postgresql
+metadata:
+  name: my-cluster
+spec:
+  ...
+  usersWithSecretRotation:
+  - myuser
+  - myanotheruser
+  - ...
+</pre> <h3 id="authentication-example">Authentication example: connect to Postgres</h3> <p>This section shows you how to deploy an example Postgres client and connect to the database using the password from a Kubernetes Secret.</p> <ol> <li>
+<p>Run the client Pod to interact with your Postgres cluster:</p> 
+<pre>kubectl apply -n postgres -f manifests/02-auth/client-pod.yaml
+</pre> <p>The credentials of the <code translate="no" dir="ltr">myuser</code> and <code translate="no" dir="ltr">mydatabaseowner</code> users are taken from the related Secrets and mounted as environment variables to the Pod.</p>
+</li> <li>
+<p>Connect to the Pod when it is ready:</p> 
+<pre>kubectl wait pod postgres-client --for=condition=Ready --timeout=300s -n postgres
+kubectl exec -it postgres-client -n postgres -- /bin/bash
+</pre>
+</li> <li>
+<p>Connect to Postgres and attempt to create a new table using <code translate="no" dir="ltr">myuser</code> credentials:</p> 
+<pre>PGPASSWORD=$CLIENTPASSWORD psql \
+  -h my-cluster \
+  -U $CLIENTUSERNAME \
+  -d mydatabase \
+  -c "CREATE TABLE test (id serial PRIMARY KEY, randomdata VARCHAR ( 50 ) NOT NULL);"
+</pre> <p>The command should fail with an error similar to the following:</p> 
+<pre>ERROR:  permission denied for schema public
+LINE 1: CREATE TABLE test (id serial PRIMARY KEY, randomdata VARCHAR...
+</pre> <p>The command fails because users without assigned privileges by default can only login to Postgres and list databases.</p>
+</li> <li>
+<p>Create a table with <code translate="no" dir="ltr">mydatabaseowner</code> credentials and grant <strong>all</strong> privileges on the table to <code translate="no" dir="ltr">myuser</code>:</p> 
+<pre>PGPASSWORD=$OWNERPASSWORD psql \
+  -h my-cluster \
+  -U $OWNERUSERNAME \
+  -d mydatabase \
+  -c "CREATE TABLE test (id serial PRIMARY KEY, randomdata VARCHAR ( 50 ) NOT NULL);GRANT ALL ON test TO myuser;GRANT ALL ON SEQUENCE test_id_seq TO myuser;"
+</pre> <p>The output is similar to the following:</p> 
+<pre>CREATE TABLE
+GRANT
+GRANT
+</pre>
+</li> <li>
+<p>Insert random data into the table using <code translate="no" dir="ltr">myuser</code> credentials:</p> 
+<pre>for i in {1..10}; do
+  DATA=$(tr -dc A-Za-z0-9 &lt;/dev/urandom | head -c 13)
+  PGPASSWORD=$CLIENTPASSWORD psql \
+  -h my-cluster \
+  -U $CLIENTUSERNAME \
+  -d mydatabase \
+  -c "INSERT INTO test(randomdata) VALUES ('$DATA');"
+done
+</pre> <p>The output is similar to the following:</p> 
+<pre>INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+</pre>
+</li> <li>
+<p>Get the values that you inserted:</p> 
+<pre>PGPASSWORD=$CLIENTPASSWORD psql \
+  -h my-cluster \
+  -U $CLIENTUSERNAME \
+  -d mydatabase \
+  -c "SELECT * FROM test;"
+</pre> <p>The output is similar to the following:</p> 
+<pre>id |  randomdata
+----+---------------
+  1 | jup9HYsAjwtW4
+  2 | 9rLAyBlcpLgNT
+  3 | wcXSqxb5Yz75g
+  4 | KoDRSrx3muD6T
+  5 | b9atC7RPai7En
+  6 | 20d7kC8E6Vt1V
+  7 | GmgNxaWbkevGq
+  8 | BkTwFWH6hWC7r
+  9 | nkLXHclkaqkqy
+ 10 | HEebZ9Lp71Nm3
+(10 rows)
+</pre>
+</li> <li>
+<p>Exit the Pod shell:</p> 
+<pre>exit
+</pre>
+</li> </ol> <h2 id="how-prometheus-collects">Understand how Prometheus collects metrics for your Postgres cluster</h2> <p>The following diagram shows how Prometheus metrics collecting works:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-zalando-metrics-architecture.svg" alt></p> <p>In the diagram, a GKE private cluster contains:</p> <ul> <li>A Postgres Pod that gathers metrics on path <code translate="no" dir="ltr">/</code> and port <code translate="no" dir="ltr">9187</code>
+</li> <li>Prometheus-based collectors that process the metrics from the Postgres Pod</li> <li>A <code translate="no" dir="ltr">PodMonitoring</code> resource that sends metrics to Cloud Monitoring</li> </ul> <p>Google Cloud Managed Service for Prometheus supports metrics collection in the Prometheus format. Cloud Monitoring uses an <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/exporters/postgresql">integrated dashboard</a> for Postgres metrics.</p> <p>Zalando exposes cluster metrics in the Prometheus format using the <a href="https://github.com/prometheus-community/postgres_exporter">postgres_exporter component</a> as a <a href="https://postgres-operator.readthedocs.io/en/latest/user/#sidecar-support">sidecar container</a>.</p> <ol> <li>
+<p>Create the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring"><code translate="no" dir="ltr">PodMonitoring</code></a> resource to scrape metrics by <code translate="no" dir="ltr">labelSelector</code>:</p> 
+<pre>kubectl apply -n postgres -f manifests/03-prometheus-metrics/pod-monitoring.yaml
+</pre>
+</li> <li>
+<p>In the Google Cloud console, go to the <strong>GKE Clusters Dashboard</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/dashboards/resourceList/gmp_gke_cluster" target="console" track-name="tasks" track-type="consoleLink">Go to GKE Clusters Dashboard</a></p> <p>The dashboard shows a non-zero metrics ingestion rate.</p>
+</li> <li>
+<p>In the Google Cloud console, go to the <strong>Dashboards</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/dashboards" target="console" track-name="tasks" track-type="consoleLink">Go to Dashboards</a></p>
+</li> <li><p>Open the <strong>PostgreSQL Prometheus Overview dashboard</strong>. The dashboard shows the number of fetched rows. It might take several minutes for the dashboard to auto-provision.</p></li> <li>
+<p>Connect to the client Pod:</p> 
+<pre>kubectl exec -it postgres-client -n postgres -- /bin/bash
+</pre>
+</li> <li>
+<p>Insert random data:</p> 
+<pre>for i in {1..100}; do
+  DATA=$(tr -dc A-Za-z0-9 &lt;/dev/urandom | head -c 13)
+  PGPASSWORD=$CLIENTPASSWORD psql \
+  -h my-cluster \
+  -U $CLIENTUSERNAME \
+  -d mydatabase \
+  -c "INSERT INTO test(randomdata) VALUES ('$DATA');"
+done
+</pre>
+</li> <li><p>Refresh the page. The <strong>Rows</strong> and <strong>Blocks</strong> graphs update to show the actual database state.</p></li> <li>
+<p>Exit the Pod shell:</p> 
+<pre>exit
+</pre>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <h3 id="delete_individual_resources">Delete individual resources</h3> <ol> <li>
+<p>Set environment variables.</p> 
+<pre>export PROJECT_ID=${PROJECT_ID}
+export KUBERNETES_CLUSTER_PREFIX=postgres
+export REGION=us-central1
+</pre>
+</li> <li>
+<p>Run the <code translate="no" dir="ltr">terraform destroy</code> command:</p> 
+<pre>export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform  -chdir=terraform/FOLDER destroy \
+  -var project_id=${PROJECT_ID} \
+  -var region=${REGION} \
+  -var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FOLDER</var></code> with either <code translate="no" dir="ltr">gke-autopilot</code> or <code translate="no" dir="ltr">gke-standard</code>.</p> <p>When prompted, type <code translate="no" dir="ltr">yes</code>.</p>
+</li> <li>
+<p>Find all unattached disks:</p> 
+<pre>export disk_list=$(gcloud compute disks list --filter="-users:* AND labels.name=${KUBERNETES_CLUSTER_PREFIX}-cluster" --format "value[separator=|](name,zone)")
+</pre>
+</li> <li>
+<p>Delete the disks:</p> 
+<pre>for i in $disk_list; do
+  disk_name=$(echo $i| cut -d'|' -f1)
+  disk_zone=$(echo $i| cut -d'|' -f2|sed 's|.*/||')
+  echo "Deleting $disk_name"
+  gcloud compute disks delete $disk_name --zone $disk_zone --quiet
+done
+</pre>
+</li> <li>
+<p>Delete the GitHub repository:</p> 
+<pre>rm -r ~/kubernetes-engine-samples/
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/stateful-workloads/zalando" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/stateful-workloads/zalando</a>
+  </p>
+</div>

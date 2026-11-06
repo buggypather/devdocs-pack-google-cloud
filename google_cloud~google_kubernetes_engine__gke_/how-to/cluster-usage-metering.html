@@ -1,0 +1,369 @@
+<h1>Understanding cluster resource usage</h1>  <p>This page explains how to use GKE usage metering to understand the usage profiles of Google Kubernetes Engine (GKE) Standard clusters, and tie usage to individual teams or business units within your organization. GKE usage metering has no impact on billing for your project; it lets you understand resource usage at a granular level.</p> <aside class="note"><strong>Note:</strong><span> We recommend that you use <a href="cost-allocations">GKE cost allocation</a> instead of GKE usage metering. GKE cost allocation lets you distribute the costs of a cluster to its users.</span></aside> <h2 id="overview">Overview</h2> <p>GKE usage metering tracks information about the resource requests and actual resource usage of your cluster's workloads. GKE usage metering tracks information about CPU, GPU, TPU, memory, storage, and optionally network egress. You can differentiate resource usage by using Kubernetes <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/">namespaces</a>, <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/">labels</a>, or a combination of both.</p> <p>Data is stored in BigQuery, where you can query it directly or export it for analysis with external tools such as <a href="https://docs.cloud.google.com/bigquery/docs/visualize-looker-studio">Data Studio</a>.</p> <p>GKE usage metering is helpful for scenarios such as the following:</p> <ul> <li>Tracking per-tenant resource requests and actual resource consumption in a multi-tenant cluster where each tenant operates within a given namespace.</li> <li>Determining the resource consumption of a workload running in a given cluster, by assigning a unique label to the Kubernetes objects associated with the workload.</li> <li>Identifying workloads whose resource requests differ significantly from their actual resource consumption, so that you can more efficiently allocate resources for each workload.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure that you have an existing Standard cluster. If you need one, <a href="creating-a-regional-cluster">create a Standard cluster</a>.</li> </ul> <h3 id="limitations">Limitations</h3> <p>You can use the sample BigQuery queries and Data Studio template to join GKE usage metering data with exported Google Cloud billing data in BigQuery. This lets you estimate a cost breakdown by cluster, namespace, and labels.</p> <p>GKE usage metering data is purely advisory, and doesn't affect your Google Cloud bill. For billing data, your Google Cloud billing invoice is the sole source of truth.</p> <p>The following limitations apply:</p> <ul> <li>Special contract discounts or credits are not accounted for.</li> <li>Resources created outside the scope of GKE are not tracked by namespace or label.</li> <li>Only labels from Pod and PersistentVolumeClaim objects are tracked by usage reporting.</li> <li>Only <a href="../concepts/persistent-volumes#dynamic_provisioning">dynamically provisioned PersistentVolumes</a> are supported.</li> <li>Only pd-standard and pd-ssd <a href="https://docs.cloud.google.com/compute/docs/disks#disk-types">disk types</a> are supported. GKE usage metering might include costs for regional versions of both disk types under the same SKU. </li> <li>Data Studio does not support the visualization of <a href="https://docs.cloud.google.com/compute/docs/machine-types#cpu-bursting">machine types capable of bursting</a>.</li> <li>You can only export data to a BigQuery dataset that is in the same project as your cluster. Additionally, the source data and the destination dataset must be in the same region. For more information, see <a href="https://docs.cloud.google.com/bigquery/docs/dts-locations">Data location and transfers</a>.</li> <li>You must not use ports 27304, 47082 and 47083, because these ports are reserved by network egress tracking.</li> <li>Custom <code translate="no" dir="ltr">StorageClass</code> objects are not supported.</li> <li>Network egress metering is not supported for Windows Server nodes.</li> <li>Network egress metering is not supported for Shared VPC or VPC Network Peering.</li> <li>Network egress metering is not supported for clusters with more than 150 nodes.</li> </ul> <h3 id="prerequisites">Prerequisites</h3> <p>Before you use GKE usage metering, you must meet the following prerequisites:</p> <ul> <li>
+<a href="https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery">Billing export for BigQuery</a> is enabled. Charges are associated with <a href="https://cloud.google.com/bigquery/pricing">BigQuery usage</a>.</li> <li>Version 250.0.0 or later of the Google Cloud CLI is required. Use <code translate="no" dir="ltr">gcloud --version</code> to check.</li> <li>You must <a href="https://docs.cloud.google.com/bigquery/docs/enable-transfer-service#creating_a_project_and_enabling_the_api">enable the BigQuery API</a> in your Google Cloud project. If you first enabled GKE after July 2018, the API is already enabled.</li> </ul> <h2 id="enabling">Enable GKE usage metering</h2> <p>To enable GKE usage metering, you first <a href="#create-dataset">create a BigQuery dataset</a> for either a single cluster, multiple clusters in the project, or the entire project. For more information about choosing a mapping between datasets and clusters, see <a href="#dataset-cluster-mapping">Choosing one or more BigQuery datasets</a>.</p> <p>Next, you <a href="#enable-usage-metering">enable GKE usage metering</a> when creating a new cluster or by modifying an existing cluster.</p> <p>Optionally, you can create a <a href="#view_in_data-studio">Data Studio dashboard</a> to visualize the resource usage of your clusters.</p> <h3 id="create-dataset">Create the BigQuery dataset</h3> <p>To use GKE usage metering for clusters in your Google Cloud project, you first create the BigQuery dataset, and then configure clusters to use it. You can use a single BigQuery dataset to store information about resource usage for multiple clusters in the same project.</p> <p>Visit <a href="https://docs.cloud.google.com/bigquery/docs/datasets#create-dataset">Creating Datasets</a> for more details. Set the <code translate="no" dir="ltr">Default table expiration</code> for the dataset to <code translate="no" dir="ltr">Never</code> so that the table doesn't expire. If a table expires, it is recreated automatically as an empty table.</p> <aside class="note"><strong>Note:</strong><span> This feature writes to the BigQuery dataset that you provide with the Google service account (<code translate="no" dir="ltr">service-<var translate="no">PROJECT_NUMBER</var>@container-engine-robot.iam.gserviceaccount.com</code>) and with the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/container#container.serviceAgent">Kubernetes Engine Service Agent role</a>.</span></aside><aside class="warning"><strong>Warning:</strong><span> If you delete a BigQuery dataset or table that a cluster is using to log GKE usage metering data, Cloud Logging shows transient warnings such as <code translate="no" dir="ltr">Failed to upload a record to BigQuery</code>. To resolve the warning, re-create the dataset or configure the cluster to use a different dataset. Your historical data will be lost.</span></aside> <h3 id="enable-usage-metering">Enable GKE usage metering on your cluster</h3> <p>You can enable GKE usage metering on a cluster by using either the Google Cloud CLI or the Google Cloud console.</p> <p>Enabling GKE usage metering also enables resource consumption metering by default. To selectively disable resource consumption metering while continuing to track resource requests, see the specific instructions for enabling GKE usage metering using the Google Cloud CLI, in this document.</p> <p>Network egress metering is disabled by default. To enable it, see the caveats and instructions in <a href="#enable-network-egress-metering">Optional: Enable network egress metering</a> in this document.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p>To enable GKE usage metering on an existing cluster, run the following command:</p> 
+<pre data-language="bash">gcloud container clusters update CLUSTER_NAME \
+    --resource-usage-bigquery-dataset RESOURCE_USAGE_DATASET
+</pre> <p>Resource consumption metering is enabled by default. To disable it and only track resource requests, add the flag <code translate="no" dir="ltr">--no-enable-resource-consumption-metering</code> to the preceding command. <strong>You also need to modify the example queries in the rest of this topic so that they do not query for resource consumption.</strong></p> <aside class="note"><strong>Note:</strong><span> Network egress metering is disabled by default. To enable it, see the caveats and instructions in <a href="#enable-network-egress-metering">Optional: Enabling network egress metering</a> in this topic.</span></aside> <p>You can also change the dataset an existing cluster uses to store its usage metering data by changing the value of the <code translate="no" dir="ltr">--resource-usage-bigquery-dataset</code> flag.</p> <p>If needed, a table is created within the BigQuery dataset when the cluster is updated.</p> </section> <section><p class="_code-tab"><strong>Console</strong></p>
+<p> <aside class="note"><strong>Note:</strong><span> When using Google Cloud console, it is not possible to enable GKE usage metering while selectively disabling resource consumption metering. If you need to do this, use the <code translate="no" dir="ltr">gcloud</code> instructions instead.</span></aside> </p>
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>Next to the cluster you want to modify, click <i class="material-icons" aria-hidden="true" translate="no">more_vert</i> <strong>Actions</strong>, then click <i class="material-icons" aria-hidden="true" translate="no">edit</i> <strong>Edit</strong>.</p></li> <li><p>Under <strong>Features</strong>, click <i class="material-icons" aria-hidden="true" translate="no">edit</i> <strong>Edit</strong> next to <strong>GKE usage metering</strong>.</p></li> <li><p>Select <strong>Enable GKE usage metering</strong>.</p></li> <li><p>Enter the name of the BigQuery dataset.</p></li> <li><p>Optional: select <strong>Enable network egress metering</strong> after reviewing the caveats and instructions in <a href="#enable-network-egress-metering">Optional: Enabling network egress metering</a>.</p></li> <li><p>Click <strong>Save Changes</strong>..</p></li> </ol> </section> </div> <h4 id="enable-network-egress-metering">Optional: Enable network egress metering</h4> <p>By default, network egress data is not collected or exported. Measuring network egress requires a network metering agent (NMA) running on each node. The NMA runs as a privileged Pod, consumes some resources on the node (CPU, memory, and disk space), and enables the <a href="https://www.kernel.org/doc/Documentation/networking/nf_conntrack-sysctl.txt" class="external">nf_conntrack_acct sysctl flag</a> on the kernel (for connection tracking flow accounting).</p> <p>If you are comfortable with these caveats, you can enable network egress tracking for use with GKE usage metering. To enable network egress tracking, include the <code translate="no" dir="ltr">--enable-network-egress-metering</code> option when creating or updating your cluster, or select <strong>Enable network egress metering</strong> when enabling GKE usage metering in the Google Cloud console.</p> <p>To disable network egress metering, add the <code translate="no" dir="ltr">--no-enable-network-egress-metering</code> flag when you update your cluster with the <a href="#enable-usage-metering">command line</a>. Alternatively, you can clear <strong>Enable network egress metering</strong> in the GKE usage metering section of the cluster in the Google Cloud console.</p> <h2 id="verifying">Verify that GKE usage metering is enabled</h2> <p>To verify that GKE usage metering is enabled on a cluster, and to confirm which BigQuery dataset stores the cluster's resource usage data, run the following command:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --format="value(resourceUsageExportConfig)"
+</pre> <p>The output is empty if GKE usage metering is not enabled, and otherwise shows the BigQuery dataset used by the cluster, as in the following example output:</p> 
+<pre>bigqueryDestination={u'datasetId': u'test_usage_metering_dataset'}
+</pre> <h2 id="dataset-cluster-mapping">Choose one or more BigQuery datasets</h2> <p>A dataset can hold GKE usage metering data for one or more clusters in your project. Whether you use one or many datasets depends on your security needs:</p> <ul> <li>A single dataset for the entire project simplifies administration.</li> <li>A dataset per cluster lets you delegate granular access to the datasets.</li> <li>A dataset per related group of clusters lets you find the right mix of simplicity and granularity for your needs.</li> </ul> <h2 id="view_in_data-studio">Visualize GKE usage metering data using a Data Studio dashboard</h2> <p>You can visualize your GKE usage metering data using a <a href="https://docs.cloud.google.com/bigquery/docs/visualize-looker-studio">Data Studio dashboard</a>. This lets you filter your data by cluster name, namespace, or label. You can also adjust the reporting period dynamically. If you have experience with Data Studio and BigQuery, you can create a customized dashboard. You can also clone a dashboard that we created specifically for GKE usage metering.</p> <aside class="note"><strong>Note:</strong><span> You may see discrepancies between GKE usage metering data and Cloud Billing data, due to upload latency. Batches of Cloud Billing data take up to 5 hours to appear in BigQuery, while GKE usage metering data appears in BigQuery roughly every hour.</span></aside> <p>You can <a href="#use_dashboard">use the dashboard</a> to visualize resource requests and consumption on your clusters over time.</p> <aside class="note"><strong>Note:</strong><span> Data Studio is not supported by Cloud Customer Care. For more information, see the <a href="https://support.google.com/looker-studio" track-type="tasks" track-name="supportLink">Data Studio Help Center</a>.</span></aside> <h3 id="prerequisites_2">Prerequisites</h3> <ol> <li>
+<p>Enable <a href="https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery">Exporting Google Cloud billing data to BigQuery</a> if it is not already enabled.</p> <p>During this process, you create a dataset, but the table within the dataset can take up to 5 hours to appear and start populating. When the table appears, its name is <code translate="no" dir="ltr">gcp_billing_export_v1_<var translate="no">BILLING_ACCOUNT_ID</var></code>.</p>
+</li> <li><p>Enable <a href="cluster-usage-metering#enabling">GKE usage metering</a> on at least one cluster in the project. Note the name you chose for the BigQuery dataset.</p></li> <li><p>Enable <a href="https://lookerstudio.google.com/c/navigation/reporting">Data Studio</a> if it's not already enabled.</p></li> <li>
+<p>Gather the following information, which is needed to configure the dashboard:</p> <ul> <li>Cloud Billing export dataset ID and data table</li> <li>GKE usage metering dataset ID</li> </ul>
+</li> <li><p>Ensure that you have version 2.0.58 or later of the <a href="https://docs.cloud.google.com/bigquery/docs/quickstarts/load-data-bq">BigQuery CLI</a>. To check the version, run <code translate="no" dir="ltr">bq version</code>, and <code translate="no" dir="ltr">gcloud components update</code> to update your BigQuery CLI.</p></li> <li><p>The commands in this section should be run in a Linux terminal or in Cloud Shell.</p></li> </ol> <h3 id="create_the_cost_breakdown_table">Create the BigQuery cost breakdown table</h3> <ol> <li>
+<p>Download one of the following query templates:</p> <ul> <li>If you enabled consumption metering, download <a href="https://docs.cloud.google.com/static/kubernetes-engine/docs/how-to/usage_metering_query_template_request_and_consumption.sql"><code translate="no" dir="ltr">this template</code></a>.</li> <li>If you didn't enable consumption metering, download <a href="https://docs.cloud.google.com/static/kubernetes-engine/docs/how-to/usage_metering_query_template_request_only.sql"><code translate="no" dir="ltr">this template</code></a>.</li> </ul> <p>If you are using Cloud Shell, copy this file into the directory where you perform the following commands.</p>
+</li> <li>
+<p>Run the following command to set environment variables:</p> 
+<pre>export GCP_BILLING_EXPORT_TABLE_FULL_PATH=YOUR_BILLING_EXPORT_TABLE_PATH
+export USAGE_METERING_PROJECT_ID=YOUR_USAGE_METERING_PROJECT_ID
+export USAGE_METERING_DATASET_ID=YOUR_USAGE_METERING_DATASET_ID
+export USAGE_METERING_START_DATE=YOUR_USAGE_METERING_START_DATE
+export COST_BREAKDOWN_TABLE_ID=YOUR_COST_BREAKDOWN_TABLE_ID
+export USAGE_METERING_QUERY_TEMPLATE=YOUR_TEMPLATE_PATH
+export USAGE_METERING_QUERY=YOUR_RENDERED_QUERY_PATH
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_BILLING_EXPORT_TABLE_PATH</var></code>: the path to your generated billing export table. This table has a name similar to <code translate="no" dir="ltr">PROJECT_ID.DATASET_ID.gcp_billing_export_v1_xxxx</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_USAGE_METERING_PROJECT_ID</var></code>: the name of your Google Cloud project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_USAGE_METERING_DATASET_ID</var></code>: the name of the dataset you created in BigQuery, such as <code translate="no" dir="ltr">all_billing_data</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_USAGE_METERING_START_DATE</var></code>: the start date of your query in the form <code translate="no" dir="ltr">YYYY-MM-DD</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_COST_BREAKDOWN_TABLE_ID</var></code>: the name of a new table that you chose, such as <code translate="no" dir="ltr">usage_metering_cost_breakdown</code>. This table is used as input to Data Studio.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_TEMPLATE_PATH</var></code>: the name of the query template you downloaded, either <code translate="no" dir="ltr">usage_metering_query_template_request_and_consumption.sql</code> or <code translate="no" dir="ltr">usage_metering_query_template_request_only.sql</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_RENDERED_QUERY_PATH</var></code>: the name of the path for the rendered query that you choose, such as <code translate="no" dir="ltr">cost_breakdown_query.sql</code>.</li> </ul> <p>As an example, your environment variables might resemble the following:</p> 
+<pre>export GCP_BILLING_EXPORT_TABLE_FULL_PATH=my-billing-project.all_billing_data.gcp_billing_export_v1_xxxx
+export USAGE_METERING_PROJECT_ID=my-billing-project
+export USAGE_METERING_DATASET_ID=all_billing_data
+export USAGE_METERING_START_DATE=2022-05-01
+export COST_BREAKDOWN_TABLE_ID=usage_metering_cost_breakdown
+export USAGE_METERING_QUERY_TEMPLATE=usage_metering_query_template_request_only.sql
+export USAGE_METERING_QUERY=cost_breakdown_query.sql
+</pre>
+</li> <li>
+<p>Render the query from the template:</p> 
+<pre>sed \
+-e "s/\${fullGCPBillingExportTableID}/$GCP_BILLING_EXPORT_TABLE_FULL_PATH/" \
+-e "s/\${projectID}/$USAGE_METERING_PROJECT_ID/" \
+-e "s/\${datasetID}/$USAGE_METERING_DATASET_ID/" \
+-e "s/\${startDate}/$USAGE_METERING_START_DATE/" \
+"$USAGE_METERING_QUERY_TEMPLATE" \
+&gt; "$USAGE_METERING_QUERY"
+</pre>
+</li> <li>
+<p>Create a new cost breakdown table that refreshes every 24 hours:</p> 
+<pre>bq query \
+--project_id=$USAGE_METERING_PROJECT_ID \
+--use_legacy_sql=false \
+--destination_table=$USAGE_METERING_DATASET_ID.$COST_BREAKDOWN_TABLE_ID \
+--schedule='every 24 hours' \
+--display_name="GKE Usage Metering Cost Breakdown Scheduled Query" \
+--replace=true \
+"$(cat $USAGE_METERING_QUERY)"
+</pre> <p>For more information about scheduling queries, see <a href="https://docs.cloud.google.com/bigquery/docs/scheduling-queries#set_up_scheduled_queries">Set up scheduled queries</a>.</p>
+</li> </ol> <h3 id="create_data_source">Create the BigQuery data source</h3> <ol> <li>In Data Studio, go to <a href="https://lookerstudio.google.com/c/navigation/datasources">Data Sources</a>.</li> <li>Click <i class="material-icons" aria-label="create" aria-hidden="true" translate="no">add</i> <strong>Create</strong>, and then click <strong>Data source</strong>.</li> <li>Select <strong>BigQuery</strong>.</li> <li>Name your data source. From the toolbar, click the words <strong>Untitled Data Source</strong> to replace the text with a descriptive name.</li> <li>Select <strong>Custom Query</strong> and then select your project ID.</li> <li>
+<p>Paste the following query into the Query Editor:</p> 
+<pre>SELECT
+  *
+FROM
+  `USAGE_METERING_PROJECT_ID.USAGE_METERING_DATASET_ID.COST_BREAKDOWN_TABLE_ID`
+</pre>
+</li> <li><p>Click <strong>Connect</strong>.</p></li> </ol> <h3 id="create_dashboard">Create the Data Studio dashboard</h3> <ol> <li>Copy the <a href="https://lookerstudio.google.com/reporting/1g7Z1hjCIkAHmL4QStbWNvuSUe-eQ-vnk">GKE usage metering dashboard</a> into your project.</li> <li>Click <i class="material-icons" aria-hidden="true" translate="no">more_vert</i> <strong>More options</strong>, and then click <span class="material-icons" aria-hidden="true" translate="no">content_copy</span> <strong>Make a copy</strong>.</li> <li>In the <strong>Copy this report</strong> dialog, from the <strong>New data source</strong> list, select the data source that you created.</li> <li>Click <strong>Copy report</strong>.</li> </ol> <p>The dashboard is created, and you can access it at any time in the list of <a href="https://lookerstudio.google.com/c/navigation/reporting">Data Studio reports</a> for your project.</p> <h3 id="use_dashboard">Use the Data Studio dashboard</h3> <p>The dashboard contains multiple reports:</p> <dl> <dt>Usage breakdown</dt> <dd>This report contains overall cluster usage ratio among all clusters sending usage metering data to the same BigQuery data source. It also includes detailed information about resource type such as CPU, memory, or network egress by namespace. You can limit the report data to one or more individual clusters or namespaces.</dd> <dt>Usage breakdown with unallocated resources</dt> <dd>This report is similar to the usage breakdown report, but spreads unallocated resources proportionally across all namespaces. Unallocated resources include idle resources and any resources that are not allocated by GKE usage metering to specific tenants.</dd> <dt>Cost trends * drill down by namespace</dt> <dd>Usage trends among all clusters sending usage metering data to the same BigQuery data source by namespace. You can select one or more individual clusters, namespaces, resources, or SKUs.</dd> <dt>Cost trends * drill down by label</dt> <dd>Cost trends among all clusters sending usage metering data to the same BigQuery data source. You can select one or more individual clusters, resources, label names, or label values.</dd> <dt>Consumption-based Metering</dt> <dd>Consumption trends among all clusters sending usage metering data to the same BigQuery data source. You can select one or more individual namespaces, label keys, or label values. This report is only populated if resource consumption metering is enabled on at least one cluster.</dd> </dl> <aside class="note"><strong>Note:</strong><span> Because of differences in the frequency of data availability between usage metering and Cloud Billing, data shown in the dashboard is not definitive and is informational only.</span></aside> <p>You can change pages using the navigation menu. You can change the timeframe for a page using the date picker. To share the report with members of your organization, or to revoke access, click <i class="material-icons" aria-hidden="true" translate="no">person_add_alt</i> <strong>Share Report</strong>.</p> <p>After you copy the report into your project, you can customize it by using the <a href="https://support.google.com/looker-studio/answer/6371822">Data Studio report editor</a>. Even if the report template provided by Google changes, your copy is unaffected.</p> <h2 id="view_in_bigquery">Explore GKE usage metering data using BigQuery</h2> <p>To view data about resource requests using BigQuery, query the <code translate="no" dir="ltr">gke_cluster_resource_usage</code> table within the relevant BigQuery dataset.</p> <p>To view data about actual resource consumption, query the <code translate="no" dir="ltr">gke_cluster_resource_consumption</code> table. Network egress consumption data remains in the <code translate="no" dir="ltr">gke_cluster_resource_usage</code> because there is no concept of resource requests for egresses.</p> <p>For more information about using queries in BigQuery, see <a href="https://docs.cloud.google.com/bigquery/docs/query-overview#running_queries">Running queries</a>. The fields in the <a href="#schema">schema</a> are stable, though more fields may be added in the future.</p> <p>These queries are simple examples. Customize your query to find the data you need.</p> <h3 id="query_for_resource_requests">Query for resource requests</h3> 
+<pre>SELECT
+  cluster_name,
+  labels,
+  usage
+FROM
+  'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_usage'
+WHERE
+  namespace="NAMESPACE"
+</pre> <h3 id="query_for_resource_consumption">Query for resource consumption</h3> 
+<pre>SELECT
+  cluster_name,
+  labels,
+  usage
+FROM
+  'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_consumption'
+WHERE
+  namespace="NAMESPACE"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_GCP_PROJECT</var></code>: the name of your Google Cloud project that contains the cluster that you want to query.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USAGE_METERING_DATASET</var></code>: the name of your usage metering table.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the name of your namespace.</li> </ul> <h3 id="more_examples">More examples</h3> <p>Expand the following sections to see more sophisticated examples.</p> <section class="expandable"> <h4 class="showalways" id="how-to-query-costs,-broken-down-by-namespace">How to query costs, broken down by namespace</h4> <p>These queries ignore a cluster's resource usage when the billing information of the associated cloud resource has not yet been exported to the Google Cloud billing export dataset. This delay happens when the time window of a cloud resource usage record is ahead of the latest record in the exported Google Cloud billing data. The latency for billing export can be up to 5 hours.</p> <h5 id="resource-requests">Resource requests</h5> 
+<pre>SELECT
+  resource_usage.cluster_name,
+  resource_usage.cluster_location,
+  resource_usage.namespace,
+  resource_usage.resource_name,
+  resource_usage.sku_id,
+  MIN(resource_usage.start_time) AS usage_start_time,
+  MAX(resource_usage.end_time) AS usage_end_time,
+  SUM(resource_usage.usage.amount * gcp_billing_export.rate) AS cost
+FROM
+  'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_usage' AS resource_usage
+LEFT JOIN (
+  SELECT
+    sku.id AS sku_id,
+    SUM(cost) / SUM(usage.amount) AS rate,
+    MIN(usage_start_time) AS min_usage_start_time,
+    MAX(usage_end_time) AS max_usage_end_time
+  FROM
+    'CLUSTER_GCP_PROJECT.BILLING_DATASET.BILLING_TABLE'
+  WHERE
+    project.id = "CLUSTER_GCP_PROJECT"
+  GROUP BY
+    sku_id) AS gcp_billing_export
+ON
+  resource_usage.sku_id = gcp_billing_export.sku_id
+WHERE
+  resource_usage.start_time &gt;= gcp_billing_export.min_usage_start_time
+  AND resource_usage.end_time &lt;= gcp_billing_export.max_usage_end_time
+GROUP BY
+  resource_usage.cluster_name,
+  resource_usage.cluster_location,
+  resource_usage.namespace,
+  resource_usage.resource_name,
+  resource_usage.sku_id
+  </pre> <h5 id="resource-consumption">Resource consumption</h5> 
+<pre>SELECT
+  resource_usage.cluster_name,
+  resource_usage.cluster_location,
+  resource_usage.namespace,
+  resource_usage.resource_name,
+  resource_usage.sku_id,
+  MIN(resource_usage.start_time) AS usage_start_time,
+  MAX(resource_usage.end_time) AS usage_end_time,
+  SUM(resource_usage.usage.amount * gcp_billing_export.rate) AS cost
+FROM
+  'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_consumption' AS resource_usage
+LEFT JOIN (
+  SELECT
+    sku.id AS sku_id,
+    SUM(cost) / SUM(usage.amount) AS rate,
+    MIN(usage_start_time) AS min_usage_start_time,
+    MAX(usage_end_time) AS max_usage_end_time
+  FROM
+    'CLUSTER_GCP_PROJECT.BILLING_DATASET.BILLING_TABLE'
+  WHERE
+    project.id = "CLUSTER_GCP_PROJECT"
+  GROUP BY
+    sku_id) AS gcp_billing_export
+ON
+  resource_usage.sku_id = gcp_billing_export.sku_id
+WHERE
+  resource_usage.start_time &gt;= gcp_billing_export.min_usage_start_time
+  AND resource_usage.end_time &lt;= gcp_billing_export.max_usage_end_time
+GROUP BY
+  resource_usage.cluster_name,
+  resource_usage.cluster_location,
+  resource_usage.namespace,
+  resource_usage.resource_name,
+  resource_usage.sku_id
+  </pre> </section> <section class="expandable"> <h4 class="showalways" id="how-to-query-costs-in-a-specific-time-period,-broken-down-by-namespace-and-labels">How to query costs in a specific time period, broken down by namespace and labels</h4> <p>These queries show the costs for a specific time period, by namespaces labels.</p> <h5 id="resource-requests-by-time-period,-grouped-by-namespaces-and-labels">Resource requests by time period, grouped by namespaces and labels</h5> 
+<pre>DECLARE drilldown_label STRING DEFAULT 'DRILLDOWN_LABEL';
+DECLARE project_id STRING default "CLUSTER_GCP_PROJECT";
+
+SELECT
+  DATE(start_time) as date,
+  resource_usage.cluster_name,
+  resource_usage.cluster_location,
+  resource_usage.namespace,
+  label.value AS label_value,
+  resource_usage.resource_name,
+  resource_usage.sku_id,
+  gcp_billing_export.sku_description,
+  SUM(resource_usage.usage.amount) AS usage,
+  resource_usage.usage.unit AS usage_unit,
+  SUM(resource_usage.usage.amount * gcp_billing_export.rate) AS cost_estimate,
+  gcp_billing_export.currency
+FROM
+  'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_usage' AS resource_usage
+
+-- select only workloads matching the defined "drilldown_label"
+  CROSS JOIN UNNEST(labels) AS label WHERE label.key=drilldown_label
+
+-- join with billing table to get pricing information and sku description
+  LEFT JOIN (
+  SELECT
+    DATE(usage_start_time) as date,
+    sku.id AS sku_id,
+    sku.description AS sku_description,
+    SAFE_DIVIDE(SUM(cost), SUM(usage.amount)) AS rate,
+    currency
+  FROM
+    'CLUSTER_GCP_PROJECT.BILLING_DATASET.BILLING_TABLE'
+  WHERE
+    project.id = project_id
+  GROUP BY
+    date,
+    sku_id,
+    sku_description,
+    currency) AS gcp_billing_export
+  ON DATE(resource_usage.start_time) = gcp_billing_export.date AND resource_usage.sku_id = gcp_billing_export.sku_id
+
+GROUP BY
+  date,
+  cluster_name,
+  cluster_location,
+  namespace,
+  label_value,
+  resource_name,
+  sku_id,
+  sku_description,
+  usage_unit,
+  currency
+
+ORDER BY
+  date,
+  cluster_name,
+  cluster_location,
+  namespace,
+  label_value,
+  resource_name
+  </pre> <h5 id="resource-consumption-by-time-period,-grouped-by-namespaces-and-labels">Resource consumption by time period, grouped by namespaces and labels</h5> 
+<pre>DECLARE drilldown_label STRING DEFAULT 'DRILLDOWN_LABEL';
+DECLARE project_id STRING default "CLUSTER_GCP_PROJECT";
+
+SELECT
+  DATE(start_time) as date,
+  resource_usage.cluster_name,
+  resource_usage.cluster_location,
+  resource_usage.namespace,
+  label.value AS label_value,
+  resource_usage.resource_name,
+  resource_usage.sku_id,
+  gcp_billing_export.sku_description,
+  SUM(resource_usage.usage.amount) AS usage,
+  resource_usage.usage.unit AS usage_unit,
+  SUM(resource_usage.usage.amount * gcp_billing_export.rate) AS cost_estimate,
+  gcp_billing_export.currency
+FROM
+  'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_consumption' AS resource_usage
+
+-- select only workloads matching the defined "drilldown_label"
+  CROSS JOIN UNNEST(labels) AS label WHERE label.key=drilldown_label
+
+-- join with billing table to get pricing information and sku description
+  LEFT JOIN (
+  SELECT
+    DATE(usage_start_time) as date,
+    sku.id AS sku_id,
+    sku.description AS sku_description,
+    SAFE_DIVIDE(SUM(cost), SUM(usage.amount)) AS rate,
+    currency
+  FROM
+    'CLUSTER_GCP_PROJECT.BILLING_DATASET.BILLING_TABLE'
+  WHERE
+    project.id = project_id
+  GROUP BY
+    date,
+    sku_id,
+    sku_description,
+    currency) AS gcp_billing_export
+  ON DATE(resource_usage.start_time) = gcp_billing_export.date AND resource_usage.sku_id = gcp_billing_export.sku_id
+
+GROUP BY
+  date,
+  cluster_name,
+  cluster_location,
+  namespace,
+  label_value,
+  resource_name,
+  sku_id,
+  sku_description,
+  usage_unit,
+  currency
+
+ORDER BY
+  date,
+  cluster_name,
+  cluster_location,
+  namespace,
+  label_value,
+  resource_name
+  </pre> </section> <section class="expandable"> <h4 class="showalways" id="how-to-show-actual-resource-consumption-as-a-percentage-of-resource-requests,-over-time">How to show actual resource consumption as a percentage of resource requests, over time</h4> <p>This query shows the ratio of actual CPU consumption to CPU requests, so you can see which Pods request too little or too much CPU compared to actual requirements.</p> 
+<pre>WITH
+  constraints AS (
+    SELECT
+      TIMESTAMP(START_TIME) as min_time,
+      TIMESTAMP(END_TIME) as max_time,
+      "CLUSTER_GCP_PROJECT" as project_id
+  ),
+  request_based_amount_by_namespace AS (
+    SELECT
+      namespace,
+      resource_name,
+      SUM(usage.amount) AS requested_amount,
+      usage.unit AS unit
+    FROM
+      'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_usage' as requested_resource_usage
+    INNER JOIN
+      constraints
+    ON
+      requested_resource_usage.start_time &gt;= constraints.min_time
+      AND requested_resource_usage.end_time &lt;= constraints.max_time
+      AND requested_resource_usage.project.id = constraints.project_id
+    GROUP BY
+      namespace, resource_name, usage.unit
+  ),
+  consumption_based_amount_by_namespace AS (
+    SELECT
+      namespace,
+      resource_name,
+      SUM(usage.amount) AS consumed_amount,
+      usage.unit AS unit
+    FROM
+      'CLUSTER_GCP_PROJECT.USAGE_METERING_DATASET.gke_cluster_resource_consumption' as consumed_resource_usage
+    INNER JOIN
+      constraints
+    ON
+      consumed_resource_usage.start_time &gt;= constraints.min_time
+      AND consumed_resource_usage.end_time &lt;= constraints.max_time
+      AND consumed_resource_usage.project.id = constraints.project_id
+    GROUP BY
+      namespace, resource_name, usage.unit
+  )
+SELECT
+  request_based_amount_by_namespace.namespace,
+  request_based_amount_by_namespace.resource_name,
+  requested_amount,
+  consumed_amount,
+  request_based_amount_by_namespace.unit,
+  CASE
+    WHEN consumed_amount IS NULL THEN NULL
+    WHEN requested_amount = 0 THEN NULL
+    ELSE consumed_amount / requested_amount END
+      AS consumption_to_request_ratio
+FROM
+  request_based_amount_by_namespace
+  FULL JOIN
+  consumption_based_amount_by_namespace
+  ON
+  request_based_amount_by_namespace.namespace = consumption_based_amount_by_namespace.namespace
+  AND
+  request_based_amount_by_namespace.resource_name = consumption_based_amount_by_namespace.resource_name
+ORDER BY
+  consumption_to_request_ratio
+DESC
+  </pre> </section> <h2 id="schema">GKE usage metering schema in BigQuery</h2> <p>The following table describes the schema for the GKE usage metering tables in the BigQuery dataset. If your cluster is running a version of GKE that supports resource consumption metering and resource requests, an additional table is created with the same schema.</p> <table> <colgroup> <col style="background-color:grey"> </colgroup> <thead> <th width="23%">Field</th> <th>Type</th> <th>Description</th> </thead> <tr> <td><code translate="no" dir="ltr">cluster_location</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The name of the Compute Engine zone or region in which the GKE cluster resides. </td> </tr> <tr> <td><code translate="no" dir="ltr">cluster_name</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The name of the GKE cluster. </td> </tr> <tr> <td><code translate="no" dir="ltr">namespace</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The Kubernetes namespace from which the usage is generated. </td> </tr> <tr> <td><code translate="no" dir="ltr">resource_name</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The name of the resource, such as "cpu", "memory", and "storage". </td> </tr> <tr> <td><code translate="no" dir="ltr">sku_id</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The SKU ID of the underlying Google Cloud cloud resource. </td> </tr> <tr> <td><code translate="no" dir="ltr">start_time</code></td> <td><code translate="no" dir="ltr">TIMESTAMP</code></td> <td> The UNIX timestamp of when the usage began. </td> </tr> <tr> <td><code translate="no" dir="ltr">end_time</code></td> <td><code translate="no" dir="ltr">TIMESTAMP</code></td> <td> The UNIX timestamp of when the usage ended. </td> </tr> <tr> <td><code translate="no" dir="ltr">fraction</code></td> <td><code translate="no" dir="ltr">FLOAT</code></td> <td> The fraction of a cloud resource used by the usage. For a dedicated cloud resource that is solely used by a single namespace, the fraction is always 1.0. For resources shared among multiple namespaces, the fraction is calculated as the requested amount divided by the total capacity of the underlying cloud resource. </td> </tr> <tr> <td><code translate="no" dir="ltr">cloud_resource_size</code></td> <td><code translate="no" dir="ltr">INTEGER</code></td> <td> The size of the underlying Google Cloud resource. For example, the size of vCPUs on a n1-standard-2 instances is 2. </td> </tr> <tr> <td><code translate="no" dir="ltr">labels.key</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The key of a Kubernetes label associated with the usage. </td> </tr> <tr> <td><code translate="no" dir="ltr">labels.value</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The value of a Kubernetes label associated with the usage. </td> </tr> <tr> <td><code translate="no" dir="ltr">project.id</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The ID of the project in which the GKE cluster resides. </td> </tr> <tr> <td><code translate="no" dir="ltr">usage.amount</code></td> <td><code translate="no" dir="ltr">FLOAT</code></td> <td> The quantity of <code translate="no" dir="ltr">usage.unit</code> used. </td> </tr> <tr> <td><code translate="no" dir="ltr">usage.unit</code></td> <td><code translate="no" dir="ltr">STRING</code></td> <td> The base unit in which resource usage is measured. For example, the base unit for standard storage is <em>byte-seconds</em>. </td> </tr> </table> <p>The units for GKE usage metering must be interpreted in the following way:</p> <ol> <li><p>The CPU <code translate="no" dir="ltr">usage.unit</code> is <em>seconds</em>, which is the total CPU time that a Pod requested or utilized. For example, if we have two Pods that each request 30 CPU and run for 15 minutes then the aggregate amount of the request table is 54,000 seconds (2 Pods * 30 CPU * 15 minutes * 60 seconds / minute).</p></li> <li><p>The memory <code translate="no" dir="ltr">usage.unit</code> is <em>bytes-seconds</em>, which is the integral of memory over time that a Pod requested or utilized. For example, if we have two Pods that each request 30 GiB and run for 15 minutes then the aggregate amount of the request table is 5.798+13 byte-seconds (2 Pods * 30 GiB * 15 minutes * 60 seconds / minute * 1073741824 bytes / GiB).</p></li> </ol> <h2 id="data_writing">Understanding when GKE usage metering data is written to BigQuery</h2> <p>There are two conditions when GKE usage metering writes usage records to BigQuery metrics:</p> <ol> <li>The Pod phase changes to <code translate="no" dir="ltr">succeeded</code> or <code translate="no" dir="ltr">failed</code>, or when the Pod is deleted.</li> <li>
+<p>The hourly schedule's timestamp to write records is reached while the Pod is still running.</p> <p>GKE usage metering generates an hourly schedule where it writes Pod usage records to BigQuery for all running Pods. The schedule's timestamp is not the same across all clusters.</p> <p>If you have multiple Pods running at that timestamp, you'll find multiple usage records with the same <code translate="no" dir="ltr">end_time</code>. These usage records' <code translate="no" dir="ltr">end_time</code> indicate the hourly schedule's timestamp.</p> <p>Also, if you have multiple Pods that have been running for multiple hours, you also have a set of usage records with an <code translate="no" dir="ltr">end_time</code> that matches the <code translate="no" dir="ltr">start_time</code> of another set of usage records.</p>
+</li> </ol> <h2 id="disabling">Disable GKE usage metering</h2> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p>To disable GKE usage metering on a cluster, run the following command:</p> 
+<pre data-language="bash">gcloud container clusters update CLUSTER_NAME \
+    --clear-resource-usage-bigquery-dataset
+</pre>
+<aside class="note"><strong>Note:</strong><span> The BigQuery dataset is preserved. You can remove it if you don't need the data and no cluster is using it.</span></aside> </section> <section><p class="_code-tab"><strong>Console</strong></p>
+
+<ol> <li>
+<p>Go to the <strong>Google Kubernetes Engine</strong> page in Google Cloud console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list" target="console" track-name="consoleLink" track-type="tasks">Go to Google Kubernetes Engine</a></p>
+</li> <li><p>Next to the cluster you want to modify, click <i class="material-icons" aria-hidden="true" translate="no">more_vert</i> <strong>Actions</strong>, then click <i class="material-icons" aria-hidden="true" translate="no">edit</i> <strong>Edit</strong>.</p></li> <li><p>Under <strong>Features</strong>, click <i class="material-icons" aria-hidden="true" translate="no">edit</i> <strong>Edit</strong> next to <strong>GKE usage metering</strong>.</p></li> <li><p>Clear <strong>Enable GKE usage metering</strong>.</p></li> <li><p>Click <strong>Save Changes</strong>.</p></li> </ol> </section> </div> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="cost-allocations">track resource consumption</a> by namespace and label with cost allocation.</li> <li>Learn how to <a href="view-observability-metrics">view observability metrics</a>.</li> <li>Learn how to <a href="configure-metrics">configure metrics</a>.</li> <li>Follow the tutorial about <a href="../tutorials/observability-with-prometheus">observability with Prometheus</a>.</li> <li>Learn about the <a href="../concepts/cluster-autoscaler">cluster autoscaler</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cluster-usage-metering" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cluster-usage-metering</a>
+  </p>
+</div>

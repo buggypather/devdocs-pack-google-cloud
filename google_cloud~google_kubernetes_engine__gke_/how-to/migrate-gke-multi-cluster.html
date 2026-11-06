@@ -1,0 +1,478 @@
+<h1>Migrate to multi-cluster networking</h1> <div class="last-reviewed">Last reviewed 2022-02-17 UTC</div> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>Multi-cluster networking is a valuable tool that enables use cases like regional high availability, globally distributed proximity to users for lower latency, and organizational isolation between teams. <a href="https://docs.cloud.google.com/kubernetes-engine" track-type="solution" track-name="internalLink" track-metadata-position="body">Google Kubernetes Engine (GKE)</a> provides built-in capabilities for multi-cluster networking that you can enable and use at scale across a fleet of GKE clusters. This feature also lets you combine, or migrate deployed infrastructure between, GKE Standard and Autopilot to meet the architectural needs of each application.</p> <p>With GKE <a href="../concepts/autopilot-overview" track-type="solution" track-name="internalLink" track-metadata-position="body">Autopilot</a> clusters, Google manages the infrastructure, including the control plane and the nodes. If you want to configure and manage your nodes instead, GKE provides <a href="../concepts/choose-cluster-mode#why-standard" track-type="solution" track-name="internalLink" track-metadata-position="body">Standard mode</a>. For more information on the differences between modes, see <a href="../concepts/choose-cluster-mode" track-type="solution" track-name="internalLink" track-metadata-position="body">Choose a cluster mode of operation</a>.</p> <p>This page demonstrates these features through several deployment topologies. You learn how to take an application deployed in a single GKE cluster and migrate it to a multi-cluster deployment across GKE Standard and Autopilot clusters. You use GKE <a href="../concepts/multi-cluster-services" track-type="solution" track-name="internalLink" track-metadata-position="body">multi-cluster Services</a> for east-west traffic and <a href="enabling-multi-cluster-gateways" track-type="solution" track-name="internalLink" track-metadata-position="body">multi-cluster Gateways</a> to enable multi-cluster north-south networking.</p> <p>This page is for cloud architects and operations teams that use, or plan to use, GKE to deploy services across multiple Kubernetes clusters. Before reading this page, ensure that you're familiar with <a href="https://kubernetes.io/docs/home/" target="external" track-type="solution" track-name="k8sLink" track-metadata-position="body" class="external">Kubernetes</a>.</p> <h2 id="multi-cluster_services_and_multi-cluster_gateways">Multi-cluster Services and multi-cluster Gateways</h2> <p>Kubernetes can run using a single control plane across disparate cloud zones to provide resiliency and higher availability for your services. GKE takes this one step further and provides GKE <a href="../concepts/multi-cluster-services" track-type="solution" track-name="internalLink" track-metadata-position="body">multi-cluster Services</a> (MCS) that provides a cross-cluster service discovery and invocation mechanism. Services that use this feature are discoverable and accessible across clusters with a virtual IP, which matches the behavior of a <code translate="no" dir="ltr">ClusterIP</code> Service accessible in a cluster. This approach allows for the following benefits:</p> <ul> <li>Services can be load-balanced across multiple clusters in the same region or different regions (east-west traffic).</li> <li>Cross-region service high availability options are achievable.</li> <li>Stateful and stateless workloads can be deployed and managed across separate clusters.</li> <li>Shared services are available across clusters.</li> </ul> <p>To learn more about how to deploy MCS, see <a href="multi-cluster-services" track-type="solution" track-name="internalLink" track-metadata-position="body">Configuring multi-cluster Services</a>.</p> <p>GKE provides an implementation of the Kubernetes Gateway API that uses the <a href="../concepts/gateway-api#gateway_controller" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE Gateway controller</a>. Gateway allows GKE to deploy Google Cloud load balancers to provide inbound (north-south) traffic routing for services deployed on GKE. GKE also provides <a href="enabling-multi-cluster-gateways" track-type="solution" track-name="internalLink" track-metadata-position="body">multi-cluster Gateways</a> (MCG) which extend the GKE Gateway controller to provision load balancers that route traffic to services deployed on disparate GKE clusters.</p> <p>The following diagram shows how, when you combine MCS and MCG, you are able to manage the complementary aspects of service deployment and traffic routing from a single control plane:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-gateway-traffic.png" alt="Multi-cluster Services facilitates communication between services in a cluster and multi-cluster Gateway deploys load balancers to route traffic across clusters."></p> <p>For more information, see <a href="multi-cluster-services" track-type="solution" track-name="internalLink" track-metadata-position="body">Deploying multi-cluster Gateways</a>.</p> <aside class="note"><strong>Note:</strong><span> In a multi-cluster scenario where clusters belong to different custom subnets and are registered to the same fleet, you must create a firewall rule to allow cross-cluster traffic. For more information, see <a href="https://docs.cloud.google.com/service-mesh/docs/unified-install/gke-install-multi-cluster#create_firewall_rule">create firewall rule</a>.</span></aside> <h2 id="overview_of_migration">Overview of migration</h2> <p>GKE multi-cluster networking capabilities benefit workloads of various profiles. For example, you might have stateless components with bursty traffic that you wish to move to Autopilot because of its more efficient cost model.</p> <p>Or, you might want to place your application frontends closer to users. This approach provides lower latency and caching that improves application performance and user experience. At the same time, you might have some stateful components that your application relies on that can only reside in one location. This configuration requires north-south, multi-cluster load balancing to send client traffic to the correct cluster in that location. You also need east-west, multi-cluster load balancing to send traffic between clusters to reach the stateful components.</p> <p>This page uses the <a href="https://github.com/GoogleCloudPlatform/microservices-demo" target="github" track-type="solution" track-name="gitHubLink" track-metadata-position="body" class="external">Online Boutique</a> cloud microservices demo application to demonstrate a multi-cluster pattern that can be used to enhance the deployment of the single zone demo. You start with a single-zone version of the application. You then add elements of high availability and resilience by using multi-cluster Services and multi-cluster Gateways, and reduce operational toil by taking advantage of Autopilot.</p> <h3 id="initial_single-cluster_deployment">Initial single-cluster deployment</h3> <p>In the following diagram, the Online Boutique application is initially deployed to a single GKE Standard mode cluster named <em>std-west</em>, and is exposed by using a <code translate="no" dir="ltr">LoadBalancer</code> Service:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-initial-state.svg" alt="A single Standard mode GKE cluster that runs all the services exposed using a regular HTTP external LoadBalancer service." style="text-align: center" class="add-background"> </p> <h3 id="migrate_to_multi-cluster_services">Migrate to multi-cluster Services</h3> <p>In the next intermediate step, you create two additional clusters, and the stateless services are deployed in additional regions. You create two GKE Autopilot clusters named <em>auto-east</em> and <em>auto-central</em> in two separate regions distinct from the single <em>std-west</em> GKE Standard cluster, and register the clusters to the <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs" track-type="solution" track-name="internalLink" track-metadata-position="body">Google Cloud fleet</a>.</p> <p>Fleets are a Google Cloud concept for logically organizing clusters and other resources, and let you use and manage multi-cluster capabilities and apply consistent policies across your systems.</p> <p>You export the <em>cartservice</em> on the <em>std-west</em> cluster in the <em>onlineboutique</em> namespace to the new fleet clusters by using <a href="multi-cluster-services#registering_a_service_for_export" track-type="solution" track-name="internalLink" track-metadata-position="body">ServiceExport</a>. You deploy Online Boutique's <em>frontend</em> Service on all three clusters and expose it through a <a href="../concepts/service#services_of_type_clusterip" track-type="solution" track-name="internalLink" track-metadata-position="body">ClusterIP</a> service. You then export the service to the fleet using <code translate="no" dir="ltr">ServiceExports</code>. Services such as the middleware layer of the Online Boutique (like <em>productcatalog</em>, <em>shipping</em>, and <em>adservice</em>) are also deployed to all three clusters.</p> <p>A <code translate="no" dir="ltr">Pod</code> that runs in any cluster in the fleet can access an exported <code translate="no" dir="ltr">Service</code> by sending a request to the <code translate="no" dir="ltr">ClusterSet</code> URI for that service. The request routes to an endpoint that backs the service.</p> <p>The <em>frontend</em> Service is able to consume the middleware services (such as <em>productcatalogservice</em> or <em>currencyservice</em>) locally in the same cluster. This architecture helps keep incoming requests local to the regions whose frontend responds to the request, and avoids unnecessary inter-region network traffic charges.</p> <p>The following diagram illustrates the two multi-cluster Services. The stateless <em>frontend</em> Service is deployed to three clusters, and the stateful backend <em>cartservice</em> is deployed to one cluster. The diagram also shows that in this intermediate step, inbound traffic for the frontend service remains routed to the original GKE Standard cluster in <em>us-west1</em> using a regional external passthrough Network Load Balancer created by the frontend-external <code translate="no" dir="ltr">LoadBalancer</code> Service:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-services.svg" alt="Multi cluster Services runs across three GKE clusters but
+traffic is still directed to a single cluster using a regular HTTP external
+LoadBalancer service." style="text-align: center" class="add-background"> </p> <h3 id="migrate_to_multi-cluster_gateway">Migrate to multi-cluster Gateway</h3> <p>In the final step, you route inbound traffic for the <em>frontend</em> Service from external client requests to services in multiple clusters in the fleet using a multi-cluster Gateway.</p> <p>A fourth cluster named <em>config-central</em> is added to the fleet to host and manage the configuration for the <a href="../concepts/gateway-api" track-type="solution" track-name="internalLink" track-metadata-position="body">Gateway</a> and <a href="https://gateway-api.sigs.k8s.io/api-types/httproute/" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body" class="external">HTTPRoute</a> resources that are created as part of this configuration. The <code translate="no" dir="ltr">HTTPRoute</code> resource maps the <em>/</em> prefix to the frontend <a href="multi-cluster-services#consuming_cross-cluster_services" track-type="solution" track-name="internalLink" track-metadata-position="body">ServiceImport</a>. Traffic for the Online Boutique's frontend is sent to a healthy endpoint in one of the available regions. This approach adds elements of high availability to the Online Boutique application architecture.</p> <p>In the following diagram, the multi-cluster Gateway deploys a Global Cloud Load Balancer that routes external traffic to the stateless <em>frontend</em> Service deployed on each of the three application clusters in the fleet.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-gateway.svg" alt="Multi cluster Services runs across three GKE clusters and traffic is now distributed across frontend services in all clusters using a multi-cluster external Gateway." style="text-align: center" class="add-background"> </p> <p>In the final state, this opinionated pattern demonstrates loose coupling between the stateful (<em>cartservice</em> and <em>redis-cart</em>) and stateless portions of the application (<em>frontend</em>, <em>emailservice</em>, <em>checkoutservice</em>, <em>recommendationservice</em>, <em>paymentservice</em>, <em>productcatalogservice</em>, <em>currencyservice</em>, <em>shippingservice</em>, and <em>adservice</em>). While outside the scope of this page, this approach gives you a future opportunity to add resilience and high availability to the stateful services layer.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Create and configure GKE Standard and Autopilot clusters.</li> <li>Deploy Online Boutique to a zonal GKE Standard cluster.</li> <li>Export multi-cluster <code translate="no" dir="ltr">Services</code>.</li> <li>Deploy manifests to Standard and Autopilot clusters.</li> <li>Enable and configure multi-cluster Gateways.</li> <li>Test multi-region application behavior.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE</a></li> <li>
+<a href="https://cloud.google.com/compute/all-pricing" track-type="solution" track-name="internalLink" track-metadata-position="body">Compute Engine</a> for <a href="../concepts/cluster-architecture#nodes" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE worker nodes</a> </li> <li><a href="https://docs.cloud.google.com/vpc/network-pricing#lb" track-type="solution" track-name="internalLink" track-metadata-position="body">Cloud Load Balancing</a></li> <li><a href="https://cloud.google.com/kubernetes-engine/pricing#multi-cluster-gateway-and-multi-cluster-ingress" track-type="solution" track-name="internalLink" track-metadata-position="body">Multi Cluster Ingress</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>Security constraints defined by your organization might prevent you from completing the following steps. For troubleshooting information, see <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/develop-apps-constrained-environment" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body">Develop applications in a constrained Google Cloud environment</a>. </p> <p>Before you begin, ensure you have the following requirements met:</p> <ul> <li>It is recommended that you use a new project for this guide, as the easiest way to clean up is to delete the project once you are finished.</li> <li>This guide assumes you have the <em>Owner IAM</em> role for your Google Cloud project. For production or real-world settings, it is best practice to scope permissions to least privilege. For more information, see <a href="https://docs.cloud.google.com/iam/docs/using-iam-securely" track-type="solution" track-name="internalLink" track-metadata-position="body">Using IAM securely</a> and <a href="https://docs.cloud.google.com/architecture/framework/security/implement-zero-trust#verify_every_access_attempt_explicitly" track-type="solution" track-name="internalLink" track-metadata-position="body">Verify every access attempt explicitly</a>.</li> <li>Familiarize yourself with the <a href="https://github.com/GoogleCloudPlatform/microservices-demo" target="github" track-type="solution" track-name="gitHubLink" track-metadata-position="body" class="external">Online Boutique</a> microservices demo application architecture.</li> </ul> </section> <div id="tutorial-content"> <h2 id="prepare_the_environment">Prepare the environment</h2> <p>In this guide, you use <a href="https://docs.cloud.google.com/shell/docs/features" track-type="solution" track-name="internalLink" track-metadata-position="body">Cloud Shell</a> to enter commands. Cloud Shell gives you access to the command line in the Google Cloud console and includes Google Cloud SDK and other tools, such as the <a href="https://docs.cloud.google.com/sdk/gcloud" track-type="solution" track-name="internalLink" track-metadata-position="body">Google Cloud CLI</a>. Cloud Shell appears as a window at the bottom of the Google Cloud console. It can take several minutes to initialize, but the window appears immediately.</p> <ol> <li>
+
+<p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> </li> <li>
+<p>In Cloud Shell, define environment variables used in this guide. Replace <var translate="no">PROJECT_ID</var> with your own project ID:</p> 
+<pre>export PROJECT=PROJECT_ID
+gcloud config set project ${PROJECT}
+</pre>
+</li> <li>
+<p>Enable the services required for the steps on this page:</p> 
+<pre>gcloud services enable \
+    gkehub.googleapis.com \
+    multiclusteringress.googleapis.com \
+    dns.googleapis.com \
+    trafficdirector.googleapis.com \
+    cloudresourcemanager.googleapis.com \
+    multiclusterservicediscovery.googleapis.com \
+    container.googleapis.com
+
+gcloud container fleet multi-cluster-services enable
+</pre> <p>Multi-cluster Services manages Google Cloud components like Cloud DNS, firewall rules, and Cloud Service Mesh, so these APIs must also be enabled. For more information, see <a href="https://docs.cloud.google.com/service-mesh/docs/overview#multi-cluster_kubernetes" track-type="solution" track-name="internalLink" track-metadata-position="body">Cloud Service Mesh overview</a>.</p> <p>The output is similar to the following example:</p> 
+<pre>Operation "operations/acf.p2-822685001869-ee4ebe78-6dd8-465e-b0fd-3b0e5f964bad"
+finished successfully.
+
+Waiting for Feature Multi-cluster Services to be created...done.
+</pre>
+</li> <li>
+<p>Verify that multi-cluster Services shows the <em>ACTIVE</em> state:</p> 
+<pre>gcloud container fleet multi-cluster-services describe
+</pre> <p>The output is similar to the following example:</p> 
+<pre>createTime: '2021-11-30T21:59:25.245190894Z'
+name: projects/PROJECT_ID/locations/global/features/multiclusterservicediscovery
+resourceState:
+  state: ACTIVE
+spec: {}
+updateTime: '2021-11-30T21:59:27.459063070Z'
+</pre> <p>If the value of <em>state</em> is not <em>ACTIVE</em>, see the <a href="multi-cluster-services#troubleshooting" track-type="solution" track-name="internalLink" track-metadata-position="body">multi-cluster services troubleshooting details</a>.</p>
+</li> </ol> <h2 id="create_and_configure_clusters">Create and configure GKE clusters</h2> <p>To demonstrate the multi-cluster pattern in this guide, you use three <em>application clusters</em> in three separate cloud regions, and one cluster to <em>host the configuration</em> for Gateway resources. You register all clusters with the fleet associated with your project. A Google Cloud project can only have a single fleet associated with it. This project is known as the fleet host project.</p> <p>In this document, all the GKE clusters are deployed in the same project. The Shared VPC network is created in this project, which is also the fleet's project.</p> <ol> <li>
+<p>Create Standard and Autopilot GKE clusters and register the clusters to your project's fleet:</p> 
+<pre>gcloud container clusters create std-west \
+    --location us-west1-a \
+    --num-nodes=6 \
+    --enable-ip-alias \
+    --release-channel regular \
+    --workload-pool=${PROJECT}.svc.id.goog \
+    --gateway-api=standard \
+    --enable-fleet \
+    --async \
+
+gcloud container clusters create-auto auto-east \
+    --location us-east1 \
+    --release-channel regular \
+    --enable-fleet \
+    --async
+
+gcloud container clusters create-auto auto-central \
+    --location us-central1 \
+    --release-channel regular \
+    --enable-fleet \
+    --async
+
+gcloud container clusters create config-central \
+    --location us-central1 \
+    --num-nodes=1 \
+    --enable-ip-alias \
+    --release-channel regular \
+    --workload-pool=${PROJECT}.svc.id.goog \
+    --gateway-api=standard \
+    --enable-fleet \
+    --async
+</pre> <p>Workload Identity Federation for GKE is enabled by default on GKE Autopilot clusters so you don't have to use the <code translate="no" dir="ltr">--workload-pool</code> flag when you create those clusters like you do with the GKE Standard clusters.</p>
+</li> <li>
+<p>Wait for the clusters' <em>STATUS</em> to change from <em>PROVISIONING</em> to <em>RUNNING</em>. This process can take up to 10 minutes. You can monitor the progress by using a watch loop:</p> 
+<pre>watch -n 20 --difference=permanent "gcloud container clusters list"
+</pre> <p>The output is similar to the following example:</p> 
+<pre>NAME: auto-central
+LOCATION: us-central1
+MASTER_VERSION: 1.21.5-gke.1802
+MASTER_IP: 107.178.213.138
+MACHINE_TYPE: e2-medium
+NODE_VERSION: 1.21.5-gke.1802
+NUM_NODES: 3
+STATUS: PROVISIONING
+
+NAME: config-central
+LOCATION: us-central1
+MASTER_VERSION: 1.21.5-gke.1802
+MASTER_IP:
+MACHINE_TYPE: e2-medium
+NODE_VERSION: 1.21.5-gke.1802
+NUM_NODES: 9
+STATUS: PROVISIONING
+
+NAME: auto-east
+LOCATION: us-east1
+MASTER_VERSION: 1.21.5-gke.1802
+MASTER_IP: 35.229.88.209
+MACHINE_TYPE: e2-medium
+NODE_VERSION: 1.21.5-gke.1802
+NUM_NODES: 3
+STATUS: PROVISIONING
+
+NAME: std-west
+LOCATION: us-west1-a
+MASTER_VERSION: 1.21.5-gke.1802
+MASTER_IP: 35.197.93.113
+MACHINE_TYPE: e2-medium
+NODE_VERSION: 1.21.5-gke.1802
+NUM_NODES: 6
+STATUS: PROVISIONING
+</pre>
+</li> <li><p>After all the clusters are in the <em>RUNNING</em> state, press <code translate="no" dir="ltr">CTRL-C</code> to interrupt the command.</p></li> <li>
+<p>Add an Identity and Access Management (IAM) policy binding granting the fleet host project MCS service account the <em>Network User</em> role for its own project:</p> 
+<pre>gcloud projects add-iam-policy-binding ${PROJECT} \
+    --member "serviceAccount:${PROJECT}.svc.id.goog[gke-mcs/gke-mcs-importer]" \
+    --role "roles/compute.networkViewer"
+</pre> <p>You use Workload Identity Federation for GKE to grant the MCS service read access to your project VPC network configuration. As a result, the fleet host project's MCS <em>Importer GKE</em> service account needs this role.</p> <p>The output is similar to the following example:</p> 
+<pre>- members:
+  - serviceAccount:PROJECT_ID.svc.id.goog[gke-mcs/gke-mcs-importer]
+  role: roles/compute.networkViewer
+[...]
+</pre>
+</li> <li>
+<p>Create an IAM binding in the fleet host project that assigns the GKE Service Agent role to the project's GKE fleet service account:</p> 
+<pre>gcloud projects add-iam-policy-binding ${PROJECT} \
+    --member "serviceAccount:service-{${PROJECT}}@gcp-sa-gkehub.iam.gserviceaccount.com" \
+    --role roles/gkehub.serviceAgent
+</pre>
+</li> <li>
+<p>Create an IAM binding in the fleet host project that assigns the MCS Service Agent role to the project's MCS service account.:</p> 
+<pre>gcloud projects add-iam-policy-binding ${PROJECT} \
+    --member "serviceAccount:service-{${PROJECT}}@gcp-sa-mcsd.iam.gserviceaccount.com" \
+    --role roles/multiclusterservicediscovery.serviceAgent
+</pre>
+</li> <li>
+<p>Connect to the clusters and generate kubeconfig entries:</p> 
+<pre>gcloud container clusters get-credentials std-west \
+    --location us-west1-a --project $PROJECT
+
+gcloud container clusters get-credentials auto-east \
+    --location us-east1 --project $PROJECT
+
+gcloud container clusters get-credentials auto-central \
+    --location us-central1 --project $PROJECT
+
+gcloud container clusters get-credentials config-central \
+    --location us-central1 --project $PROJECT
+</pre> <p>For each command, the output is similar to the following example:</p> 
+<pre>Fetching cluster endpoint and auth data.
+kubeconfig entry generated for std-west.
+</pre>
+</li> <li>
+<p>Rename contexts for clusters so that they are easier to work with in the rest of this page:</p> 
+<pre>kubectl config rename-context \
+    gke_${PROJECT}_us-west1-a_std-west \
+    std-west
+
+kubectl config rename-context \
+    gke_${PROJECT}_us-east1_auto-east \
+    auto-east
+
+kubectl config rename-context \
+    gke_${PROJECT}_us-central1_auto-central \
+    auto-central
+
+kubectl config rename-context \
+    gke_${PROJECT}_us-central1_config-central \
+    config-central
+</pre> <p>In this guide, the contexts are named based on their location. Although you can provide alternate names, the remaining steps in this guide use the names used in this step.</p>
+</li> </ol> <h2 id="deploy_online_boutique_on">Deploy Online Boutique on GKE Standard</h2> <p>In the first step of the demonstration deployment, you deploy the full set of Online Boutique application services to the single GKE Standard cluster <em>std-west</em> in <em>us-west1</em>.</p> <ol> <li>
+<p>Create the namespace <em>onlineboutique</em> on <em>std-west</em>:</p> 
+<pre>kubectl create namespace onlineboutique --context std-west
+</pre> <p>The output is similar to the following example:</p> 
+<pre>namespace/onlineboutique created
+</pre>
+</li> <li>
+<p>Clone the Online Boutique GitHub repository and set up a <em>WORKDIR</em> variable:</p> 
+<pre>cd ~
+
+git clone --branch release/v0.4.1 \
+    https://github.com/GoogleCloudPlatform/microservices-demo.git
+
+cd microservices-demo/release &amp;&amp; export WORKDIR=`pwd`
+</pre>
+</li> <li>
+<p>Deploy Online Boutique on <em>std-west</em>. This process creates <code translate="no" dir="ltr">Deployments</code> and <code translate="no" dir="ltr">Services</code> for all of Online Boutique's microservices, and includes a <a href="../concepts/service#services_of_type_loadbalancer" track-type="solution" track-name="internalLink" track-metadata-position="body">LoadBalancer</a> type Service which externally exposes Online Boutique's frontend service:</p> 
+<pre>cd $WORKDIR
+
+kubectl apply -f kubernetes-manifests.yaml \
+    -n onlineboutique --context=std-west
+</pre>
+</li> <li>
+<p>Wait for the <code translate="no" dir="ltr">LoadBalancer</code> Service to get an external IP:</p> 
+<pre>watch -n 20 --difference=permanent \
+     "kubectl get svc frontend-external -n onlineboutique --context=std-west"
+</pre> <p>Initially, the output is similar to the following example:</p> 
+<pre>NAME                TYPE           CLUSTER-IP   EXTERNAL-IP   PORT(S)        AGE
+frontend-external   LoadBalancer   10.60.5.62   &lt;pending&gt;     80:30359/TCP   43s
+</pre> <p>When the <code translate="no" dir="ltr">Service</code> is ready the <em>EXTERNAL-IP</em> column displays the public IP address of the load balancer.</p>
+</li> <li>
+<p>After the <code translate="no" dir="ltr">Service</code> is ready, get the external IP address of the load balancer and use curl to verify that the frontend is ready. If this curl command returns an error, wait a few moments before you try again:</p> 
+<pre>  curl $(kubectl get svc frontend-external \
+      -n onlineboutique --context=std-west \
+      -o=jsonpath="{.status.loadBalancer.ingress[0].ip}") | \
+        grep -e Cluster -e Zone -e Pod
+</pre> <p>The successful output of the curl command is similar to the following example:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;std-west&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-west1-a&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-b7bddcc97-wdjsk
+</pre>
+</li> </ol> <p>You now have a single-zone version of Online Boutique running in <em>us-west1-a</em>. You can also use a web browser to navigate to the external IP assigned to the <em>frontend-external</em> <code translate="no" dir="ltr">LoadBalancer</code> Service to access the application and observe its behavior. This initial single deployment is shown in the following diagram:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-initial-state.svg" alt="A single Standard mode GKE cluster that runs all the services exposed with a regular HTTP external LoadBalancer service." style="text-align: center" class="add-background"> </p> <h2 id="export_cartservice_as_a_multi-cluster_service">Export cartservice as a multi-cluster Service</h2> <p>In this section, you start to add elements of high availability to the application. You export the backend <em>cartservice</em> as a multi-cluster Service to the GKE Autopilot clusters.</p> <ol> <li>
+<p>Create the namespace <em>onlineboutique</em> on the remaining clusters:</p> 
+<pre>kubectl create namespace onlineboutique --context auto-east
+
+kubectl create namespace onlineboutique --context auto-central
+
+kubectl create namespace onlineboutique --context config-central
+</pre> <p>For each command, the output is similar to the following example:</p> 
+<pre>namespace/onlineboutique created
+</pre>
+</li> <li>
+<p>Export <em>cartservice</em> from the <em>std-west</em> cluster to all other clusters in the <code translate="no" dir="ltr">ClusterSet</code>. The <code translate="no" dir="ltr">ServiceExport</code> object registers the <em>cartservice</em> Service, with GKE multi-cluster Services, for export to all clusters in the fleet that have the namespace <em>onlineboutique</em> present. For more details, see <a href="multi-cluster-services#registering_a_service_for_export" track-type="solution" track-name="internalLink" track-metadata-position="body">registering a service for export</a>.</p> 
+<pre>cat &lt;&lt;EOF&gt;&gt; $WORKDIR/cartservice-export.yaml
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+ namespace: onlineboutique
+ name: cartservice
+
+EOF
+
+kubectl apply -f $WORKDIR/cartservice-export.yaml \
+    -n onlineboutique --context=std-west
+</pre>
+</li> </ol> <h2 id="apply_application_manifests_for_multi-cluster_pattern">Apply application manifests for multi-cluster pattern</h2> <p>In this section you apply two curated manifests to deploy the multi-cluster pattern. These manifests contain selected portions of the <em>kubernetes-manifests.yaml</em> that you previously applied to the <em>std-west</em> cluster:</p> <ul> <li>The first manifest is used for the <em>frontend</em> <code translate="no" dir="ltr">Deployment</code>, <code translate="no" dir="ltr">Service</code>, and <code translate="no" dir="ltr">ServiceExport</code>.</li> <li>The second manifest is used to deploy the middleware <code translate="no" dir="ltr">Services</code> (<em>emailservice</em>, <em>checkoutservice</em>, <em>recommendationservice</em>, <em>paymentservice</em>, <em>productcatalogservice</em>, <em>currencyservice</em>, <em>shippingservice</em>, and <em>adservice</em>) to all regions that have a <em>frontend</em> running. By keeping a request local to a region for as long as possible, you avoid unnecessary inter-region network traffic charges.</li> </ul> <p>A <code translate="no" dir="ltr">Pod</code> that runs in any cluster in the fleet can access an exported <code translate="no" dir="ltr">Service</code> by sending a request to the <code translate="no" dir="ltr">ClusterSet</code> URI for that service in the format <code translate="no" dir="ltr">SERVICE_NAME.NAMESPACE.svc.clusterset.local</code>. For example, the <em>frontend</em> <code translate="no" dir="ltr">Deployments</code> in all three example clusters are able to consume the <em>cartservice</em>, in the <code translate="no" dir="ltr">onlineboutique</code> namespace, by making a request to <em>cartservice.onlineboutique.svc.clusterset.local</em>.</p> <p>For this reason, in each manifest, the hostname for the <em>cartservice</em> has been updated to its <code translate="no" dir="ltr">ClusterSet</code> URI. This step is critical. If this service hostname is not updated, the <em>frontend</em> Service would ask kube-dns for <code translate="no" dir="ltr">cartservice</code> instead of <code translate="no" dir="ltr">cartservice.onlineboutique.svc.clusterset.local</code>. This behavior would result in <code translate="no" dir="ltr">HTTP Status 500</code> errors on clusters where a local version of <em>cartservice</em> is not available, and cause the <em>frontend</em> pods to be unhealthy.</p> <ol> <li>
+<p>Set an environment varianble for the GitHub repository that contains the manifests:</p> 
+<pre>export MANIFEST_REPO_PATH=https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/master/gateway/docs/cluster-migration
+</pre>
+</li> <li>
+<p>Apply the manifests to deploy the frontend layer to all three workload clusters:</p> 
+<pre>kubectl apply -f ${MANIFEST_REPO_PATH}/onlineboutique-frontend-manifests.yaml \
+    -n onlineboutique --context=std-west
+
+kubectl apply -f ${MANIFEST_REPO_PATH}/onlineboutique-frontend-manifests.yaml \
+    -n onlineboutique --context=auto-east
+
+kubectl apply -f ${MANIFEST_REPO_PATH}/onlineboutique-frontend-manifests.yaml \
+    -n onlineboutique --context=auto-central
+</pre>
+</li> <li>
+<p>Apply the manifests to deploy the middleware layer to all three workload clusters:</p> 
+<pre>kubectl apply -f ${MANIFEST_REPO_PATH}/onlineboutique-middleware-manifests.yaml \
+    -n onlineboutique --context=std-west
+
+kubectl apply -f ${MANIFEST_REPO_PATH}/onlineboutique-middleware-manifests.yaml \
+    -n onlineboutique --context=auto-east
+
+kubectl apply -f ${MANIFEST_REPO_PATH}/onlineboutique-middleware-manifests.yaml \
+    -n onlineboutique --context=auto-central
+</pre>
+</li> </ol> <p>You now have the <em>frontend</em> <code translate="no" dir="ltr">Deployment</code>, <code translate="no" dir="ltr">Service</code>, and <code translate="no" dir="ltr">ServiceExport</code> active in clusters <em>std-west</em>, <em>auto-east</em>, and <em>auto-central</em>. You also have locally running Online Boutique middleware services in each cluster. However, external traffic is still routed only to the <code translate="no" dir="ltr">Service</code> that runs in the initial cluster in <em>us-west1</em>, as shown in the following diagram:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-services.svg" alt="Multi cluster Services runs across three GKE clusters but traffic is still directed to a single cluster using a regular HTTP external LoadBalancer service." style="text-align: center" class="add-background"> </p> <h2 id="enable_and_configure_multi-cluster_gateways">Enable and configure multi-cluster Gateways</h2> <p>In this section, you route traffic to and load balance external traffic across frontends in all three clusters. To achieve this configuration, you use multi-cluster Gateways (MCG). These steps to set up MCG follow the guidance described in more detail on <a href="enabling-multi-cluster-gateways" track-type="solution" track-name="internalLink" track-metadata-position="body">Enabling multi-cluster Gateways</a>.</p> <p>In these steps, you use the <em>config-central</em> cluster to host the configuration for Gateway resources.</p> <ol> <li>
+<p>Confirm that all clusters have successfully registered to the fleet:</p> 
+<pre>gcloud container fleet memberships list --project=$PROJECT
+</pre> <p>The following example output shows that all the clusters are successfully registered:</p> 
+<pre>NAME: auto-central
+EXTERNAL_ID: 21537493-32ea-4a41-990d-02be2c1b319f
+
+NAME: config-central
+EXTERNAL_ID: 4369423e-ea7b-482d-a0eb-93b560e67b98
+
+NAME: std-west
+EXTERNAL_ID: 7fcb048b-c796-476b-9698-001a00f91ab3
+
+NAME: auto-east
+EXTERNAL_ID: aae2d2ff-b861-4a38-bcaf-612f14810012
+</pre>
+</li> <li>
+<p>Install the Gateway API <em>custom resource definition</em> on the <em>config-central</em> cluster:</p> 
+<pre>kubectl --context=config-central kustomize "github.com/kubernetes-sigs/gateway-api/config/crd?ref=v0.5.0" \
+    | kubectl apply -f -
+</pre> <p>This step installs the Gateway API custom resource definitions including the <code translate="no" dir="ltr">GatewayClass</code>, <code translate="no" dir="ltr">Gateway</code>, and <code translate="no" dir="ltr">HTTPRoute</code> resources. The custom resource definitions are maintained by the Kubernetes <a href="https://github.com/kubernetes/community/tree/master/sig-network" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body" class="external">Network Special Interest Group</a>. Once installed, you can use the GKE Gateway controller.</p>
+</li> <li>
+<p>Enable Multi Cluster Ingress for your fleet if you haven't done so already. Enabling this feature also enables the multi-cluster Gateway controller.</p> 
+<pre>gcloud container fleet ingress enable \
+    --config-membership=config-central \
+    --project=$PROJECT
+
+gcloud container fleet ingress describe --project=$PROJECT
+</pre> <p>The output is similar to the following example:</p> 
+<pre>createTime: '2021-12-08T23:10:52.505888854Z'
+name: projects/PROJECT_ID/locations/global/features/multiclusteringress
+resourceState:
+  state: ACTIVE
+spec:
+  multiclusteringress:
+    configMembership: projects/zl-mcs-expf61cbd13/locations/global/memberships/config-central
+state:
+  state:
+    code: OK
+    description: Ready to use
+    updateTime: '2021-12-08T23:11:37.994971649Z'
+updateTime: '2021-12-08T23:11:38.098244178Z'
+</pre> <p>If the value of <em>state</em> is not <em>ACTIVE</em>, see <a href="troubleshooting-and-ops#config_cluster_migration" track-type="solution" track-name="internalLink" track-metadata-position="body">Troubleshooting and operations for Multi Cluster Ingress</a>.</p>
+</li> <li>
+<p>Confirm that <code translate="no" dir="ltr">GatewayClasses</code> are available on the <em>config-central</em> cluster:</p> 
+<pre>kubectl get gatewayclasses --context=config-central
+</pre> <p>The output is similar to the following example:</p> 
+<pre>NAME                                  CONTROLLER                  AGE
+gke-l7-global-external-managed        networking.gke.io/gateway   18s
+gke-l7-global-external-managed-mc     networking.gke.io/gateway   19s
+gke-l7-regional-external-managed      networking.gke.io/gateway   18s
+gke-l7-regional-external-managed-mc   networking.gke.io/gateway   19s
+gke-l7-gxlb                           networking.gke.io/gateway   74s
+gke-l7-gxlb-mc                        networking.gke.io/gateway   16s
+gke-l7-rilb                           networking.gke.io/gateway   74s
+gke-l7-rilb-mc                        networking.gke.io/gateway   16s
+</pre> <p>Different <code translate="no" dir="ltr">GatewayClass</code> resources have different capabilities. For more information on when to use which type, see <a href="gatewayclass-capabilities" track-type="solution" track-name="internalLink" track-metadata-position="body">GatewayClass capabilities</a>.</p>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">external-http</code> Gateway resource to <code translate="no" dir="ltr">config-central</code>:</p> 
+<pre>cat &lt;&lt;EOF&gt;&gt; $WORKDIR/external-http-gateway.yaml
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: external-http
+  namespace: onlineboutique
+spec:
+  gatewayClassName: gke-l7-global-external-managed-mc
+  listeners:
+  - protocol: HTTP
+    port: 80
+    name: http
+EOF
+
+kubectl apply -f external-http-gateway.yaml \
+    -n onlineboutique --context=config-central
+</pre> <p>As indicated by the <code translate="no" dir="ltr">gatewayClassName</code> field, this resource is of <code translate="no" dir="ltr">GatewayClass</code> <em>gke-l7-global-external-managed-mc</em> which manages Layer 7 external Cloud Load Balancing and exposes the multi-cluster application</p>
+</li> <li>
+<p>Deploy the <code translate="no" dir="ltr">HTTPRoute</code> named <em>public-frontend-route</em> on <em>config-central</em>:</p> 
+<pre>cat &lt;&lt;EOF&gt;&gt; $WORKDIR/public-frontend-route.yaml
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: public-frontend-route
+  namespace: onlineboutique
+spec:
+  parentRefs:
+  - name: "external-http"
+  hostnames:
+  - "store.example.com"
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: frontend
+      group: net.gke.io
+      kind: ServiceImport
+      port: 80
+EOF
+
+kubectl apply -f public-frontend-route.yaml \
+    -n onlineboutique --context=config-central
+</pre> <p>When you deploy the <code translate="no" dir="ltr">HTTPRoute</code> resource it creates an external Layer 7 Cloud Load Balancing resource and exposes the frontend <code translate="no" dir="ltr">ServiceImport</code> backed by the frontend services that run in the <em>std-west</em>, <em>auto-east</em>, and <em>auto-central</em> clusters.</p> <aside class="note"><strong>Note:</strong><span> Alternatively, you can replace <code translate="no" dir="ltr">store.example.com</code> in this manifest with a hostname from a domain you or your team owns, and point the respective DNS record to the external IP address of the load balancer created by this step. Requests destined for that hostname would then be directed to this load balancer.</span></aside> <p>The following diagram shows how, after the multi-cluster Gateway is deployed, traffic can be routed to any of the frontend multi-cluster Services on any of the three application clusters:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/migrate-gke-multi-cluster-gateway.svg" alt="Multi cluster Services runs across three GKE clusters and traffic is now distributed across frontend services in all clusters using a multi-cluster external Gateway." style="text-align: center" class="add-background"> </p>
+</li> <li>
+<p>Wait for the load balancer to be ready with a provisioned external IP address before proceeding to the next step. It can take up to 10 minutes for the IP address to be assigned. You can monitor progress by using a watch loop. The load balancer has a name in the pattern like <em>gkemcg-onlineboutique-external-http-k09mfhk74gop</em>:</p> 
+<pre>watch -n 20 --difference=permanent \
+    "gcloud compute forwarding-rules list \
+        | grep -A 5 NAME..*external-http"
+</pre> <p>The output is similar to the following example:</p> 
+<pre>NAME: gkemcg-onlineboutique-external-http-k09mfhk74gop
+REGION:
+IP_ADDRESS: 34.149.29.176
+IP_PROTOCOL: TCP
+TARGET: gkemcg-onlineboutique-external-http-k09mfhk74gop
+</pre>
+</li> <li>
+<p>Once the load balancer is ready, run the following command in Cloud Shell to export the external IP address of the load balancer created through the application of <em>external-http-gateway.yaml</em> and <em>public-frontend-route.yaml</em> manifests:</p> 
+<pre>export EXTERNAL_LB_IP=$(kubectl --context=config-central \
+                            -n onlineboutique get gateway external-http \
+                            -o=jsonpath='{.status.addresses[0].value}')
+</pre>
+</li> <li>
+<p>When you send a request to the load balancer with the appropriate headers, it returns the HTML contents served by the frontend service. For example, since you configured the <code translate="no" dir="ltr">HTTPRoute</code> resource to map the <code translate="no" dir="ltr">store.example.com</code> hostname to the <em>frontend</em> <code translate="no" dir="ltr">ServiceImport</code>, you must supply the <code translate="no" dir="ltr">HOST</code> header when you make the HTTP request. If the following curl example returns an error, wait a few minutes and try again:</p> 
+<pre>curl -H 'HOST: store.example.com' $EXTERNAL_LB_IP | \
+    grep -e Cluster -e Zone -e Pod
+</pre> <p>The successful output of the curl command is similar to the following example:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;auto-central&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-central1-f&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-7c7d596ddc-jdh8f
+</pre>
+<aside class="note"><strong>Note:</strong><span> If the matching headers, as configured in the <code translate="no" dir="ltr">HTTPRoute</code>, are not supplied when you make the request, the client receives an <code translate="no" dir="ltr">HTTP status
+404</code> error. Any of the three frontend pods that run in the serving path can respond to the HTTP request inbound to the global load balancer. The global load balancer can route requests to healthy backends located closest to where the request originated.</span></aside>
+</li> </ol> <h2 id="test_application_multi-region_routing_behavior">Test application multi-region routing behavior</h2> <p>One of the powerful features obtained by using multi-cluster Services and multi-cluster Gateways is that external requests are routed to the geographically closest cluster.</p> <p>To test application multi-region behavior, generate traffic that originates from the various regions where you have clusters deployed. Create three small pods, one in each of the serving clusters (<em>std-west</em>, <em>auto-east</em>, and <em>auto-central</em>), that you can use to send HTTP requests to the load balancer endpoint. The results let you see which frontend <code translate="no" dir="ltr">Pod</code> responds.</p> <ol> <li>
+<p>Create the client pods:</p> 
+<pre>kubectl run --context=std-west \
+            --image=radial/busyboxplus:curl client-west \
+            -- sh -c 'while sleep 3600; do :; done'
+
+kubectl run --context=auto-east \
+            --image=radial/busyboxplus:curl client-east \
+            -- sh -c 'while sleep 3600; do :; done'
+
+kubectl run --context=auto-central \
+            --image=radial/busyboxplus:curl client-central \
+            -- sh -c 'while sleep 3600; do :; done'
+</pre>
+</li> <li>
+<p>After the pods are running, use a curl command to send a request to the load balancer endpoint from the client <code translate="no" dir="ltr">Pod</code> in the <em>std-west</em> cluster and review the response:</p> 
+<pre>kubectl exec -it --context=std-west client-west \
+    -- curl -H 'HOST: store.example.com' $EXTERNAL_LB_IP | \
+           grep -e Cluster -e Zone -e Pod
+</pre> <p>The successful output of the curl command is similar to the following example:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;std-west&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-west1-a&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-7cf48b79cf-trzc4
+</pre>
+</li> <li>
+<p>Run the same curl request from the client <code translate="no" dir="ltr">Pod</code> in the <em>auto-east</em> cluster, and look at the response:</p> 
+<pre>kubectl exec -it --context=auto-east client-east \
+    -- curl -H 'HOST: store.example.com' $EXTERNAL_LB_IP | \
+           grep -e Cluster -e Zone -e Pod
+</pre> <p>The successful output of the curl command is similar to the following example:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;auto-east&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-east1-d&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-6784b6df98-scdws
+</pre> <p>As this is an Autopilot cluster, the cluster may need to provision additional resources to schedule the <code translate="no" dir="ltr">Pod</code>. If you see output similar to the following example, wait a moment and try again:</p> 
+<pre> Error from server (BadRequest): pod client-east does not have a host assigned
+</pre>
+</li> <li>
+<p>Run the curl from the client <code translate="no" dir="ltr">Pod</code> in the <em>auto-central</em> cluster and check the response:</p> 
+<pre>kubectl exec -it --context=auto-central client-central \
+    -- curl -H 'HOST: store.example.com' $EXTERNAL_LB_IP | \
+        grep -e Cluster -e Zone -e Pod
+</pre> <p>The successful output of the curl command is similar to the following example:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;auto-central&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-central1-b&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-6784b6df98-x2fv4
+</pre> <p>These results confirm that traffic routes to the corresponding pods in the locations closest to request origin.</p>
+</li> </ol> <h2 id="test_application_multi-region_resiliency">Test application multi-region resiliency</h2> <p>In addition to efficient traffic routing, running your services in multiple regions provides resiliency in the rare, yet still possible, case of infrastructure failure.</p> <p>Test the behavior by deleting the <em>frontend</em> <code translate="no" dir="ltr">Deployments</code> in specific clusters and then retry the curl command from the client <code translate="no" dir="ltr">Pod</code> in those regions. Observe that the application is still available, and look at the location of the <code translate="no" dir="ltr">Pod</code> that responds to the request.</p> <ol> <li>
+<p>Run the curl command from the <em>client-west</em> <code translate="no" dir="ltr">Pod</code> in the <em>std-west</em> cluster, and see that the result comes from the frontend in <em>us-west1</em>:</p> 
+<pre>kubectl exec -it --context=std-west client-west \
+    -- curl -H 'HOST: store.example.com' $EXTERNAL_LB_IP  | \
+           grep -e Cluster -e Zone -e Pod
+</pre> <p>The successful output of the curl command is similar to the following example:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;std-west&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-west1-a&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-7cf48b79cf-trzc4
+</pre>
+</li> <li>
+<p>Delete the <em>frontend</em> <code translate="no" dir="ltr">Deployment</code> in the <em>std-west</em> cluster:</p> 
+<pre>kubectl delete deploy frontend \
+    -n onlineboutique --context=std-west
+</pre> <p>The output is similar to the following example:</p> 
+<pre>deployment.apps "frontend" deleted
+</pre>
+</li> <li>
+<p>Send another request from the <em>client-west</em> <code translate="no" dir="ltr">Pod</code> in the <em>std-west</em> cluster. You should see a response from one of the remaining <em>frontend</em> <code translate="no" dir="ltr">Deployments</code> located in the <em>auto-east</em> or <em>auto-central</em> clusters:</p> 
+<pre>kubectl exec -it --context=std-west client-west \
+    -- curl -H 'HOST: store.example.com' $EXTERNAL_LB_IP | \
+           grep -e Cluster -e Zone -e Pod
+</pre> <p>Output similar to the following example indicates the location of the healthy <code translate="no" dir="ltr">Pod</code> that responds to this request:</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;auto-central&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-central1-b&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-6784b6df98-x2fv4
+</pre> <p>or</p> 
+<pre>&lt;b&gt;Cluster: &lt;/b&gt;auto-east&lt;br/&gt;
+&lt;b&gt;Zone: &lt;/b&gt;us-east1-d&lt;br/&gt;
+&lt;b&gt;Pod: &lt;/b&gt;frontend-6784b6df98-scdws
+</pre> <p>Run the command several times to see alternating results.</p>
+</li> </ol> <p>With this demonstration deployment, you have added elements of resiliency and geographic distribution to the Online Boutique application using multi-cluster Services and multi-cluster Gateways. Requests are routed to the closest geographical region and even if the frontend or middleware services in a region experience issues, the end user is still able to successfully use the application.</p> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Read more about <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs" track-type="solution" track-name="internalLink" track-metadata-position="body">Google Cloud fleet and multi-cluster management</a>.</li> <li>Learn about <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/fleet-creation" track-type="solution" track-name="internalLink" track-metadata-position="body">how to register a cluster</a>, including GKE clusters, to a Google Cloud fleet.</li> <li>Dive deeper into the <a href="https://gateway-api.sigs.k8s.io/" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body" class="external">Kubernetes Gateway API</a> and the <a href="../concepts/gateway-api" track-type="solution" track-name="internalLink" track-metadata-position="body">GKE Gateway</a>.</li> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/migrate-gke-multi-cluster" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/migrate-gke-multi-cluster</a>
+  </p>
+</div>

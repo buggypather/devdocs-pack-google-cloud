@@ -1,0 +1,1139 @@
+<h1>Customize GKE Gateway traffic using Service Extensions</h1>  <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>This page describes how Google Kubernetes Engine (GKE) uses Service Extensions to add custom logic into Cloud Load Balancing.</p> <p>This page is intended for GKE Identity and account admins and Developers who need to configure custom traffic management logic using Service Extensions.</p> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li><a href="../concepts/network-overview">Basic GKE networking concepts</a></li> <li><a href="../concepts/gateway-api">GKE Gateway API</a></li> <li><a href="../concepts/gateway-api#gateway_controller">GKE Gateway Controllers</a></li> <li><a href="gatewayclass-capabilities">GKE GatewayClasses</a></li> <li><a href="https://docs.cloud.google.com/service-extensions/docs/overview">Service Extensions overview </a></li> </ul> <h2 id="overview">Overview</h2> <p>GKE uses Service Extensions to add custom logic into Cloud Load Balancing. You can use Service Extensions for tasks such as advanced traffic splitting, custom authentication, or request logging.</p> <p>The GKE Gateway controller supports the following Service Extensions:</p> <ul> <li>
+<strong>GCPRoutingExtension</strong>: this extension adds custom logic into Cloud Load Balancing to control traffic routing.</li> <li>
+<strong>GCPTrafficExtension</strong>: this extension inserts custom logic to Cloud Load Balancing to modify traffic. This logic is applied to traffic after the service is selected. The load balancer can add or change the headers and payloads of HTTP requests and responses. GCPTrafficExtension does not affect service selection or service security policies.</li> <li>
+<strong>GCPEdgeExtension</strong>: this extension lets you influence backend service selection and Cloud CDN cache keys by modifying request headers. It is exclusively supported for Global External Managed Load Balancers.</li> <li>
+<strong>GCPAuthzExtension</strong>: this extension lets you delegate authorization decisions to a custom or third-party authorization engine (such as an external web application firewall) or Identity-Aware Proxy. This extension is used with a GCPAuthzPolicy resource, which enforces access control on traffic entering the Gateway and dictates when the callout to the extension should occur.</li> </ul> <p>An extension attaches to a Gateway. For a single-cluster Gateway, the extension references a Service resource, a GCPWasmPlugin resource, or a GoogleAPIServiceName resource. For a multi-cluster Gateway, the extension references a ServiceImport resource or a GoogleAPIServiceName resource.</p> <ul> <li><p><strong>Reference a Service resource or a ServiceImport resource</strong>: in this model, you deploy your custom logic as a separate backend application, exposed as a Kubernetes Service. The load balancer makes a callout to this service to process traffic. This approach is versatile and lets you implement custom routing logic or perform traffic manipulation, such as header modification or payload inspection.</p></li> <li><p><strong>Reference a GCPWasmPlugin resource</strong>: for high-performance use cases, you can inject custom, user-written logic directly into the data path of the Google Cloud load balancer by using a WebAssembly (Wasm) module. You define a GCPWasmPlugin resource that points to your Wasm module's image in Artifact Registry. This method is used only with GCPTrafficExtension and GCPEdgeExtension resources and a global external Application Load Balancer</p></li> <li><p><strong>Reference a Google API Service</strong>: you can also reference a Google API service directly by using the <code translate="no" dir="ltr">googleAPIServiceName</code> field within a GCPTrafficExtension or GCPAuthzExtension.</p></li> </ul> <p>In the following diagram, the GCPRoutingExtension resource is attached to a Gateway and references multiple Services. The extension controls traffic routing to the Services.</p> <figure style="text-align: center"> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gcp-routing-extensions.svg" class="add-background" alt="The GCPRoutingExtension resource is attached to a Gateway and
+        references a Service. The extension
+        controls traffic routing."> <figcaption><b>Figure: </b>How GCPRoutingExtension works with Gateways</figcaption> </figure> <p>In the following diagram, the GCPTrafficExtension resource is attached to a Gateway and references a Service, a GoogleAPIServiceName, or a GCPWasmPlugin. The extension changes the headers and payloads of requests and responses.</p> <figure style="text-align: center"> <img src="https://docs.cloud.google.com/kubernetes-engine/images/gcp-traffic-extensions.svg" class="add-background" alt="The GCPTrafficExtension resource is attached to a Gateway and
+        references a Service, a GoogleAPIServiceName or a GCPWasmPlugin. The extension
+        changes the headers and payloads of requests and responses."> <figcaption><b>Figure: </b>How GCPTrafficExtension works with Gateways</figcaption> </figure> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<p>Enable the Compute Engine API, the Network Services API, and the Model Armor API if needed.</p> <p>Go to <a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Enable access to APIs</a> and follow the instructions.</p>
+</li> <li><p>For detailed information about the pricing of Google Cloud Service Extensions, see <a href="https://cloud.google.com/service-extensions/pricing">Pricing</a>.</p></li> <li><p>Review the required roles and permissions in <a href="https://docs.cloud.google.com/service-extensions/docs/access-control"> Service Extensions access control</a>.</p></li> <li><p>Familiarize yourself with the quotas and limits in <a href="https://docs.cloud.google.com/service-extensions/docs/quotas"> Service Extensions quotas</a>.</p></li> <li>
+<p>If you intend to use Common Expression Language (CEL) matchers, review the supported attributes and operators in the <a href="https://docs.cloud.google.com/service-extensions/docs/cel-matcher-language-reference">CEL matcher language reference</a>.</p> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">request.backend_service_name</code> and <code translate="no" dir="ltr">request.backend_service_project_number</code> request attributes are not supported.</span></aside>
+</li> <li><p>Review <a href="#restrictions-and-limitations">restrictions and limitations</a> for Service Extensions.</p></li> </ul> <h3 id="gateway-controller-requirements">GKE Gateway controller requirements</h3> <ul> <li>Your cluster must use GKE version 1.33 or later.</li> <li>To use the GCPWasmPlugin, your cluster must use GKE version 1.33.3 or later.</li> <li>To use the ServiceImport resource, your cluster must use GKE version 1.34.3 or later.</li> <li>You must have a configured Gateway resource for an <a href="deploy-internal-multi-cluster-gateway">internal multi-cluster Gateway</a>. This resource can be a global external Application Load Balancer, cross-region internal Application Load Balancer, regional external Application Load Balancer, or regional internal Application Load Balancer Gateway.</li> <li>Your cluster must have <a href="deploying-gateways#enable-gateway">Gateway API</a> enabled.</li> <li>You must have a configured <a href="deploying-gateways">Gateway resource</a>. This resource can be a global external Application Load Balancer, regional external Application Load Balancer, or regional internal Application Load Balancer Gateway. If you use a GCPWasmPlugin resource, then you must deploy only a global external Application Load Balancer Gateway.</li> <li>You must have a configured <a href="deploying-gateways#configure_http-to-https_redirects">HTTPRoute resource</a>.</li> </ul> <h3 id="restrictions-and-limitations">Restrictions and limitations</h3> <p>The following table lists the restrictions associated with the configuration of Gateway Service Extensions in GKE:</p> <table border="1"> <thead> <tr> <th>Category</th> <th>Restrictions and limitations</th> </tr> </thead> <tbody> <tr> <td><b>Load Balancer</b></td> <td> The GCPRoutingExtension is supported for the following load balancers: <ul> <li>Regional external Application Load Balancer (<code translate="no" dir="ltr">gke-l7-regional-external-managed</code> Gateway Class)</li> <li>Regional external Application Load Balancer (<code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code> Gateway Class)</li> <li>Regional internal Application Load Balancer (<code translate="no" dir="ltr">gke-l7-rilb</code> Gateway Class)</li> <li>Regional internal Application Load Balancer (<code translate="no" dir="ltr">gke-l7-rilb-mc</code> Gateway Class)</li> <li>Cross-region internal Application Load Balancer (<code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code> Gateway Class)</li> </ul> The GCPTrafficExtension is supported for the following load balancers: <ul> <li>Regional external Application Load Balancer (<code translate="no" dir="ltr">gke-l7-regional-external-managed</code> Gateway Class)</li> <li>Regional external Application Load Balancer (<code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code> Gateway Class)</li> <li>Regional internal Application Load Balancer (<code translate="no" dir="ltr">gke-l7-rilb</code> Gateway Class)</li> <li>Regional internal Application Load Balancer (<code translate="no" dir="ltr">gke-l7-rilb-mc</code> Gateway Class)</li> <li>Global external Application Load Balancer (<code translate="no" dir="ltr">gke-l7-global-external-managed</code> Gateway Class)</li> <li>Global external Application Load Balancer (<code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code> Gateway Class)</li> <li>Cross-region internal Application Load Balancer (<code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code> Gateway Class)</li> </ul> The GCPEdgeExtension is <b>exclusively supported</b> for the Global External Managed Load Balancer (<code translate="no" dir="ltr">gke-l7-global-external-managed</code> Gateway Class). </td> </tr> <tr> <td><b>Extension chain and specification</b></td> <td> <ul> <li>For a GCPTrafficExtension, each <code translate="no" dir="ltr">ExtensionChain</code> can have a maximum of 3 <code translate="no" dir="ltr">Extensions</code>.</li> <li>For both GCPRoutingExtension and GCPEdgeExtension, each <code translate="no" dir="ltr">ExtensionChain</code> is limited to 1 <code translate="no" dir="ltr">Extension</code>.</li> <li>All extension types (Traffic, Routing, and Edge) can have a maximum of 5 <code translate="no" dir="ltr">ExtensionChains</code> per resource.</li> </ul> </td> </tr> <tr> <td><b>Timeout</b></td> <td> <ul> <li>The timeout for each individual message on the stream within an Extension must be between 10 and 10,000 milliseconds. Default timeout is one second.</li> </ul> </td> </tr> <tr> <td><b>MatchCondition</b></td> <td> <ul> <li>Each <code translate="no" dir="ltr">MatchCondition</code> within an <code translate="no" dir="ltr">ExtensionChain</code> is limited to a maximum of 10 <code translate="no" dir="ltr">CELExpressions</code>.</li> <li>The resulting <code translate="no" dir="ltr">MatchCondition</code> string that is sent to the GCE has a character limit of 512.</li> <li>The <code translate="no" dir="ltr">CELMatcher</code> string within a <code translate="no" dir="ltr">CELExpression</code> has a maximum length of 512 characters.</li> <li>For GCPEdgeExtension: <ul> <li>Response attributes (for example, <code translate="no" dir="ltr">response.code</code>) in CELMatcher are not supported.</li> <li>Unsupported request attributes include <code translate="no" dir="ltr">backend_service_name</code> and <code translate="no" dir="ltr">backend_service_project_number</code>.</li> <li>The number of regular expressions is limited to 1.</li> </ul> </li> <li>Only <code translate="no" dir="ltr">backendRefs</code> field of kind Service or ServiceImport are supported in <code translate="no" dir="ltr">CELExpression</code>.</li> <li>The <code translate="no" dir="ltr">backendRefs</code> field is not supported with the <code translate="no" dir="ltr">gke-l7-global-external-managed</code> and <code translate="no" dir="ltr">gke-l7-global-external-managed-mc Gateway Classes</code>
+</li> </ul> </td> </tr> <tr> <td><b>Header</b></td> <td> <ul> <li>The <code translate="no" dir="ltr">ForwardHeaders</code> list in an <code translate="no" dir="ltr">Extension</code> can contain a maximum of 50 HTTP header names.</li> </ul> </td> </tr> <tr> <td><b>Metadata</b></td> <td> <ul> <li>The <code translate="no" dir="ltr">Metadata</code> map in an <code translate="no" dir="ltr">Extension</code> can have a maximum of 16 properties.</li> <li>Keys within the <code translate="no" dir="ltr">Metadata</code> map must be between 1 and 63 characters long.</li> <li>Values within the <code translate="no" dir="ltr">Metadata</code> map must be between 1 and 1,023 characters long.</li> </ul> </td> </tr> <tr> <td><b>Event</b></td> <td> <ul> <li>
+<code translate="no" dir="ltr">SupportedEvents</code> is required for a GCPTrafficExtension.</li> <li>
+<code translate="no" dir="ltr">SupportedEvents</code> is optional for a GCPRoutingExtension.</li> <li>For GCPEdgeExtension, the <code translate="no" dir="ltr">SupportedEvents</code> list must contain only <code translate="no" dir="ltr">RequestHeaders</code>.</li> <li>If unspecified, <code translate="no" dir="ltr">RequestHeaders</code> event is assumed as supported.</li> </ul> </td> </tr> <tr> <td><b>RequestBodySendMode</b></td> <td> <ul> <li>The <code translate="no" dir="ltr">RequestBodySendMode</code> can be used only with backendRefs of kind Service or ServiceImport.</li> <li>The <code translate="no" dir="ltr">RequestBodySendMode</code> can be set only if the <code translate="no" dir="ltr">SupportedEvents</code> include <code translate="no" dir="ltr">RequestBody</code>.</li> <li>If <code translate="no" dir="ltr">SupportedEvents</code> include <code translate="no" dir="ltr">RequestBody</code>, but <code translate="no" dir="ltr">RequestBodySendMode</code> is unset, the default value <code translate="no" dir="ltr">Streamed</code> is used.</li> <li>If <code translate="no" dir="ltr">RequestBodySendMode</code> set to <code translate="no" dir="ltr">FullDuplexStreamed</code>, <code translate="no" dir="ltr">SupportedEvents</code> must include both <code translate="no" dir="ltr">RequestBody</code> and <code translate="no" dir="ltr">RequestTrailers</code>.</li> <li>For a GCPTrafficExtension, only <code translate="no" dir="ltr">FullDuplexStreamed</code> is supported.</li> </ul> </td> </tr> <tr> <td><b>ResponseBodySendMode</b></td> <td> <ul> <li>The <code translate="no" dir="ltr">ResponseBodySendMode</code> field is supported for GCPTrafficExtension only.</li> <li>The <code translate="no" dir="ltr">ResponseBodySendMode</code> can be used only with backendRefs of kind Service or ServiceImport.</li> <li>The field can be set only if the <code translate="no" dir="ltr">SupportedEvents</code> include <code translate="no" dir="ltr">ResponseBody</code>.</li> <li>If <code translate="no" dir="ltr">SupportedEvents</code> include <code translate="no" dir="ltr">ResponseBody</code>, but <code translate="no" dir="ltr">ResponseBodySendMode</code> is unset, the default value <code translate="no" dir="ltr">Streamed</code> is used.</li> <li>When this field is set to <code translate="no" dir="ltr">FullDuplexStreamed</code>, <code translate="no" dir="ltr">SupportedEvents</code> must include both <code translate="no" dir="ltr">ResponseBody</code> and <code translate="no" dir="ltr">ResponseTrailers</code>.</li> </ul> </td> </tr> <tr> <td><b>Resource references</b></td> <td> <ul> <li>For GCPEdgeExtension, the <b>only supported backend kind is GCPWasmPlugin</b>.</li> <li>The <code translate="no" dir="ltr">googleAPIServiceName</code> field is <b>not supported</b> for GCPEdgeExtension.</li> <li>The Gateway, Edge extension, and plugin must all reside in the <b>same namespace</b>.</li> </ul> </td> </tr> <tr> <td><strong>GCPWasmPlugin</strong></td> <td> <ul> <li>The GCPWasmPlugin field is supported for GCPTrafficExtension and GCPEdgeExtension only.</li> <li>Extensions with GCPWasmPlugin don't support the following fields: <ul> <li><code translate="no" dir="ltr">authority</code></li> <li><code translate="no" dir="ltr">timeout</code></li> <li><code translate="no" dir="ltr">metadata</code></li> <li><code translate="no" dir="ltr">requestBodySendMode</code></li> <li><code translate="no" dir="ltr">responseBodySendMode</code></li> </ul> </li> <li>Extensions with GCPWasmPlugin support only <code translate="no" dir="ltr">RequestHeaders</code>, <code translate="no" dir="ltr">RequestBody</code>, <code translate="no" dir="ltr">ResponseHeaders</code>, and <code translate="no" dir="ltr">ResponseBody</code> events.</li> </ul> </td> </tr> <tr> <td><strong>GCPAuthzPolicy and GCPAuthzExtension</strong></td> <td> <ul> <li>For a given Gateway, there can be only one authorization policy with a <code translate="no" dir="ltr">CUSTOM</code> action.</li> <li>An authorization policy with a <code translate="no" dir="ltr">CUSTOM</code> action is limited to exactly one custom extension.</li> <li>You are limited to a total of five resource-level authorization policies per Gateway.</li> <li>You are limited to 10 GCPAuthzExtension resources and 10 GCPAuthzPolicy resources per project.</li> <li>A single GCPAuthzPolicy resource can point to up to 100 forwarding rules.</li> <li>The Gateway, the GCPAuthzPolicy, and the GCPAuthzExtension must all reside in the same namespace. Cross-namespace references are not allowed.</li> <li>GCPAuthzExtension cannot influence backend service selection.</li> <li>GCPAuthzExtension receives only the request headers, not the body or any part of the response.</li> <li>IAP is supported only for regional load balancers with GCPAuthzExtension.</li> <li>When you use IAP with GCPAuthzExtension, IAM permissions cannot be set on the forwarding rule. Only project-level or organization-level permissions are allowed. For more information, see <a href="https://docs.cloud.google.com/iap/docs/auth-policies#apply_permissions_to_resources">Apply permissions to resources</a>.</li> </ul> </td> </tr> <tr> <td><b><code translate="no" dir="ltr">googleAPIServiceName</code></b></td> <td> <ul> <li>The <code translate="no" dir="ltr">googleAPIServiceName</code> field is supported for GCPTrafficExtension and GCPAuthzExtension.</li> <li>The <code translate="no" dir="ltr">authority</code> must not be set, if <code translate="no" dir="ltr">googleAPIServiceName</code> is set.</li> <li>Exactly one of either <code translate="no" dir="ltr">backendRef</code> or <code translate="no" dir="ltr">googleAPIServiceName</code> can be set for an Extension.</li> </ul> </td> </tr> <tr> <td><b><code translate="no" dir="ltr">backendRef</code></b></td> <td> When you reference a Service that uses the <code translate="no" dir="ltr">backendRef</code> in an Extension, you must meet the following conditions: <ul> <li>Must use HTTP2 as its <code translate="no" dir="ltr">appProtocol</code>.</li> <li>Must be in the same namespace as the Extension and the Gateway that's referenced by the Extension.</li> <li>Can't use <a href="https://googlecloudplatform.github.io/gke-gateway-api/#identityawareproxyconfig">IAP</a>.</li> <li>Can't use <a href="https://googlecloudplatform.github.io/gke-gateway-api/#gcpbackendpolicyconfig">Google Cloud Armor</a> security policies.</li> <li>Can't use <a href="https://docs.cloud.google.com/cdn/docs/overview">Cloud CDN</a>.</li> <li>Must set exactly one of either <code translate="no" dir="ltr">backendRef</code> or <code translate="no" dir="ltr">googleAPIServiceName</code> for an <code translate="no" dir="ltr">Extension</code>.</li> <li>Must set <code translate="no" dir="ltr">authority</code>, if <code translate="no" dir="ltr">backendRef</code> is set and <code translate="no" dir="ltr">kind</code> is Service.</li> </ul> </td> </tr> <tr> <td><b><code translate="no" dir="ltr">observabilityMode</code></b></td> <td> Field <code translate="no" dir="ltr">observabilityMode</code> field can be set on the <code translate="no" dir="ltr">Extension</code> with the following limitations: <ul> <li>Supported for GKE clusters on version 1.35.0-gke.3047000 or later.</li> <li>Supported by GCPTrafficExtension and GCPRoutingExtension resources attached to gateways with regional Gateway Classes.</li> <li>Enabled <code translate="no" dir="ltr">observabilityMode</code> is only supported when both the <code translate="no" dir="ltr">requestBodySendMode</code> and <code translate="no" dir="ltr">responseBodySendMode</code> fields are not set, or set to <code translate="no" dir="ltr">Streamed</code>.</li> </ul> </td> </tr> </tbody> </table> <h2 id="configure-gke-service-extensions">Refer to a Service</h2> <p>In Service Extensions, you can refer to a Service that hosts the custom logic that you want the load balancer to execute. Gateways don't have Service Extensions by default.</p> <p>To configure GKE Service Extensions, follow these steps:</p> <ol> <li><p><a href="#deploy-backend-callout-service">Deploy a backend callout Service</a>: create a Kubernetes Service that represents the backend service for custom logic execution. The load balancer invokes this service.</p></li> <li>
+<p><a href="#configure-gcp-extensions">Configure Service Extensions</a>: use the appropriate extension based on your load balancer type.</p> <ol> <li><p><a href="#configure-gcproutingextension">GCPRoutingExtension for regional Gateways</a>: use this extension for regional external Application Load Balancer and regional internal Application Load Balancer to implement custom routing logic within the region.</p></li> <li><p><a href="#configure-the-gateways">GCPTrafficExtension for global external, regional external, and internal Gateways</a>: use this extension for global external Application Load Balancer, regional external Application Load Balancer, and regional internal Application Load Balancer to perform traffic manipulation, such as header modification or payload inspection, across various load balancer types.</p></li> </ol>
+</li> </ol> <h3 id="deploy-backend-callout-service">Deploy a backend callout service</h3> <p>A callout service implements custom logic for Gateway Service Extensions in GKE. The Gateway invokes these backend applications, based on GCPTrafficExtension or GCPRoutingExtension configurations, to modify or route traffic.</p> <p>You deploy a callout service to add custom logic to your Gateway. This separate service handles custom processing, such as header manipulation, payload transformations, or traffic routing.</p> <p>To deploy a service that can function as a callout for your Gateway, perform the following steps:</p> <ol> <li>
+<p>(Optional) <a href="secure-gateway#secure-using-secret">Create a secret for TLS</a>: This command creates a Kubernetes secret of type TLS that contains your TLS certificate and private key.</p> <p>To create the TLS secret for your callout service, replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SECRET_NAME</var></code>: the secret name for your callout service</li> <li>
+<code translate="no" dir="ltr">path-to-cert</code>: the file paths to your certificate</li> <li>
+<code translate="no" dir="ltr">path-to-key</code>: the file paths to your key</li> </ul>
+</li> <li>
+<p>To verify that the secret was added, run the following command:</p> 
+<pre>kubectl get secrets SECRET_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SECRET_NAME</var></code> with the secret name for your callout service.</p> <p>The output should be similar to the following:</p> 
+<pre>NAME            TYPE                DATA   AGE
+SECRET_NAME     kubernetes.io/tls   2      12s
+</pre>
+</li> <li>
+<p>Define Deployment and Service resources.</p> <p>You must define the following:</p> <ul> <li>
+<strong>Deployment</strong>: to manage the application pods that contain the custom logic for your Service Extensions.</li> <li>
+<strong>Service</strong>: to expose the application pods that are managed by the Deployment as a network service.</li> </ul> <ol> <li>
+<p>Create a sample manifest <code translate="no" dir="ltr">extension-service-app.yaml</code> that has Deployment and Service definitions:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: extension-service-app
+spec:
+  selector:
+    matchLabels:
+      app: store
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: store
+    spec:
+      containers:
+      - name: serviceextensions
+        image: us-docker.pkg.dev/service-extensions-samples/callouts/python-example-basic:public-image-e42d951
+        ports:
+        - containerPort: 8080
+        - containerPort: 443
+        volumeMounts:
+        - name: certs
+          mountPath: "/etc/certs/"
+          readOnly: true
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: TLS_SERVER_CERT_PATH
+          value: "/etc/certs/path-to-cert"
+        - name: TLS_SERVER_PRIVKEY
+          value: "/etc/certs/path-to-key"
+        resources:
+          requests:
+            cpu: 10m
+      volumes:
+      - name: certs
+        secret:
+          secretName: SECRET_NAME
+          optional: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: extension-service
+spec:
+  ports:
+  - port: 443
+    targetPort: 443
+    appProtocol: HTTP2
+  selector:
+    app: store
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code>: the name of your Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SECRET_NAME</var></code>: the secret name for your callout service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TLS_SERVER_CERT_PATH</var></code>: the path to the TLS server certificate within the Pod.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TLS_SERVER_PRIVKEY</var></code>: the path to the TLS server private key within the Pod.</li> </ul>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">extension-service-app.yaml</code> manifest:</p> 
+<pre>kubectl apply -f extension-service-app.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Verify your configuration:</p> <ol> <li>
+<p>Verify that the application was deployed:</p> 
+<pre>kubectl get pod --selector app=store
+</pre> <p>After the application starts running, the output is similar to the following:</p> 
+<pre>NAME                                     READY   STATUS    RESTARTS   AGE
+extension-service-app-85f466bc9b-b5mf4   1/1     Running   0          7s
+</pre>
+</li> <li>
+<p>Verify that the Service was deployed:</p> 
+<pre>kubectl get service extension-service
+</pre> <p>The output is similar to the following, which shows a Service for each store Deployment:</p> 
+<pre>NAME                TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+extension-service   ClusterIP   34.118.225.9   &lt;none&gt;        443/TCP   2m40s
+</pre>
+</li> </ol>
+</li> </ol> <h3 id="configure-gcp-extensions">Configure Service Extensions</h3> <p>You can configure either a GCPRoutingExtension or a GCPTrafficExtension to customize your traffic flow.</p> <h4 id="configure-gcproutingextension">Configure the GCPRoutingExtension for regional Gateways</h4> <p>You can reroute traffic by using a GCPRoutingExtension. To configure a GCPRoutingExtension, update the HTTPRoute to specify the requests for the <code translate="no" dir="ltr">service-extensions.com</code> host.</p> <ol> <li>
+<p>Update HTTPRoute. Modify your HTTPRoute to include hostnames or paths that will trigger the routing extension.</p> <ol> <li>
+<p>Save the following sample manifest as the <code translate="no" dir="ltr">store-route.yaml</code> file:</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store
+spec:
+  parentRefs:
+  - kind: Gateway
+    name:GATEWAY_NAME
+  hostnames:
+  - "store.example.com"
+  - "service-extensions.example.com"
+  rules:
+  - backendRefs:
+    - name: store-v1
+      port: 8080
+  - matches:
+    - headers:
+      - name: env
+        value: canary
+    backendRefs:
+    - name: store-v2
+      port: 8080
+  - matches:
+    - path:
+        value: /de
+    backendRefs:
+    - name: store-german
+      port: 8080
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">store-route.yaml</code> manifest:</p> 
+<pre>kubectl apply -f store-route.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Define the GCPRoutingExtension.</p> <ol> <li>
+<p>Save the GCPRoutingExtension configuration in the sample <code translate="no" dir="ltr">gcp-routing-extension.yaml</code> file:</p> 
+<pre>kind: GCPRoutingExtension
+apiVersion: networking.gke.io/v1
+metadata:
+  name: my-gateway-extension
+  namespace: default
+spec:
+  targetRefs:
+  - group: "gateway.networking.k8s.io"
+    kind: Gateway
+    name: GATEWAY_NAME
+  extensionChains:
+  - name: chain1
+    matchCondition:
+      celExpressions:
+      - celMatcher: request.path.contains("serviceextensions")
+    extensions:
+    - name: ext1
+      authority: "myext.com"
+      timeout: 1s
+      backendRef:
+        group: ""
+        kind: Service
+        name: extension-service
+        port: 443
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>kubectl apply -f gcp-routing-extension.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Verify the configuration of the GCPRoutingExtension and its binding to the Gateway.</p> <ol> <li>
+<p>Check the GCPRoutingExtension deployment:</p> 
+<pre>kubectl describe gcproutingextension my-gateway-extension
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         my-gateway-extension
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPRoutingExtension
+Metadata:
+  Creation Timestamp:  2025-03-02T17:12:30Z
+  Generation:        1
+  Resource Version:  31283253
+  UID:               ec8efaa0-d8e7-4e1b-9fd4-0ae0ef3c74d0
+Spec:
+  Extension Chains:
+    Extensions:
+      Authority:    myext.com
+      Backend Ref:
+        Group:
+        Kind: Service
+        Name: extension-service
+        Port: 443
+      Name:       ext1
+      Timeout:    1s
+    Match Condition:
+      Cel Expressions:
+        Cel Matcher: request.path.contains("serviceextensions")
+    Name:  chain1
+  Target Refs:
+    Group: gateway.networking.k8s.io
+    Kind: Gateway
+    Name: GATEWAY_NAME
+Events:  &lt;none&gt;
+</pre> <p>The output displays the details of the GCPRoutingExtension, which is named <code translate="no" dir="ltr">my-gateway-extension</code>, within the default namespace. The output shows the <code translate="no" dir="ltr">Spec</code> field, which contains the definition of how the extension should behave.</p>
+</li> <li>
+<p>Verify the Gateway binding:</p> <ol> <li>
+<p>Confirm that the GCPRoutingExtension is bound to the Gateway. This might take a few minutes:</p> 
+<pre>kubectl describe gateway GATEWAY_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>The output is similar to the following:</p> 
+<pre>Name:         GATEWAY_NAME
+Namespace:    default
+Labels:       none
+Annotations:  networking.gke.io/addresses: /projects/1234567890/regions/us-central1/addresses/test-hgbk-default-internal-http-5ypwen3x2gcr
+              networking.gke.io/backend-services:
+                /projects/1234567890/regions/us-central1/backendServices/test-hgbk-default-extension-service-443-rduk21fwhoj0, /projects/1234567890/re...
+              networking.gke.io/firewalls: /projects/1234567890/global/firewalls/test-hgbk-l7-default-us-central1
+              networking.gke.io/forwarding-rules: /projects/1234567890/regions/us-central1/forwardingRules/test-hgbk-default-internal-http-qn7dk9i9zm73
+              networking.gke.io/health-checks:
+                /projects/1234567890/regions/us-central1/healthChecks/test-hgbk-default-extension-service-443-rduk21fwhoj0, /projects/1234567890/regio...
+              networking.gke.io/last-reconcile-time: 2025-03-02T17:15:02Z
+              networking.gke.io/lb-route-extensions:
+                /projects/1234567890/locations/us-central1/lbRouteExtensions/test-hgbk-default-internal-http-lwh0op4qorb0
+              networking.gke.io/lb-traffic-extensions:
+              networking.gke.io/ssl-certificates:
+              networking.gke.io/target-http-proxies:
+                /projects/1234567890/regions/us-central1/targetHttpProxies/test-hgbk-default-internal-http-2jzr7e3xclhj
+              networking.gke.io/target-https-proxies:
+              networking.gke.io/url-maps: /projects/1234567890/regions/us-central1/urlMaps/test-hgbk-default-internal-http-2jzr7e3xclhj
+API Version:  gateway.networking.k8s.io/v1
+Kind:         Gateway
+Metadata:
+  Creation Timestamp:  2025-03-02T16:37:50Z
+  Finalizers:
+  gateway.finalizer.networking.gke.io
+  Generation:        1
+  Resource Version:  31284863
+  UID:               fd512611-bad2-438e-abfd-5619474fbf31
+...
+</pre> <p>The output shows the annotations, which GKE uses to store the links between the Gateway and the underlying Google Cloud resources. The <code translate="no" dir="ltr">networking.gke.io/lb-route-extensions</code> annotation confirms the binding of the gateway to the GCPRoutingExtension.</p>
+</li> <li>
+<p>Check the extension status by confirming that the GCPRoutingExtension has a <code translate="no" dir="ltr">Programmed</code> status with the <code translate="no" dir="ltr">ProgrammingSucceeded</code> reason. This command might take a few minutes.</p> 
+<pre>kubectl describe gcproutingextension my-gateway-extension
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         my-gateway-extension
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPRoutingExtension
+Metadata:
+  Creation Timestamp:  2025-03-02T17:12:30Z
+  Generation:          1
+  Resource Version:    31284378
+  UID:                 ec8efaa0-d8e7-4e1b-9fd4-0ae0ef3c74d0
+Spec:
+  Extension Chains:
+    Extensions:
+      Authority:  myext.com
+      Backend Ref:
+        Group:
+        Kind:   Service
+        Name:   extension-service
+        Port:   443
+      Name:     ext1
+      Timeout:  1s
+    Match Condition:
+      Cel Expressions:
+        Cel Matcher:  request.path.contains("serviceextensions")
+    Name:             chain1
+  Target Refs:
+    Group:  gateway.networking.k8s.io
+    Kind:   Gateway
+    Name:   GATEWAY_NAME
+Status:
+  Ancestors:
+    Ancestor Ref:
+      Group:      gateway.networking.k8s.io
+      Kind:       Gateway
+      Name:       GATEWAY_NAME
+      Namespace:  default
+    Conditions:
+      Last Transition Time:  2025-03-02T17:14:15Z
+      Message:
+      Reason:                Accepted
+      Status:                True
+      Type:                  Accepted
+      Last Transition Time:  2025-03-02T17:14:15Z
+      Message:
+      Reason:                ProgrammingSucceeded
+      Status:                True
+      Type:                  Programmed
+    Controller Name:         networking.gke.io/gateway
+Events:
+  Type    Reason  Age                From                   Message
+  ----    ------  ----               ----                   -------
+  Normal  ADD     2m31s              sc-gateway-controller  default/my-gateway-extension
+Normal  SYNC    51s (x2 over 98s)  sc-gateway-controller  Attachment of GCPRoutingExtension "default/my-gateway-extension" to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        GATEWAY_NAME,
+SectionName: nil,
+Port:        nil} was a success
+  Normal  SYNC    23s           sc-gateway-controller  Reconciliation of GCPRoutingExtension "default/my-gateway-extension" to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        GATEWAY_NAME,
+SectionName: nil,
+Port:        nil} was a success
+</pre> <p>The <code translate="no" dir="ltr">Status.Conditions</code> field shows a <code translate="no" dir="ltr">Programmed</code> condition with <code translate="no" dir="ltr">Status: True</code> and <code translate="no" dir="ltr">Reason: ProgrammingSucceeded</code>. This information confirms that the extension was successfully applied.</p>
+</li> </ol>
+</li> </ol>
+</li> <li>
+<p>Send traffic to your application.</p> <p>After your Gateway, Route, and application are deployed in your cluster, you can pass traffic to your application.</p> <ol> <li>
+<p>To access your application, you need to find the IP address of your Gateway.</p> <p>In your terminal, use the following command:</p> 
+<pre>kubectl get gateways.gateway.networking.k8s.io GATEWAY_NAME -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>This command outputs the Gateway's IP address. In the follow-up commands, replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code> with the IP address from the output.</p>
+</li> <li>
+<p>Test the path update by going to the <code translate="no" dir="ltr">serviceextensions</code> version of the store service at <code translate="no" dir="ltr">store.example.com/serviceextensions</code>:</p> 
+<pre>curl http://store.example.com/serviceextensions --resolve store.example.com:80:GATEWAY_IP_ADDRESS -v
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+"cluster_name": "gke1",
+"host_header": "service-extensions.com",
+"metadata": "store-v1",
+"pod_name": "store-v1-5d9554f847-cvxpd",
+"pod_name_emoji": "💇🏼‍♀️",
+"project_id": "gateway-demo",
+"timestamp": "2025-03-15T12:00:00",
+"zone": "us-central1-c"
+}
+</pre>
+</li> </ol>
+</li> </ol> <h4 id="configure-the-gateways">Configure the GCPTrafficExtension</h4> <p>You can use a GCPTrafficExtension to use advanced traffic management capabilities within your Google Cloud environment. You can configure this extension across global external Application Load Balancers, regional external Application Load Balancers, and regional internal Application Load Balancers. You can use GCPTrafficExtension to implement custom HTTP request and response logic, sophisticated routing, transformations, and security policies.</p> <ol> <li>
+<p>Update HTTPRoute. Modify your HTTPRoute to include hostnames or paths that will trigger the traffic extension.</p> <ol> <li>
+<p>Save the following sample manifest as the <code translate="no" dir="ltr">store-route.yaml</code> file:</p> 
+<pre>kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store
+spec:
+  parentRefs:
+  - kind: Gateway
+    name: GATEWAY_NAME
+  hostnames:
+  - "store.example.com"
+  - "service-extensions.example.com"
+  rules:
+  - backendRefs:
+    - name: store-v1
+      port: 8080
+  - matches:
+    - headers:
+      - name: env
+        value: canary
+    backendRefs:
+    - name: store-v2
+      port: 8080
+  - matches:
+    - path:
+        value: /de
+    backendRefs:
+    - name: store-german
+      port: 8080
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway, such as <code translate="no" dir="ltr">internal-http</code>, <code translate="no" dir="ltr">external-http</code>, or <code translate="no" dir="ltr">global-external-http</code>.</p>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">store-route.yaml</code> manifest to your cluster:</p> 
+<pre>kubectl apply -f store-route.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Define the GCPTrafficExtension.</p> <ol> <li>
+<p>Save the GCPTrafficExtension configuration to the sample <code translate="no" dir="ltr">gcp-traffic-extension.yaml</code> file:</p> 
+<pre>kind: GCPTrafficExtension
+apiVersion: networking.gke.io/v1
+metadata:
+name: my-traffic-extension
+namespace: default
+spec:
+targetRefs:
+- group: "gateway.networking.k8s.io"
+  kind: Gateway
+  name: GATEWAY_NAME
+extensionChains:
+- name: chain1
+  matchCondition:
+    celExpressions:
+    - celMatcher: request.path.contains("serviceextensions")
+  extensions:
+  - name: ext1
+    authority: "myext.com"
+    timeout: 1s
+    backendRef:
+      group: ""
+      kind: Service
+      name: extension-service
+      port: 443
+    supportedEvents:
+      - RequestHeaders
+      - RequestBody
+      - ResponseHeaders
+      - ResponseBody
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway, as <code translate="no" dir="ltr">internal-http</code>, <code translate="no" dir="ltr">external-http</code>, or <code translate="no" dir="ltr">global-external-http</code>.</p>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>kubectl apply -f gcp-traffic-extension.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Verify the configuration of the GCPTrafficExtension and its binding to the Gateway.</p> <ol> <li>
+<p>Check the GCPTrafficExtension deployment:</p> 
+<pre>kubectl describe gcptrafficextension my-traffic-extension
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         my-traffic-extension
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPTrafficExtension
+Metadata:
+  Creation Timestamp:  2025-03-02T17:12:30Z
+  Generation:        1
+  Resource Version:  31283253
+  UID:               ec8efaa0-d8e7-4e1b-9fd4-0ae0ef3c74d0
+Spec:
+  Extension Chains:
+    Extensions:
+      Authority:    myext.com
+      Backend Ref:
+        Group:
+        Kind: Service
+        Name: extension-service
+        Port: 443
+      Name:       ext1
+      Timeout:    1s
+    Match Condition:
+      Cel Expressions:
+        Cel Matcher: request.path.contains("serviceextensions")
+    Name:  chain1
+  Target Refs:
+    Group: gateway.networking.k8s.io
+    Kind: Gateway
+    Name: GATEWAY_NAME
+Events:  &lt;none&gt;
+</pre> <p>The output displays the details of the GCPTrafficExtension named <code translate="no" dir="ltr">my-traffic-extension</code> within the default namespace. It shows the <code translate="no" dir="ltr">Spec</code> field, which contains the definition of how the extension should behave.</p>
+</li> <li>
+<p>Verify the Gateway binding:</p> <p>Confirm that the GCPTrafficExtension is bound to the Gateway. This command might take a few minutes to complete:</p> 
+<pre>kubectl describe gateway GATEWAY_NAME
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         GATEWAY_NAME
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  networking.gke.io/addresses: /projects/1234567890/regions/us-central1/addresses/test-hgbk-default-internal-http-5ypwen3x2gcr
+              networking.gke.io/backend-services:
+                /projects/1234567890/regions/us-central1/backendServices/test-hgbk-default-extension-service-443-rduk21fwhoj0, /projects/1234567890/re...
+              networking.gke.io/firewalls: /projects/1234567890/global/firewalls/test-hgbk-l7-default-us-central1
+              networking.gke.io/forwarding-rules: /projects/1234567890/regions/us-central1/forwardingRules/test-hgbk-default-internal-http-qn7dk9i9zm73
+              networking.gke.io/health-checks:
+                /projects/1234567890/regions/us-central1/healthChecks/test-hgbk-default-extension-service-443-rduk21fwhoj0, /projects/1234567890/regio...
+              networking.gke.io/last-reconcile-time: 2025-03-02T17:15:02Z
+              networking.gke.io/lb-traffic-extensions:
+                /projects/1234567890/locations/us-central1/lbTrafficExtensions/test-hgbk-default-internal-http-lwh0op4qorb0
+              networking.gke.io/ssl-certificates:
+              networking.gke.io/target-http-proxies:
+                /projects/1234567890/regions/us-central1/targetHttpProxies/test-hgbk-default-internal-http-2jzr7e3xclhj
+              networking.gke.io/target-https-proxies:
+              networking.gke.io/url-maps: /projects/1234567890/regions/us-central1/urlMaps/test-hgbk-default-internal-http-2jzr7e3xclhj
+API Version:  gateway.networking.k8s.io/v1
+Kind:         Gateway
+Metadata:
+  Creation Timestamp:  2025-03-02T16:37:50Z
+  Finalizers:
+    gateway.finalizer.networking.gke.io
+  Generation:        1
+  Resource Version:  31284863
+  UID:               fd512611-bad2-438e-abfd-5619474fbf31
+...
+</pre> <p>The output shows the annotations, which GKE uses to store the links between the Gateway and the underlying Google Cloud resources. The <code translate="no" dir="ltr">networking.gke.io/lb-traffic-extensions</code> annotation confirms the binding.</p>
+</li> <li>
+<p>Check the extension status:</p> <p>To check the extension status of GCPTrafficExtension, run the following command:</p> 
+<pre>kubectl describe gcptrafficextension my-traffic-extension
+</pre> <p>Confirm that the GCPTrafficExtension has a <code translate="no" dir="ltr">Programmed</code> status with the <code translate="no" dir="ltr">ProgrammingSucceeded</code> reason. The command might take a few minutes to complete.</p> <p>The GCPTrafficExtension resource output is similar to the following:</p> 
+<pre>Name:         my-traffic-extension
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPTrafficExtension
+Metadata:
+  Creation Timestamp:  2025-03-02T17:12:30Z
+  Generation:          1
+  Resource Version:    31284378
+  UID:                 ec8efaa0-d8e7-4e1b-9fd4-0ae0ef3c74d0
+Spec:
+  Extension Chains:
+    Extensions:
+      Authority:  myext.com
+      Backend Ref:
+        Group:
+        Kind:   Service
+        Name:   extension-service
+        Port:   443
+      Name:     ext1
+      Timeout:  1s
+    Match Condition:
+      Cel Expressions:
+        Cel Matcher:  request.path.contains("serviceextensions")
+    Name:             chain1
+  Target Refs:
+    Group:  gateway.networking.k8s.io
+    Kind:   Gateway
+    Name:   GATEWAY_NAME
+Status:
+  Ancestors:
+    Ancestor Ref:
+      Group:      gateway.networking.k8s.io
+      Kind:       Gateway
+      Name:       GATEWAY_NAME
+      Namespace:  default
+    Conditions:
+      Last Transition Time:  2025-03-02T17:14:15Z
+      Message:
+      Reason:                Accepted
+      Status:                True
+      Type:                  Accepted
+      Last Transition Time:  2025-03-02T17:14:15Z
+      Message:
+      Reason:                ProgrammingSucceeded
+      Status:                True
+      Type:                  Programmed
+    Controller Name:         networking.gke.io/gateway
+Events:
+  Type    Reason  Age                From                   Message
+  ----    ------  ----               ----                   -------
+  Normal  ADD     2m31s              sc-gateway-controller  default/my-traffic-extension
+  Normal  SYNC    51s (x2 over 98s)  sc-gateway-controller  Attachment of GCPTrafficExtension "default/my-gateway-extension" to AncestorRef {Group:       "gateway.networking.k8s.io",
+  Kind:        "Gateway",
+  Namespace:   "default",
+  Name:        GATEWAY_NAME,
+  SectionName: nil,
+  Port:        nil} was a success
+  Normal  SYNC    23s           sc-gateway-controller  Reconciliation of GCPTrafficExtension "default/my-traffic-extension" to AncestorRef {Group:       "gateway.networking.k8s.io",
+  Kind:        "Gateway",
+  Namespace:   "default",
+  Name:        GATEWAY_NAME,
+  SectionName: nil,
+  Port:        nil} was a success
+</pre> <p>The <code translate="no" dir="ltr">Status.Conditions</code> field shows a <code translate="no" dir="ltr">Programmed</code> condition with <code translate="no" dir="ltr">Status:
+True</code> and <code translate="no" dir="ltr">Reason: ProgrammingSucceeded</code>. This information confirms that the extension was successfully applied.</p>
+</li> </ol>
+</li> <li>
+<p>Send traffic to your application.</p> <p>After your Gateway, Route, and application are deployed in your cluster, you can pass traffic to your application.</p> <ol> <li>
+<p>To access your application, you need to find the IP address of your Gateway.</p> <p>In your terminal, use the following command:</p> 
+<pre>kubectl get gateways.gateway.networking.k8s.io GATEWAY_NAME -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>This command outputs the Gateway's IP address. In the follow-up commands, replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code> with the IP address from the output.</p>
+</li> <li>
+<p>Test the path update by going to the <code translate="no" dir="ltr">serviceextensions</code> version of the store service at <code translate="no" dir="ltr">store.example.com/serviceextensions</code>:</p> 
+<pre>curl http://store.example.com/serviceextensions --resolve store.example.com:80:GATEWAY_IP_ADDRESS -v
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+*   Request completely sent off
+&lt; HTTP/1.1 200 OK
+&lt; server: Werkzeug/2.3.7 Python/3.11.3
+&lt; date: Sun, 02 Mar 2025 16:58:10 GMT
+&lt; content-type: application/json
+&lt; access-control-allow-origin: *
+&lt; hello: service-extensions
+&lt; via: 1.1 google
+&lt; transfer-encoding: chunked
+}
+</pre>
+</li> </ol>
+</li> </ol> <h4 id="configure-gcp-authz-ext">Configure the GCPAuthzExtension resource</h4> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>You can use a GCPAuthzExtension with a GCPAuthzPolicy to enforce complex authorization decisions by delegating them to an external service or Identity-Aware Proxy (IAP).</p> <ol> <li>
+<p>Define the GCPAuthzExtension:</p> <p>You can configure the GCPAuthzExtension to reference either a custom extension service or IAP as a callout service.</p> <ul> <li>
+<p><strong>Option 1: Reference a custom extension service</strong></p> <ol> <li>Save the GCPAuthzExtension configuration to the sample <code translate="no" dir="ltr">gcp-authz-extension.yaml</code> file:</li> </ol> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAuthzExtension
+metadata:
+  name: my-authz-ext
+  namespace: default
+spec:
+  backendRef:
+    kind: Service
+    name: "${authz-service}"
+  forwardHeaders:
+  - Authorization
+  failOpen: false
+  timeout: "0.1s"
+  wireFormat: EXT_PROC_GRPC
+</pre> <p>In the preceding example, <code translate="no" dir="ltr">"${authz-service}"</code> is an extension service, which must be present in the same namespace as GCPAuthzPolicy.</p> <ol> <li>Apply the manifest:</li> </ol> 
+<pre>kubectl apply -f gcp-authz-extension.yaml
+</pre>
+</li> <li>
+<p><strong>Option 2: Reference IAP as a custom callout service</strong></p> <p>You can also configure IAP as a custom callout service by specifying <code translate="no" dir="ltr">iap.googleapis.com</code> in the <code translate="no" dir="ltr">googleAPIServiceName</code> field:</p> <ol> <li>Save the GCPAuthzExtension configuration to the sample <code translate="no" dir="ltr">authz-extension-iap.yaml</code> file:</li> </ol> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAuthzExtension
+metadata:
+  name: my-authz-ext-iap
+  namespace: default
+spec:
+  googleAPIServiceName: iap.googleapis.com
+  timeout: 50ms
+  failOpen: false
+</pre> <ol> <li>Apply the manifest:</li> </ol> 
+<pre>kubectl apply -f authz-extension-iap.yaml
+</pre>
+<aside class="note"><strong>Note:</strong><span> IAP is supported only for regional load balancers with GCPAuthzExtension. When you configure IAP with GCPAuthzExtension, IAM permissions cannot be set on the forwarding rule. Only project-level or organization-level permissions are allowed. For more information, see <a href="https://docs.cloud.google.com/iap/docs/auth-policies#apply_permissions_to_resources">Apply permissions to resources</a>.</span></aside>
+</li> </ul>
+</li> <li>
+<p>Define the GCPAuthzPolicy:</p> <p>The GCPAuthzPolicy targets the Gateway and specifies the action to take on matching traffic:</p> <ul> <li>
+<p><strong>Set up a <code translate="no" dir="ltr">CUSTOM</code> authorization policy</strong>:</p> <p>The <code translate="no" dir="ltr">CUSTOM</code> action delegates the authorization decision to the extension that you created in the previous step.</p> <ol> <li>
+<p>Save the following manifest to <code translate="no" dir="ltr">gcp-authz-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAuthzPolicy
+metadata:
+  name: my-gateway-authz
+  namespace: default
+spec:
+  enforcementLevel: L7
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: "GATEWAY_NAME"
+  rules:
+  - from:
+      sources:
+      - principals:
+        - principal_selector: CLIENT_CERT_URI_SANS
+          principal:
+            exact: "spiffee://cluster.local/ns1/pod1"
+  - to:
+      operations:
+      - paths:
+        - exact: "/api/secure-endpoint"
+  action: CUSTOM
+  customProvider:
+    authzExtension:
+      extensionRefs:
+      - group: networking.gke.io
+        kind: GCPAuthzExtension
+        name: my-authz-ext
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f gcp-authz-policy.yaml
+</pre>
+</li> </ol>
+</li> </ul>
+</li> </ol> <h2 id="gcp-extensions-plugin">Refer to a GCPWasmPlugin resource</h2> <p>You can inject custom logic directly into the load balancer's data path by using a GCPWasmPlugin with a GCPTrafficExtension or GCPEdgeExtension. This method lets you deploy custom traffic management capabilities packaged as a Wasm module.</p> <p>To configure GKE Service Extensions, follow these steps:</p> <ol> <li><p><a href="#deploy-gcpwasmplugin">Deploy a GCPWasmPlugin</a>: create and deploy a GCPWasmPlugin CustomResourceDefinition (CRD) that contains the custom code for your <a href="https://webassembly.org/">Wasm</a> module. You can use GCPWasmPlugin with GCPTrafficExtension or GCPEdgeExtension for the <code translate="no" dir="ltr">gke-l7-global-external-managed</code> GatewayClass.</p></li> <li>
+<p>Configure service extensions: configure one of the following extensions with GCPWasmPlugin:</p> <ul> <li><a href="#gcp-configure-extensions-plugin">GCPTrafficExtension</a></li> <li><a href="#configure-gcpedgeextension">GCPEdgeExtension</a></li> </ul>
+</li> </ol> <h3 id="deploy-gcpwasmplugin">Deploy a GCPWasmPlugin</h3> <p>The GCPWasmPlugin lets you inject custom, user-written logic directly into the data path of the Google Cloud load balancer. The GCPWasmPlugin resource points to the Wasm module's image in Artifact Registry, which is then executed by the load balancer.</p> <p>Before you continue with the following steps, ensure that you have uploaded your Wasm module to an Artifact Registry repository. For more information, see <a href="https://docs.cloud.google.com/service-extensions/docs/prepare-plugin-code">Prepare the plugin code</a>.</p> <p>To deploy a GCPWasmPlugin resource, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">wasm-plugin.yaml</code>:</p> 
+<pre>kind: GCPWasmPlugin
+apiVersion: networking.gke.io/v1
+metadata:
+  name: gcp-wasm-plugin
+spec:
+  versions:
+  - name: wasm-plugin-version
+    description: "Test wasm plugin version"
+    image: "us-docker.pkg.dev/service-extensions-samples/plugins/local-reply:main"
+    weight: 1000000
+  logConfig:
+    enabled: true
+    # Configures the sampling rate of activity logs.
+    # The value of the field must be in range [0, 1e6].
+    sampleRate: 1000000
+    # Specifies the lowest level of logs that are exported to Cloud Logging.
+    minLogLevel: INFO
+</pre> <p>Note the following:</p> <ul> <li>
+<code translate="no" dir="ltr">spec.versions.name</code>: the version name must be unique within the GCPWasmPlugin resource. You can list up to 10 versions, and only one version must have a non-zero weight.</li> <li>
+<code translate="no" dir="ltr">spec.versions.image</code>: references the image containing the plugin code that is stored in Artifact Registry.</li> <li>
+<code translate="no" dir="ltr">spec.versions.weight</code>: specifies the weight of the plugin version. The weight must be a number between 0 and 1,000,000, inclusive.</li> <li>
+<code translate="no" dir="ltr">spec.logConfig</code>: specifies whether to enable Cloud Logging for this plugin. If the value isn't specified, Cloud Logging is disabled by default.</li> <li>
+<code translate="no" dir="ltr">spec.logConfig.sampleRate</code>: configures the sampling rate of activity logs. The rate must be a number between 0 and 1,000,000, inclusive. If unspecified when Cloud Logging is enabled, the default value is <code translate="no" dir="ltr">1,000,000</code> (100% of requests are logged).</li> <li>
+<code translate="no" dir="ltr">spec.logConfig.minLogLevel</code>: specifies the lowest level of logs that are exported to Cloud Logging. If the value isn't specified when Cloud Logging is enabled, the field is set to <code translate="no" dir="ltr">INFO</code> by default.</li> </ul>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">wasm-plugin.yaml</code> manifest:</p> 
+<pre>kubectl apply -f wasm-plugin.yaml
+</pre>
+</li> <li>
+<p>Verify that the plugin was deployed:</p> 
+<pre>kubectl describe gcpwasmplugins.networking.gke.io gcp-wasm-plugin
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         gcp-wasm-plugin
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPWasmPlugin
+Metadata:
+  Creation Timestamp:  2025-08-08T19:54:18Z
+  Generation:          1
+  Resource Version:    44578
+  UID:                 549a12c7-91d1-43ad-a406-d6157a799b79
+Spec:
+  Log Config:
+    Enabled: true
+    Min Log Level: INFO
+    Sample Rate: 1000000
+  Versions:
+    Description:  Test wasm plugin version
+    Image:        us-docker.pkg.dev/service-extensions-samples/plugins/local-reply:main
+    Name:         wasm-plugin-version
+    Weight:       1000000
+  Events:     &lt;none&gt;
+</pre>
+</li> </ol> <h3 id="gcp-configure-extensions-plugin">Configure GCPTrafficExtension</h3> <p>To add custom logic to your global external Application Load Balancer, you can configure a GCPTrafficExtension to use a GCPWasmPlugin. You can use a GCPTrafficExtension to use advanced traffic management capabilities within your Google Cloud environment. You can configure this extension across global external Application Load Balancers.</p> <p>To configure a GCPTrafficExtension to use a GCPWasmPlugin, complete the following steps:</p> <ol> <li>
+<p>Define the GCPTrafficExtension.</p> <ol> <li>
+<p>Save the GCPTrafficExtension configuration as <code translate="no" dir="ltr">gcp-traffic-extension-with-plugin.yaml</code>:</p> 
+<pre>kind: GCPTrafficExtension
+apiVersion: networking.gke.io/v1
+metadata:
+  name: gcp-traffic-extension-with-plugin
+  namespace: default
+spec:
+  targetRefs:
+  - group: "gateway.networking.k8s.io"
+    kind: Gateway
+    name: GATEWAY_NAME
+  extensionChains:
+  - name: chain1
+    matchCondition:
+      celExpressions:
+      - celMatcher: request.path.contains("serviceextensions")
+    extensions:
+    - name: ext1
+      supportedEvents:
+      - RequestHeaders
+      - ResponseHeaders
+      backendRef:
+        group: "networking.gke.io"
+        kind: GCPWasmPlugin
+        name: gcp-wasm-plugin
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway, such as <code translate="no" dir="ltr">global-external-http</code>.</p>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>kubectl apply -f gcp-traffic-extension-with-plugin.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Verify the configuration of the GCPTrafficExtension and its binding to the Gateway.</p> <ol> <li>
+<p>Check the GCPTrafficExtension deployment:</p> 
+<pre>kubectl describe gcptrafficextensions.networking.gke.io gcp-traffic-extension-with-plugin
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         gcp-traffic-extension-with-plugin
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPTrafficExtension
+Metadata:
+  Creation Timestamp:  2025-03-02T17:12:30Z
+  Generation:        1
+  Resource Version:  31283253
+  UID:               ec8efaa0-d8e7-4e1b-9fd4-0ae0ef3c74d0
+Spec:
+  Extension Chains:
+    Extensions:
+      Backend Ref:
+        Group: networking.gke.io
+        Kind: GCPWasmPlugin
+        Name: gcp-wasm-plugin
+      Name:       ext1
+      Supported Events:
+        RequestHeaders
+        ResponseHeaders
+    Match Condition:
+      Cel Expressions:
+        Cel Matcher: request.path.contains("serviceextensions")
+    Name:  chain1
+  Target Refs:
+    Group: gateway.networking.k8s.io
+    Kind: Gateway
+    Name: GATEWAY_NAME
+Events:  &lt;none&gt;
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>The output displays the details of the GCPTrafficExtension named <code translate="no" dir="ltr">gcp-traffic-extension-with-plugin</code> within the default namespace. It shows the <code translate="no" dir="ltr">Spec</code> field, which contains the definition of how the extension should behave.</p>
+</li> <li>
+<p>Verify the Gateway binding:</p> <p>Confirm that the GCPTrafficExtension is bound to the Gateway. This command might take a few minutes to complete:</p> 
+<pre>kubectl describe gateway GATEWAY_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>The output is similar to the following:</p> 
+<pre>Name:         GATEWAY_NAME
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  networking.gke.io/addresses: /projects/922988411345/global/addresses/test-k18j-default-external-http-2jfqxrkgd0fm
+              networking.gke.io/backend-services:
+                /projects/922988411345/global/backendServices/test-k18j-default-gw-serve404-80-8zjp3d8cqfsu, /projects/922988411345/global/backendServices...
+                networking.gke.io/certmap: store-example-com-map
+                networking.gke.io/firewalls: /projects/922988411345/global/firewalls/test-k18j-l7-default-global
+                networking.gke.io/forwarding-rules: /projects/922988411345/global/forwardingRules/test-k18j-default-external-http-wt1tl0cwi6zr
+                networking.gke.io/health-checks:
+                  /projects/922988411345/global/healthChecks/test-k18j-default-gw-serve404-80-8zjp3d8cqfsu, /projects/922988411345/global/healthChecks/test-...
+                networking.gke.io/last-reconcile-time: 2025-08-08T20:27:35Z
+                networking.gke.io/lb-route-extensions:
+                networking.gke.io/lb-traffic-extensions:
+                  projects/922988411345/locations/global/lbTrafficExtensions/test-k18j-default-external-http-0tdum40yts35
+                networking.gke.io/ssl-certificates:
+                networking.gke.io/target-http-proxies:
+                networking.gke.io/target-https-proxies: /projects/922988411345/global/targetHttpsProxies/test-k18j-default-external-http-jy9mc97xb5yh
+                networking.gke.io/url-maps: /projects/922988411345/global/urlMaps/test-k18j-default-external-http-jy9mc97xb5yh
+                networking.gke.io/wasm-plugin-versions:
+                  projects/922988411345/locations/global/wasmPlugins/test-k18j-default-gcp-wasm-plugin-itle20jj9nyk/versions/test-k18j-wasm-plugin-version-i...
+                networking.gke.io/wasm-plugins: projects/922988411345/locations/global/wasmPlugins/test-k18j-default-gcp-wasm-plugin-itle20jj9nyk
+API Version:  gateway.networking.k8s.io/v1
+Kind:         Gateway
+Metadata:
+  Creation Timestamp:  2025-03-02T16:37:50Z
+  Finalizers:
+    gateway.finalizer.networking.gke.io
+  Generation:        1
+  Resource Version:  31284863
+  UID:               fd512611-bad2-438e-abfd-5619474fbf31
+Spec:
+  Gateway Class Name:  gke-l7-global-external-managed
+  Listeners:
+    Allowed Routes:
+      Namespaces:
+        From:  Same
+    Name:      https
+    Port:      443
+    Protocol:  HTTPS
+...
+</pre> <p>The output shows the annotations, which GKE uses to store the links between the Gateway and the underlying Google Cloud resources. The <code translate="no" dir="ltr">networking.gke.io/lb-traffic-extensions</code>, <code translate="no" dir="ltr">networking.gke.io/wasm-plugin-versions</code>, and <code translate="no" dir="ltr">networking.gke.io/wasm-plugins</code> annotations confirm the binding.</p>
+</li> <li>
+<p>Check the extension status:</p> <p>Confirm that the GCPTrafficExtension has a <code translate="no" dir="ltr">Programmed</code> status with the <code translate="no" dir="ltr">ProgrammingSucceeded</code> reason. The command might take a few minutes to complete.</p> 
+<pre>kubectl describe gcptrafficextensions.networking.gke.io gcp-traffic-extension-with-plugin
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         gcp-traffic-extension-with-plugin
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPTrafficExtension
+Metadata:
+  Creation Timestamp:  2025-08-08T20:08:09Z
+  Generation:          1
+  Resource Version:    56528
+  UID:                 1389f790-9663-45ca-ac4e-a2c082f43359
+Spec:
+  Extension Chains:
+    Extensions:
+      Backend Ref:
+        Group:  networking.gke.io
+        Kind:   GCPWasmPlugin
+        Name:   gcp-wasm-plugin
+      Name:     ext1
+      Supported Events:
+        RequestHeaders
+        ResponseHeaders
+    Match Condition:
+      Cel Expressions:
+        Cel Matcher:  request.path.contains("serviceextensions")
+    Name:             chain1
+  Target Refs:
+    Group:  gateway.networking.k8s.io
+    Kind:   Gateway
+    Name:   external-http
+Status:
+  Ancestors:
+    Ancestor Ref:
+      Group:      gateway.networking.k8s.io
+      Kind:       Gateway
+      Name:       external-http
+      Namespace:  default
+    Conditions:
+      Last Transition Time:  2025-08-08T20:16:13Z
+      Message:
+      Observed Generation:   1
+      Reason:                Accepted
+      Status:                True
+      Type:                  Accepted
+      Last Transition Time:  2025-08-08T20:16:13Z
+      Message:
+      Observed Generation:   1
+      Reason:                ResolvedRefs
+      Status:                True
+      Type:                  ResolvedRefs
+      Last Transition Time:  2025-08-08T20:16:13Z
+      Message:
+      Observed Generation:   1
+      Reason:                ProgrammingSucceeded
+      Status:                True
+      Type:                  Programmed
+    Controller Name:         networking.gke.io/gateway
+Events:
+  Type    Reason  Age                  From                   Message
+  ----    ------  ----                 ----                   -------
+  Normal  ADD     19m                  sc-gateway-controller  default/gcp-traffic-extension-with-plugin
+  Normal  SYNC    3m25s (x4 over 11m)  sc-gateway-controller  Attachment of GCPTrafficExtension "default/gcp-traffic-extension-with-plugin" to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        "external-http",
+SectionName: nil,
+Port:        nil} was a success
+  Normal  SYNC  3m25s (x4 over 11m)  sc-gateway-controller  All the object references were able to be resolved for GCPTrafficExtension "default/gcp-traffic-extension-with-plugin" bound to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        "external-http",
+SectionName: nil,
+Port:        nil}
+  Normal  SYNC  3m25s (x4 over 11m)  sc-gateway-controller  Programming of GCPTrafficExtension "default/gcp-traffic-extension-with-plugin" to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        "external-http",
+SectionName: nil,
+Port:        nil} was a success
+</pre>
+</li> <li>
+<p>Check the plugin status.</p> <p>Confirm that the GCPWasmPlugin resource has a <code translate="no" dir="ltr">Programmed</code> status with the <code translate="no" dir="ltr">ProgrammingSucceeded</code> reason. The command might take a few minutes to complete.</p> 
+<pre>kubectl describe gcpwasmplugins.networking.gke.io gcp-wasm-plugin
+</pre> <p>The output is similar to the following:</p> 
+<pre>Name:         gcp-wasm-plugin
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+API Version:  networking.gke.io/v1
+Kind:         GCPWasmPlugin
+Metadata:
+  Creation Timestamp:  2025-08-08T19:54:18Z
+  Generation:          1
+  Resource Version:    44578
+  UID:                 549a12c7-91d1-43ad-a406-d6157a799b79
+Spec:
+  Log Config:
+    Enabled: true
+    Min Log Level: INFO
+    Sample Rate: 1000000
+  Versions:
+    Description:  Test wasm plugin version
+    Image:        us-docker.pkg.dev/service-extensions-samples/plugins/local-reply:main
+    Name:         wasm-plugin-version
+    Weight:       1000000
+Status:
+  Ancestors:
+    Ancestor Ref:
+      Group:      gateway.networking.k8s.io
+      Kind:       Gateway
+      Name:       external-http
+      Namespace:  default
+    Conditions:
+      Last Transition Time:  2025-08-08T19:59:06Z
+      Message:
+      Observed Generation:   1
+      Reason:                Accepted
+      Status:                True
+      Type:                  Accepted
+      Last Transition Time:  2025-08-08T19:59:06Z
+      Message:
+      Observed Generation:   1
+      Reason:                ResolvedRefs
+      Status:                True
+      Type:                  ResolvedRefs
+      Last Transition Time:  2025-08-08T19:59:06Z
+      Message:
+      Observed Generation:   1
+      Reason:                ProgrammingSucceeded
+      Status:                True
+      Type:                  Programmed
+    Controller Name:         networking.gke.io/gateway
+Events:
+  Type    Reason  Age                 From                   Message
+  ----    ------  ----                ----                   -------
+  Normal  ADD     31m                 sc-gateway-controller  default/gcp-wasm-plugin
+  Normal  SYNC    2m1s (x7 over 26m)  sc-gateway-controller  Attachment of WasmPlugin "default/gcp-wasm-plugin" to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        "external-http",
+SectionName: nil,
+Port:        nil} was a success
+  Normal  SYNC  2m1s (x7 over 26m)  sc-gateway-controller  All the object references were able to be resolved for WasmPlugin "default/gcp-wasm-plugin" bound to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        "external-http",
+SectionName: nil,
+Port:        nil}
+  Normal  SYNC  2m1s (x7 over 26m)  sc-gateway-controller  Programming of WasmPlugin "default/gcp-wasm-plugin" to AncestorRef {Group:       "gateway.networking.k8s.io",
+Kind:        "Gateway",
+Namespace:   "default",
+Name:        "external-http",
+SectionName: nil,
+Port:        nil} was a success
+</pre>
+</li> </ol>
+</li> <li>
+<p>Send traffic to your application.</p> <p>After your Gateway, Route, and application are deployed in your cluster, you can pass traffic to your application.</p> <ol> <li>
+<p>To access your application, you need to find the IP address of your Gateway.</p> <p>In your terminal, use the following command:</p> 
+<pre>kubectl get gateways.gateway.networking.k8s.io GATEWAY_NAME -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>This command outputs the Gateway's IP address. In the follow-up commands, replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code> with the IP address from the output.</p>
+</li> <li>
+<p>Test the path update by going to the <code translate="no" dir="ltr">serviceextensions</code> version of the store service at <code translate="no" dir="ltr">store.example.com/serviceextensions</code>:</p> 
+<pre>curl https://store.example.com/serviceextensions --resolve store.example.com:443:GATEWAY_IP_ADDRESS --cacert cacert.pem -v
+</pre> <p>The output returns <code translate="no" dir="ltr">Hello World</code>.</p>
+</li> </ol>
+</li> </ol> <h3 id="configure-gcpedgeextension">Configure GCPEdgeExtension with GCPWasmPlugin</h3> <p>To add custom logic to your global external Application Load Balancer by using a WebAssembly (Wasm) module, configure a GCPEdgeExtension that references the GCPWasmPlugin.</p> <ol> <li>
+<p>Save the following GCPEdgeExtension manifest as <code translate="no" dir="ltr">gcp-edge-extension-with-plugin.yaml</code>:</p> 
+<pre>kind: GCPEdgeExtension
+apiVersion: networking.gke.io/v1
+metadata:
+  name: gcp-edge-extension-with-plugin
+  namespace: default
+spec:
+  targetRefs:
+  - group: "gateway.networking.k8s.io"
+    kind: Gateway
+    name: GATEWAY_NAME
+  extensionChains:
+  - name: chain1
+    matchCondition:
+      celExpressions:
+      - celMatcher: request.path.startsWith("/serviceextensions")
+    extensions:
+    - name: ext1
+      supportedEvents:
+      - RequestHeaders
+      backendRef:
+        group: "networking.gke.io"
+        kind: GCPWasmPlugin
+        name: gcp-wasm-plugin
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f gcp-edge-extension-with-plugin.yaml
+</pre>
+</li> <li>
+<p>Verify the configuration of the GCPEdgeExtension and its binding to the Gateway:</p> <ol> <li>
+<p>Check the extension status:</p> <p>To check the extension status of the GCPEdgeExtension, run the following command:</p> 
+<pre>kubectl describe gcpedgeextensions.networking.gke.io gcp-edge-extension-with-plugin
+</pre> <p>Confirm that the GCPEdgeExtension has a <code translate="no" dir="ltr">Programmed</code> status with the <code translate="no" dir="ltr">ProgrammingSucceeded</code> reason. This command might take a few minutes to complete.</p>
+</li> <li>
+<p>Verify the Gateway binding:</p> <p>Run the following command:</p> 
+<pre>kubectl describe gateway GATEWAY_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p> <p>Confirm that the GCPEdgeExtension is bound to the Gateway. This command might take a few minutes to complete. The output includes the <code translate="no" dir="ltr">networking.gke.io/lb-edge-extensions</code> annotation, which confirms the link between the Gateway and the edge extension.</p>
+</li> </ol>
+</li> </ol> <h3 id="send-traffic-to-the-edge-extension">Send traffic to the extension</h3> <p>After you deploy your Gateway and GCPEdgeExtension, test the routing logic by sending traffic to your application.</p> <ol> <li>
+<p>To access your application, get the IP address of your Gateway:</p> 
+<pre>kubectl get gateways.gateway.networking.k8s.io external-http -o=jsonpath="{.status.addresses[0].value}"
+</pre> <p>The output is the IP address of the Gateway. In the following commands, replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_IP_ADDRESS</var></code> with the IP address from the output.</p>
+</li> <li>
+<p>Send a request to the base URL:</p> 
+<pre>curl http://store.example.com --resolve store.example.com:80:GATEWAY_IP_ADDRESS -v
+</pre> <p>The Gateway routes the request to the default service, such as <code translate="no" dir="ltr">store-v1</code>.</p>
+</li> <li>
+<p>Send a request to the path specified in your celMatcher, such as <code translate="no" dir="ltr">/serviceextensions</code>:</p> 
+<pre>curl http://store.example.com/serviceextensions --resolve store.example.com:80:GATEWAY_IP_ADDRESS -v
+</pre> <p>The extension triggers the Wasm plugin, which routes the request to the secondary service, such as <code translate="no" dir="ltr">store-v2</code>.</p>
+</li> </ol> <h2 id="manage-wasmplugin">Manage the GCPWasmPlugin resource</h2> <p>You can update the GCPWasmPlugin CRD and monitor the plugin.</p> <h3 id="update-wasmplugin">Update the GCPWasmPlugin</h3> <p>To update a GCPWasmPlugin resource, follow these steps:</p> <ol> <li>
+<p>Make the change in your GCPWasmPlugin manifest and follow the steps described in <a href="#deploy-gcpwasmplugin">Deploy a GCPWasmPlugin</a>.</p> <p>For example, to have two versions of the plugin, where one version is serving traffic and the other is not, update your <code translate="no" dir="ltr">wasm-plugin.yaml</code> file to the following:</p> 
+<pre>kind: GCPWasmPlugin
+apiVersion: networking.gke.io/v1
+metadata:
+  name: gcp-wasm-plugin
+spec:
+  versions:
+  - name: wasm-plugin-version-v1
+    description: "Serving Wasm Plugin version"
+    image: "us-docker.pkg.dev/service-extensions-samples/plugins/local-reply:main"
+    weight: 1000000
+  - name: wasm-plugin-version-v2
+    description: "Non serving Wasm Plugin version"
+    image: "us-docker.pkg.dev/service-extensions-samples/plugins/local-reply:main"
+    weight: 0
+  logConfig:
+    enabled: true
+    sampleRate: 1000000
+    minLogLevel: INFO
+</pre> <p>In this example, the following applies:</p> <ul> <li>
+<code translate="no" dir="ltr">wasm-plugin-version-v1</code> has a <code translate="no" dir="ltr">weight</code> of <code translate="no" dir="ltr">1000000</code>, meaning it serves all traffic.</li> <li>
+<code translate="no" dir="ltr">wasm-plugin-version-v2</code> has a <code translate="no" dir="ltr">weight</code> of <code translate="no" dir="ltr">0</code>, meaning it does not serve any traffic.</li> </ul>
+</li> <li>
+<p>To ensure that the Gateway is updated, run the following command. This command might take a few minutes to complete:</p> 
+<pre>kubectl describe gateway GATEWAY_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with the name of your Gateway.</p>
+</li> </ol> <h3 id="monitor-wasmplugin">Monitor GCPWasmPlugin</h3> <p>To view metrics for GCPWasmPlugin in the Google Cloud console, see <a href="https://docs.cloud.google.com/service-extensions/docs/monitor-lb-plugins#monitoring_from_a_plugins_perspective">Monitoring from a plugins perspective</a>.</p> <p>When you reach the step in the guide where you must select a value from the <strong>Plugin version filter</strong> list, look for the format <code translate="no" dir="ltr">prefix−WASM_PLUGIN_VERSION_NAME_FROM_FILE−suffix</code>, where <code translate="no" dir="ltr">WASM_PLUGIN_VERSION_NAME_FROM_FILE</code> is the specific version name you defined in your GCPWasmPlugin configuration file.</p> <h2 id="troubleshooting">Troubleshoot traffic extensions on Gateways</h2> <p>This section provides troubleshooting tips for configuring traffic extensions on Gateways.</p> <h3 id="gateway-not-found">Gateway not found</h3> <p>The following error indicates that the Gateway resource specified in the <code translate="no" dir="ltr">targetRefs</code> field of the GCPTrafficExtension, GCPRoutingExtension, or GCPEdgeExtension resource doesn't exist:</p> 
+<pre>error: failed to create resource: GCPTrafficExtension.networking.gke.io "my-traffic-extension" is invalid: spec.gatewayRef: gateway "my-gateway" not found in namespace "default"
+</pre> <p>To resolve this issue, ensure that the Gateway resource specified in the <code translate="no" dir="ltr">targetRefs</code> field of the GCPTrafficExtension or GCPRoutingExtension resource exists in the specified namespace.</p> <h3 id="service-port-not-found">Service or service port not found</h3> <p>The following error indicates that the Service or Service port specified in the <code translate="no" dir="ltr">backendRef</code> field of the GCPTrafficExtension or GCPRoutingExtension resource does not exist:</p> 
+<pre>error: failed to create resource: GCPTrafficExtension.networking.gke.io "my-traffic-extension" is invalid: spec.service: service "callout-service" not found in namespace "default"
+</pre> <p>To resolve this issue, ensure that the Service and Service port specified in the <code translate="no" dir="ltr">backendRef</code> field of the GCPTrafficExtension or GCPRoutingExtension resource exist in the specified namespace.</p> <h3 id="no-network-endpoints">No network endpoints in the NEG</h3> <p>The following error indicates that there are no network endpoints in the NEG are associated with the Service specified in the <code translate="no" dir="ltr">backendRef</code> field of the GCPTrafficExtension or GCPRoutingExtension resource:</p> 
+<pre>error: failed to create resource: GCPTrafficExtension.networking.gke.io "my-traffic-extension" is invalid: spec.service: no network endpoints found for service "callout-service"
+</pre> <p>To resolve this issue, ensure that the Service specified in the <code translate="no" dir="ltr">backendRef</code> field of the GCPTrafficExtension or GCPRoutingExtension resource has network endpoints.</p> <h3 id="no-reply">No reply or reply with an error when sending the request</h3> <p>If you don't receive a reply, or if you receive a reply with an error when you send a request, it might indicate that the callout Service is not working correctly.</p> <p>To resolve this issue, check the logs of the callout Service for any errors.</p> <h4 id="error-code-404">Error code 404 in the JSON payload</h4> <p>The following error indicates that the callout Service is not found or is not responding to the request:</p> 
+<pre>{
+  "error": {
+    "code": 404,
+    "message": "Requested entity was not found.",
+    "status": "NOT_FOUND"
+  }
+}
+</pre> <p>To resolve this issue, ensure that the callout Service is running, that it is listening on the correct port, and that the service is correctly configured in the GCPTrafficExtension or GCPRoutingExtension resource.</p> <h4 id="error-code-500">Error code 500 in the JSON payload</h4> <p>The following error indicates that the callout Service is experiencing an internal server error:</p> 
+<pre>{
+  "error": {
+    "code": 500,
+    "message": "Internal server error.",
+    "status": "INTERNAL"
+  }
+}
+</pre> <p>To resolve this issue, check the logs of the callout Service to identify the cause of the internal server error.</p> <h3 id="gcpwasmplugin-absent">GCPWasmPlugin does not exist</h3> <p>The following error indicates that the GCPWasmPlugin resource doesn't exist in your project for your GCPTrafficExtension or GCPEdgeExtension:</p> 
+<pre>Status:
+  Ancestors:
+    Ancestor Ref:
+      Group:      gateway.networking.k8s.io
+      Kind:       Gateway
+      Name:       external-http
+      Namespace:  default
+    Conditions:
+      Last Transition Time:  2025-03-06T16:27:57Z
+      Message:
+      Reason:                Accepted
+      Status:                True
+      Type:                  Accepted
+      Last Transition Time:  2025-03-06T16:27:57Z
+      Message:               error cause: invalid-wasm-plugin: GCPWasmPlugin default/my-wasm-plugin in GCPTrafficExtension default/my-gateway-plugin-extension does not exist
+      Reason:                GCPWasmPluginNotFound
+      Status:                False
+      Type:                  ResolvedRefs
+    Controller Name:         networking.gke.io/gateway
+</pre> <p>To resolve this issue, <a href="#deploy-gcpwasmplugin">create a corresponding GCPWasmPlugin</a> in the Google Cloud project or <a href="#gcp-configure-extensions-plugin">point an extension</a> to an existing GCPWasmPlugin.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="../concepts/about-gke-inference-gateway">GKE Inference Gateway</a>.</li> <li>Learn how to <a href="../tutorials/serve-with-gke-inference-gateway">Serve an LLM with GKE Inference Gateway</a>.</li> <li>Learn how to <a href="view-observability-metrics">View observability metrics</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-gke-service-extensions" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-gke-service-extensions</a>
+  </p>
+</div>

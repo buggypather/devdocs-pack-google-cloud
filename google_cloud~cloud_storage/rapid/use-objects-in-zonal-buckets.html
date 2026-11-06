@@ -1,0 +1,2257 @@
+<h1>Read and append to objects in zonal buckets</h1> <meta name="Keywords_public" value="gcs, cloud storage, google cloud storage, gcp, rapid bucket, rapid storage, zonal buckets, store data in rapid storage, rapid storage class, use objects in zonal buckets, use rapid storage objects"> <meta name="description" content="Learn how to upload, read, write, pause, resume, and finalize appendable objects in zonal buckets."> <meta name="tenant_type" value="cloud_tenants"> <p>Appendable objects in zonal buckets let you incrementally add data to an object without rewriting the entire object, which helps you manage continuously flowing data. Zonal buckets are available through <a href="rapid-bucket">Rapid Bucket</a> and use the <a href="../storage-classes#rapid">Rapid storage class</a>, a high-performance storage class that's optimized for I/O-intensive workloads.</p> <p>This document describes how to create, write to, and read appendable objects. It also shows you how to pause, resume, and finalize objects, read the tail end of objects, and optimize write latency with a pool of pre-opened writers. Before you start, you might want to learn how to <a href="create-zonal-buckets">create a zonal bucket</a> and <a href="../uploading-objects">upload objects to a bucket</a>.</p> <h2 id="append-objects">Make appendable writes to objects</h2> <div> <section><p class="_code-tab"><strong>Client libraries</strong></p>
+<p> <section> <div id="create-and-write-appendable-objects-code-sample" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>C++</strong></p> <p> For more information, see the <a href="https://docs.cloud.google.com/cpp/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="cpp">Cloud Storage C++ API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uploads an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+auto coro = [](gcs::AsyncClient&amp; client, std::string bucket_name,
+               std::string object_name)
+    -&gt; google::cloud::future&lt;google::storage::v2::Object&gt; {
+  auto [writer, token] =
+      (co_await client.StartAppendableObjectUpload(
+           gcs::BucketName(std::move(bucket_name)), std::move(object_name)))
+          .value();
+  std::cout &lt;&lt; "Appendable upload started for object " &lt;&lt; object_name &lt;&lt; "\n";
+
+  token = (co_await writer.Write(std::move(token),
+                                 gcs::WritePayload("Some data\n")))
+              .value();
+  std::cout &lt;&lt; "Wrote initial data.\n";
+
+  // Flush the buffered data to the service. This is not a terminal
+  // operation. The writer can be used after the flush completes.
+  // After a flush, the data is visible to readers.
+  auto flush_status = co_await writer.Flush();
+  if (!flush_status.ok()) throw std::runtime_error(flush_status.message());
+
+  std::cout &lt;&lt; "Flush completed. Persisted size is now "
+            &lt;&lt; std::get&lt;std::int64_t&gt;(writer.PersistedState()) &lt;&lt; "\n";
+
+  // The writer is still open. We can write more data.
+  token = (co_await writer.Write(std::move(token),
+                                 gcs::WritePayload("Some more data\n")))
+              .value();
+  std::cout &lt;&lt; "Wrote more data.\n";
+
+  // Finalize the upload to make it a regular object.
+  co_return (co_await writer.Finalize(std::move(token))).value();
+};</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <p> For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/storage" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="go">Cloud Storage Go API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uploads an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// createAndWriteAppendableObject creates and uploads a new appendable object in
+// a bucket with the Rapid storage class. The object will not be finalized.
+func createAndWriteAppendableObject(w io.Writer, bucket, object string) error {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithAppendableUploads())
+	if err != nil {
+		return fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+
+	// Create a Writer and write some data.
+	writer := client.Bucket(bucket).Object(object).NewWriter(ctx)
+
+	if _, err := writer.Write([]byte("Some data\n")); err != nil {
+		return fmt.Errorf("Writer.Write: %w", err)
+	}
+
+	// Flush the buffered data to the service. This is not a terminal
+	// operation. The Writer can be used after the flush completes.
+	// After a flush, the data is visible to readers.
+	size, err := writer.Flush()
+	if err != nil {
+		return fmt.Errorf("Writer.Flush: %w", err)
+	}
+	fmt.Fprintf(w, "Flush completed. Persisted size is now %d\n", size)
+
+	// The Writer is still open. We can write more data.
+	if _, err := writer.Write([]byte("Some more data\n")); err != nil {
+		return fmt.Errorf("Writer.Write: %w", err)
+	}
+
+	// Close the Writer to flush any remaining buffered data.
+	// The object will be unfinalized, which means another writer can
+	// later append to the object.
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("Writer.Close: %w", err)
+	}
+	fmt.Fprintf(w, "Uploaded object %v\n", object)
+
+	return nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <p> For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-storage/latest/overview" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="java">Cloud Storage Java API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uploads an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.cloud.storage.BlobAppendableUpload;
+import com.google.cloud.storage.BlobAppendableUpload.AppendableUploadWriteableByteChannel;
+import com.google.cloud.storage.BlobAppendableUploadConfig;
+import com.google.cloud.storage.BlobAppendableUploadConfig.CloseAction;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.FlushPolicy;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+import com.google.common.io.ByteStreams;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.file.Paths;
+import java.util.Locale;
+
+public class CreateAndWriteAppendableObject {
+  public static void createAndWriteAppendableObject(
+      String bucketName, String objectName, String filePath) throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS object
+    // String objectName = "your-object-name";
+
+    // The path to the file to upload
+    // String filePath = "path/to/your/file";
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
+
+      int flushSize = 64 * 1000;
+      FlushPolicy.MaxFlushSizeFlushPolicy flushPolicy = FlushPolicy.maxFlushSize(flushSize);
+      BlobAppendableUploadConfig config =
+          BlobAppendableUploadConfig.of()
+              .withCloseAction(CloseAction.FINALIZE_WHEN_CLOSING)
+              .withFlushPolicy(flushPolicy);
+      BlobAppendableUpload uploadSession = storage.blobAppendableUpload(blobInfo, config);
+      try (AppendableUploadWriteableByteChannel channel = uploadSession.open();
+          ReadableByteChannel readableByteChannel = FileChannel.open(Paths.get(filePath))) {
+        ByteStreams.copy(readableByteChannel, channel);
+        // Since the channel is in a try-with-resources block, channel.close()
+        // will be implicitly called here, which triggers the finalization.
+      } catch (IOException ex) {
+        throw new IOException("Failed to upload to object " + blobId.toGsUtilUri(), ex);
+      }
+      BlobInfo result = storage.get(blobId);
+      System.out.printf(
+          Locale.US,
+          "Object %s successfully uploaded",
+          result.getBlobId().toGsUtilUriWithGeneration());
+    }
+  }
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <p> For more information, see the <a href="https://cloud.google.com/python/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="python">Cloud Storage Python API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uploads an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">
+
+async def storage_create_and_write_appendable_object(
+    bucket_name, object_name, grpc_client=None
+):
+    """Uploads an appendable object to zonal bucket.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+    writer = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+        generation=0,  # throws `FailedPrecondition` if object already exists.
+    )
+    # This creates a new appendable object of size 0 and opens it for appending.
+    await writer.open()
+
+    # appends data to the object
+    # you can perform `.append` multiple times as needed. Data will be appended
+    # to the end of the object.
+    await writer.append(b"Some data")
+
+    # Once all appends are done, close the gRPC bidirectional stream.
+    await writer.close()
+
+    print(
+        f"Appended object {object_name} created of size {writer.persisted_size} bytes."
+    )
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Rust</strong></p> <aside class="note"><b>Note:</b> Support for appendable objects in the Rust client library is unstable. To use it, enable the <code translate="no" dir="ltr">google_cloud_unstable_storage_bidi</code> compiler flag by building with <code translate="no" dir="ltr">RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"</code>, or by adding <code translate="no" dir="ltr">rustflags = ["--cfg", "google_cloud_unstable_storage_bidi"]</code> to the <code translate="no" dir="ltr">[build]</code> section of your <code translate="no" dir="ltr">.cargo/config.toml</code> file.</aside> <p>The following sample uploads an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">// The appendable upload API is unstable. Build with
+// `RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"` to enable it.
+use bytes::Bytes;
+use google_cloud_storage::client::Storage;
+
+pub async fn sample(client: &amp;Storage, bucket: &amp;str, object: &amp;str) -&gt; Result&lt;(), anyhow::Error&gt; {
+    let mut writer = client
+        .open_appendable_object(format!("projects/_/buckets/{bucket}"), object)
+        .send()
+        .await?;
+
+    writer.append(Bytes::from("Some data\n")).await?;
+
+    // Flush the buffered data to the service. After a flush, the data is visible to readers.
+    let persisted_size = writer.flush().await?;
+    println!("Flush completed. Persisted size is now {persisted_size}");
+
+    // The writer is still open. We can write more data.
+    writer.append(Bytes::from("Some more data\n")).await?;
+
+    // Close the writer without finalizing the object.
+    let persisted_size = writer.close().await?;
+    println!("Created appendable object {object} in bucket {bucket} with {persisted_size} bytes");
+    Ok(())
+}</pre> </div> </section> </div> </section> </p></section> </div> <h2 id="read-objects">Read objects</h2> <div> <section><p class="_code-tab"><strong>Client libraries</strong></p>
+<p> <section> <div id="read-appendable-objects-code-sample" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>C++</strong></p> <p> For more information, see the <a href="https://docs.cloud.google.com/cpp/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="cpp">Cloud Storage C++ API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample performs a ranged read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+
+// Helper coroutine to count newlines returned by an AsyncReader.
+// This helps consume the data from the read operation.
+auto count_newlines =
+    [](gcs::AsyncReader reader,
+       gcs::AsyncToken token) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  std::uint64_t count = 0;
+  while (token.valid()) {
+    auto [payload, t] = (co_await reader.Read(std::move(token))).value();
+    token = std::move(t);
+    for (auto const&amp; buffer : payload.contents()) {
+      count += std::count(buffer.begin(), buffer.end(), '\n');
+    }
+  }
+  co_return count;
+};
+
+auto coro =
+    [&amp;count_newlines](
+        gcs::AsyncClient&amp; client, std::string bucket_name,
+        std::string object_name) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  auto descriptor =
+      (co_await client.Open(gcs::BucketName(std::move(bucket_name)),
+                            std::move(object_name)))
+          .value();
+
+  auto [reader, token] = descriptor.Read(0, 1024);
+
+  co_return co_await count_newlines(std::move(reader), std::move(token));
+};</pre> </div> <p>The following sample performs a full read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+
+// Helper coroutine to count newlines returned by an AsyncReader.
+// This helps consume the data from the read operation.
+auto count_newlines =
+    [](gcs::AsyncReader reader,
+       gcs::AsyncToken token) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  std::uint64_t count = 0;
+  while (token.valid()) {
+    auto [payload, t] = (co_await reader.Read(std::move(token))).value();
+    token = std::move(t);
+    for (auto const&amp; buffer : payload.contents()) {
+      count += std::count(buffer.begin(), buffer.end(), '\n');
+    }
+  }
+  co_return count;
+};
+
+auto coro =
+    [&amp;count_newlines](
+        gcs::AsyncClient&amp; client, std::string bucket_name,
+        std::string object_name) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  auto descriptor =
+      (co_await client.Open(gcs::BucketName(std::move(bucket_name)),
+                            std::move(object_name)))
+          .value();
+
+  auto [reader, token] = descriptor.ReadFromOffset(0);
+
+  co_return co_await count_newlines(std::move(reader), std::move(token));
+};</pre> </div> <p>The following sample performs ranged reads on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+
+// Helper coroutine to count newlines returned by an AsyncReader.
+auto count_newlines =
+    [](gcs::AsyncReader reader,
+       gcs::AsyncToken token) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  std::uint64_t count = 0;
+  while (token.valid()) {
+    auto [payload, t] = (co_await reader.Read(std::move(token))).value();
+    token = std::move(t);
+    for (auto const&amp; buffer : payload.contents()) {
+      count += std::count(buffer.begin(), buffer.end(), '\n');
+    }
+  }
+  co_return count;
+};
+
+auto coro =
+    [&amp;count_newlines](
+        gcs::AsyncClient&amp; client, std::string bucket_name,
+        std::string object_name) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  auto descriptor =
+      (co_await client.Open(gcs::BucketName(std::move(bucket_name)),
+                            std::move(object_name)))
+          .value();
+
+  auto [r1, t1] = descriptor.Read(0, 1024);
+  auto [r2, t2] = descriptor.Read(0, 1024);
+  auto [r3, t3] = descriptor.Read(1024, 1024);
+
+  auto c1 = count_newlines(std::move(r1), std::move(t1));
+  auto c2 = count_newlines(std::move(r2), std::move(t2));
+  auto c3 = count_newlines(std::move(r3), std::move(t3));
+  co_return (co_await std::move(c1)) + (co_await std::move(c2)) +
+      (co_await std::move(c3));
+};</pre> </div> <p>The following sample performs ranged reads on multiple objects (a single read per object):</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+
+// Helper coroutine to count newlines returned by an AsyncReader.
+auto count_newlines =
+    [](gcs::AsyncReader reader,
+       gcs::AsyncToken token) -&gt; google::cloud::future&lt;std::uint64_t&gt; {
+  std::uint64_t count = 0;
+  while (token.valid()) {
+    auto [payload, t] = (co_await reader.Read(std::move(token))).value();
+    token = std::move(t);
+    for (auto const&amp; buffer : payload.contents()) {
+      count += std::count(buffer.begin(), buffer.end(), '\n');
+    }
+  }
+  co_return count;
+};
+
+auto coro = [&amp;count_newlines](
+                gcs::AsyncClient&amp; client, std::string bucket_name,
+                std::string object_name1, std::string object_name2,
+                std::string object_name3) -&gt; google::cloud::future&lt;void&gt; {
+  // List of object names to read (passed as arguments)
+  std::vector&lt;std::string&gt; object_names = {object_name1, object_name2,
+                                           object_name3};
+  std::vector&lt;google::cloud::future&lt;std::uint64_t&gt;&gt; futures;
+
+  // Start ranged reads for all objects and collect futures
+  // This example opens multiple objects, not one object multiple times.
+  for (auto const&amp; name : object_names) {
+    auto descriptor =
+        (co_await client.Open(gcs::BucketName(bucket_name), name)).value();
+    auto [reader, token] = descriptor.Read(0, 1024);
+    futures.push_back(count_newlines(std::move(reader), std::move(token)));
+  }
+
+  // Process futures as they become ready and print results
+  while (!futures.empty()) {
+    bool progress_made = false;
+    for (std::size_t i = 0; i &lt; futures.size(); ++i) {
+      if (futures[i].is_ready()) {  // Check if the future is ready
+        auto count = futures[i].get();
+        std::cout &lt;&lt; "Object " &lt;&lt; object_names[i] &lt;&lt; " read returned "
+                  &lt;&lt; count &lt;&lt; " newlines\n";
+        futures.erase(futures.begin() + i);
+        object_names.erase(object_names.begin() + i);
+        progress_made = true;
+        break;  // Restart the loop after modifying the vectors
+      }
+    }
+    if (!progress_made) {
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(10));  // Avoid busy spin
+    }
+  }
+};</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <p> For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/storage" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="go">Cloud Storage Go API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample performs a ranged read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// openObjectSingleRangedRead reads a single range from an object.
+func openObjectSingleRangedRead(w io.Writer, bucket, object string) ([]byte, error) {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithGRPCBidiReads())
+	if err != nil {
+		return nil, fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+
+	// Read the first KiB of the file and copy into a buffer.
+	r, err := client.Bucket(bucket).Object(object).NewRangeReader(ctx, 0, 1024)
+	if err != nil {
+		return nil, fmt.Errorf("NewRangeReader: %w", err)
+	}
+	defer r.Close()
+	buf := new(bytes.Buffer)
+	if _, err := io.Copy(buf, r); err != nil {
+		return nil, fmt.Errorf("copying data: %w", err)
+	}
+
+	fmt.Fprintf(w, "Read the first 1024 bytes of %v into a buffer\n", object)
+
+	return buf.Bytes(), nil
+}
+</pre> </div> <p>The following sample performs a full read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// openObjectReadFullObject reads a full object's data.
+func openObjectReadFullObject(w io.Writer, bucket, object string) ([]byte, error) {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithGRPCBidiReads())
+	if err != nil {
+		return nil, fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+
+	// Read the full object and copy it into a buffer.
+	r, err := client.Bucket(bucket).Object(object).NewReader(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NewReader: %w", err)
+	}
+	defer r.Close()
+	buf := new(bytes.Buffer)
+	if _, err := io.Copy(buf, r); err != nil {
+		return nil, fmt.Errorf("copying data: %w", err)
+	}
+
+	fmt.Fprintf(w, "Read the data of %v into a buffer\n", object)
+
+	return buf.Bytes(), nil
+}
+</pre> </div> <p>The following sample performs ranged reads on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// openObjectMultipleRangedRead opens a single object using
+// MultiRangeDownloader to download multiple ranges.
+func openObjectMultipleRangedRead(w io.Writer, bucket, object string) ([][]byte, error) {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithGRPCBidiReads())
+	if err != nil {
+		return nil, fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+
+	// Create the MultiRangeDownloader, which opens a stream to the object.
+	mrd, err := client.Bucket(bucket).Object(object).NewMultiRangeDownloader(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NewMultiRangeDownloader: %w", err)
+	}
+
+	// Add some 1 KiB ranges to download. This call is non-blocking. The
+	// provided callback is invoked when the range download is complete.
+	// Each range writes to its own buffer and its own error slot, so the
+	// callbacks can run concurrently without any further synchronization.
+	startOffsets := []int64{0, 1024, 2048}
+	var dataBufs [3]bytes.Buffer
+	var errs [3]error
+	for i, off := range startOffsets {
+		mrd.Add(&amp;dataBufs[i], off, 1024, func(off, length int64, err error) {
+			errs[i] = err
+		})
+	}
+
+	// Wait for all downloads to complete.
+	mrd.Wait()
+	if err := errors.Join(errs[:]...); err != nil {
+		return nil, fmt.Errorf("one or more downloads failed: %w", err)
+	}
+	if err := mrd.Close(); err != nil {
+		return nil, fmt.Errorf("MultiRangeDownloader.Close: %w", err)
+	}
+
+	fmt.Fprintf(w, "Read the ranges of %v into memory\n", object)
+
+	// Collect the byte slices
+	var byteSlices [][]byte
+	for i := range dataBufs {
+		byteSlices = append(byteSlices, dataBufs[i].Bytes())
+	}
+
+	return byteSlices, nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <p> For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-storage/latest/overview" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="java">Cloud Storage Java API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample performs a ranged read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobReadSession;
+import com.google.cloud.storage.RangeSpec;
+import com.google.cloud.storage.ReadProjectionConfigs;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+import java.util.concurrent.TimeUnit;
+
+public class OpenObjectSingleRangedRead {
+  public static void openObjectSingleRangedRead(
+      String bucketName, String objectName, long offset, int length) throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS object
+    // String objectName = "your-object-name";
+
+    // The beginning of the range
+    // long offset = 0
+
+    // The maximum number of bytes to read from the object.
+    // int length = 64;
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      ApiFuture&lt;BlobReadSession&gt; futureBlobReadSession = storage.blobReadSession(blobId);
+
+      try (BlobReadSession blobReadSession = futureBlobReadSession.get(10, TimeUnit.SECONDS)) {
+        // Define the range of bytes to read.
+        RangeSpec rangeSpec = RangeSpec.of(offset, length);
+        ApiFuture&lt;byte[]&gt; future =
+            blobReadSession.readAs(ReadProjectionConfigs.asFutureBytes().withRangeSpec(rangeSpec));
+
+        // Wait for the read to complete.
+        byte[] bytes = future.get();
+
+        System.out.println(
+            "Successfully read "
+                + bytes.length
+                + " bytes from object "
+                + objectName
+                + " in bucket "
+                + bucketName);
+      }
+    }
+  }
+}</pre> </div> <p>The following sample performs a full read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobReadSession;
+import com.google.cloud.storage.ReadAsChannel;
+import com.google.cloud.storage.ReadProjectionConfigs;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+import java.nio.ByteBuffer;
+import java.nio.channels.ScatteringByteChannel;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+
+public class OpenObjectReadFullObject {
+  public static void openObjectReadFullObject(String bucketName, String objectName)
+      throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS object to read
+    // String objectName = "your-object-name";
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      ApiFuture&lt;BlobReadSession&gt; futureBlobReadSession = storage.blobReadSession(blobId);
+
+      try (BlobReadSession blobReadSession = futureBlobReadSession.get(10, TimeUnit.SECONDS)) {
+
+        ReadAsChannel readAsChannelConfig = ReadProjectionConfigs.asChannel();
+        try (ScatteringByteChannel channel = blobReadSession.readAs(readAsChannelConfig)) {
+          long totalBytesRead = 0;
+          ByteBuffer buffer = ByteBuffer.allocate(64 * 1024);
+          int bytesRead;
+
+          while ((bytesRead = channel.read(buffer)) != -1) {
+            totalBytesRead += bytesRead;
+            buffer.clear();
+          }
+
+          System.out.printf(
+              Locale.US,
+              "Successfully read a total of %d bytes from object %s%n",
+              totalBytesRead,
+              blobId.toGsUtilUri());
+        }
+      }
+    }
+  }
+}</pre> </div> <p>The following sample performs ranged reads on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutures;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobReadSession;
+import com.google.cloud.storage.RangeSpec;
+import com.google.cloud.storage.ReadProjectionConfigs;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+import com.google.common.collect.ImmutableList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+public class OpenObjectMultipleRangedRead {
+  public static void openObjectMultipleRangedRead(
+      String bucketName, String objectName, long offset1, int length1, long offset2, int length2)
+      throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS object
+    // String objectName = "your-object-name";
+
+    // The beginning of the range 1
+    // long offset = 0
+
+    // The maximum number of bytes to read in range 1
+    // int length = 16;
+
+    // The beginning of the range 2
+    // long offset = 16
+
+    // The maximum number of bytes to read in range 2
+    // int length = 32;
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      ApiFuture&lt;BlobReadSession&gt; futureBlobReadSession = storage.blobReadSession(blobId);
+      RangeSpec rangeSpec1 = RangeSpec.of(offset1, length1);
+      RangeSpec rangeSpec2 = RangeSpec.of(offset2, length2);
+
+      try (BlobReadSession blobReadSession = futureBlobReadSession.get(10, TimeUnit.SECONDS)) {
+        ApiFuture&lt;byte[]&gt; future1 =
+            blobReadSession.readAs(ReadProjectionConfigs.asFutureBytes().withRangeSpec(rangeSpec1));
+        ApiFuture&lt;byte[]&gt; future2 =
+            blobReadSession.readAs(ReadProjectionConfigs.asFutureBytes().withRangeSpec(rangeSpec2));
+
+        List&lt;byte[]&gt; allBytes = ApiFutures.allAsList(ImmutableList.of(future1, future2)).get();
+
+        byte[] bytes1 = allBytes.get(0);
+        byte[] bytes2 = allBytes.get(1);
+
+        System.out.println(
+            "Successfully read "
+                + bytes1.length
+                + " bytes from range 1 and "
+                + bytes2.length
+                + " bytes from range 2.");
+      }
+    }
+  }
+}
+</pre> </div> <p>The following sample performs ranged reads on multiple objects:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutures;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobReadSession;
+import com.google.cloud.storage.RangeSpec;
+import com.google.cloud.storage.ReadAsFutureBytes;
+import com.google.cloud.storage.ReadProjectionConfigs;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+import com.google.common.util.concurrent.MoreExecutors;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+public class OpenMultipleObjectsRangedRead {
+  public static void multipleObjectsSingleRangedRead(
+      String bucketName, List&lt;String&gt; objectNames, long startOffset, int length) throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS objects to read
+    // List&lt;String&gt; objectName = Arrays.asList("object-1", "object-2", "object-3");
+
+    RangeSpec singleRange = RangeSpec.of(startOffset, length);
+    ReadAsFutureBytes rangeConfig =
+        ReadProjectionConfigs.asFutureBytes().withRangeSpec(singleRange);
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      List&lt;ApiFuture&lt;byte[]&gt;&gt; futuresToWaitOn = new ArrayList&lt;&gt;();
+
+      System.out.printf(
+          "Initiating single ranged read [%d, %d] on %d objects...%n",
+          startOffset, startOffset + length - 1, objectNames.size());
+
+      for (String objectName : objectNames) {
+        BlobId blobId = BlobId.of(bucketName, objectName);
+        ApiFuture&lt;BlobReadSession&gt; futureReadSession = storage.blobReadSession(blobId);
+
+        ApiFuture&lt;byte[]&gt; readAndCloseFuture =
+            ApiFutures.transformAsync(
+                futureReadSession,
+                (BlobReadSession session) -&gt; {
+                  ApiFuture&lt;byte[]&gt; readFuture = session.readAs(rangeConfig);
+
+                  readFuture.addListener(
+                      () -&gt; {
+                        try {
+                          session.close();
+                        } catch (java.io.IOException e) {
+                          System.err.println(
+                              "WARN: Background error while closing session: " + e.getMessage());
+                        }
+                      },
+                      MoreExecutors.directExecutor());
+                  return readFuture;
+                },
+                MoreExecutors.directExecutor());
+
+        futuresToWaitOn.add(readAndCloseFuture);
+      }
+      ApiFutures.allAsList(futuresToWaitOn).get(30, TimeUnit.SECONDS);
+
+      System.out.println("All concurrent single-ranged read operations are complete.");
+    }
+  }
+}</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <p> For more information, see the <a href="https://cloud.google.com/python/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="python">Cloud Storage Python API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample performs a ranged read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_open_object_single_ranged_read(
+    bucket_name, object_name, start_byte, size, grpc_client=None
+):
+    """Downloads a range of bytes from an object.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+
+    mrd = AsyncMultiRangeDownloader(grpc_client, bucket_name, object_name)
+
+    try:
+        # Open the object, mrd always opens in read mode.
+        await mrd.open()
+
+        # requested range will be downloaded into this buffer, user may provide
+        # their own buffer or file-like object.
+        output_buffer = BytesIO()
+        await mrd.download_ranges([(start_byte, size, output_buffer)])
+    finally:
+        if mrd.is_stream_open:
+            await mrd.close()
+
+    # Downloaded size can differ from requested size if object is smaller.
+    # mrd will download at most up to the end of the object.
+    downloaded_size = output_buffer.getbuffer().nbytes
+    print(f"Downloaded {downloaded_size} bytes from {object_name}")
+
+</pre> </div> <p>The following sample performs a full read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_open_object_read_full_object(
+    bucket_name, object_name, grpc_client=None
+):
+    """Downloads the entire content of an object using a multi-range downloader.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+
+    # mrd = Multi-Range-Downloader
+    mrd = AsyncMultiRangeDownloader(grpc_client, bucket_name, object_name)
+
+    try:
+        # Open the object, mrd always opens in read mode.
+        await mrd.open()
+
+        # This could be any buffer or file-like object.
+        output_buffer = BytesIO()
+        # A download range of (0, 0) means to read from the beginning to the end.
+        await mrd.download_ranges([(0, 0, output_buffer)])
+    finally:
+        if mrd.is_stream_open:
+            await mrd.close()
+
+    downloaded_bytes = output_buffer.getvalue()
+    print(
+        f"Downloaded all {len(downloaded_bytes)} bytes from object {object_name} in bucket {bucket_name}."
+    )
+
+</pre> </div> <p>The following sample performs ranged reads on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_open_object_multiple_ranged_read(
+    bucket_name, object_name, grpc_client=None
+):
+    """Downloads multiple ranges of bytes from a single object into different buffers.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+
+    mrd = AsyncMultiRangeDownloader(grpc_client, bucket_name, object_name)
+
+    try:
+        # Open the object, mrd always opens in read mode.
+        await mrd.open()
+
+        # Specify four different buffers to download ranges into.
+        buffers = [BytesIO(), BytesIO(), BytesIO(), BytesIO()]
+
+        # Define the ranges to download. Each range is a tuple of (start_byte, size, buffer).
+        # All ranges will download 10 bytes from different starting positions.
+        # We choose arbitrary start bytes for this example. An object should be large enough.
+        # A user can choose any start byte between 0 and `object_size`.
+        # If `start_bytes` is greater than `object_size`, mrd will throw an error.
+        ranges = [
+            (0, 10, buffers[0]),
+            (20, 10, buffers[1]),
+            (40, 10, buffers[2]),
+            (60, 10, buffers[3]),
+        ]
+
+        await mrd.download_ranges(ranges)
+
+    finally:
+        await mrd.close()
+
+    # Print the downloaded content from each buffer.
+    for i, output_buffer in enumerate(buffers):
+        downloaded_size = output_buffer.getbuffer().nbytes
+        print(
+            f"Downloaded {downloaded_size} bytes into buffer {i + 1} from start byte {ranges[i][0]}: {output_buffer.getvalue()}"
+        )
+
+</pre> </div> <p>The following sample performs ranged reads on multiple objects:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_open_multiple_objects_ranged_read(
+    bucket_name, object_names, grpc_client=None
+):
+    """Downloads a range of bytes from multiple objects concurrently.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+
+    async def _download_range(object_name):
+        """Helper coroutine to download a range from a single object."""
+        mrd = AsyncMultiRangeDownloader(grpc_client, bucket_name, object_name)
+        try:
+            # Open the object, mrd always opens in read mode.
+            await mrd.open()
+
+            # Each object downloads the first 100 bytes.
+            start_byte = 0
+            size = 100
+
+            # requested range will be downloaded into this buffer, user may provide
+            # their own buffer or file-like object.
+            output_buffer = BytesIO()
+            await mrd.download_ranges([(start_byte, size, output_buffer)])
+        finally:
+            if mrd.is_stream_open:
+                await mrd.close()
+
+        # Downloaded size can differ from requested size if object is smaller.
+        # mrd will download at most up to the end of the object.
+        downloaded_size = output_buffer.getbuffer().nbytes
+        print(f"Downloaded {downloaded_size} bytes from {object_name}")
+
+    download_tasks = [_download_range(name) for name in object_names]
+    await asyncio.gather(*download_tasks)
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Rust</strong></p> <p>The following sample performs a ranged read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">use google_cloud_storage::client::Storage;
+use google_cloud_storage::model_ext::ReadRange;
+
+pub async fn sample(
+    client: &amp;Storage,
+    bucket: &amp;str,
+    object: &amp;str,
+    start: u64,
+    end: u64,
+    destination_file_name: &amp;str,
+) -&gt; anyhow::Result&lt;()&gt; {
+    let count = end - start + 1;
+    let (metadata, mut reader) = client
+        .open_object(format!("projects/_/buckets/{bucket}"), object)
+        .send_and_read(ReadRange::segment(start, count))
+        .await?;
+
+    let mut content = Vec::new();
+    while let Some(data) = reader.next().await.transpose()? {
+        content.extend_from_slice(&amp;data);
+    }
+
+    tokio::fs::write(destination_file_name, content).await?;
+
+    println!(
+        "Downloaded bytes from {start} to {end} of object {object} in bucket {bucket} to {destination_file_name}."
+    );
+    println!("Metadata: {:?}", metadata.object());
+    Ok(())
+}</pre> </div> <p>The following sample performs a full read on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">use google_cloud_storage::client::Storage;
+use google_cloud_storage::model_ext::ReadRange;
+
+pub async fn sample(
+    client: &amp;Storage,
+    bucket: &amp;str,
+    object: &amp;str,
+    destination_file_name: &amp;str,
+) -&gt; anyhow::Result&lt;()&gt; {
+    let (metadata, mut reader) = client
+        .open_object(format!("projects/_/buckets/{bucket}"), object)
+        .send_and_read(ReadRange::all())
+        .await?;
+
+    let mut content = Vec::new();
+    while let Some(data) = reader.next().await.transpose()? {
+        content.extend_from_slice(&amp;data);
+    }
+
+    tokio::fs::write(destination_file_name, content).await?;
+
+    println!("Downloaded object {object} in bucket {bucket} to {destination_file_name}.");
+    println!("Metadata: {:?}", metadata.object());
+    Ok(())
+}</pre> </div> <p>The following sample performs ranged reads on a single object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">use google_cloud_storage::client::Storage;
+use google_cloud_storage::model_ext::ReadRange;
+
+pub async fn sample(client: &amp;Storage, bucket: &amp;str, object: &amp;str) -&gt; anyhow::Result&lt;()&gt; {
+    let bucket_name = format!("projects/_/buckets/{bucket}");
+
+    // 1. Open the connection and read the first range.
+    let (descriptor, mut reader) = client
+        .open_object(bucket_name, object)
+        .send_and_read(ReadRange::head(5))
+        .await?;
+
+    let mut content = Vec::new();
+    while let Some(data) = reader.next().await.transpose()? {
+        content.extend_from_slice(&amp;data);
+    }
+    println!(
+        "Read first range from {object} in {bucket}. Content: {:?}",
+        String::from_utf8_lossy(&amp;content)
+    );
+
+    // 2. Read another range.
+    let mut reader = descriptor.read_range(ReadRange::segment(5, 5)).await;
+
+    let mut content = Vec::new();
+    while let Some(data) = reader.next().await.transpose()? {
+        content.extend_from_slice(&amp;data);
+    }
+    println!(
+        "Read second range from {object} in {bucket}. Content: {:?}",
+        String::from_utf8_lossy(&amp;content)
+    );
+
+    println!("Metadata: {:?}", descriptor.object());
+    Ok(())
+}</pre> </div> <p>The following sample performs ranged reads on multiple objects:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">use google_cloud_storage::client::Storage;
+use google_cloud_storage::model_ext::ReadRange;
+use google_cloud_storage::object_descriptor::ObjectDescriptor;
+use std::collections::HashMap;
+use tokio::task::JoinSet;
+
+pub async fn sample(client: &amp;Storage, bucket: &amp;str, object_names: &amp;[&amp;str]) -&gt; anyhow::Result&lt;()&gt; {
+    let bucket_name = format!("projects/_/buckets/{bucket}");
+
+    async fn read_footer(
+        client: &amp;Storage,
+        bucket_name: &amp;str,
+        object_name: &amp;str,
+    ) -&gt; anyhow::Result&lt;(ObjectDescriptor, Vec&lt;u8&gt;, String)&gt; {
+        // Reading the last 8 bytes is common in Parquet and other column-oriented formats
+        // with a footer.
+        let (descriptor, mut reader) = client
+            .open_object(bucket_name, object_name)
+            .send_and_read(ReadRange::tail(8))
+            .await?;
+
+        let mut footer = Vec::new();
+        while let Some(data) = reader.next().await.transpose()? {
+            footer.extend_from_slice(&amp;data);
+        }
+        Ok((descriptor, footer, object_name.to_string()))
+    }
+
+    let mut set = JoinSet::new();
+    for o in object_names {
+        let client = client.clone();
+        let bucket_name = bucket_name.clone();
+        let object_name = o.to_string();
+        set.spawn(async move { read_footer(&amp;client, &amp;bucket_name, &amp;object_name).await });
+    }
+
+    let mut descriptors = HashMap::new();
+    while let Some(result) = set.join_next().await {
+        let (descriptor, footer, object_name) = result??;
+        println!("The footer for object {object_name} is {footer:?}");
+        descriptors.insert(object_name, (descriptor, footer));
+    }
+
+    // Use the descriptors in the map to read more ranges.
+
+    Ok(())
+}</pre> </div> </section> </div> </section> </p></section> </div> <h2 id="pause-resume-objects">Pause and resume an object</h2> <div> <section><p class="_code-tab"><strong>Client libraries</strong></p>
+<p> <section> <div id="pause-resume-appendable-objects-code-sample" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>C++</strong></p> <p> For more information, see the <a href="https://docs.cloud.google.com/cpp/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="cpp">Cloud Storage C++ API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample pauses and resumes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+auto coro = [](gcs::AsyncClient&amp; client, std::string bucket_name,
+               std::string object_name)
+    -&gt; google::cloud::future&lt;google::storage::v2::Object&gt; {
+  // Start an appendable upload and write some data.
+  auto [writer, token] = (co_await client.StartAppendableObjectUpload(
+                              gcs::BucketName(bucket_name), object_name))
+                             .value();
+  std::cout &lt;&lt; "Appendable upload started.\n";
+  token = (co_await writer.Write(std::move(token),
+                                 gcs::WritePayload("paused data\n")))
+              .value();
+
+  // The writer is closed, but the upload is not finalized. This "pauses" the
+  // upload, as the object remains appendable.
+  auto close_status = co_await writer.Close();
+  if (!close_status.ok()) throw std::runtime_error(close_status.message());
+  std::cout &lt;&lt; "Upload paused.\n";
+
+  // To resume the upload we need the object's generation. We can use the
+  // regular GCS client to get the latest metadata.
+  auto regular_client = gcs::Client();
+  auto metadata =
+      regular_client.GetObjectMetadata(bucket_name, object_name).value();
+  std::cout &lt;&lt; "Object generation is " &lt;&lt; metadata.generation() &lt;&lt; "\n";
+
+  // Now resume the upload.
+  std::tie(writer, token) =
+      (co_await client.ResumeAppendableObjectUpload(
+           gcs::BucketName(bucket_name), object_name, metadata.generation()))
+          .value();
+  std::cout &lt;&lt; "Upload resumed from offset "
+            &lt;&lt; std::get&lt;std::int64_t&gt;(writer.PersistedState()) &lt;&lt; "\n";
+
+  // Append the rest of the data.
+  token = (co_await writer.Write(std::move(token),
+                                 gcs::WritePayload("resumed data\n")))
+              .value();
+
+  // Finalize the upload and return the object metadata.
+  co_return (co_await writer.Finalize(std::move(token))).value();
+};</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <p> For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/storage" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="go">Cloud Storage Go API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample pauses and resumes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// pauseAndResumeAppendableUpload creates a new unfinalized appendable object in
+// a bucket with the Rapid storage class, closes the Writer, then re-opens the
+// object for writing using NewWriterFromAppendableObject.
+func pauseAndResumeAppendableUpload(w io.Writer, bucket, object string) error {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithAppendableUploads())
+	if err != nil {
+		return fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+
+	// Start an appendable upload and write some data.
+	writer := client.Bucket(bucket).Object(object).NewWriter(ctx)
+
+	if _, err := writer.Write([]byte("Some data\n")); err != nil {
+		return fmt.Errorf("Writer.Write: %w", err)
+	}
+
+	// The writer is closed, but the upload is not finalized. This "pauses" the
+	// upload, as the object remains appendable.
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("Writer.Close: %w", err)
+	}
+	fmt.Fprintf(w, "Uploaded unfinalized object %v\n", object)
+
+	// To resume the upload we need the object's generation. We can get this
+	// from the previous Writer after close.
+	gen := writer.Attrs().Generation
+
+	// Now resume the upload. Writer options including finalization can be
+	// passed on calling this constructor.
+	appendWriter, offset, err := client.Bucket(bucket).Object(object).Generation(gen).NewWriterFromAppendableObject(
+		ctx, &amp;storage.AppendableWriterOpts{
+			FinalizeOnClose: true,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("NewWriterFromAppendableObject: %w", err)
+	}
+	fmt.Fprintf(w, "Resuming upload from offset %v\n", offset)
+
+	// Append the rest of the data and close the Writer to finalize.
+	if _, err := appendWriter.Write([]byte("resumed data\n")); err != nil {
+		return fmt.Errorf("appendWriter.Write: %w", err)
+	}
+	if err := appendWriter.Close(); err != nil {
+		return fmt.Errorf("Writer.Close: %w", err)
+	}
+	fmt.Fprintf(w, "Uploaded and finalized object %v\n", object)
+	return nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <p> For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-storage/latest/overview" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="java">Cloud Storage Java API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample pauses and resumes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.BlobAppendableUpload;
+import com.google.cloud.storage.BlobAppendableUpload.AppendableUploadWriteableByteChannel;
+import com.google.cloud.storage.BlobAppendableUploadConfig;
+import com.google.cloud.storage.BlobAppendableUploadConfig.CloseAction;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageChannelUtils;
+import com.google.cloud.storage.StorageOptions;
+import com.google.common.io.ByteStreams;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
+import java.util.Locale;
+
+public class PauseAndResumeAppendableObjectUpload {
+  public static void pauseAndResumeAppendableObjectUpload(
+      String bucketName, String objectName, String filePath) throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS object
+    // String objectName = "your-object-name";
+
+    // The path to the file to upload
+    // String filePath = "path/to/your/file";
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
+
+      // --- Step 1: Initial string write (PAUSE) ---
+      // Default close action will be CLOSE_WITHOUT_FINALIZING
+      BlobAppendableUploadConfig initialConfig = BlobAppendableUploadConfig.of();
+      BlobAppendableUpload initialUploadSession =
+          storage.blobAppendableUpload(blobInfo, initialConfig);
+
+      try (AppendableUploadWriteableByteChannel channel = initialUploadSession.open()) {
+        String initialData = "Initial data segment.\n";
+        ByteBuffer buffer = ByteBuffer.wrap(initialData.getBytes(StandardCharsets.UTF_8));
+        long totalBytesWritten = StorageChannelUtils.blockingEmptyTo(buffer, channel);
+        channel.flush();
+
+        System.out.printf(
+            Locale.US, "Wrote %d bytes (initial string) in first segment.\n", totalBytesWritten);
+      } catch (IOException ex) {
+        throw new IOException("Failed initial upload to object " + blobId.toGsUtilUri(), ex);
+      }
+
+      Blob existingBlob = storage.get(blobId);
+      long currentObjectSize = existingBlob.getSize();
+      System.out.printf(
+          Locale.US,
+          "Initial upload paused. Currently uploaded size: %d bytes\n",
+          currentObjectSize);
+
+      // --- Step 2: Resume upload with file content and finalize ---
+      // Use FINALIZE_WHEN_CLOSING to ensure the object is finalized on channel closure.
+      BlobAppendableUploadConfig resumeConfig =
+          BlobAppendableUploadConfig.of().withCloseAction(CloseAction.FINALIZE_WHEN_CLOSING);
+      BlobAppendableUpload resumeUploadSession =
+          storage.blobAppendableUpload(existingBlob.toBuilder().build(), resumeConfig);
+
+      try (FileChannel fileChannel = FileChannel.open(Paths.get(filePath));
+          AppendableUploadWriteableByteChannel channel = resumeUploadSession.open()) {
+        long bytesToAppend = fileChannel.size();
+        System.out.printf(
+            Locale.US,
+            "Appending the entire file (%d bytes) after the initial string.\n",
+            bytesToAppend);
+
+        ByteStreams.copy(fileChannel, channel);
+      }
+
+      BlobInfo result = storage.get(blobId);
+      System.out.printf(
+          Locale.US,
+          "\nObject %s successfully resumed and finalized. Total size: %d bytes\n",
+          result.getBlobId().toGsUtilUriWithGeneration(),
+          result.getSize());
+    }
+  }
+}</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <p> For more information, see the <a href="https://cloud.google.com/python/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="python">Cloud Storage Python API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample pauses and resumes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_pause_and_resume_appendable_upload(
+    bucket_name, object_name, grpc_client=None
+):
+    """Demonstrates pausing and resuming an appendable object upload.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+
+    writer1 = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+    )
+    await writer1.open()
+    await writer1.append(b"First part of the data. ")
+    print(f"Appended {writer1.persisted_size} bytes with the first writer.")
+
+    # 2. After appending some data, close the writer to "pause" the upload.
+    #  NOTE: you can pause indefinitely and still read the conetent uploaded so far using MRD.
+    await writer1.close()
+
+    print("First writer closed. Upload is 'paused'.")
+
+    # 3. Create a new writer, passing the generation number from the previous
+    #    writer. This is a precondition to ensure that the object hasn't been
+    #    modified since we last accessed it.
+    generation_to_resume = writer1.generation
+    print(f"Generation to resume from is: {generation_to_resume}")
+
+    writer2 = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+        generation=generation_to_resume,
+    )
+    # 4. Open the new writer.
+    try:
+        await writer2.open()
+
+        # 5. Append some more data using the new writer.
+        await writer2.append(b"Second part of the data.")
+        print(f"Appended more data. Total size is now {writer2.persisted_size} bytes.")
+    finally:
+        # 6. Finally, close the new writer.
+        if writer2._is_stream_open:
+            await writer2.close()
+    print("Second writer closed. Full object uploaded.")
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Rust</strong></p> <aside class="note"><b>Note:</b> Support for appendable objects in the Rust client library is unstable. To use it, enable the <code translate="no" dir="ltr">google_cloud_unstable_storage_bidi</code> compiler flag by building with <code translate="no" dir="ltr">RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"</code>, or by adding <code translate="no" dir="ltr">rustflags = ["--cfg", "google_cloud_unstable_storage_bidi"]</code> to the <code translate="no" dir="ltr">[build]</code> section of your <code translate="no" dir="ltr">.cargo/config.toml</code> file.</aside> <p>The following sample pauses and resumes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">// The appendable upload API is unstable. Build with
+// `RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"` to enable it.
+use bytes::Bytes;
+use google_cloud_storage::client::Storage;
+
+pub async fn sample(client: &amp;Storage, bucket: &amp;str, object: &amp;str) -&gt; Result&lt;(), anyhow::Error&gt; {
+    let mut writer = client
+        .open_appendable_object(format!("projects/_/buckets/{bucket}"), object)
+        .send()
+        .await?;
+
+    writer.append(Bytes::from("Part 1")).await?;
+    let generation = writer.generation();
+    // Close the writer. Remaining data is flushed. The object is not finalized, so another writer
+    // can append to it later.
+    writer.close().await?;
+
+    // Resume the upload by reopening the object at the same generation.
+    let mut resumed_writer = client
+        .reopen_appendable_object(format!("projects/_/buckets/{bucket}"), object, generation)
+        .send()
+        .await?;
+
+    resumed_writer.append(Bytes::from("Part 2")).await?;
+    let metadata = resumed_writer.finalize().await?;
+
+    println!("Appended data across multiple sessions to {object} in bucket {bucket}: {metadata:?}");
+    Ok(())
+}</pre> </div> </section> </div> </section> </p></section> </div> <h2 id="finalize-objects">Finalize an object</h2> <div> <section><p class="_code-tab"><strong>Client libraries</strong></p>
+<p> <section> <div id="finalize-appendable-objects-code-sample" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>C++</strong></p> <p> For more information, see the <a href="https://docs.cloud.google.com/cpp/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="cpp">Cloud Storage C++ API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample finalizes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+auto coro = [](gcs::AsyncClient&amp; client, std::string bucket_name,
+               std::string object_name)
+    -&gt; google::cloud::future&lt;google::storage::v2::Object&gt; {
+  // Start an appendable upload.
+  auto [writer, token] =
+      (co_await client.StartAppendableObjectUpload(
+           gcs::BucketName(std::move(bucket_name)), std::move(object_name)))
+          .value();
+  std::cout &lt;&lt; "Appendable upload started. \n";
+
+  // Write some data.
+  token =
+      (co_await writer.Write(std::move(token),
+                             gcs::WritePayload("some data to finalize\n")))
+          .value();
+
+  // Finalize the upload. This makes the object non-appendable.
+  // No more data can be written to this writer.
+  auto object = (co_await writer.Finalize(std::move(token))).value();
+  std::cout &lt;&lt; "Upload finalized.\n";
+  co_return object;
+};</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <p> For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/storage" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="go">Cloud Storage Go API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample finalizes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// finalizeAppendableObject creates, uploads and finalizes a new object in
+// a bucket with the Rapid storage class.
+func finalizeAppendableObject(w io.Writer, bucket, object string) error {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithAppendableUploads())
+	if err != nil {
+		return fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+
+	// Create a Writer and set FinalizeOnClose so that the object will be
+	// finalized after the write is complete.
+	writer := client.Bucket(bucket).Object(object).NewWriter(ctx)
+	writer.FinalizeOnClose = true
+
+	if _, err := writer.Write([]byte("some data to finalize\n")); err != nil {
+		return fmt.Errorf("Writer.Write: %w", err)
+	}
+
+	// Close the Writer to flush any remaining buffered data and finalize
+	// the upload. This makes the object non-appendable.
+	// No more data can be written to this object.
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("Writer.Close: %w", err)
+	}
+	fmt.Fprintf(w, "Uploaded and finalized object %v\n", object)
+
+	return nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <p> For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-storage/latest/overview" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="java">Cloud Storage Java API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample finalizes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.BlobAppendableUpload;
+import com.google.cloud.storage.BlobAppendableUploadConfig;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+
+public class FinalizeAppendableObjectUpload {
+  public static void finalizeAppendableObjectUpload(String bucketName, String objectName)
+      throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS unfinalized appendable object
+    // String objectName = "your-object-name";
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      Blob existingBlob = storage.get(blobId);
+
+      if (existingBlob == null) {
+        System.out.println("Object " + objectName + " not found in bucket " + bucketName);
+        return;
+      }
+
+      BlobInfo blobInfoForTakeover = BlobInfo.newBuilder(existingBlob.getBlobId()).build();
+      BlobAppendableUpload finalizingSession =
+          storage.blobAppendableUpload(
+              blobInfoForTakeover,
+              BlobAppendableUploadConfig.of()
+                  .withCloseAction(BlobAppendableUploadConfig.CloseAction.FINALIZE_WHEN_CLOSING));
+
+      try (BlobAppendableUpload.AppendableUploadWriteableByteChannel channel =
+          finalizingSession.open()) {
+        channel.finalizeAndClose();
+      }
+
+      System.out.println(
+          "Successfully finalized object " + objectName + " in bucket " + bucketName);
+    }
+  }
+}</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <p> For more information, see the <a href="https://cloud.google.com/python/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="python">Cloud Storage Python API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample finalizes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_finalize_appendable_object_upload(
+    bucket_name, object_name, grpc_client=None
+):
+    """Creates, writes to, and finalizes an appendable object.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+    writer = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+        generation=0,  # throws `FailedPrecondition` if object already exists.
+    )
+    # This creates a new appendable object of size 0 and opens it for appending.
+    await writer.open()
+
+    # Appends data to the object.
+    await writer.append(b"Some data")
+
+    # finalize the appendable object,
+    # NOTE:
+    # 1. once finalized no more appends can be done to the object.
+    # 2. If you don't want to finalize, you can simply call `writer.close`
+    # 3. calling `.finalize()` also closes the grpc-bidi stream, calling
+    #   `.close` after `.finalize` may lead to undefined behavior.
+    object_resource = await writer.finalize()
+
+    print(f"Appendable object {object_name} created and finalized.")
+    print("Object Metadata:")
+    print(object_resource)
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Rust</strong></p> <aside class="note"><b>Note:</b> Support for appendable objects in the Rust client library is unstable. To use it, enable the <code translate="no" dir="ltr">google_cloud_unstable_storage_bidi</code> compiler flag by building with <code translate="no" dir="ltr">RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"</code>, or by adding <code translate="no" dir="ltr">rustflags = ["--cfg", "google_cloud_unstable_storage_bidi"]</code> to the <code translate="no" dir="ltr">[build]</code> section of your <code translate="no" dir="ltr">.cargo/config.toml</code> file.</aside> <p>The following sample finalizes an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">// The appendable upload API is unstable. Build with
+// `RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"` to enable it.
+use bytes::Bytes;
+use google_cloud_storage::client::Storage;
+
+pub async fn sample(client: &amp;Storage, bucket: &amp;str, object: &amp;str) -&gt; Result&lt;(), anyhow::Error&gt; {
+    let mut writer = client
+        .open_appendable_object(format!("projects/_/buckets/{bucket}"), object)
+        .send()
+        .await?;
+
+    writer
+        .append(Bytes::from("some data to finalize\n"))
+        .await?;
+
+    // Finalize the upload. No more data can be written to this object.
+    let metadata = writer.finalize().await?;
+
+    println!("Finalized appendable object {object} in bucket {bucket}: {metadata:?}");
+    Ok(())
+}</pre> </div> </section> </div> </section> </p></section> </div> <h2 id="read-objects-tail">Read the tail of an object</h2> <div> <section><p class="_code-tab"><strong>Client libraries</strong></p>
+<p> <section> <div id="read-object-tail-code-sample" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>C++</strong></p> <p> For more information, see the <a href="https://docs.cloud.google.com/cpp/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="cpp">Cloud Storage C++ API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample reads the tail of an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+auto coro = [](gcs::AsyncClient&amp; client, std::string bucket_name,
+               std::string object_name) -&gt; google::cloud::future&lt;void&gt; {
+  // This coroutine simulates a "tail -f" command on a GCS object. It
+  // repeatedly polls an appendable object for new content. In a real
+  // application, the object would be written to by a separate process.
+  std::cout &lt;&lt; "Polling for content from " &lt;&lt; object_name &lt;&lt; "...\n\n";
+
+  // Start an appendable upload. In a real application this would be done by
+  // a separate process, and this application would only know the object name.
+  auto [writer, token] = (co_await client.StartAppendableObjectUpload(
+                              gcs::BucketName(bucket_name), object_name))
+                             .value();
+
+  std::int64_t bytes_read = 0;
+  for (int i = 0; i != 2; ++i) {
+    // In a real application, another process would append data here.
+    // We simulate this by writing to the object.
+    auto content =
+        "More data for tail example, iteration " + std::to_string(i) + "\n";
+    token =
+        (co_await writer.Write(std::move(token), gcs::WritePayload(content)))
+            .value();
+    (void)co_await writer.Flush();
+
+    // Poll for new content by reading from the last known offset.
+    auto payload =
+        (co_await client.ReadObjectRange(gcs::BucketName(bucket_name),
+                                         object_name, bytes_read, -1))
+            .value();
+    for (auto const&amp; buffer : payload.contents()) {
+      std::cout &lt;&lt; std::string(buffer.begin(), buffer.end());
+      bytes_read += buffer.size();
+    }
+    // In a real application you would wait here, e.g. with a timer.
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+};</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <p> For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/storage" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="go">Cloud Storage Go API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample reads the tail of an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// readAppendableObjectTail simulates a "tail -f" command on a GCS object. It
+// repeatedly polls an appendable object for new content. In a real
+// application, the object would be written to by a separate process.
+// Appendable objects require a bucket with the Rapid storage class.
+func readAppendableObjectTail(w io.Writer, bucket, object string) ([]byte, error) {
+	// bucket := "bucket-name"
+	// object := "object-name"
+	ctx := context.Background()
+	client, err := storage.NewGRPCClient(ctx, storage.WithGRPCBidiReads(), storage.WithAppendableUploads())
+	if err != nil {
+		return nil, fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	// Set a context timeout. When this timeout is reached, the read stream
+	// will be closed, so omit this to tail indefinitely.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	// Create a new appendable object and write some data.
+	writer := client.Bucket(bucket).Object(object).If(storage.Conditions{DoesNotExist: true}).NewWriter(ctx)
+	if _, err := writer.Write([]byte("Some data\n")); err != nil {
+		return nil, fmt.Errorf("Writer.Write: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("Writer.Close: %w", err)
+	}
+	gen := writer.Attrs().Generation
+
+	obj := client.Bucket(bucket).Object(object)
+
+	// Create the MultiRangeDownloader, which opens a read stream to the object.
+	mrd, err := obj.NewMultiRangeDownloader(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NewMultiRangeDownloader: %w", err)
+	}
+
+	// In a goroutine, poll the object. In this example we continue until all the
+	// bytes we expect to see were received, but in a real application this could
+	// continue to poll indefinitely until some signal is received.
+	var buf bytes.Buffer
+	var mrdErr error
+	done := make(chan bool)
+	go func() {
+		var currOff int64
+		// The channel is buffered so that the callback never blocks, even if
+		// we stopped waiting for the range below.
+		rangeDownloaded := make(chan error, 1)
+		for buf.Len() &lt; 100 {
+			// Check how much data is available. The size of an unfinalized
+			// appendable object grows as more data is appended to it.
+			attrs, err := obj.Attrs(ctx)
+			if err != nil {
+				mrdErr = err
+				break
+			}
+			if attrs.Size &lt;= currOff {
+				// Nothing new was appended yet; wait and check again.
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			// Add the range of newly appended bytes and wait for it to be
+			// downloaded. The callback will give the actual number of bytes
+			// that were read in each iteration.
+			mrd.Add(&amp;buf, currOff, attrs.Size-currOff, func(offset, length int64, err error) {
+				// After each range is received, update
+				// the starting offset based on how many bytes were received.
+				currOff += length
+				rangeDownloaded &lt;- err
+			})
+			// Wait for the range download to complete with a timeout of 10s.
+			select {
+			case mrdErr = &lt;-rangeDownloaded:
+			case &lt;-time.After(10 * time.Second):
+				mrdErr = mrd.Error()
+				if mrdErr == nil {
+					mrdErr = errors.New("range request timed out after 10s")
+				}
+			}
+
+			if mrdErr != nil {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		// After exiting the loop, close MultiRangeDownloader and signal that
+		// all ranges have been read.
+		if err := mrd.Close(); err != nil {
+			mrdErr = err
+		}
+		done &lt;- true
+	}()
+
+	// Meanwhile, continue to write 10 bytes at a time to the object.
+	// This could be done by calling NewWriterFromAppendableObject repeatedly
+	// (as in the example) or calling Writer.Flush without closing the Writer.
+	for range 9 {
+		appendWriter, offset, err := client.Bucket(bucket).Object(object).Generation(gen).NewWriterFromAppendableObject(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("NewWriterFromAppendableObject: %w", err)
+		}
+		if _, err := appendWriter.Write([]byte("more data\n")); err != nil {
+			return nil, fmt.Errorf("appendWriter.Write: %w", err)
+		}
+		if err := appendWriter.Close(); err != nil {
+			return nil, fmt.Errorf("appendWriter.Close: %w", err)
+		}
+		fmt.Fprintf(w, "Wrote 10 bytes at offset %v\n", offset)
+	}
+
+	// Wait for tailing goroutine to exit.
+	&lt;-done
+	if mrdErr != nil {
+		return nil, fmt.Errorf("MultiRangeDownloader: %w", mrdErr)
+	}
+	fmt.Fprintf(w, "Read %v bytes from object %v\n", buf.Len(), object)
+	return buf.Bytes(), nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <p> For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-storage/latest/overview" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="java">Cloud Storage Java API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample reads the tail of an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.core.ApiFuture;
+import com.google.cloud.storage.BlobAppendableUpload;
+import com.google.cloud.storage.BlobAppendableUpload.AppendableUploadWriteableByteChannel;
+import com.google.cloud.storage.BlobAppendableUploadConfig;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.BlobReadSession;
+import com.google.cloud.storage.FlushPolicy;
+import com.google.cloud.storage.RangeSpec;
+import com.google.cloud.storage.ReadProjectionConfigs;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageChannelUtils;
+import com.google.cloud.storage.StorageOptions;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.concurrent.TimeUnit;
+
+public class ReadAppendableObjectTail {
+  public static void readAppendableObjectTail(String bucketName, String objectName)
+      throws Exception {
+    // The ID of your GCS bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The ID of your GCS object
+    // String objectName = "your-object-name";
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobId blobId = BlobId.of(bucketName, objectName);
+      BlobInfo info = BlobInfo.newBuilder(blobId).build();
+      int totalToWrite = 64 * 1000;
+      // Define our flush policy to flush small increments
+      // This is useful for demonstration purposes, but you should use more appropriate values for
+      // your workload.
+      int flushSize = totalToWrite / 8;
+      FlushPolicy.MinFlushSizeFlushPolicy flushPolicy =
+          FlushPolicy.minFlushSize(flushSize).withMaxPendingBytes(flushSize);
+      BlobAppendableUploadConfig appendableUploadConfig =
+          BlobAppendableUploadConfig.of().withFlushPolicy(flushPolicy);
+      BlobAppendableUpload upload =
+          storage.blobAppendableUpload(
+              info, appendableUploadConfig, Storage.BlobWriteOption.doesNotExist());
+      // Create the object, we'll takeover to write for our example.
+      upload.open().closeWithoutFinalizing();
+      BlobInfo gen1 = upload.getResult().get();
+      BlobAppendableUpload takeover = storage.blobAppendableUpload(gen1, appendableUploadConfig);
+
+      try (AppendableUploadWriteableByteChannel channel = takeover.open()) {
+        // Start a background thread to write some data on a periodic basis
+        // In reality, you're application would probably be doing thing in another scope
+        Thread writeThread = startWriteThread(totalToWrite, channel, flushPolicy);
+        try (BlobReadSession readSession =
+            storage.blobReadSession(gen1.getBlobId()).get(10, TimeUnit.SECONDS)) {
+          int zeroCnt = 0;
+          long read = 0;
+          while (read &lt; totalToWrite) {
+            if (zeroCnt &gt;= 30 &amp;&amp; !channel.isOpen()) {
+              System.out.println("breaking");
+              break;
+            }
+            ApiFuture&lt;byte[]&gt; future =
+                readSession.readAs(
+                    ReadProjectionConfigs.asFutureBytes()
+                        .withRangeSpec(RangeSpec.of(read, flushPolicy.getMinFlushSize())));
+            byte[] bytes = future.get(20, TimeUnit.SECONDS);
+
+            read += bytes.length;
+            long defaultSleep = 1_500L;
+            if (bytes.length == 0) {
+              zeroCnt++;
+              long millis = defaultSleep * zeroCnt;
+              System.out.println("millis = " + millis);
+              Thread.sleep(millis);
+            } else {
+              zeroCnt = 0;
+              System.out.println("bytes.length = " + bytes.length + " read = " + read);
+              Thread.sleep(defaultSleep);
+            }
+          }
+          assert read == totalToWrite : "not enough bytes";
+        }
+        writeThread.join();
+      }
+    }
+  }
+
+  private static Thread startWriteThread(
+      int totalToWrite,
+      AppendableUploadWriteableByteChannel channel,
+      FlushPolicy.MinFlushSizeFlushPolicy flushPolicy) {
+    Thread writeThread =
+        new Thread(
+            () -&gt; {
+              try {
+                for (long written = 0; written &lt; totalToWrite; ) {
+                  byte alphaOffset = (byte) (written % 0x1a);
+
+                  ByteBuffer buf = ByteBuffer.wrap(new byte[] {(byte) (0x41 + alphaOffset)});
+                  int w = StorageChannelUtils.blockingEmptyTo(buf, channel);
+                  written += w;
+                  if (written % flushPolicy.getMinFlushSize() == 0) {
+                    channel.flush();
+                    Thread.sleep(40);
+                  }
+                }
+                channel.closeWithoutFinalizing();
+
+              } catch (IOException | InterruptedException e) {
+                throw new RuntimeException(e);
+              }
+            });
+    writeThread.start();
+    return writeThread;
+  }
+}</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <p> For more information, see the <a href="https://cloud.google.com/python/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="python">Cloud Storage Python API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample reads the tail of an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def appender(writer: AsyncAppendableObjectWriter, duration: int):
+    """Appends 10 bytes to the object every second for a given duration."""
+    print("Appender started.")
+    bytes_appended = 0
+    start_time = time.monotonic()
+    # Run the appender for the specified duration.
+    while time.monotonic() - start_time &lt; duration:
+        await writer.append(BYTES_TO_APPEND)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        bytes_appended += NUM_BYTES_TO_APPEND_EVERY_SECOND
+        print(
+            f"[{now}] Appended {NUM_BYTES_TO_APPEND_EVERY_SECOND} new bytes. Total appended: {bytes_appended} bytes."
+        )
+        await asyncio.sleep(0.1)
+    print("Appender finished.")
+
+
+async def tailer(
+    bucket_name: str, object_name: str, duration: int, client: AsyncGrpcClient
+):
+    """Tails the object by reading new data as it is appended."""
+    print("Tailer started.")
+    start_byte = 0
+    start_time = time.monotonic()
+    mrd = AsyncMultiRangeDownloader(client, bucket_name, object_name)
+    try:
+        await mrd.open()
+        # Run the tailer for the specified duration.
+        while time.monotonic() - start_time &lt; duration:
+            output_buffer = BytesIO()
+            # A download range of (start, 0) means to read from 'start' to the end.
+            await mrd.download_ranges([(start_byte, 0, output_buffer)])
+
+            bytes_downloaded = output_buffer.getbuffer().nbytes
+            if bytes_downloaded &gt; 0:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                print(f"[{now}] Tailer read {bytes_downloaded} new bytes: ")
+                start_byte += bytes_downloaded
+
+            await asyncio.sleep(0.1)  # Poll for new data every 0.1 seconds.
+    finally:
+        if mrd.is_stream_open:
+            await mrd.close()
+    print("Tailer finished.")
+
+
+# read_appendable_object_tail simulates a "tail -f" command on a GCS object. It
+# repeatedly polls an appendable object for new content. In a real
+# application, the object would be written to by a separate process.
+async def read_appendable_object_tail(
+    bucket_name: str, object_name: str, duration: int, grpc_client=None
+):
+    """Main function to create an appendable object and run tasks.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+    writer = AsyncAppendableObjectWriter(
+        client=grpc_client,
+        bucket_name=bucket_name,
+        object_name=object_name,
+    )
+    # 1. Create an empty appendable object.
+    try:
+        # 1. Create an empty appendable object.
+        await writer.open()
+        print(f"Created empty appendable object: {object_name}")
+
+        # 2. Create the appender and tailer coroutines.
+        appender_task = asyncio.create_task(appender(writer, duration))
+        tailer_task = asyncio.create_task(
+            tailer(bucket_name, object_name, duration, grpc_client)
+        )
+
+        # 3. Execute the coroutines concurrently.
+        await asyncio.gather(appender_task, tailer_task)
+    finally:
+        if writer._is_stream_open:
+            await writer.close()
+            print("Writer closed.")
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Rust</strong></p> <aside class="note"><b>Note:</b> Support for appendable objects in the Rust client library is unstable. To use it, enable the <code translate="no" dir="ltr">google_cloud_unstable_storage_bidi</code> compiler flag by building with <code translate="no" dir="ltr">RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"</code>, or by adding <code translate="no" dir="ltr">rustflags = ["--cfg", "google_cloud_unstable_storage_bidi"]</code> to the <code translate="no" dir="ltr">[build]</code> section of your <code translate="no" dir="ltr">.cargo/config.toml</code> file.</aside> <p>The following sample reads the tail of an appendable object:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">// The appendable upload API is unstable. Build with
+// `RUSTFLAGS="--cfg google_cloud_unstable_storage_bidi"` to enable it.
+use bytes::Bytes;
+use google_cloud_storage::client::Storage;
+use google_cloud_storage::model_ext::ReadRange;
+use std::time::Duration;
+use tokio::time::sleep;
+
+pub async fn sample(client: &amp;Storage, bucket: &amp;str, object: &amp;str) -&gt; Result&lt;(), anyhow::Error&gt; {
+    let bucket_name = format!("projects/_/buckets/{bucket}");
+    let mut writer = client
+        .open_appendable_object(&amp;bucket_name, object)
+        .send()
+        .await?;
+
+    let mut bytes_read: u64 = 0;
+    for i in 0..2 {
+        let content = format!("More data for tail example, iteration {i}\n");
+        writer.append(Bytes::from(content)).await?;
+        // After a flush, the data is visible to readers.
+        writer.flush().await?;
+
+        // Read everything from the last offset to the current end of the object.
+        let (_metadata, mut reader) = client
+            .open_object(&amp;bucket_name, object)
+            .send_and_read(ReadRange::offset(bytes_read))
+            .await?;
+        while let Some(chunk) = reader.next().await.transpose()? {
+            print!("{}", String::from_utf8_lossy(&amp;chunk));
+            bytes_read += chunk.len() as u64;
+        }
+
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    // Close the writer without finalizing the object.
+    writer.close().await?;
+    Ok(())
+}</pre> </div> </section> </div> </section> </p></section> </div> <h2 id="optimize-write-latency">Optimize write latency</h2> <p>If you maintain your own gRPC parallel write logic, consider using a pool of pre-opened writers on unfinalized appendable objects. Because each writer's object is already created and its stream is already open, your application can append data immediately instead of waiting for object creation and stream setup when it needs to write.</p> <aside class="note"><strong>Note:</strong><span> In workloads with long idle periods (&gt;60 seconds), writers in the pool might be disconnected by the server due to stream idle timeouts. Production pools should record writer creation timestamps and replace any writer that's idle for more than 60 seconds.</span></aside><div> <section><p class="_code-tab"><strong>Client libraries</strong></p>
+<p> <section> <div id="optimize-write-latency-pool-code-sample" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>C++</strong></p> <p> For more information, see the <a href="https://docs.cloud.google.com/cpp/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="cpp">Cloud Storage C++ API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uses a pool of pre-opened writers for a zonal bucket:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace gcs = google::cloud::storage;
+auto coro = [](gcs::AsyncClient&amp; client, std::string bucket_name,
+               std::string key_prefix,
+               int pool_size) -&gt; google::cloud::future&lt;void&gt; {
+  std::string const next_object_name =
+      key_prefix + "_" + std::to_string(pool_size);
+
+  // 1. Init pool: Sized to ensure pre-warmed writers are always available.
+  std::deque&lt;std::pair&lt;gcs::AsyncWriter, gcs::AsyncToken&gt;&gt; pool;
+  for (int i = 0; i &lt; pool_size; ++i) {
+    auto [writer, token] = (co_await client.StartAppendableObjectUpload(
+                                gcs::BucketName(bucket_name),
+                                key_prefix + "_" + std::to_string(i)))
+                               .value();
+    pool.emplace_back(std::move(writer), std::move(token));
+  }
+
+  // 2. Write: Pop a pre-warmed writer and commit with the faster Flush()
+  // instead of Finalize().
+  auto [writer, token] = std::move(pool.front());
+  pool.pop_front();
+  token = (co_await writer.Write(std::move(token),
+                                 gcs::WritePayload("0123456789")))
+              .value();
+  auto flush_status = co_await writer.Flush();
+  if (!flush_status.ok()) throw std::runtime_error(flush_status.message());
+
+  // 3. Pool maintenance (run asynchronously off the critical write path):
+  // Close the used writer without finalizing and refill the pool.
+  auto maintain_pool = [](gcs::AsyncClient client, std::string bucket_name,
+                          std::string next_object_name,
+                          gcs::AsyncWriter writer)
+      -&gt; google::cloud::future&lt;std::pair&lt;gcs::AsyncWriter, gcs::AsyncToken&gt;&gt; {
+    auto close_status = co_await writer.Close();
+    if (!close_status.ok()) throw std::runtime_error(close_status.message());
+    auto [new_writer, new_token] =
+        (co_await client.StartAppendableObjectUpload(
+             gcs::BucketName(std::move(bucket_name)),
+             std::move(next_object_name)))
+            .value();
+    co_return {std::move(new_writer), std::move(new_token)};
+  };
+  auto maintenance_future =
+      maintain_pool(client, bucket_name, next_object_name, std::move(writer));
+
+  // 4. Read: Unfinalized objects are readable after Flush().
+  gcs::ObjectDescriptor descriptor =
+      (co_await client.Open(gcs::BucketName(bucket_name), key_prefix + "_0"))
+          .value();
+  auto [reader, read_token] = descriptor.Read(0, 10);
+  std::string contents;
+  while (read_token.valid()) {
+    auto [payload, t] = (co_await reader.Read(std::move(read_token))).value();
+    read_token = std::move(t);
+    for (auto const&amp; buffer : payload.contents()) {
+      contents.append(buffer.begin(), buffer.end());
+    }
+  }
+  std::cout &lt;&lt; "Read unfinalized object " &lt;&lt; key_prefix &lt;&lt; "_0: " &lt;&lt; contents
+            &lt;&lt; "\n";
+
+  auto [new_writer, new_token] = co_await std::move(maintenance_future);
+  pool.emplace_back(std::move(new_writer), std::move(new_token));
+  for (auto&amp; [rem_writer, rem_token] : pool) {
+    auto close_status = co_await rem_writer.Close();
+    if (!close_status.ok()) throw std::runtime_error(close_status.message());
+  }
+};</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <p> For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/storage" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="go">Cloud Storage Go API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uses a pool of pre-opened writers for a zonal bucket:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"sync/atomic"
+	"time"
+
+	"cloud.google.com/go/storage"
+)
+
+// optimizeWriteLatencyPool uses a pre-warmed pool of writers for appendable
+// objects in a bucket with the Rapid storage class.
+func optimizeWriteLatencyPool(out io.Writer, bucketName, keyPrefix string) error {
+	// bucketName := "bucket-name"
+	// keyPrefix := "pooled-object"
+	const poolSize = 3
+	// Pool writers live until ctx is canceled (here, on return).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client, err := storage.NewGRPCClient(ctx, storage.WithAppendableUploads())
+	if err != nil {
+		return fmt.Errorf("storage.NewGRPCClient: %w", err)
+	}
+	defer client.Close()
+
+	bucket := client.Bucket(bucketName)
+	// Each pre-warmed writer gets the next unique object number.
+	var nextID atomic.Int64
+	newPrewarmedWriter := func() (*storage.Writer, error) {
+		name := fmt.Sprintf("%s_%d", keyPrefix, nextID.Add(1)-1)
+		w := bucket.Object(name).If(storage.Conditions{DoesNotExist: true}).NewWriter(ctx)
+		if _, err := w.Flush(); err != nil {
+			return nil, errors.Join(fmt.Errorf("Writer.Flush(%q): %w", name, err), w.Close())
+		}
+		return w, nil
+	}
+
+	// Init pool: A buffered channel is a thread-safe FIFO queue of pre-warmed
+	// writers. Flushing incurs operation charges, so size the pool carefully.
+	pool := make(chan *storage.Writer, poolSize)
+	// On return, close pooled writers; unused objects remain unfinalized.
+	defer func() {
+		close(pool)
+		for w := range pool {
+			if err := w.Close(); err != nil {
+				fmt.Fprintf(out, "Writer.Close: %v\n", err)
+			}
+		}
+	}()
+
+	for range poolSize {
+		w, err := newPrewarmedWriter()
+		if err != nil {
+			return err
+		}
+		pool &lt;- w
+	}
+
+	// Write: Take a pre-warmed writer (waiting for a refill if the pool is
+	// empty) and commit with the faster Flush() instead of blocking on Close().
+	var w *storage.Writer
+	select {
+	case w = &lt;-pool:
+	case &lt;-time.After(10 * time.Second):
+		return errors.New("timed out waiting for a pre-warmed writer")
+	}
+	if _, err := w.Write([]byte("0123456789")); err != nil {
+		return errors.Join(fmt.Errorf("Writer.Write: %w", err), w.Close())
+	}
+	if _, err := w.Flush(); err != nil {
+		return errors.Join(fmt.Errorf("Writer.Flush: %w", err), w.Close())
+	}
+	fmt.Fprintf(out, "Wrote and flushed %q without finalizing\n", w.Name)
+
+	// Pool maintenance (run asynchronously off the critical write path):
+	// Close the used writer without finalizing and refill the pool.
+	maintenance := make(chan struct{})
+	go func(used *storage.Writer) {
+		defer close(maintenance)
+		if err := used.Close(); err != nil {
+			fmt.Fprintf(out, "Writer.Close: %v\n", err)
+		}
+		next, err := newPrewarmedWriter()
+		if err != nil {
+			fmt.Fprintf(out, "failed to pre-warm replacement writer: %v\n", err)
+			return
+		}
+		pool &lt;- next
+	}(w)
+	// Wait for maintenance on return; runs before the pool cleanup above.
+	defer func() { &lt;-maintenance }()
+
+	// Read: Unfinalized objects are readable after Flush().
+	r, err := bucket.Object(fmt.Sprintf("%s_0", keyPrefix)).NewReader(ctx)
+	if err != nil {
+		return fmt.Errorf("Object.NewReader: %w", err)
+	}
+	contents, err := io.ReadAll(r)
+	if err := errors.Join(err, r.Close()); err != nil {
+		return fmt.Errorf("reading %s_0: %w", keyPrefix, err)
+	}
+
+	fmt.Fprintf(out, "Read unfinalized object %s_0: %s\n", keyPrefix, contents)
+	return nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <p> For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-storage/latest/overview" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="java">Cloud Storage Java API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uses a pool of pre-opened writers for a zonal bucket:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.cloud.storage.BlobAppendableUpload.AppendableUploadWriteableByteChannel;
+import com.google.cloud.storage.BlobAppendableUploadConfig;
+import com.google.cloud.storage.BlobAppendableUploadConfig.CloseAction;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.BlobReadSession;
+import com.google.cloud.storage.RangeSpec;
+import com.google.cloud.storage.ReadProjectionConfigs;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+public class OptimizeWriteLatencyPool {
+  private static AppendableUploadWriteableByteChannel newPrewarmedChannel(
+      Storage storage, BlobInfo info, BlobAppendableUploadConfig config) throws IOException {
+    AppendableUploadWriteableByteChannel channel =
+        storage.blobAppendableUpload(info, config, Storage.BlobWriteOption.doesNotExist()).open();
+    // open() is lazy. flush() creates the 0-byte object.
+    try {
+      channel.flush();
+    } catch (IOException e) {
+      // Close the channel; attach any close error to the flush error.
+      try {
+        channel.closeWithoutFinalizing();
+      } catch (IOException closeException) {
+        e.addSuppressed(closeException);
+      }
+      throw e;
+    }
+    return channel;
+  }
+
+  public static void optimizeWriteLatencyPool(String bucketName, String keyPrefix)
+      throws Exception {
+    // The ID of your GCS zonal bucket
+    // String bucketName = "your-unique-bucket-name";
+
+    // The prefix for your pooled GCS objects
+    // String keyPrefix = "pooled-object";
+
+    int poolSize = 3;
+    String nextObjectName = keyPrefix + "_" + poolSize;
+    byte[] payload = "0123456789".getBytes(StandardCharsets.UTF_8);
+
+    try (Storage storage = StorageOptions.grpc().build().getService()) {
+      BlobAppendableUploadConfig config =
+          BlobAppendableUploadConfig.of().withCloseAction(CloseAction.CLOSE_WITHOUT_FINALIZING);
+      Queue&lt;AppendableUploadWriteableByteChannel&gt; pool = new ConcurrentLinkedQueue&lt;&gt;();
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      try {
+        // 1. Init pool: Flushing incurs operation charges, so size the pool carefully.
+        for (int i = 0; i &lt; poolSize; i++) {
+          BlobInfo info = BlobInfo.newBuilder(bucketName, keyPrefix + "_" + i).build();
+          pool.add(newPrewarmedChannel(storage, info, config));
+        }
+
+        // 2. Write: Pop a pre-warmed writer and commit with flush() (~1-2 ms)
+        // instead of blocking on close().
+        AppendableUploadWriteableByteChannel channel = pool.poll();
+        if (channel == null) {
+          throw new IllegalStateException("Writer pool is empty");
+        }
+        try {
+          channel.write(ByteBuffer.wrap(payload));
+          channel.flush();
+        } catch (Exception e) {
+          try {
+            channel.closeWithoutFinalizing();
+          } catch (Exception closeException) {
+            e.addSuppressed(closeException);
+          }
+          throw e;
+        }
+
+        // 3. Pool maintenance (run asynchronously off the critical write path):
+        // Close the used channel without finalizing and refill the pool.
+        Future&lt;Void&gt; maintenanceFuture =
+            executor.submit(
+                () -&gt; {
+                  channel.closeWithoutFinalizing();
+                  BlobInfo nextInfo = BlobInfo.newBuilder(bucketName, nextObjectName).build();
+                  pool.add(newPrewarmedChannel(storage, nextInfo, config));
+                  return null;
+                });
+
+        // 4. Read: Unfinalized objects are readable after flush().
+        try (BlobReadSession readSession =
+            storage
+                .blobReadSession(BlobId.of(bucketName, keyPrefix + "_0"))
+                .get(10, TimeUnit.SECONDS)) {
+          byte[] bytes =
+              readSession
+                  .readAs(
+                      ReadProjectionConfigs.asFutureBytes()
+                          .withRangeSpec(RangeSpec.of(0, payload.length)))
+                  .get();
+          System.out.printf(
+              "Read unfinalized object %s_0: %s%n",
+              keyPrefix, new String(bytes, StandardCharsets.UTF_8));
+        }
+
+        maintenanceFuture.get(10, TimeUnit.SECONDS);
+      } finally {
+        // Wait for in-flight maintenance so it can't add a channel after the pool is drained.
+        executor.shutdown();
+        executor.awaitTermination(10, TimeUnit.SECONDS);
+        // Runs before the Storage client is closed by the outer try-with-resources.
+        AppendableUploadWriteableByteChannel remaining;
+        while ((remaining = pool.poll()) != null) {
+          try {
+            remaining.closeWithoutFinalizing();
+          } catch (Exception e) {
+            // Ignore so the remaining channels are still closed.
+          }
+        }
+      }
+    }
+  }
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <p> For more information, see the <a href="https://cloud.google.com/python/docs/reference/storage/latest" track-type="clientLibrariesUsage" track-name="clientLibrariesLink" track-metadata-lang="python">Cloud Storage Python API reference documentation</a>. </p> <p> To authenticate to Cloud Storage, set up Application Default Credentials. For more information, see <a href="../authentication#client-libs">Set up authentication for client libraries</a>. </p> <p>The following sample uses a pool of pre-opened writers for a zonal bucket:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">async def storage_optimize_write_latency_pool(
+    bucket_name: str, key_prefix: str, pool_size: int = 3, grpc_client=None
+):
+    """Uses a pre-warmed pool of writers for a zonal bucket.
+
+    grpc_client: an existing grpc_client to use, this is only for testing.
+    """
+    # The ID of your GCS zonal bucket
+    # bucket_name = "your-unique-bucket-name"
+
+    # The prefix for your pooled GCS objects
+    # key_prefix = "pooled-object"
+
+    grpc_client_created = False
+    if grpc_client is None:
+        grpc_client = AsyncGrpcClient()
+        grpc_client_created = True
+
+    next_object_name = f"{key_prefix}_{pool_size}"
+
+    async def new_prewarmed_writer(name: str) -&gt; AsyncAppendableObjectWriter:
+        w = AsyncAppendableObjectWriter(
+            client=grpc_client,
+            bucket_name=bucket_name,
+            object_name=name,
+            generation=0,
+        )
+        await w.open()  # Establishes stream and creates 0-byte object in background.
+        return w
+
+    # 1. Init pool: Sized to ensure pre-warmed writers are always available.
+    pool = deque(
+        await asyncio.gather(
+            *(
+                new_prewarmed_writer(f"{key_prefix}_{i}")
+                for i in range(pool_size)
+            )
+        )
+    )
+
+    try:
+        # 2. Write: Pop a pre-warmed writer; append() writes and flushes data
+        # (~1-2 ms).
+        writer = pool.popleft()
+        await writer.append(b"0123456789")
+
+        # 3. Pool maintenance (run asynchronously off the critical write path):
+        # Close the used writer without finalizing and refill the pool.
+        async def maintain_pool(
+            used: AsyncAppendableObjectWriter, next_name: str
+        ):
+            await used.close(finalize_on_close=False)
+            pool.append(await new_prewarmed_writer(next_name))
+
+        maintenance_task = asyncio.create_task(
+            maintain_pool(writer, next_object_name)
+        )
+
+        # 4. Read: Unfinalized objects are readable after flush().
+        mrd = AsyncMultiRangeDownloader(
+            grpc_client, bucket_name, f"{key_prefix}_0"
+        )
+        await mrd.open()
+        buf = BytesIO()
+        await mrd.download_ranges([(0, 0, buf)])
+        await mrd.close()
+
+        await maintenance_task
+        print(
+            f"Read unfinalized object {key_prefix}_0: "
+            f"{buf.getvalue().decode('utf-8')}"
+        )
+    finally:
+        for rem in pool:
+            await rem.close(finalize_on_close=False)
+        if grpc_client_created:
+            await grpc_client.close()
+
+</pre> </div> </section> </div> </section> </p></section> </div> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="../downloading-objects">Download objects from a bucket</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/storage/docs/rapid/use-objects-in-zonal-buckets" class="_attribution-link">https://docs.cloud.google.com/storage/docs/rapid/use-objects-in-zonal-buckets</a>
+  </p>
+</div>

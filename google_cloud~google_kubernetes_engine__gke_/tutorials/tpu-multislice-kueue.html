@@ -1,0 +1,616 @@
+<h1>Orchestrate Multislice workloads using JobSet and Kueue</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial demonstrates how to orchestrate multiple multislice workloads on Google Kubernetes Engine (GKE) for improved resource utilization. You deploy a <a href="https://github.com/google/jax">Jax</a> workload as an example, run it on TPU Multislice, and implement Job queueing with JobSet and <a href="https://kueue.sigs.k8s.io">Kueue</a>. Kueue determines when Jobs should run based on available resources, quotas, and a hierarchy for fair sharing among teams.</p> <p>This tutorial is intended for Machine learning (ML) engineers and Platform admins and operators who are interested in the container orchestration capabilities of Kubernetes to train LLMs. To learn more about common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/anthos/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li>Current TPU version availability with the <a href="https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm#versions">Cloud TPU system architecture</a>
+</li> <li><a href="../how-to/tpu-multislice">TPU Multislice in GKE</a></li> </ul> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ol> <li>Prepare your environment with a GKE cluster with three v5e TPU slices. Each TPU slice has a <code translate="no" dir="ltr">2x4</code> topology with 8 chips. Therefore, 24 TPU v5e TPU chips in total.</li> <li>Create the Kueue resources to ensure that quotas are shared fairly between the workloads.</li> <li>Run your Multislice workload.</li> </ol> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li><p><a href="https://jobset.sigs.k8s.io/docs/installation/">Install JobSet</a> v0.2.3 or later.</p></li> <li><p><a href="https://kueue.sigs.k8s.io/docs/installation/">Install Kueue</a> v0.4.1 or later.</p></li> </ul> </section> <div id="tutorial-content"> <h2 id="prepare_the_environment">Prepare the environment</h2> <ol> <li><p>In the Google Cloud console, start a Cloud Shell instance: <br> <a track-type="solution" track-name="internalLink" track-metadata-position="body" target="console" class="button button-primary" href="https://console.cloud.google.com/">Open Cloud Shell</a></p></li> <li>
+<p>Set the default environment variables by using the by using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/config/set"><code translate="no" dir="ltr">gcloud config set</code></a> command:</p> 
+<pre>gcloud config set project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</p>
+</li> </ol> <p>Autopilot clusters that run version 1.29.2-gke.1521000 or later enable TPUs by default. TPUs on Autopilot clusters are configured in the workload specification. For more information, see the <a href="#multislice-jobset">Define your Multislice workloads with JobSets</a> section.</p> <h3 id="create_cluster">Create a GKE cluster</h3> <p>In Cloud Shell, create a GKE cluster:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">gcloud container clusters create-auto multislice-cluster \
+    --location=CONTROL_PLANE_LOCATION \
+    --cluster-version 1.29.2-gke.1521000 \
+    --release-channel rapid
+</pre> <p>In this command:</p> <ul> <li>The <code translate="no" dir="ltr">--location</code> flag specifies the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones/viewing-regions-zones">region</a> of the control plane of the cluster.</li> <li>The <code translate="no" dir="ltr">--cluster-version</code> flag specifies Kubernetes version for your cluster.</li> <li>The <code translate="no" dir="ltr">--release-channel</code> flag specifies the <a href="../concepts/release-channels">release channel</a> for your cluster. In this case, the rapid channel supports the latest versions available in GKE.</li> </ul></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">gcloud container clusters create multislice-cluster \
+    --location=CONTROL_PLANE_LOCATION
+</pre></section> </div> <p>Replace <var translate="no">CONTROL_PLANE_LOCATION</var> with the location in which you want to create your cluster. Ensure it has capacity for the <code translate="no" dir="ltr">ct5lp-hightpu-4t</code> machine type. Cluster creation might take several minutes.</p> <p>If you use GKE Autopilot mode, skip to the <a href="#kueue-resources">Create the Kueue resources</a> section. Autopilot clusters that run version 1.29.2-gke.1521000 or later enable TPUs by default.</p> <h3 id="create-standard-node-pool">Create three Standard mode TPU slice node pools</h3> <p>In this section, you create TPU node pools by using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/container/node-pools/create"><code translate="no" dir="ltr">gcloud beta container node-pools create</code></a> command.</p> <ol> <li>
+<p>Create the first node pool named <code translate="no" dir="ltr">nodepool1</code>:</p> 
+<pre>gcloud beta container node-pools create nodepool1 \
+    --location=CONTROL_PLANE_LOCATION \
+    --cluster=multislice-cluster \
+    --node-locations=NODE_LOCATION \
+    --machine-type=ct5lp-hightpu-4t \
+    --tpu-topology=2x4 \
+    --project=PROJECT_ID
+</pre> <p>Replace <var translate="no">NODE_LOCATION</var> with one or more zones in the cluster region in which you want to create the nodes.</p>
+</li> <li>
+<p>Create the second node pool named <code translate="no" dir="ltr">nodepool2</code>:</p> 
+<pre>gcloud beta container node-pools create nodepool2 \
+    --location=CONTROL_PLANE_LOCATION \
+    --cluster=multislice-cluster \
+    --node-locations=NODE_LOCATION \
+    --machine-type=ct5lp-hightpu-4t \
+    --tpu-topology=2x4 \
+    --project=PROJECT_ID
+</pre>
+</li> <li>
+<p>Create the third node pool named <code translate="no" dir="ltr">nodepool3</code>:</p> 
+<pre>gcloud beta container node-pools create nodepool3 \
+    --location=CONTROL_PLANE_LOCATION \
+    --cluster=multislice-cluster \
+    --node-locations=NODE_LOCATION \
+    --machine-type=ct5lp-hightpu-4t \
+    --tpu-topology=2x4 \
+    --project=PROJECT_ID
+</pre>
+</li> </ol> <p>GKE creates three node pools. Each node pool is a separate TPU slice.</p> <p>In the preceding steps, you used the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/container/node-pools/create"><code translate="no" dir="ltr">gcloud beta container node-pools create</code></a> command to create the node pools. These commands use the following flags:</p> <ul> <li>
+<code translate="no" dir="ltr">--node-locations</code>: the comma-separated list of one or more zones where GKE creates the node pools.</li> <li>
+<code translate="no" dir="ltr">--machine-type</code>: the type of machine to use for nodes. In this case, you used <code translate="no" dir="ltr">ct5lp-hightpu-4t</code>. For more information about TPU compatible machine types, use the table in <a href="../concepts/plan-tpus#choose-tpu-version">Choose the TPU version</a>.</li> <li>
+<code translate="no" dir="ltr">--tpu-topology</code>: the TPU topology to use for the node pool. In this case, you used <code translate="no" dir="ltr">2x4</code>. For more information about TPU topologies, see <a href="../concepts/plan-tpus#topology">Choose the TPU topology</a>.</li> </ul> <h2 id="kueue-resources">Create the Kueue resources</h2> <ol> <li>
+<p>Create the following <code translate="no" dir="ltr">kueue.yaml</code> manifest:</p> 
+<pre>apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: "vlp-24"
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+    cloud.google.com/gke-tpu-topology: 2x4
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: "cluster-queue"
+spec:
+  namespaceSelector: {}
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources: ["google.com/tpu"]
+    flavors:
+    - name: "vlp-24"
+      resources:
+      - name: "google.com/tpu"
+        nominalQuota: 24
+
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  namespace: default
+  name: multislice-queue
+spec:
+  clusterQueue: cluster-queue
+</pre>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">kueue.yaml</code> manifest:</p> 
+<pre>kubectl apply -f kueue.yaml
+</pre>
+</li> </ol> <p>GKE creates the following Kueue resources:</p> <ul> <li>
+<a href="https://kueue.sigs.k8s.io/docs/concepts/resource_flavor/">ResourceFlavor</a>: an abstraction of the resources in a cluster. In this example, GKE creates three TPU slices with <code translate="no" dir="ltr">2x4</code> topology. Each TPU slice has a <code translate="no" dir="ltr">2x4</code> topology with 8 chips (24 TPU chips in total).</li> <li>
+<a href="https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/">ClusterQueue</a>: a global queue managing workloads and cluster resources.</li> <li>
+<a href="https://kueue.sigs.k8s.io/docs/concepts/local_queue/">LocalQueue</a>: groups closely related workloads that are typically run by a single tenant (user). Each LocalQueue points to a ClusterQueue from which resources are allocated to run its workloads. A <a href="https://kueue.sigs.k8s.io/docs/concepts/workload/">Kueue Workload</a> is an abstraction representing a batch workload, in this case, each workload is a JobSet.</li> </ul> <h2 id="multislice-jobset">Define your Multislice workloads with JobSets</h2> <p>In this section, you create three JobSets. A Jobset is a workload API that lets you manage a group of Kubernetes Jobs as a unit. The most common use case for a JobSet is distributed training, but you can also use it to run batch workloads.</p> <p>The following JobSets run a Jax workload which outputs the global number of TPU chips in the slice, then sleeps for 60 seconds to simulate some model training time, then exits.</p> <ol> <li>
+<p>Install the JobSet API in your cluster:</p> 
+<pre>VERSION=v0.8.1
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/$VERSION/manifests.yaml
+</pre>
+</li> <li>
+<p>Create the following <code translate="no" dir="ltr">jobsets-multislice.yaml</code> manifest:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-1slice
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 1
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                command:
+                - bash
+                - -c
+                - |
+                  pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+                  python -c 'import jax; print("Global device count:", jax.device_count())'
+                resources:
+                  limits:
+                    google.com/tpu: 4
+
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-2slice
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 2
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                command:
+                - bash
+                - -c
+                - |
+                  pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+                  python -c 'import jax; print("Global device count:", jax.device_count())'
+                  sleep 60
+                resources:
+                  limits:
+                    google.com/tpu: 4
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-3slice
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 3
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                command:
+                - bash
+                - -c
+                - |
+                  sleep 60
+                resources:
+                  limits:
+                    google.com/tpu: 4
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-1slice
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 1
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+                  python -c 'import jax; print("Global device count:", jax.device_count())'
+                resources:
+                  limits:
+                    google.com/tpu: 4
+
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-2slice
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 2
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+                  python -c 'import jax; print("Global device count:", jax.device_count())'
+                  sleep 60
+                resources:
+                  limits:
+                    google.com/tpu: 4
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: multislice-3slice
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 3
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  sleep 60
+                resources:
+                  limits:
+                    google.com/tpu: 4
+</pre></section> </div>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">jobsets-multislice.yaml</code> manifest:</p> 
+<pre>kubectl apply -f jobsets-multislice.yaml
+</pre>
+</li> </ol> <p>GKE creates the Jobs with the following resource requests:</p> <ul> <li>The <code translate="no" dir="ltr">multislice-1slice</code> JobSet creates one Job that requires one TPU slice in total.</li> <li>The <code translate="no" dir="ltr">multislice-2slice</code> JobSet creates two Jobs that require two TPU slices in total.</li> <li>The <code translate="no" dir="ltr">multislice-3slice</code> JobSet creates three Jobs that require three TPU slice in total.</li> </ul> <p>Because the cluster only has three TPU slices, not all JobSets can run at once. When Kueue enqueues all three of <code translate="no" dir="ltr">multislice-3slice</code> JobSets, its Jobs run alone to completion. The <code translate="no" dir="ltr">multislice-1slice</code> and <code translate="no" dir="ltr">multislice-2slice</code> wait and run together afterwards.</p> <aside class="note"><strong>Note:</strong><span> To mitigate any issues, ensure that your cluster has all the prerequisites listed in the <a href="https://jobset.sigs.k8s.io/docs/installation/#before-you-begin">Before You Begin</a> section of the Jobset Installation documentation. If you encounter issues after ensuring your cluster meets the requirements, visit <a href="https://jobset.sigs.k8s.io/docs/troubleshooting/">Jobset Troubleshooting</a>.</span></aside> <h3 id="verify_kueue_admitted_the_workloads">Verify Kueue admitted the workloads</h3> <ol> <li>
+<p>Check the enqueued workloads in Kueue:</p> 
+<pre>kubectl get workloads
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                             QUEUE              ADMITTED BY     AGE
+jobset-multislice-1slice-2530a   multislice-queue                   3s
+jobset-multislice-2slice-ffb02   multislice-queue                   4s
+jobset-multislice-3slice-8c695   multislice-queue   cluster-queue   10s
+</pre>
+</li> </ol> <p>Kueue enqueues one or more workloads, depending on the TPU resources they require.</p> <h2 id="monitor_the_workloads">Monitor the workloads</h2> <p>JobSet and node pool observability metrics and dashboards in the Google Cloud console are generally available.</p> <p>Training goodput and Cloud ML goodput observability metrics and dashboards in the Google Cloud console are in <a href="https://cloud.google.com/products#product-launch-stages">Preview</a>. To learn more about goodput, see <a href="https://cloud.google.com/blog/products/ai-machine-learning/goodput-metric-as-measure-of-ml-productivity">Introducing ML Productivity Goodput: a metric to measure AI system efficiency</a>.</p> <h3 id="dashboards">Dashboards</h3> <p>To view the status of your TPU multi-host node pools on GKE, go to the <strong>GKE TPU Node Pool Status</strong> dashboard provided by Cloud Monitoring:</p> <p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/dashboards/integration/gke.gke-tpu-node-pool-status" target="console" track-name="consoleLink" track-type="tasks">Go to GKE TPU Node Pool Status</a></p> <p>For more information, see <a href="../how-to/tpus#tpu-node-pool-health-metrics">Monitor health metrics for TPU nodes and node pools</a>.</p> <p>To view comprehensive information about the health and performance of JobSets, go to the <strong>JobSet monitoring</strong> dashboard in the Google Cloud console:</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/aiml/jobs" target="console" track-name="consoleLink" track-type="tasks">Go to JobSet monitoring dashboard</a></p> <p>The JobSet monitoring dashboard includes three tabs:</p> <ul> <li>
+<strong>Overview</strong>: this tab shows the underlying JobSet infrastructure, such as JobSet status, replica readiness, and replica state. The tab also includes goodput metrics and some infrastructure metrics including CPU, GPU, TPU, memory, and storage metrics. For more information, see <a href="#jobset-health-metrics">Monitor JobSet health with metrics</a>.</li> <li>
+<strong>Training Goodput</strong> (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>): this tab provides a comprehensive view of the JobSet's end-to-end operational efficiency, such as the health of underlying node pools and actual workload execution. It provides goodput scores for you to monitor JobSet performance, including scheduling goodput and proxy runtime goodput . For more information, see <a href="#jobset-goodput">Monitor JobSet goodput</a>.</li> <li>
+<p><strong>Cloud ML Goodput</strong> (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>): this tab provides a detailed insight of the JobSet goodput, including badput breakdowns in the application layer.</p> <p>To use this dashboard, you need to integrate with the <a href="https://github.com/AI-Hypercomputer/ml-goodput-measurement/tree/main">Goodput Measurement API</a>, and instrument the application to send goodput metrics. For more details, see the instructions in the <a href="https://github.com/AI-Hypercomputer/ml-goodput-measurement/blob/main/README.md#usage">ML Goodput Measurement library</a>.</p>
+</li> </ul> <h3 id="monitor_which_pods_are_running">Monitor which Pods are running</h3> 
+<pre>kubectl get pods
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                READY   STATUS      RESTARTS   AGE
+multislice-1slice-slice-0-0-pf2ll   1/1     Running     0          1s
+multislice-1slice-slice-0-1-55g62   1/1     Running     0          1s
+multislice-2slice-slice-0-0-f4hf7   1/1     Running     0          3s
+multislice-2slice-slice-0-1-c8kv7   1/1     Running     0          3s
+multislice-2slice-slice-1-0-7h46t   1/1     Running     0          3s
+multislice-2slice-slice-1-1-lj9hb   1/1     Running     0          3s
+multislice-3slice-slice-0-0-wzq9t   0/1     Completed   0          2m31s
+multislice-3slice-slice-0-1-zf4dp   0/1     Completed   0          2m30s
+multislice-3slice-slice-1-0-hbfn5   0/1     Completed   0          2m31s
+multislice-3slice-slice-1-1-45fgl   0/1     Completed   0          2m30s
+multislice-3slice-slice-2-0-wjbp4   0/1     Completed   0          2m30s
+multislice-3slice-slice-2-1-lwnvs   0/1     Completed   0          2m30s
+</pre> <p>See that GKE scheduled, created, and ran the Pods for <code translate="no" dir="ltr">multislice-3slice</code> first. Then, GKE ran the Pods from <code translate="no" dir="ltr">multislice-1slice</code> and <code translate="no" dir="ltr">multislice-2slice</code> JobSets.</p> <h3 id="jobset-health-metrics">Monitor JobSet health with metrics</h3> <p>To understand whether a JobSet is running as expected, or to infer whether it was interrupted, you can use Prometheus metrics from the <a href="../how-to/kube-state-metrics#ksm-jobset-metrics">JobSet metrics package</a>, such as <code translate="no" dir="ltr">kube_jobset_succeeded_replicas</code>.</p> <p>Note that Jobset health metrics are supported only in GKE version 1.32.1-gke.135700 or later. JobSet health metrics are enabled by default in newly created clusters with supported versions. For existing clusters that are upgraded to supported versions, customers need to manually enable the JobSet metrics package. For more information, refer to the <a href="../how-to/kube-state-metrics#requirements">documentation</a>.</p> <p>For this tutorial, check the JobSet completion with this PromQL query:</p> 
+<pre>kube_jobset_succeeded_replicas{
+  cluster="multislice-cluster",
+  jobset_name=~"mulitslice-.*"}
+</pre> <h3 id="monitor_jobset_scheduling">Monitor JobSet scheduling</h3> <p>To monitor the scheduling of a JobSet, use the following metrics:</p> <ul> <li>
+<code translate="no" dir="ltr">kubernetes.io/jobset/assigned_node_pools</code>: GKE node pools where a Kubernetes JobSet has scheduled Pods.</li> <li>
+<code translate="no" dir="ltr">kubernetes.io/node_pool/assigned_jobsets</code>: Kubernetes JobSets that have scheduled Pods on a GKE node pool.</li> <li>
+<code translate="no" dir="ltr">kubernetes.io/jobset/assigned_nodes</code>: GKE nodes where a Kubernetes JobSet has scheduled Pods.</li> <li>
+<code translate="no" dir="ltr">kubernetes.io/node/assigned_jobsets</code>: Kubernetes JobSets that have scheduled Pods on a GKE node.</li> </ul> <p>To view the node pools where each JobSet in a specific cluster has scheduled Pods, run the following PromQL query:</p> 
+<pre>avg_over_time(
+  kubernetes_io:jobset_assigned_node_pools{
+    monitored_resource="k8s_entity",
+    cluster_name="multislice-cluster"}[${__interval}])
+</pre> <p>To identify the node pools where a specific Jobset has been scheduled, run the following PromQL query:</p> 
+<pre>avg_over_time(
+  kubernetes_io:jobset_assigned_node_pools{
+    monitored_resource="k8s_entity",
+    cluster_name="multislice-cluster",
+    entity_name=~"multislice-.*"}[${__interval}])
+</pre> <p>To identify the Jobsets that have been scheduled on a specific node pool, run the following PromQL query:</p> 
+<pre>avg_over_time(
+  kubernetes_io:node_pool_assigned_jobsets{
+    monitored_resource="k8s_node_pool",
+    cluster_name="multislice-cluster",
+    node_pool_name="multislice-np"}[${__interval}])
+</pre> <h3 id="monitor_jobset_uptime_times_to_recover_ttr_and_times_between_interruptions_tbi">Monitor JobSet uptime, times to recover (TTR), and times between interruptions (TBI)</h3> <p>The following metrics are useful for monitoring the availability of a JobSet:</p> <ul> <li>
+<code translate="no" dir="ltr">kubernetes.io/jobset/uptime</code>: total time the JobSet has been available.</li> <li>
+<code translate="no" dir="ltr">kubernetes.io/jobset/times_to_recover</code>: distribution of recovery period for a JobSet. Each sample indicates a single recovery event from a downtime period for the JobSet.</li> <li>
+<code translate="no" dir="ltr">kubernetes.io/jobset/times_between_interruptions</code>: distribution of the interval between the end of the previous interruption and the beginning of the current interruption for a JobSet. Each sample indicates a single duration between the previous and the current interruption.</li> </ul> <p>These metrics apply to JobSets that have exactly one GPU or TPU replicated job. The calculation of the metrics is based only on the availability of that single replicated job. The metrics are supported in all GKE versions.</p> <p>To view uptime for the JobSets that you used in this tutorial, run the following PromQL query:</p> 
+<pre>avg_over_time(
+  kubernetes_io:jobset_uptime{
+    monitored_resource="k8s_entity", entity_type="jobset",
+    entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}])
+</pre> <p>To view the TBI distributions for the JobSets from this tutorial, run the following PromQL query:</p> 
+<pre>histogram_quantile(0.50,
+  sum_over_time(
+    kubernetes_io:jobset_times_between_interruptions_bucket{
+      monitored_resource="k8s_entity",entity_type="jobset",
+      entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}]))
+</pre> <p>You can extend the interval of the query to a longer time horizon, such as 7 days, and compute the mean time between interruptions (MTBI) over this period:</p> 
+<pre>sum(sum_over_time(
+  kubernetes_io:jobset_times_between_interruptions_sum{
+    monitored_resource="k8s_entity",entity_type="jobset",
+    entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}]))
+/
+sum(sum_over_time(
+  kubernetes_io:jobset_times_between_interruptions_count{
+    monitored_resource="k8s_entity",entity_type="jobset",
+    entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}]))
+</pre> <p>To view the TTR distributions, you can run the following PromQL queries:</p> 
+<pre>histogram_quantile(0.50,
+  sum_over_time(
+    kubernetes_io:jobset_times_to_recover_bucket{
+      monitored_resource="k8s_entity",entity_type="jobset",
+      entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}]))
+</pre> <p>After you increase the query interval to a longer time horizon, such as 7 days, you can compute the mean time to recover (MTTR) over this period:</p> 
+<pre>sum(sum_over_time(
+  kubernetes_io:jobset_times_to_recover_sum{
+    monitored_resource="k8s_entity",entity_type="jobset",
+    entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}]))
+/
+sum(sum_over_time(
+  kubernetes_io:jobset_times_to_recover_count{
+    monitored_resource="k8s_entity",entity_type="jobset",
+    entity_name=~"multislice-.*",cluster_name="multislice-cluster"}[${__interval}]))
+</pre>
+<aside class="success"><strong>Success:</strong><span> You've successfully run a three Multislice Jax workloads.</span></aside> <h3 id="jobset-goodput">Monitor JobSet goodput</h3> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This product or feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA products and features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>The following metrics are useful for monitoring the performance of a JobSet:</p> <ul> <li>
+<code translate="no" dir="ltr">kubernetes.io/jobset/scheduling_goodput</code>: the fraction of time that all the resources required to run the training JobSet are available.</li> <li>
+<p><code translate="no" dir="ltr">kubernetes.io/jobset/proxy_runtime_goodput</code>: the fraction of time that all required accelerators are productive. This metric provides an estimate of the real runtime goodput.</p> <p>If you need a more accurate measure of runtime goodput, you can instrument your application and integrate with the <a href="https://github.com/AI-Hypercomputer/ml-goodput-measurement/tree/main">Goodput Measurement API</a>. For more details, see the instructions in the <a href="https://github.com/AI-Hypercomputer/ml-goodput-measurement/blob/main/README.md#usage">ML Goodput Measurement library</a>.</p>
+</li> </ul> <p>To view the scheduling goodput for the JobSet that you used in this tutorial, run the following PromQL query:</p> 
+<pre>avg_over_time(
+  kubernetes_io:jobset_scheduling_goodput{
+    monitored_resource="k8s_entity", entity_type="jobset",
+    entity_name=~"multislice-.*",
+    cluster_name="multislice-cluster"}[${__interval}])
+</pre> <p>To view the proxy runtime goodput for the JobSets from this tutorial, run the following PromQL query:</p> 
+<pre>avg_over_time(
+  kubernetes_io:jobset_proxy_runtime_goodput{
+    monitored_resource="k8s_entity", entity_type="jobset",
+    entity_name=~"multislice-.*",
+    cluster_name="multislice-cluster"}[${__interval}])
+</pre> <h2 id="enable_kueue_workload_priorities_and_preemption">Enable Kueue workload priorities and preemption</h2> <p>Optionally, you can assign Kueue workloads priorities which determine the order in which enqueued workloads are admitted by Kueue.</p> <aside class="note"><strong>Note:</strong><span> Depending on the configuration of the ClusterQueue's preemption policy, some preemption scenarios might occur. For example, GKE can preempt a running workload to run a higher priority workload if there are not sufficient resources to run both workloads concurrently. GKE stops and re-enqueues a preempted workload to be continue processing when possible.</span></aside><ol> <li>
+<p>Update your <code translate="no" dir="ltr">ClusterQueue</code> to have a preemption policy:</p> 
+<pre>apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: "vlp-24"
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+    cloud.google.com/gke-tpu-topology: 2x4
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: "cluster-queue"
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+  - coveredResources: ["google.com/tpu"]
+    flavors:
+    - name: "vlp-24"
+      resources:
+      - name: "google.com/tpu"
+        nominalQuota: 24
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  namespace: default
+  name: multislice-queue
+spec:
+  clusterQueue: cluster-queue
+</pre>
+</li> <li>
+<p>Create a <code translate="no" dir="ltr">PriorityClass</code> for each distinct priority level you want to assign to workloads:</p> 
+<pre>apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+value: 100
+globalDefault: false
+description: "This low priority class should be used for some Pods only."
+</pre>
+</li> <li>
+<p>Assign the <code translate="no" dir="ltr">priorityClassName</code> to your JobSet:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+
+<pre data-language="">apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: low-priority
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 1
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              priorityClassName: low-priority
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                command:
+                - bash
+                - -c
+                - |
+                  sleep 60
+                resources:
+                  limits:
+                    google.com/tpu: 4 # Number of TPU chips per worker
+</pre></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+
+<pre data-language="">apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: low-priority
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  failurePolicy:
+    maxRestarts: 4
+  replicatedJobs:
+    - name: slice
+      replicas: 1
+      template:
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            spec:
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+                cloud.google.com/gke-tpu-topology: 2x4
+              priorityClassName: low-priority
+              containers:
+              - name: jax-tpu
+                image: python:3.8
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  sleep 60
+                resources:
+                  limits:
+                    google.com/tpu: 4 # Number of TPU chips per worker
+</pre></section> </div>
+</li> </ol> <p>GKE includes a preemption policy, which defines how Kueue assigns the available resources. The policy specifies that a workload can be preempted if a higher priority workload needs the resources. Workloads with a lower priority value are more likely to be preempted by higher priority workloads.</p> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h3 id="delete_the_individual_resource">Delete the individual resource</h3> <ol> <li>
+<p>Delete the Kueue resources:</p> 
+<pre>kubectl delete -f jobsets-multislice.yaml
+kubectl delete -f kueue.yaml
+</pre>
+</li> <li>
+<p>Delete the cluster:</p> 
+<pre>gcloud container clusters delete multislice-cluster --location=CONTROL_PLANE_LOCATION
+</pre> </li>
+</ol></section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn more about <a href="https://kueue.sigs.k8s.io/docs/overview/">Kueue</a>.</li> <li>Learn how to <a href="kueue-cohort">Implement a Job queuing system with quota sharing between namespaces on GKE</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/tpu-multislice-kueue" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/tpu-multislice-kueue</a>
+  </p>
+</div>

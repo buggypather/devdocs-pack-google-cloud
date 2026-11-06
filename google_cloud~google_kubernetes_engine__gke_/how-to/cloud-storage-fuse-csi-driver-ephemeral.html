@@ -1,0 +1,265 @@
+<h1>Mount Cloud Storage buckets as CSI ephemeral volumes</h1>  <p>This guide shows you how to use <a href="https://kubernetes.io/docs/concepts/storage/ephemeral-volumes/#csi-ephemeral-volumes">CSI ephemeral volumes</a> backed by your Cloud Storage buckets to automatically manage storage resources for your Kubernetes <a href="https://kubernetes.io/docs/concepts/workloads/pods/">Pods</a> or <a href="https://kubernetes.io/docs/concepts/workloads/controllers/job/">Jobs</a> on Google Kubernetes Engine (GKE). CSI ephemeral volumes are tied to the Pod or Job lifecycle, and you don't need to manually handle PersistentVolume and PersistentVolumeClaim objects.</p> <p>This guide is for Platform admins and operators who want to simplify storage management for their GKE applications.</p> <p>Before reading this page, ensure you're familiar with CSI ephemeral volumes, Kubernetes Pods and Jobs, and Cloud Storage buckets.</p> <p>If you are already familiar with PersistentVolumes and want consistency with your existing deployments that rely on this resource type, see <a href="cloud-storage-fuse-csi-driver-pv">Mount Cloud Storage buckets as persistent volumes</a>.</p> <h2 id="before-you-begin">Before you begin</h2> <p>Make sure you have completed these prerequisites:</p> <ul> <li>Understand the <a href="../concepts/cloud-storage-fuse-csi-driver#requirements">requirements</a> and <a href="../concepts/cloud-storage-fuse-csi-driver#limitations">limitations</a> of the Cloud Storage FUSE CSI driver.</li> <li><a href="cloud-storage-fuse-csi-driver-setup#create-bucket">Create the Cloud Storage bucket</a></li> <li><a href="cloud-storage-fuse-csi-driver-setup#enable">Enable the Cloud Storage FUSE CSI driver</a></li> <li><a href="cloud-storage-fuse-csi-driver-setup#authentication">Configure access to Cloud Storage buckets</a></li> </ul> <h2 id="how">How CSI ephemeral storage for Cloud Storage buckets work</h2> <p>CSI ephemeral volumes simplify storage management for your applications on GKE. You define CSI ephemeral volumes directly within your Pod or Job specification. Using CSI ephemeral volumes eliminates the need for separate PersistentVolume and PersistentVolumeClaim objects.</p> <p>Using a CSI ephemeral volume involves these operations:</p> <ol> <li>
+<p><strong>Storage definition</strong>: You specify the storage in your Pod or Job's YAML file, including the CSI driver to use and any required parameters. For Cloud Storage FUSE CSI driver, you specify the bucket name and other relevant details.</p> <p>Optionally, you can fine-tune the performance of your CSI driver by using the <a href="cloud-storage-fuse-csi-driver-perf#file-caching">file caching</a> feature. File caching can boost GKE app performance by caching frequently accessed Cloud Storage files on a faster disk.</p> <p>Additionally, you can use the <a href="cloud-storage-fuse-csi-driver-perf#parallel-download">parallel download</a> feature to accelerate reading large files from Cloud Storage for multi-threaded downloads. You can use this feature to improve model load times, especially for reads of over 1 GB in size.</p> <aside class="tip"><strong>Tip:</strong><span> For additional ways to fine-tune the performance of your CSI driver, see <a href="cloud-storage-fuse-csi-driver-perf">Optimize performance for the Cloud Storage FUSE CSI driver</a>.</span></aside>
+</li> <li><p><strong>Driver invocation</strong>: When you create the Pod or Job, GKE detects the ephemeral volume request and calls the Cloud Storage FUSE CSI driver.</p></li> <li><p><strong>Volume mount and attachment</strong>: The CSI driver mounts the CSI ephemeral volume (which points to the underlying Cloud Storage bucket) and makes it available to the Pod or Job, making it accessible to your application. To fine-tune how buckets are mounted in the file system, you can use <a href="cloud-storage-fuse-csi-driver-perf#mount-options">mount options</a>. You can also use <a href="cloud-storage-fuse-csi-driver-perf#volume-attributes">volume attributes</a> to configure specific behavior of the Cloud Storage FUSE CSI driver.</p></li> <li><p><strong>Lifecycle management</strong>: The ephemeral volume exists for the lifetime of the Pod or Job. When the Pod is deleted or the Job completes, the CSI driver automatically handles cleanup, and unmounting the volume.</p></li> </ol> <aside class="note"><strong>Note:</strong><span> When using CSI ephemeral volumes, you are still responsible for creating the buckets before use and for deleting the buckets.</span></aside> <h2 id="attach-the-csi-ephemeral-volume">Attach the CSI ephemeral volume</h2> <p>Follow these instructions, depending on whether you want to attach the CSI ephemeral volume to a Pod or Job.</p> <div> <section><p class="_code-tab"><strong>Pod</strong></p>
+<p>To attach the CSI ephemeral volume in a Pod, follow these steps:</p> <ol> <li>
+<p>Create a Pod YAML manifest with the following specification:</p> 
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: gcs-fuse-csi-example-ephemeral 
+  namespace: NAMESPACE
+  annotations:
+    gke-gcsfuse/volumes: "true" 
+spec:
+  terminationGracePeriodSeconds: 60
+  containers:
+  - image: busybox
+    name: busybox
+    command: ["sleep"]
+    args: ["infinity"] 
+    volumeMounts:
+    - name: gcs-fuse-csi-ephemeral
+      mountPath: /data
+      readOnly: true
+  serviceAccountName: KSA_NAME
+  volumes:
+  - name: gcs-fuse-csi-ephemeral
+    csi:
+      driver: gcsfuse.csi.storage.gke.io
+      readOnly: true
+      volumeAttributes:
+        bucketName: BUCKET_NAME
+        mountOptions: "implicit-dirs" 
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">NAMESPACE</var>: the Kubernetes namespace where you want to deploy your Pod.</li> <li>
+<var translate="no">KSA_NAME</var>: the name of the Kubernetes ServiceAccount you specified when <a href="cloud-storage-fuse-csi-driver-setup#authentication">configuring access to the Cloud Storage buckets</a>.</li> <li>
+<var translate="no">BUCKET_NAME</var>: the Cloud Storage bucket name you specified when configuring access to the Cloud Storage buckets. You can specify an underscore (<code translate="no" dir="ltr">_</code>) to mount all buckets that the Kubernetes ServiceAccount can access. To learn more, see <a href="https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/mount-bucket#dynamic-mount">Dynamic mounting</a> in the Cloud Storage FUSE documentation.</li> </ul> <p>The example manifest shows these required settings:</p> <ul> <li>
+<code translate="no" dir="ltr">metadata.annotations</code>: the annotation <code translate="no" dir="ltr">gke-gcsfuse/volumes: "true"</code> is required. See <a href="cloud-storage-fuse-csi-driver-sidecar">Configure the sidecar container</a> for optional annotations.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.driver</code>: use <code translate="no" dir="ltr">gcsfuse.csi.storage.gke.io</code> as the CSI driver name.</li> </ul> <p>Optionally, you can adjust these variables:</p> <ul> <li>
+<code translate="no" dir="ltr">spec.terminationGracePeriodSeconds</code>: By default, this is set to 30. If you need to write large files to the Cloud Storage bucket, increase this value to make sure that Cloud Storage FUSE has enough time to flush the data after your application exits. To learn more, see <a href="https://cloud.google.com/blog/products/containers-kubernetes/kubernetes-best-practices-terminating-with-grace">Kubernetes best practices: terminating with grace</a>.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.volumeAttributes.mountOptions</code>: Pass <a href="cloud-storage-fuse-csi-driver-perf#mount-options">mount options</a> to Cloud Storage FUSE. Specify the flags in one string separated by commas, without spaces.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.volumeAttributes</code>: Pass additional <a href="cloud-storage-fuse-csi-driver-perf#volume-attributes">volume attributes</a> to Cloud Storage FUSE.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.readOnly</code>: Specify true if all the volume mounts are read-only.</li> <li>
+<code translate="no" dir="ltr">spec.containers[n].volumeMounts[m].readOnly</code>: Specify true if only a specific volume mount is read-only.</li> </ul>
+</li> <li>
+<p>Run the following command to apply the manifest to your cluster:</p> 
+<pre data-language="">kubectl apply -f FILE_PATH
+</pre> <p>Replace <var translate="no">FILE_PATH</var> with the path to your YAML file.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Pod (file caching)</strong></p>
+<p>To attach the CSI ephemeral volume with file caching in a Pod, follow these steps:</p> <ol> <li>
+<p>Create a cluster or node pool with <a href="../concepts/local-ssd#ephemeral">Local SSD-backed ephemeral storage</a>, by following the steps in <a href="persistent-volumes/local-ssd#create">Create a cluster or node pool with Local SSD-backed ephemeral storage</a>.</p> <aside class="note"><strong>Note:</strong><span> If you want to fine tune the storage type of the file cache (for example, if you are using a TPU VM and want to use RAM for faster processing), see <a href="cloud-storage-fuse-csi-driver-perf#select-storage-for-file-cache">Select the storage for backing your file cache</a>.</span></aside>
+</li> <li>
+<p>Create a Pod YAML manifest with the following specification:</p> 
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: gcs-fuse-csi-file-cache-example 
+  namespace: NAMESPACE
+  annotations:
+    gke-gcsfuse/volumes: "true"
+    gke-gcsfuse/ephemeral-storage-limit: "50Gi" 
+spec:
+  nodeSelector:
+    cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
+  restartPolicy: Never
+  initContainers:
+  - name: data-loader
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+    resources:
+      limits:
+        cpu: 500m
+        memory: 1Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    command:
+      - "/bin/sh"
+      - "-c"
+      - |
+        mkdir -p /test_files
+        for i in $(seq 1 1000); do dd if=/dev/zero of=/test_files/file_$i.txt bs=1024 count=64; done
+        gcloud storage cp /test_files gs://BUCKET_NAME --recursive
+  containers:
+  - name: data-validator
+    image: busybox
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 500m
+        memory: 512Mi
+    command:
+      - "/bin/sh"
+      - "-c"
+      - |
+        echo "first read with cache miss"
+        time cat /data/test_files/file_* &gt; /dev/null
+
+        echo "second read from local cache"
+        time cat /data/test_files/file_* &gt; /dev/null 
+    volumeMounts:
+    - name: gcs-fuse-csi-ephemeral
+      mountPath: /data
+  serviceAccountName: KSA_NAME
+  volumes:
+  - name: gcs-fuse-csi-ephemeral
+    csi:
+      driver: gcsfuse.csi.storage.gke.io
+      volumeAttributes:
+        bucketName: BUCKET_NAME
+        mountOptions: "implicit-dirs,file-cache:max-size-mb:-1"
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">NAMESPACE</var>: the Kubernetes namespace where you want to deploy your Pod.</li> <li>
+<var translate="no">KSA_NAME</var>: the name of the Kubernetes ServiceAccount you specified when configuring access to the Cloud Storage buckets.</li> <li>
+<p><var translate="no">BUCKET_NAME</var>: the Cloud Storage bucket name you specified when configuring access to the Cloud Storage buckets. You can specify an underscore (<code translate="no" dir="ltr">_</code>) to mount all buckets that the Kubernetes ServiceAccount can access. To learn more, see <a href="https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/mount-bucket#dynamic-mount">Dynamic mounting</a> in the Cloud Storage FUSE documentation.</p> <p>In the example manifest, the init container data-loader generates 1,000 files with size of 64 KiB, and uploads the files to a Cloud Storage bucket. The main container <code translate="no" dir="ltr">data-validator</code> reads all the files from the bucket twice, and logs the duration.</p>
+</li> </ul>
+</li> <li>
+<p>Run the following command to apply the manifest to your cluster:</p> 
+<pre data-language="">kubectl apply -f FILE_PATH
+</pre> <p>Replace <var translate="no">FILE_PATH</var> with the path to your YAML file.</p>
+</li> <li>
+<p>To view the log output, run the following command:</p> 
+<pre data-language="">kubectl logs -n NAMESPACE gcs-fuse-csi-file-cache-example -c data-validator
+</pre> <p>Replace <var translate="no">NAMESPACE</var> with the namespace of your workload.</p> <p>The output should look similar to the following:</p> 
+<pre data-language="">first read with cache miss
+real    0m 54.68s
+...
+second read from local cache
+real    0m 0.38s
+...
+</pre> <p>The output shows that the second read with local cache is much faster than the first read with a cache miss.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Pod (parallel download)</strong></p>
+<p>To attach the CSI ephemeral volume with parallel download in a Pod, follow these steps:</p> <ol> <li>
+<p>Create a Pod YAML manifest with the following specification:</p> 
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: gcs-fuse-csi-example-ephemeral 
+  namespace: NAMESPACE
+  annotations:
+    gke-gcsfuse/volumes: "true"
+    gke-gcsfuse/ephemeral-storage-limit: "50Gi" 
+spec:
+  containers:
+  ...
+  volumes:
+  - name: gcs-fuse-csi-ephemeral 
+    csi:
+      driver: gcsfuse.csi.storage.gke.io
+      volumeAttributes:
+        bucketName: BUCKET_NAME
+        mountOptions: "implicit-dirs,file-cache:enable-parallel-downloads:true,file-cache:max-size-mb:-1"
+        fileCacheCapacity: "-1"
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">NAMESPACE</var>: the Kubernetes namespace where you want to deploy your Pod.</li> <li>
+<var translate="no">BUCKET_NAME</var>: the Cloud Storage bucket name you specified when configuring access to the Cloud Storage buckets. You can specify an underscore (<code translate="no" dir="ltr">_</code>) to mount all buckets that the Kubernetes ServiceAccount can access. To learn more, see <a href="https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/mount-bucket#dynamic-mount">Dynamic mounting</a> in the Cloud Storage FUSE documentation.</li> </ul>
+</li> <li>
+<p>Run the following command to apply the manifest to your cluster:</p> 
+<pre data-language="">kubectl apply -f FILE_PATH
+</pre> <p>Replace <var translate="no">FILE_PATH</var> with the path to your YAML file.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Job</strong></p>
+<p>To attach the CSI ephemeral volume in a Job, follow these steps:</p> <ol> <li>
+<p>Create a Job YAML manifest with the following specification:</p> 
+<pre data-language="">apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gcs-fuse-csi-job-example 
+  namespace: NAMESPACE 
+spec:
+  template:
+    metadata: 
+      annotations:
+        gke-gcsfuse/volumes: "true"
+    spec:
+      serviceAccountName: KSA_NAME 
+      containers:
+      - name: writer
+        image: busybox
+        command:
+          - "/bin/sh"
+          - "-c"
+          - touch /data/test &amp;&amp; echo $(date) &gt;&gt; /data/test &amp;&amp; sleep 10
+        volumeMounts:
+        - name: gcs-fuse-csi-ephemeral
+          mountPath: /data
+      - name: reader
+        image: busybox
+        command:
+          - "/bin/sh"
+          - "-c"
+          - sleep 10 &amp;&amp; cat /data/test 
+        volumeMounts:
+        - name: gcs-fuse-csi-ephemeral
+          mountPath: /data
+          readOnly: true
+      volumes:
+      - name: gcs-fuse-csi-ephemeral
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: BUCKET_NAME
+      restartPolicy: Never 
+  backoffLimit: 1
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">NAMESPACE</var>: the Kubernetes namespace where you deploy your Pod.</li> <li>
+<var translate="no">KSA_NAME</var>: the name of the Kubernetes ServiceAccount you specified when configuring access to the Cloud Storage buckets.</li> <li>
+<var translate="no">BUCKET_NAME</var>: the Cloud Storage bucket name you specified when configuring access to the Cloud Storage buckets. You can specify an underscore (<code translate="no" dir="ltr">_</code>) to mount all buckets that the Kubernetes ServiceAccount can access. To learn more, see <a href="https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/mount-bucket#dynamic-mount">Dynamic mounting</a> in the Cloud Storage FUSE documentation.</li> </ul> <p>The example manifest shows these required settings:</p> <ul> <li>
+<code translate="no" dir="ltr">metadata.annotations</code>: the annotation <code translate="no" dir="ltr">gke-gcsfuse/volumes: "true"</code> is required. See <a href="cloud-storage-fuse-csi-driver-sidecar">Configure the sidecar container</a> for optional annotations.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.drive</code>r: use <code translate="no" dir="ltr">gcsfuse.csi.storage.gke.io</code> as the CSI driver name.</li> </ul> <p>Optionally, you can adjust these variables:</p> <ul> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.volumeAttributes.mountOptions</code>: Pass <a href="cloud-storage-fuse-csi-driver-perf#mount-options">mount options</a> to Cloud Storage FUSE. Specify the flags in one string separated by commas, without spaces.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.volumeAttributes</code>: Pass additional <a href="cloud-storage-fuse-csi-driver-perf#volume-attributes">volume attributes</a> to Cloud Storage FUSE.</li> <li>
+<code translate="no" dir="ltr">spec.volumes[n].csi.readOnly</code>: Specify true if all the volume mounts are read-only.</li> <li>
+<code translate="no" dir="ltr">spec.containers[n].volumeMounts[m].readOnly</code>: Specify true if only a specific volume mount is read-only.</li> </ul>
+</li> <li>
+<p>Run the following command to apply the manifest to your cluster:</p> 
+<pre data-language="">kubectl apply -f FILE_PATH
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILE_PATH</var></code> with the path to your YAML file.</p>
+</li> </ol></section> </div> <h2 id="mount-same-bucket-different-csi-ev">Mount the same Cloud Storage bucket with different CSI ephemeral volumes</h2> <p>You can optionally use multiple CSI ephemeral volumes that are backed by the same Cloud Storage bucket. To do so, attach two or more volumes that reference the same bucket name at different mount paths. An example use case could be mounting different CSI ephemeral volumes with different mount options to the same Pod, where each ephemeral volume refers to the same Cloud Storage bucket. The following is a sample Pod manifest using this feature:</p> 
+<pre>apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gcs-fuse-csi-job-example
+  namespace: NAMESPACE
+spec:
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+    spec:
+      serviceAccountName: KSA_NAME
+      containers:
+      - name: writer
+        image: busybox
+        command:
+          - "/bin/sh"
+          - "-c"
+          - touch /data/test &amp;&amp; echo $(date) &gt;&gt; /data/test &amp;&amp; sleep 10
+        volumeMounts: 
+        - name: gcs-fuse-csi-ephemeral
+          mountPath: /data
+        volumeMounts:
+        - name: gcs-fuse-csi-ephemeral-with-mo
+          mountPath: /data2
+      volumes:
+      - name: gcs-fuse-csi-ephemeral
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: BUCKET_NAME
+      - name: gcs-fuse-csi-ephemeral-with-mo
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: BUCKET_NAME
+            mountOptions: "implicit-dirs"
+      restartPolicy: Never
+  backoffLimit: 1
+</pre> <h2 id="troubleshoot">Troubleshoot issues</h2> <p>For more information about troubleshooting the Cloud Storage FUSE CSI driver, see the <a href="https://github.com/GoogleCloudPlatform/gcs-fuse-csi-driver/blob/main/docs/troubleshooting.md">troubleshooting guide</a> in the GitHub project documentation.</p> <h2 id="whats-next">What's next</h2> <ul> <li><a href="cloud-storage-fuse-csi-driver-perf">Learn how to optimize performance for the Cloud Storage FUSE CSI driver.</a></li> <li>
+<a href="https://github.com/GoogleCloudPlatform/gcs-fuse-csi-driver/blob/main/examples/README.md">Explore additional samples for using the CSI driver on GitHub</a>.</li> <li>
+<a href="https://docs.cloud.google.com/storage/docs/gcs-fuse">Learn more about Cloud Storage FUSE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-ephemeral" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-ephemeral</a>
+  </p>
+</div>

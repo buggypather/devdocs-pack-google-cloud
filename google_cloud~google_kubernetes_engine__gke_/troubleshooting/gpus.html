@@ -1,0 +1,283 @@
+<h1>Troubleshoot GPUs in GKE</h1>  <p>If your Google Kubernetes Engine (GKE) Pods are stuck in a <code translate="no" dir="ltr">Pending</code> state while requesting <code translate="no" dir="ltr">nvidia.com/gpu</code> resources, or if your nodes fail to register their available GPUs, you might have an issue with the NVIDIA driver installation or your node pool configuration. These problems prevent your workloads from accessing the GPU hardware that they need.</p> <p>This document shows you how to diagnose and resolve common problems that prevent GKE from scheduling or running GPU-accelerated workloads. Learn how to verify the GPU driver installation, inspect Pod and node logs for errors, and confirm that your configurations are correct.</p> <p>This information is for Platform admins and operators who manage GPU-enabled node pools and need to resolve NVIDIA driver issues, and for Application developers who need to debug GPU workloads that are stuck or failing to start. For more information about the common roles and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="gpu-drivers">GPU driver installation</h2> <p>This section provides troubleshooting information for automatic NVIDIA device driver installation in GKE.</p> <h3 id="driver-installation-fails-ubuntu">Driver installation fails in Ubuntu nodes</h3> <p>If you use Ubuntu nodes that have attached L4, RTX PRO 6000, H100, or H200 GPUs, the default GPU driver that GKE installs might not be at or later than the required version for those GPUs. As a result, the GPU device plugin Pod remains stuck in the Pending state and your GPU workloads on those nodes might experience issues.</p> <p>To resolve this issue, see the instructions for the respective GPU:</p> <div> <section><p class="_code-tab"><strong>L4 and H100</strong></p>
+<p>To resolve this issue for L4 and H100 GPUs, we recommend upgrading to the following GKE versions which install GPU driver version 535 as the default driver:</p> <ul> <li>1.26.15-gke.1483000 and later</li> <li>1.27.15-gke.1039000 and later</li> <li>1.28.11-gke.1044000 and later</li> <li>1.29.6-gke.1073000 and later</li> <li>1.30.2-gke.1124000 and later</li> </ul> <p>Alternatively, you can manually install driver version 535 or later by running the following command:</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/ubuntu/daemonset-preloaded-R535.yaml
+</pre></section> <section><p class="_code-tab"><strong>RTX PRO 6000</strong></p>
+<p>To resolve this issue for RTX PRO 6000 GPUs, upgrade to one of the following GKE versions. These versions install GPU driver version 580 as the default driver:</p> <ul> <li>1.32.8-gke.1170000 and later</li> <li>1.33.4-gke.1245000 and later</li> <li>1.34.0-gke.1662000 and later</li> </ul> <p>This solution works only for <a href="https://docs.cloud.google.com/compute/docs/gpus#rtx-6000-gpus">G4 machine types</a> with one or more GPUs. G4 machine types that have less than one GPU don't support Ubuntu node images.</p></section> <section><p class="_code-tab"><strong>H200</strong></p>
+<p>To resolve this issue for H200 GPUs, you must manually install driver version 550 or later by running the following command:</p> 
+<pre data-language="">kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/refs/heads/master/nvidia-driver-installer/ubuntu/daemonset-preloaded-R550.yaml
+</pre></section> </div> <h3 id="device-plugin-crashloopbackoff">GPU device plugins fail with CrashLoopBackOff errors</h3> <p>The following issue occurs if you used the <a href="../how-to/gpus#installing_drivers">manual driver installation method</a> in your node pool prior to <strong>January 25, 2023</strong> and later upgraded your node pool to a GKE version that supports automatic driver installation. Both installation workloads exist at the same time and try to install conflicting driver versions on your nodes.</p> <p>The GPU device plugin init container fails with the <code translate="no" dir="ltr">Init:CrashLoopBackOff</code> status. The logs for the container are similar to the following:</p> 
+<pre>failed to verify installation: failed to verify GPU driver installation: exit status 18
+</pre> <p>To resolve this issue, try the following methods:</p> <ul> <li>
+<p>Remove the manual driver installation DaemonSet from your cluster. This deletes the conflicting installation workload and lets GKE automatically install a driver to your nodes.</p> <aside class="note"><strong>Note:</strong><span> Ensure that all of your node pools use automatic installation before you delete the DaemonSet.</span></aside>
+<pre>kubectl delete -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
+</pre>
+</li> <li>
+<p>Re-apply the manual driver installation DaemonSet manifest to your cluster. On January 25, 2023, we updated the manifest to ignore nodes that use automatic driver installation.</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
+</pre>
+</li> <li>
+<p>Disable automatic driver installation for your node pool. The existing driver installation DaemonSet should work as expected after the update operation completes.</p> 
+<pre>gcloud container node-pools update POOL_NAME \
+    --accelerator=type=GPU_TYPE,count=GPU_COUNT,gpu-driver-version=disabled \
+    --cluster=CLUSTER_NAME \
+    --location=LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GPU_TYPE</var></code>: the GPU type that the node pool already uses.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GPU_COUNT</var></code>: the number of GPUs that are already attached to the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the GKE cluster that contains the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Compute Engine location of the cluster.</li> </ul>
+</li> </ul> <p>For more information about mapping the GPU driver version to GKE version, see <a href="#map-gke-cos-gpu">Map the GKE version and Container-Optimized OS node image version to the GPU driver version</a>.</p> <h3 id="missing-driver-gpu-nodes">Error: "Container image cos-nvidia-installer:fixed is not present with pull policy of Never." or "Container image ubuntu-nvidia-installer:fixed is not present with pull policy of Never."</h3> <p>This issue occurs when the <code translate="no" dir="ltr">nvidia-driver-installer</code> Pods are in the <code translate="no" dir="ltr">PodInitializing</code> state and the GPU plugin device or the GPU driver installer Pods report the following error. The specific error message depends on the operating system running on your node:</p> <div> <section><p class="_code-tab"><strong>COS</strong></p>
+
+<pre data-language="">Container image "cos-nvidia-installer:fixed" is not present with pull policy of Never.
+</pre></section> <section><p class="_code-tab"><strong>Ubuntu</strong></p>
+
+<pre data-language="">Container image "gke-nvidia-installer:fixed" is not present with pull policy of Never.
+</pre></section> </div> <p>This issue can occur when the garbage collector removes the preloaded NVIDIA driver image to free space on a node. When the driver Pod is recreated or its container is restarted, GKE won't be able to locate the preloaded image.</p> <p>To mitigate the garbage collection issue when you are running COS, upgrade your GKE nodes to one of these versions that contain the fix:</p> <ul> <li>1.25.15-gke.1040000 and later</li> <li>1.26.10-gke.1030000 and later</li> <li>1.27.6-gke.1513000 and later</li> <li>1.28.3-gke.1061000 and later</li> </ul> <p>For more information about mapping the GPU driver version to GKE version, see <a href="#map-gke-cos-gpu">Map the GKE version and Container-Optimized OS node image version to the GPU driver version</a>.</p> <p>If your nodes are running Ubuntu, no fix is available yet for this garbage collection issue. To mitigate this issue on Ubuntu, you can run a privileged container that interacts with the host to ensure the correct setup of NVIDIA GPU drivers. To do so, run <code translate="no" dir="ltr">sudo /usr/local/bin/nvidia-container-first-boot</code> from your node or apply the following manifest:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: gke-nvidia-installer-fixup
+spec:
+  nodeSelector:
+    cloud.google.com/gke-os-distribution: ubuntu
+  hostPID: true
+  containers:
+  - name: installer
+    image: ubuntu
+    securityContext:
+      privileged: true
+    command:
+      - nsenter
+      - -at
+      - '1'
+      - --
+      - sh
+      - -c
+      - "/usr/local/bin/nvidia-container-first-boot"
+  restartPolicy: Never
+</pre> <p>Another potential cause of the issue is when the NVIDIA driver images are lost after node reboot or host maintenance. This may occur on confidential nodes, or nodes with GPUs, that use ephemeral local SSD storage. In this situation, GKE preloads the <code translate="no" dir="ltr">nvidia-installer-driver</code> container images on nodes and moves them from the boot disk to the local SSD on first boot.</p> <p>To confirm there was a host maintenance event, use the following log filter:</p> 
+<pre>resource.type="gce_instance"
+protoPayload.serviceName="compute.googleapis.com"
+log_id("cloudaudit.googleapis.com/system_event")
+</pre> <p>To mitigate the host maintenance issue, upgrade your GKE version to one of these versions:</p> <ul> <li>1.27.13-gke.1166000 and later</li> <li>1.29.3-gke.1227000 and later</li> <li>1.28.8-gke.1171000 and later</li> </ul> <h3 id="driver-install-dirs-config">Error: failed to configure GPU driver installation dirs: failed to create lib64 overlay: failed to create dir /usr/local/nvidia/lib64: mkdir /usr/local/nvidia/lib64: not a directory.</h3> <p>You encounter this error from the GPU driver installer container inside the GPU device plugin when NCCL fastsocket is enabled:</p> 
+<pre>failed to configure GPU driver installation dirs: failed to create lib64 overlay: failed to create dir /usr/local/nvidia/lib64: mkdir /usr/local/nvidia/lib64: not a directory.
+</pre> <p>This issue only happens on clusters and nodes running GKE 1.28 and 1.29.</p> <p>The issue is caused by a NCCL fastsocket race condition with the GPU driver installer.</p> <p>To mitigate this issue, upgrade your GKE version to one of these versions:</p> <ul> <li>1.28.8-gke.1206000 and later</li> <li>1.29.3-gke.1344000 and later</li> </ul> <p>For more information, read the <a href="https://github.com/GoogleCloudPlatform/container-engine-accelerators/blob/master/gpudirect-tcpxo/README.md">GPUDirect-TCPXO Release Notes</a>.</p> <h3 id="device-not-found">Error: Failed to get device for nvidia0: device nvidia0 not found.</h3> <p>The following error indicates that XID 62 and RmInitAdapter failed for GPU with minor 0:</p> 
+<pre>Failed to get device for nvidia0: device nvidia0 not found.
+</pre> <p>NVIDIA driver version 525.105.17 has a bug that can cause communication errors (XID) and prevent the GPU from initializing properly, leading to a failure to initialize the GPU.</p> <p>To fix this issue, upgrade the NVIDIA driver to driver version 525.110.11 or later.</p> <h2 id="gpudirect-rdma">GPUDirect RDMA issues</h2> <p>This section provides troubleshooting information for GPUDirect RDMA issues.</p> <h3 id="gib-plugin-not-found">Error: Network gIB plugin is not found</h3> <p>The <code translate="no" dir="ltr">pytorch/pytorch:latest</code> image from the PyTorch repository doesn't include the Netlink Library Protocol Suite (<code translate="no" dir="ltr">libnl</code>), which is needed by the gIB plugin. The following error indicates that gIB plugin didn't load because the <code translate="no" dir="ltr">libnl</code> libraries are missing from the image:</p> 
+<pre>ncclInvalidUsage: Error: network gIB not found.
+</pre> <p>To resolve this issue, you must use a different Pytorch base image or manually add the libraries to your containers. The issue is not specific to any machine type. For more information about using NCCL/gIB, see <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/nccl/overview">Optimize cluster networking by using NCCL/gIB</a>.</p> <h4 id="resolve_the_issue_by_using_the_nvidia_pytorch_image">Resolve the issue by using the Nvidia PyTorch image</h4> <p>You can fix this issue by using the <a href="https://nvcr.io/nvidia/pytorch:26.04-py3">NVIDIA PyTorch image</a>. To find the latest version, see the <a href="https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/index.html">PyTorch Release Notes</a>.</p> <h4 id="resolve_the_issue_through_manual_installation">Resolve the issue through manual installation</h4> <p>If you can't migrate to another image base, you can also manually install the <code translate="no" dir="ltr">libnl</code> libraries in the container image.</p> 
+<pre>apt update -y &amp;&amp; apt upgrade -y &amp;&amp; apt install -y libnl-3-200 libnl-route-3-200
+</pre> <p>To help ensure the consistency of IBVerbs library within the workload container, use the updated NCCL RDMA Installer DaemonSet to install the gIB plugin libraries on the container path.</p> <p>To download the DaemonSet configuration, clone the container engine accelerators repository:</p> 
+<pre>cd
+git clone https://github.com/GoogleCloudPlatform/container-engine-accelerators.git
+</pre> <p>Find the configuration under tree/master/gpudirect-rdma directory:</p> 
+<pre>cd container-engine-accelerators/gpudirect-rdma
+ls -l nccl-rdma-installer*
+-rw-r----- 1 adelab primarygroup 2899 May  6 15:57 nccl-rdma-installer-a4x.yaml
+-rw-r----- 1 adelab primarygroup 2743 Apr 30 00:34 nccl-rdma-installer-autopilot.yaml
+-rw-r----- 1 adelab primarygroup 2677 May  6 15:57 nccl-rdma-installer.yaml
+</pre> <p>Choose one of the following installer configurations:</p> <table class="fixed"> <tbody> <tr> <th>Description</th> <th><code translate="no" dir="ltr">nccl-rdma-installer.yaml</code></th> <th><code translate="no" dir="ltr">nccl-rdma-installer-a4x.yaml</code></th> <th><code translate="no" dir="ltr">nccl-rdma-installer-autopilot.yaml</code></th> </tr> <tr> <td>GKE mode of operation</td> <td>GKE Standard</td> <td>GKE Standard</td> <td>GKE Autopilot</td> </tr> <tr> <td>Machine types</td> <td>
+<a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#a4-machine-type">A4</a> and <a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#a3-ultra-vms">A3 Ultra</a> machine types</td> <td>
+<a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#a4x-machine-type">A4X</a> machine type</td> <td>
+<a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#a4-machine-type">A4</a> and <a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#a3-ultra-vms">A3 Ultra</a> machine types</td> </tr> <tr> <td>Namespace</td> <td>Deploys to <code translate="no" dir="ltr">kube-system</code>.</td> <td>Deploys to <code translate="no" dir="ltr">kube-system</code>.</td> <td>Deploys to a dedicated <code translate="no" dir="ltr">rdma-system</code> namespace (because Autopilot restricts modifications to the <code translate="no" dir="ltr">kube-system</code> namespace).</td> </tr> <tr> <td>Priority class</td> <td>Uses <code translate="no" dir="ltr">system-node-critical</code> to help ensure the installer runs with high priority.</td> <td>Uses <code translate="no" dir="ltr">system-node-critical</code>.</td> <td>None. (Autopilot restricts the use of system-level priority classes).</td> </tr> <tr> <td>Function</td> <td>Runs as a DaemonSet and installs the GPUDirect-TCPX (GIB) NCCL plugin (specifically <code translate="no" dir="ltr">nccl-plugin-gib:v1.1.1</code>) to the <code translate="no" dir="ltr">/home/kubernetes/bin/nvidia/lib64</code> and <code translate="no" dir="ltr">/home/kubernetes/bin/gib</code> host directories. This approach enables high-performance RDMA communication for NCCL on GKE nodes.</td> <td>Similar to the base installer, but installs the ARM64-compiled version of the GPUDirect-TCPX (GIB) NCCL plugin (<code translate="no" dir="ltr">nccl-plugin-gib-arm64:v1.1.0</code>). Also includes a specific node affinity for <code translate="no" dir="ltr">nvidia-gb200</code> and <code translate="no" dir="ltr">arm64</code> to help ensure it runs only on these specific GKE nodes.</td> <td>Installs the GPUDirect-TCPX (GIB) NCCL plugin (<code translate="no" dir="ltr">nccl-plugin-gib:v1.1.1</code>), but with modifications that support the security and operational model of Autopilot mode: <ul> <li>It deploys in the <code translate="no" dir="ltr">rdma-system</code> namespace.</li> <li>The installation script is invoked with the <code translate="no" dir="ltr">--install-nccl</code> flag, which performs additional setup to help ensure NCCL itself is properly configured or installed in the Autopilot environment. In GKE Autopilot, the host environment might be more restricted or pre-configured differently compared to GKE Standard.</li> </ul> </td> </tr> </tbody> </table> <p>Apply the daemonset:</p> 
+<pre>kubectl apply -f nccl-rdma-installer.yaml
+</pre> <h3 id="map-gke-cos-gpu">Map the GKE version and Container-Optimized OS node image version to the GPU driver version</h3> To find the GPU driver versions that are mapped with <a href="https://docs.cloud.google.com/kubernetes-engine/docs/release-notes#current_versions">GKE versions</a> and Container-Optimized OS node image versions, do the following steps: <ol> <li> <a href="../concepts/node-images#map-gke-cos">Map Container-Optimized OS node image versions to GKE patch versions</a> for the specific GKE version where you want to find the GPU driver version. For example, 1.33.0-gke.1552000 uses cos-121-18867-90-4. </li> <li> Choose the milestone of the Container-Optimized OS node image version in the <a href="https://docs.cloud.google.com/container-optimized-os/docs/release-notes">Container-Optimized OS release notes</a>. For example, choose Milestone 121 for cos-121-18867-90-4. </li> <li> In the release notes page for the specific milestone, find the release note corresponding with the specific Container-Optimized OS node image version. For example, in <a href="https://docs.cloud.google.com/container-optimized-os/docs/release-notes/m121">Container-Optimized OS Release Notes: Milestone 121</a>, see <a href="https://docs.cloud.google.com/container-optimized-os/docs/release-notes/m121#cos-121-18867-90-4_">cos-121-18867-90-4</a>. In the table in the <b>GPU Drivers</b> column, click <b>See List</b> to see the GPU driver version information. </li> </ol> <p>In GKE version 1.36.0-gke.3302004 and later, GKE automatically publishes the installed NVIDIA driver version as annotations on running GPU nodes. To view the driver version annotations on a GPU node, run the following command:</p> 
+<pre>kubectl get node GPU_NODE_NAME -o jsonpath='{.metadata.annotations}'</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GPU_NODE_NAME</var></code> with the name of your GPU node.</p> <p>The output includes annotations similar to the following:</p> 
+<pre>
+{
+  "cloud.google.com/cuda.driver-version.full": "580.126.20",
+  "cloud.google.com/cuda.driver-version.major": "580",
+  "cloud.google.com/cuda.driver-version.minor": "126",
+  "cloud.google.com/cuda.driver-version.revision": "20"
+}
+</pre> <h3 id="nvidia-smi-fails">The <code translate="no" dir="ltr">nvidia-smi</code> command fails</h3> <p>When you use GPU VMs to run workloads in GKE, commands like <code translate="no" dir="ltr">nvidia-smi</code> might fail within the container with any of the following errors:</p> <ul> <li><code translate="no" dir="ltr">bash: nvidia-smi: command not found</code></li> <li>Errors indicating that <code translate="no" dir="ltr">libnvidia-ml.so</code> or other NVIDIA libraries cannot be found.</li> </ul> <p>GKE mounts the necessary NVIDIA drivers and tools from the host node in your containers, typically under the <code translate="no" dir="ltr">/usr/local/nvidia/</code> path. However, the container's default environment variables (<code translate="no" dir="ltr">PATH</code> and <code translate="no" dir="ltr">LD_LIBRARY_PATH</code>) might not include the paths to these NVIDIA binaries and libraries.</p> <p>To solve these errors, update your Pod or Deployment manifest to include the necessary NVIDIA paths in the <code translate="no" dir="ltr">PATH</code> and <code translate="no" dir="ltr">LD_LIBRARY_PATH</code> environment variables for the container.</p> <p>For example, add the following <code translate="no" dir="ltr">env</code> block to your <code translate="no" dir="ltr">spec.template.spec.containers</code> spec:</p> 
+<pre>spec:
+  containers:
+  - name: gpu-container
+    image: gpu-image
+    env:
+    - name: LD_LIBRARY_PATH
+      # Prepend NVIDIA lib64 directory to existing LD_LIBRARY_PATH
+      value: /usr/local/nvidia/lib64
+    - name: PATH
+      # Prepend NVIDIA bin directory to existing PATH
+      value: /usr/local/nvidia/bin:$PATH
+    # ... other container settings
+</pre> <h2 id="reboot-guest-os">Guest OS reboot for standard clusters</h2> <p>This section demonstrates how to use GKE to manage the reboot of the guest OS running on the node for standard clusters.</p> <p>A GKE node might require a reboot when it has Xid or other GPU issues. For examples of Xid issues, see <a href="https://docs.cloud.google.com/compute/docs/troubleshooting/troubleshooting-gpus#xid_messages">Compute Engine Xid handling</a>.</p> <p>When you reboot the guest OS with this method the following occurs:</p> <ul> <li>The guest OS is reset.</li> <li>The GPU is reset.</li> <li>The underlying instance is not changed and the boot disk is preserved, but after the reboot, the boot ID is different.</li> </ul> <p>The reboot operation takes about five minutes. This time is in addition to the termination grace period configured on the pods. For more details about the Pod lifecycle and termination period, see <a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination">Termination of Pods</a>.</p> <h3 id="reboot-requirements">Requirements</h3> <p>This method for guest OS reboot requires the cluster to be running GKE version 1.37.0-gke.3503000 or later. Don't trigger a guest OS reboot on earlier versions, because GKE might not be able to schedule workloads on your nodes after the reboot completes.</p> <h3 id="reboot-guest-os-standard">Reboot the guest OS on a GKE node</h3> <p>To reboot the guest OS on a GKE node, follow these steps:</p> <ol> <li><p>Identify the node to reboot.</p></li> <li>
+<p>Apply the <code translate="no" dir="ltr">cloud.google.com/perform-reboot=true</code> label by using the following command:</p> 
+<pre>kubectl label nodes NODE_NAME cloud.google.com/perform-reboot=true
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node.</p> <p>When this label is applied, GKE reboots the guest OS by performing the following steps:</p> <ol> <li>Cordon the node.</li> <li>Evicts Pods, respecting any <a href="https://kubernetes.io/docs/tasks/run-application/configure-pdb/">distribution budgets</a> and termination grace period. For details about how to configure these termination behaviors, see <a href="../concepts/handle-disruption-gpu-tpu#configure-gkev">Configure GKE to terminate your workloads gracefully</a>
+</li> <li>Reboots the node by using <code translate="no" dir="ltr">systemd</code>. The node shuts down and restarts, and the boot ID changes.</li> </ol>
+</li> <li>
+<p>Go to the node events to see that the node has successfully rebooted.</p> <ol> <li>
+<p>In the Google Cloud console, go to <strong>Kubernetes Engine</strong> &gt; <strong>Clusters</strong>.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/list/overview" target="console" track-type="quickstart" track-name="consoleLink" track-metadata-position="body" track-metadata-end-goal="viewBuildDetails"> Go to Clusters</a></p>
+</li> <li><p>Select the cluster that contains the node you're rebooting.</p></li> <li><p>Click <strong>Nodes</strong> and then select the node you're rebooting.</p></li> <li>
+<p>Click <strong>Events</strong> to view the node events page.</p> <p>Node events are recorded on this page. Events from a successful reboot process include the following:</p> <ul> <li>When the node starts up after the reboot.</li> <li>When the maintenance handler removes the <code translate="no" dir="ltr">perform-reboot</code> node label.</li> <li>When the boot ID change is detected.</li> </ul>
+</li> </ol>
+</li> </ol> <p>If you followed these steps for a node that runs a version earlier than 1.37.0-gke.3503000, then the node might retain both the <code translate="no" dir="ltr">cloud.google.com/impending-node-termination</code> taint and the <code translate="no" dir="ltr">cloud.google.com/perform-reboot=true</code> label after the reboot completes. The node has the <code translate="no" dir="ltr">Ready</code> state but can't run workloads. To resolve this issue, upgrade to GKE version 1.37.0-gke.3503000 or later. To mitigate this issue without upgrading, manually remove the taint and label from the affected node by running the following commands:</p> 
+<pre># Remove the perform-reboot label
+kubectl label node NODE_NAME cloud.google.com/perform-reboot-
+
+# Remove the boot ID annotation (might report "not found", which is expected)
+kubectl annotate node NODE_NAME node.gke.io/reboot-boot-id-
+
+# Remove the taint (might already be removed automatically, which is expected)
+kubectl taint nodes NODE_NAME cloud.google.com/impending-node-termination:NoSchedule-
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the stuck node.</p> <p>After you remove the stuck state, wait at least 60 seconds for the maintenance handler to detect the changes. Don't attempt a guest OS reboot again unless your cluster runs version 1.37.0-gke.3503000 or later.</p> <h4 id="reboot-fast-retry">Reboot label ignored when re-applied quickly</h4> <p>On all GKE versions, if you re-apply the <code translate="no" dir="ltr">cloud.google.com/perform-reboot=true</code> label within 60 seconds of a completed reboot, the maintenance handler might not act on the new label due to a race condition in its internal state. The node remains stuck with the <code translate="no" dir="ltr">perform-reboot</code> label and the <code translate="no" dir="ltr">cloud.google.com/impending-node-termination</code> taint, but no reboot occurs.</p> <p>To mitigate this issue, wait at least 60 seconds after a reboot completes before re-applying the <code translate="no" dir="ltr">cloud.google.com/perform-reboot=true</code> label. You can verify that the reboot completed by checking that the <code translate="no" dir="ltr">perform-reboot</code> label and the <code translate="no" dir="ltr">reboot-boot-id</code> annotation were removed from the node:</p> 
+<pre>kubectl get node NODE_NAME -o jsonpath='{.metadata.labels.cloud\.google\.com/perform-reboot}'
+kubectl get node NODE_NAME -o jsonpath='{.metadata.annotations.node\.gke\.io/reboot-boot-id}'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node.</p> <p>Both commands should return empty output before you re-apply the label.</p> <p>If the node is already stuck, manually remove the Kubernetes node metadata that's causing the stuck state:</p> <ol> <li>
+<p>Remove the <code translate="no" dir="ltr">cloud.google.com/perform-reboot</code> node label:</p> 
+<pre>kubectl label node NODE_NAME \
+    cloud.google.com/perform-reboot-
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the stuck node.</p>
+</li> <li>
+<p>Remove the <code translate="no" dir="ltr">node.gke.io/reboot-boot-id</code> annotation:</p> 
+<pre>kubectl annotate node NODE_NAME \
+    node.gke.io/reboot-boot-id-
+</pre> <p>If the output is <code translate="no" dir="ltr">not found</code>, then the annotation is already removed.</p>
+</li> <li>
+<p>Remove the <code translate="no" dir="ltr">cloud.google.com/impending-node-termination:NoSchedule</code> taint:</p> 
+<pre>kubectl taint nodes NODE_NAME \
+    cloud.google.com/impending-node-termination:NoSchedule-
+</pre> <p>If the output is <code translate="no" dir="ltr">not found</code>, then the taint is already removed.</p>
+</li> <li><p>Wait for at least 60 seconds.</p></li> <li>
+<p>Re-apply the <code translate="no" dir="ltr">cloud.google.com/perform-reboot</code> label:</p> 
+<pre>kubectl label node NODE_NAME \
+    cloud.google.com/perform-reboot=true
+</pre>
+</li> </ol> <h2 id="reset-gpus-a3">Reset GPUs on A3 and A4 VMs</h2> <p>Some issues might require you to reset the GPU on an A3 or A4 VM.</p> <p><strong>Note:</strong> You can also use the <a href="https://github.com/ai-on-gke/tutorials-and-examples/tree/main/gpu-reset-tool">gpu-reset-tool</a> to reset all the GPUs. This tool automates the reset process and requires only the target node name.</p> <p>To manually reset the GPU, follow these steps:</p> <ol> <li><p>Remove Pods that request GPU resources from the node where you need to reset the GPU.</p></li> <li>
+<p>Disable the GPU device plugin on the node:</p> 
+<pre>kubectl get nodes \
+    --selector=kubernetes.io/hostname=NODE_NAME \
+    --no-headers | awk '{print $1}' \
+    | xargs -I{} kubectl label node {} gke-no-default-nvidia-gpu-device-plugin=true
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node.</p>
+</li> <li>
+<p>If you have <a href="../how-to/dcgm-metrics">DCGM metrics</a> enabled, then temporarily disable the DCGM exporter on the node by changing the driver version label:</p> <p>a. Note the current value of the <code translate="no" dir="ltr">cloud.google.com/gke-gpu-driver-version</code> label on the node.</p> <p>b. Change the label value to <code translate="no" dir="ltr">reset</code> to evict the DCGM exporter Pod:</p> 
+<pre>  kubectl label node NODE_NAME \
+      cloud.google.com/gke-gpu-driver-version=reset --overwrite
+</pre> <p>The Pod is automatically evicted because it requires the label to be <code translate="no" dir="ltr">default</code> or <code translate="no" dir="ltr">latest</code>.</p>
+</li> <li><p><a href="https://docs.cloud.google.com/compute/docs/connect/standard-ssh">Connect to the VM</a> backing the node.</p></li> <li>
+<p>In the SSH session, reset the GPU:</p> <p>Reset all the GPUs on the VM</p> 
+<pre>/home/kubernetes/bin/nvidia/bin/nvidia-smi --gpu-reset
+</pre> <p>To reset a specific GPU</p> 
+<pre># Identify the faulty GPU
+/home/kubernetes/bin/nvidia/bin/nvidia-smi
+
+# Reset the specifc GPU using either the GPU index or PCI bus ID from above command output 
+/home/kubernetes/bin/nvidia/bin/nvidia-smi --gpu-reset -i &lt;gpu_id&gt;
+</pre>
+</li> <li>
+<p>Restore the node labels to re-enable the GPU device plugin and DCGM exporter:</p> <p>a. Re-enable the GPU device plugin:</p> 
+<pre>  kubectl get nodes --selector=kubernetes.io/hostname=NODE_NAME \
+      --no-headers \| awk '{print $1}' \
+      | xargs -I{} kubectl label node {} gke-no-default-nvidia-gpu-device-plugin=false \
+      --overwrite
+</pre> <p>b. Restore the original value of the <code translate="no" dir="ltr">cloud.google.com/gke-gpu-driver-version</code> label (for example, <code translate="no" dir="ltr">latest</code> or <code translate="no" dir="ltr">default</code>) to re-enable the DCGM exporter:</p> 
+<pre>  kubectl label node NODE_NAME \
+      cloud.google.com/gke-gpu-driver-version=ORIGINAL_VALUE --overwrite
+</pre>
+</li> </ol> <h2 id="confidential-nodes-gpus">GPUs on Confidential GKE Nodes</h2> <p>The following sections show you how to identify and fix issues with GPUs that run on Confidential GKE Nodes.</p> <h3 id="gpu-confidential-not-scheduled">GPU workloads not scheduling on Confidential GKE Nodes</h3> <p>Confidential GKE Nodes requires that you manually install a GPU driver that corresponds to your selected GPU type and your GKE version. If your GPU Pods aren't scheduling on Confidential GKE Nodes and remain in the <code translate="no" dir="ltr">Pending</code> state, describe the driver installation DaemonSet:</p> 
+<pre>kubectl --namespace=kube-system get daemonset nvidia-driver-installer -o yaml
+</pre> <p>If the output returns a <code translate="no" dir="ltr">NotFound</code> error, <a href="../how-to/gpus#installing_drivers">install the driver</a>.</p> <p>If the DaemonSet is running, the output is similar to the following:</p> 
+<pre>apiVersion: apps/v1
+kind: DaemonSet
+# lines omitted for clarity
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: nvidia-driver-installer
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        k8s-app: nvidia-driver-installer
+        name: nvidia-driver-installer
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/gke-accelerator
+                operator: Exists
+              - key: cloud.google.com/gke-gpu-driver-version
+                operator: DoesNotExist
+              - key: cloud.google.com/gke-confidential-nodes-instance-type
+                operator: In
+                values:
+                - TDX
+</pre> <p>In this output, verify that the <code translate="no" dir="ltr">nodeAffinity</code> field contains the <code translate="no" dir="ltr">cloud.google.com/gke-confidential-nodes-instance-type</code> key. If the output doesn't contain this key, the driver installation DaemonSet doesn't support Confidential GKE Nodes.</p> <p>Deploy the DaemonSet that supports GPUs on Confidential GKE Nodes:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/refs/heads/master/nvidia-driver-installer/cos/daemonset-confidential.yaml
+</pre> <p>After you install the drivers, check whether your GPU workloads start successfully.</p> <h3 id="failed-allocate-device-vector">Error: Failed to allocate device vector</h3> <p>The following error message in your GPU container logs indicates that the GPU was detached from the node VM instance:</p> 
+<pre>Failed to allocate device vector A (error code unknown error)!
+</pre> <p>This detachment might happen because of a hardware error or because of an issue with the encryption keys.</p> <p>To resolve this issue, reboot the node instance. This operation is disruptive, and affects all of the workloads on that node. To reboot the instance, do the following steps:</p> <ol> <li>
+<p>Get the name of the node that runs the GPU Pod:</p> 
+<pre>kubectl get pod POD_NAME -o yaml | grep "nodeName"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of the failing Pod.</p> <p>The output is similar to the following:</p> 
+<pre>nodeName: gke-cluster-1-default-pool-b7asdfbt-fd3e
+</pre>
+</li> <li>
+<p>Reset the Compute Engine instance:</p> 
+<pre>gcloud compute instances reset NODE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the node name from the output of the previous step.</p> <p>The gcloud CLI looks for VMs with that name in your active project. If you see a prompt to select a zone, specify <code translate="no" dir="ltr">Y</code>.</p>
+</li> <li><p>Check whether your GPU workloads run without errors.</p></li> </ol> <h3 id="decryption-failed-error">Error: Decryption failed with error -74</h3> <p>The following error message in your node logs indicates that the encryption keys for the GPU were lost:</p> 
+<pre>Decryption failed with error -74
+</pre> <p>This error happens when the NVIDIA persistence daemon, which runs on the node VM instance, fails. If you see this error message, reset the instance:</p> 
+<pre>gcloud compute instances reset NODE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the failing node.</p> <p>The gcloud CLI looks for VMs with that name in your active project. If you see a prompt to select a zone, specify <code translate="no" dir="ltr">Y</code>.</p> <p>If resetting the instance doesn't fix this issue, contact Cloud Customer Care or submit a product bug. For more information, see <a href="../getting-support">Get support</a>.</p> <h2 id="find-gpu-xid">Finding XID errors</h2> <p>The <code translate="no" dir="ltr">gpu-device-plugin</code> daemonset runs within the <code translate="no" dir="ltr">kube-system</code> namespace and is responsible for the following:</p> <ul> <li>
+<strong>GPU workload scheduling:</strong> allocating GPU resources to Pods.</li> <li>
+<strong>GPU health checking:</strong> monitoring the health of your GPUs.</li> <li>
+<strong>GPU metrics gathering:</strong> collecting GPU-related metrics, such as duty cycle and memory usage.</li> </ul> <p>The <code translate="no" dir="ltr">gpu-device-plugin</code> uses NVIDIA Management Library (NVML) to detect XID errors. When an XID error occurs, the <code translate="no" dir="ltr">gpu-device-plugin</code> Pod running on the affected node logs the error. You will find two types of XID error logs:</p> <ul> <li>
+<strong>Non-critical XID errors:</strong> <ul> <li>Log format: <code translate="no" dir="ltr">Skip error Xid=%d as it is not Xid Critical</code>
+</li> <li>Meaning: These errors are considered non-critical. They can be caused by various software or hardware issues.</li> <li>Action: GKE takes no automated action for non-critical XID errors.</li> </ul>
+</li> <li>
+<strong>Critical XID errors:</strong> <ul> <li>Log format: <code translate="no" dir="ltr">XidCriticalError: Xid=%d, All devices will go unhealthy</code>
+</li> <li>Meaning: These errors indicate a GPU hardware issue.</li> <li>Action: <ul> <li>GKE marks the node's GPU resources as unhealthy.</li> <li>GKE prevents GPU workloads from being scheduled on the node.</li> <li>If node auto-repair is enabled, GKE will recreate the node.</li> </ul>
+</li> </ul>
+</li> </ul> <h2 id="gpudirect-tcpx-o">GPUDirect-TCPX(O) issues</h2> <p>This section provides troubleshooting information for GPUDirect-TCPX(O) issues. If you are using affected versions of GKE version 1.34 or 1.35, also see the <a href="known-issues#tcpx-cos125">GKE Known issues</a> page.</p> <h3 id="release-note">Release note and upgrade instructions</h3> <p>For new users, <a href="../how-to/gpu-bandwidth-gpudirect-tcpx">Maximize GPU network bandwidth in Standard mode clusters</a> provides guidance on using GPUDirect-TCPX(O). For existing users, read the <a href="https://github.com/GoogleCloudPlatform/container-engine-accelerators/blob/master/gpudirect-tcpxo/README.md">GPUDirect-TCPXO Release Notes</a> for release information and upgrade instructions, because new versions are continuously released.</p> <h3 id="tcpx-daemon-upgrade-failure">
+<code translate="no" dir="ltr">tcpx-daemon</code> and <code translate="no" dir="ltr">tcpxo-daemon</code> failure after GKE version upgrade</h3> <p>You might encounter the following error if your <code translate="no" dir="ltr">tcpx-daemon</code> or <code translate="no" dir="ltr">tcpxo-daemon</code> Pods fail:</p> 
+<pre>cuda error detected! name: CUDA_ERROR_NO_DEVICE; string: no CUDA-capable device is detected
+</pre> <p>Also, check if the <code translate="no" dir="ltr">device-injector</code> Pods in the <code translate="no" dir="ltr">kube-system</code> namespace are in the <code translate="no" dir="ltr">CrashLoopBackOff</code> or <code translate="no" dir="ltr">Error</code> state.</p> <p>This issue occurs if you upgraded your GKE node pools to one of the following versions or later:</p> <ul> <li>For GKE 1.31: 1.31.14-gke.1033000</li> <li>For GKE 1.32: 1.32.9-gke.1575000</li> <li>For GKE 1.33: 1.33.5-gke.1862000</li> <li>For GKE 1.34: 1.34.1-gke.3225000</li> <li>For GKE 1.35 and later</li> </ul> <p>The issue is caused by using an older version of the <a href="../how-to/gpu-bandwidth-gpudirect-tcpx#nri-device-injector">NRI device injector</a> manifest that includes an <code translate="no" dir="ltr">initContainer</code> named <code translate="no" dir="ltr">enable-nri</code>. In these affected GKE versions, NRI is enabled by default in the node configuration. The obsolete <code translate="no" dir="ltr">enable-nri</code> container attempts to modify the configuration and restart the container runtime, which conflicts with the system defaults and causes the <code translate="no" dir="ltr">nri-device-injector</code> Pods to crash. This failure prevents GPU devices from being exposed to the <code translate="no" dir="ltr">tcpx-daemon</code> or <code translate="no" dir="ltr">tcpxo-daemon</code> container.</p> <p>To resolve this issue, update the <code translate="no" dir="ltr">nri-device-injector</code> DaemonSet to the latest version, which removes the conflicting <code translate="no" dir="ltr">initContainer</code>.</p> <ol> <li>
+<p>Delete the existing DaemonSet:</p> 
+<pre>kubectl delete daemonset device-injector -n kube-system
+</pre>
+</li> <li>
+<p>Apply the latest manifest:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nri_device_injector/nri-device-injector.yaml
+</pre>
+</li> <li><p>Restart your workload Pods.</p></li> </ol> <h3 id="debug-with-nccl-logs">Debug with NCCL logs</h3> <p>If you can't resolve an issue with NCCL, collect NCCL logs with debugging information. These logs contain valuable information about NCCL operations and can help you find the source of your problem. If you can't resolve the issue, collect these logs <em>before</em> you open a case with Cloud Customer Care. These logs can help Cloud Customer Care resolve your issue more quickly.</p> <p>To generate and collect the logs, complete the following steps:</p> <ol> <li>
+<p>Set the following environment variables inside your Pod or application manifest:</p> 
+<pre>NCCL_DEBUG=INFO
+NCCL_DEBUG_SUBSYS=INIT,NET,ENV,COLL,GRAPH
+NCCL_DEBUG_FILE=/DIRECTORY/FILE_NAME.%h.%p
+</pre> <p>For more information about these environment variables, read <a href="../how-to/gpu-bandwidth-gpudirect-tcpx#collect-nccl-debugging-logs">collect NCCL debugging logs</a>.</p>
+</li> <li><p>To generate data for your logs, run an <a href="https://github.com/NVIDIA/nccl-tests">NCCL test</a>. The way to run this test depends on the type of cluster that you use. For GKE clusters, you can <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/create/gke-ai-hypercompute#deploy-run-nccl-tas-test">deploy and run NCCL test with Topology Aware Scheduling (TAS)</a>. After you run the NCCL test, NCCL automatically generates the logs on all participating nodes.</p></li> <li>
+<p>Collect the logs from all nodes. Verify that you've collected NCCL logs from all nodes by verifying that the logs contain the following information:</p> <ul> <li>The hostnames of all VMs that are involved in a workload.</li> <li>The PIDs of all relevant processes on the VM.</li> <li>The ranks of all GPUs that are used by the workload on each VM.</li> </ul> <p>If you're not sure where the log files are located, the following example shows you where NCCL creates the log files when the <code translate="no" dir="ltr">NCCL_DEBUG_FILE</code> variable is set to <code translate="no" dir="ltr">/tmp/nccl_log.%h.%p</code>. You have two VMs named <code translate="no" dir="ltr">a3plus-vm-1</code> and <code translate="no" dir="ltr">a3plus-vm-2</code>, and each VM runs eight processes within the workload container. In this scenario, NCCL creates the following log files under the <code translate="no" dir="ltr">/tmp</code> directory within the workload container on each VM:</p> <ul> <li>On <code translate="no" dir="ltr">a3plus-vm-1</code>: eight log files named <code translate="no" dir="ltr">nccl_log.a3plus-vm-1.PID</code>, where <code translate="no" dir="ltr">PID</code> is the process ID.</li> <li>On <code translate="no" dir="ltr">a3plus-vm-2</code>: eight log files named <code translate="no" dir="ltr">nccl_log.a3plus-vm-2.PID</code>.</li> </ul>
+</li> <li>
+<p>Review the logs. NCCL log entries have the following format:</p> 
+<pre>HOSTNAME:PID:TID [RANK] NCCL_MESSAGE
+</pre> <p>These log entries contain the following values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">HOSTNAME</var></code>: the hostname of the VM. This value identifies which VM was being used when NCCL generated the log entry.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PID</var></code>: the PID. This value identifies which process generated the log entry.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TID</var></code>: the thread ID. This value identifies which thread within the process was being used when NCCL generated the log entry.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RANK</var></code>: the local rank ID. This value identifies which GPU was being used when NCCL generated the log entry. Ranks are numbered from 0-N, where N is the total number of GPUs that are involved in the process. For example, if your workload runs with eight GPUs per VM, then each VM should have eight different rank values (0-7).</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NCCL_MESSAGE</var></code>: a descriptive message that provides more information about the event and includes the timestamp of when NCCL created the log.</li> </ul> <p>For example:</p> 
+<pre>gke-a3plus-mega-np-2-aa33fe53-7wvq:1581:1634 [1] NCCL INFO 00:09:24.631392: NET/FasTrak plugin initialized.
+</pre> <p>This example has the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">gke-a3plus-mega-np-2-aa33fe53-7wvq</code>: the hostname.</li> <li>
+<code translate="no" dir="ltr">1581</code>: the process ID.</li> <li>
+<code translate="no" dir="ltr">1634</code>: the thread ID.</li> <li>
+<code translate="no" dir="ltr">1</code>: the local rank ID.</li> <li>
+<code translate="no" dir="ltr">NCCL INFO 00:09:24.631392: NET/FasTrak plugin initialized.</code>: the message explaining what happened.</li> </ul>
+</li> <li><p>If you're opening a support case, package the logs that you collected, along with the output of the NCCL test, into a zip file. Include the zip file when you <a href="https://cloud.google.com/support-hub">submit a support case to Cloud Customer Care</a>.</p></li> <li><p>To stop collecting NCCL debugging logs, remove the variables that you added in step 1.</p></li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>
+<p>If you can't find a solution to your problem in the documentation, see <a href="../getting-support" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Get support</a> for further help, including advice on the following topics:</p> <ul> <li>Opening a support case by contacting <a href="https://cloud.google.com/support-hub" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Cloud Customer Care</a>.</li> <li>Getting support from the community by <a href="http://stackoverflow.com/questions/tagged/google-kubernetes-engine" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">asking questions on StackOverflow</a> and using the <code translate="no" dir="ltr">google-kubernetes-engine</code> tag to search for similar issues. You can also join the <a href="https://googlecloud-community.slack.com/messages/C0B9GKTKJ/" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">#kubernetes-engine</code> Slack channel</a> for more community support.</li> <li>Opening issues or feature requests by using the <a href="https://docs.cloud.google.com/support/docs/issue-trackers" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">public issue tracker</a>.</li> </ul>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/gpus" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/gpus</a>
+  </p>
+</div>

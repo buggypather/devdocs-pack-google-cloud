@@ -1,0 +1,119 @@
+<h1>Supported customization actions</h1>  <aside class="note"> <b>Note:</b> Image Builder is generally available, but your project must be added to an allowlist before you can use it. To request access, submit the <a href="https://forms.gle/4NncEhwetZDjaPx9A">access request form</a> or contact your Google Cloud account team. The allowlist covers only the service accounts in your project and doesn't cover Google-owned service accounts. For more information, see <a href="prerequisites#allowlist-coverage">Service accounts covered by the allowlist</a>. </aside> <p>To customize your virtual machine images, such as running terminal scripts, updating boot parameters, transferring binaries, or installing GPU drivers, you can define specific helper actions inside the <code translate="no" dir="ltr">spec.steps</code> block of your customization recipe (<a href="customization-recipe-schema"><code translate="no" dir="ltr">imagebuilder.yaml</code></a>). </p>
+<h2 id="overview">Overview</h2> <p>During the execution phase of an Image Builder build, the orchestrator runs the steps declared in your customization recipe (<code translate="no" dir="ltr">spec.steps</code>) sequentially on the temporary worker VM.</p> <p>Each step must specify a <code translate="no" dir="ltr">name</code>, an <code translate="no" dir="ltr">action</code>, and an <code translate="no" dir="ltr">inputs</code> block tailored to that action type. Image Builder supports the following customization actions:</p> <ul> <li>
+<a href="#shell"><code translate="no" dir="ltr">Shell</code></a>: Executes inline terminal scripts or commands on the worker guest OS.</li> <li>
+<a href="#updatekernelcommandline"><code translate="no" dir="ltr">UpdateKernelCommandLine</code></a>: Modifies boot parameters and kernel command-line flags.</li> <li>
+<a href="#filecopy"><code translate="no" dir="ltr">FileCopy</code></a>: Transfers configuration files, scripts, or assets from Cloud Storage or local workspaces onto the VM.</li> <li>
+<a href="#installgpu"><code translate="no" dir="ltr">InstallGPU</code></a>: Downloads, compiles, and registers NVIDIA GPU drivers.</li> </ul> <h2 id="shell">Shell action</h2> <p>The <code translate="no" dir="ltr">Shell</code> action lets you execute inline terminal scripts or single shell commands on the guest OS of the temporary worker VM to perform customizations like updating packages, configuring user accounts, or compiling software.</p> <p>Specify either of the following inputs under <code translate="no" dir="ltr">steps.inputs</code>:</p> <ul> <li>
+<code translate="no" dir="ltr">inlineScript</code> (string): Raw multiline shell commands to execute.</li> <li>
+<code translate="no" dir="ltr">command</code> (string): A single system command string or relative path to a binary file executable.</li> </ul> <h3 id="shell-examples">Sample configurations</h3> <p>The following tabs show sample step configurations for running an inline script versus running a single command:</p> <div> <section><p class="_code-tab"><strong>Run an inline script</strong></p>
+<p>The following configuration runs a multiline script that updates packages using <code translate="no" dir="ltr">apt</code>:</p> 
+<pre data-language="">- name: "Update guest packages and configure groups"
+  action: Shell
+  inputs:
+    inlineScript: |
+      #!/bin/bash
+      apt-get update -y
+      apt-get install -y fail2ban build-essential
+      groupadd -r adminusers
+</pre></section> <section><p class="_code-tab"><strong>Run a single command</strong></p>
+<p>The following configuration runs a single shell command to verify the active operating system kernel version:</p> 
+<pre data-language="">- name: "Log kernel identifier"
+  action: Shell
+  inputs:
+    command: "uname -a"
+</pre></section> </div> <h3 id="shell-behaviors">Special behaviors</h3> <p>When you run <code translate="no" dir="ltr">Shell</code> actions, the customization provisioner manages security auditing and automated system reboots as described in the following sections:</p> <h4 id="auditing">Security auditing</h4> <p>To prevent sensitive tokens, secrets, or proprietary code from leaking into execution logs, the customization provisioner doesn't print the raw lines of your scripts unless interactive debugging is enabled (<code translate="no" dir="ltr">debug: true</code>). Instead, it logs the SHA-256 integrity hash of your script payload to the build logs. This hash provides an immutable audit trace of exactly what code ran on the image.</p> <h4 id="reboots">System reboots (Exit Code 3010)</h4> <p>Some shell actions, such as kernel patch updates or storage partition adjustments, require a system reboot before subsequent steps can run.</p> <p>To request a system reboot during customization, your shell script must end with the command <code translate="no" dir="ltr">exit 3010</code>. When the customization provisioner receives exit code <code translate="no" dir="ltr">3010</code>, it handles the reboot lifecycle as follows:</p> <ol> <li>The provisioner detects exit code <code translate="no" dir="ltr">3010</code>, pauses execution, and marks the step progress index.</li> <li>The provisioner reboots the worker VM.</li> <li>After the VM restarts, the provisioner mounts the workspace and automatically resumes the pipeline at the next step in the queue.</li> </ol> <h5 id="reboot_example">Reboot example:</h5> <p>The following example shows a step configuration that updates packages and requests a reboot:</p> 
+<pre>- name: "Install core updates and request reboot"
+  action: Shell
+  inputs:
+    inlineScript: |
+      #!/bin/bash
+      echo "Applying configuration package upgrades..."
+      apt-get dist-upgrade -y
+      # Terminate with return code 3010 to trigger a system reboot
+      exit 3010
+- name: "Post-reboot verification"
+  action: Shell
+  inputs:
+    command: "uname -r"
+</pre> <h2 id="updatekernelcommandline">UpdateKernelCommandLine action</h2> <p>The <code translate="no" dir="ltr">UpdateKernelCommandLine</code> action locates, replaces, inserts, or removes command-line flags passed to the kernel at system boot, such as when you configure console logs or adjust kernel parameters.</p> <p>Specify the following properties under the <code translate="no" dir="ltr">steps.inputs</code> map:</p> <ul> <li>
+<code translate="no" dir="ltr">oldArguments</code> (string, Required): The exact command-line arguments to locate, remove, or replace inside the bootloader config.</li> <li>
+<code translate="no" dir="ltr">newArguments</code> (string, Optional): The replacement arguments to write in place of the target flags. If you omit the <code translate="no" dir="ltr">newArguments</code> property, Image Builder removes the parameters configured in the <code translate="no" dir="ltr">oldArguments</code> property entirely from the boot line.</li> </ul> <aside class="caution"><strong>Caution:</strong><span> You can include the <code translate="no" dir="ltr">UpdateKernelCommandLine</code> action only once inside the <code translate="no" dir="ltr">steps</code> list of a customization recipe.</span></aside> <h3 id="updatekernelcommandline-examples">Sample configurations</h3> <p>The following tabs show sample step configurations for replacing or removing kernel boot arguments:</p> <div> <section><p class="_code-tab"><strong>Replace boot arguments</strong></p>
+<p>The following configuration locates the kernel log level key <code translate="no" dir="ltr">loglevel=4</code> and replaces it with more verbose parameters <code translate="no" dir="ltr">loglevel=6 console=ttyS0</code>:</p> 
+<pre data-language="">- name: "Configure detailed boot logging"
+  action: UpdateKernelCommandLine
+  inputs:
+    oldArguments: "loglevel=4"
+    newArguments: "loglevel=6 console=ttyS0"
+</pre></section> <section><p class="_code-tab"><strong>Remove boot arguments</strong></p>
+<p>The following configuration searches for the parameter <code translate="no" dir="ltr">quiet</code> and removes it from the boot arguments to enable verbose logging during startup check phases:</p> 
+<pre data-language="">- name: "Enable verbose startup diagnostics"
+  action: UpdateKernelCommandLine
+  inputs:
+    oldArguments: "quiet"
+</pre></section> </div> <h3 id="updatekernelcommandline-os-behaviors">OS-specific execution details</h3> <p>The following tabs describe how the customization provisioner handles image modifications depending on the source guest operating system:</p> <div> <section><p class="_code-tab"><strong>Container-Optimized OS (COS)</strong></p>
+<p>Because COS features a read-only partition layout, it omits standard configuration tools. The customization provisioner does the following:</p> <ol> <li>Determines the active boot device path.</li> <li>Mounts partition 12, the EFI partition, of the boot device.</li> <li>Directly updates bootloader parameters inside <code translate="no" dir="ltr">/efi/boot/grub.cfg</code>.</li> <li>Safely unmounts partition 12.</li> </ol></section> <section><p class="_code-tab"><strong>Ubuntu</strong></p>
+<p>On Ubuntu images, the customization provisioner does the following:</p> <ol> <li>Opens <code translate="no" dir="ltr">/etc/default/grub</code> and files under <code translate="no" dir="ltr">/etc/default/grub.d/*.cfg</code>.</li> <li>Inserts, modifies, or deletes the target arguments under the <code translate="no" dir="ltr">GRUB_CMDLINE_LINUX</code> block.</li> <li>Runs the package command <code translate="no" dir="ltr">update-grub</code> to regenerate the bootloader configurations.</li> </ol></section> </div> <h2 id="filecopy">FileCopy action</h2> <p>The <code translate="no" dir="ltr">FileCopy</code> action copies configuration files, binaries, or certificates from a remote bucket or your local repository to your custom image. The customization provisioner downloads or reads the source file, writes it to your specified guest path on the worker VM, and configures the permissions.</p> <p>Specify the following inputs under <code translate="no" dir="ltr">steps.inputs</code>:</p> <ul> <li>
+<code translate="no" dir="ltr">destination</code> (string, Required): The absolute path in the guest OS where the file is created.</li> <li>
+<code translate="no" dir="ltr">permissions</code> (string, Required): The octal representation of the target configuration permissions, such as <code translate="no" dir="ltr">"0755"</code> or <code translate="no" dir="ltr">"0644"</code>.</li> <li>Specify either of the following source properties: <ul> <li>
+<code translate="no" dir="ltr">gcsSourcePath</code> (string): The Cloud Storage URI of the source file, which must follow the format <code translate="no" dir="ltr">gs://<var translate="no">BUCKET_NAME</var>/<var translate="no">OBJECT_NAME</var></code>.</li> <li>
+<code translate="no" dir="ltr">localSourcePath</code> (string): The relative path to the file inside the local workspace repository folder. Path traversal using <code translate="no" dir="ltr">../</code> is blocked for security.</li> </ul>
+</li> </ul> <h3 id="filecopy-examples">Sample configurations</h3> <p>The following tabs show sample step configurations for copying a file from Cloud Storage versus copying from your local workspace:</p> <div> <section><p class="_code-tab"><strong>Cloud Storage</strong></p>
+<p>The following configuration copies a configuration template from a Cloud Storage bucket onto the guest VM image:</p> 
+<pre data-language="">- name: "Import licensing configuration"
+  action: FileCopy
+  inputs:
+    gcsSourcePath: "gs://enterprise-configs-bucket/licensing/license.key"
+    destination: "/etc/app/license.key"
+    permissions: "0600"
+</pre></section> <section><p class="_code-tab"><strong>Local workspace</strong></p>
+<p>The following configuration copies an application script compiled during previous Cloud Build steps:</p> 
+<pre data-language="">- name: "Deploy setup automation daemon"
+  action: FileCopy
+  inputs:
+    localSourcePath: "bin/setup-daemon"
+    destination: "/usr/local/bin/setup-daemon"
+    permissions: "0755"
+</pre></section> </div> <h3 id="filecopy-os-behavior">OS-specific guidelines</h3> <p>The following tabs describe file location guidelines depending on the target guest operating system:</p> <div> <section><p class="_code-tab"><strong>Container-Optimized OS (COS)</strong></p>
+<p>COS images contain a read-only partition layout for security purposes. Some standard system targets, such as <code translate="no" dir="ltr">/usr/</code> or <code translate="no" dir="ltr">/bin/</code>, are write-protected.</p> <p>When configuring file destinations on COS:</p> <ul> <li>Specify files only inside writable stateful locations, such as <code translate="no" dir="ltr">/var</code> or <code translate="no" dir="ltr">/home</code>.</li> <li>Refer to the official <a href="https://docs.cloud.google.com/container-optimized-os/docs/concepts/disks-and-filesystem">Container-Optimized OS Disks and file system reference</a> to identify appropriate paths.</li> </ul></section> <section><p class="_code-tab"><strong>Ubuntu</strong></p>
+<p>Ubuntu images feature a standard Linux read-write root partition layout (<code translate="no" dir="ltr">/</code>). You can specify file destinations inside any standard system path, such as <code translate="no" dir="ltr">/etc</code>, <code translate="no" dir="ltr">/usr/local/bin</code>, <code translate="no" dir="ltr">/var</code>, or <code translate="no" dir="ltr">/home</code>, provided the user profile or destination folder has appropriate configuration permissions on the worker VM.</p></section> </div> <h2 id="installgpu">InstallGPU action</h2> <p>Use the <code translate="no" dir="ltr">InstallGPU</code> action to build VM images optimized for machine learning, data science, or scientific workloads. Image Builder downloads, compiles, and registers NVIDIA GPU drivers on your custom images. Depending on your base image type and target hardware, you can choose between installing precompiled drivers or compiling custom driver <code translate="no" dir="ltr">.run</code> files.</p> <p>Specify one of the following inputs under <code translate="no" dir="ltr">steps.inputs</code>:</p> <ul> <li>
+<code translate="no" dir="ltr">version</code> (string): The target NVIDIA driver version number, such as <code translate="no" dir="ltr">"595.129.03"</code>. If you specify only <code translate="no" dir="ltr">version</code>, the orchestrator downloads the driver from the official NVIDIA repository (<code translate="no" dir="ltr">https://us.download.nvidia.com/tesla/&lt;version&gt;</code>).</li> <li>
+<code translate="no" dir="ltr">gcsRunfile</code> (string): The Cloud Storage path of a custom NVIDIA driver installer file, which must use the format <code translate="no" dir="ltr">gs://<var translate="no">BUCKET_NAME</var>/<var translate="no">OBJECT_NAME</var>.run</code>.</li> <li>
+<code translate="no" dir="ltr">sourceRunfile</code> (string): The relative path to an installer <code translate="no" dir="ltr">.run</code> file inside the local workspace repository folder.</li> </ul> <aside class="caution"><strong>Caution:</strong><span> You can include the <code translate="no" dir="ltr">InstallGPU</code> action only once inside the <code translate="no" dir="ltr">steps</code> list of a customization recipe.</span></aside> <h3 id="installgpu-examples">Sample configurations</h3> <p>The following tabs show sample step configurations for installing a specific pre-packaged driver version versus installing a custom runfile:</p> <div> <section><p class="_code-tab"><strong>Standard version download</strong></p>
+<p>The following configuration downloads and installs a specified NVIDIA driver version from the official repository:</p> 
+<pre data-language="">- name: "Configure default NVIDIA drivers"
+  action: InstallGPU
+  inputs:
+    version: "&lt;var&gt;DRIVER_VERSION&lt;/var&gt;"
+</pre></section> <section><p class="_code-tab"><strong>Cloud Storage runfile</strong></p>
+<p>The following configuration deploys a custom NVIDIA driver <code translate="no" dir="ltr">.run</code> installer directly from a Cloud Storage bucket:</p> 
+<pre data-language="">- name: "Deploy custom GPU driver from Cloud Storage"
+  action: InstallGPU
+  inputs:
+    gcsRunfile: "gs://&lt;var&gt;BUCKET_NAME&lt;/var&gt;/drivers/NVIDIA-Linux-aarch64-&lt;var&gt;DRIVER_VERSION&lt;/var&gt;.run"
+</pre></section> <section><p class="_code-tab"><strong>Local workspace runfile</strong></p>
+<p>The following configuration deploys a custom NVIDIA driver <code translate="no" dir="ltr">.run</code> installer from your local repository workspace:</p> 
+<pre data-language="">- name: "Deploy custom GPU driver from workspace"
+  action: InstallGPU
+  inputs:
+    sourceRunfile: "drivers/NVIDIA-Linux-x86_64-&lt;var&gt;DRIVER_VERSION&lt;/var&gt;.run"
+</pre></section> </div> <h3 id="gpu-methods">Configuration methods</h3> <p>The following tabs describe the supported methods for configuring NVIDIA GPU drivers on your custom images:</p> <div> <section><p class="_code-tab"><strong>Precompiled drivers</strong></p>
+<p>We recommend using pre-packaged driver versions to avoid the compute overhead and build time of compiling drivers from scratch.</p> <ul> <li>
+<p><strong>Container-Optimized OS (COS)</strong>: If you specify a driver version pre-packaged by Google, the customization provisioner runs the guest tool <code translate="no" dir="ltr">cos-extensions install gpu</code> to activate it.</p> <p>To see the list of supported precompiled driver versions for your COS release, run <code translate="no" dir="ltr">sudo cos-extensions list</code> on a running COS instance, or refer to <a href="https://docs.cloud.google.com/container-optimized-os/docs/how-to/run-gpus#identify-driver">Identify the GPU driver version</a>.</p>
+</li> <li>
+<p><strong>Ubuntu</strong>: To save build time on Ubuntu, we recommend selecting pre configured base images from the public <code translate="no" dir="ltr">ubuntu-os-accelerator-images</code> project where NVIDIA drivers are preinstalled.</p> <p>To list available accelerator images, run the following command in the <code translate="no" dir="ltr">gcloud</code> CLI:</p> 
+<pre data-language="">gcloud compute images list \
+    --project=ubuntu-os-accelerator-images \
+    --no-standard-images
+</pre>
+</li> </ul></section> <section><p class="_code-tab"><strong>Custom runfiles</strong></p>
+<p>If you must install a custom driver version that isn't precompiled by Google or Canonical, you can specify direct installer run files for compilation as follows:</p> <ul> <li>
+<strong>Ubuntu</strong>: Performs in-guest compilation. The customization provisioner automatically installs the matching kernel headers (<code translate="no" dir="ltr">linux-headers-$(uname -r)</code>), compiles the NVIDIA driver <code translate="no" dir="ltr">.run</code> file on the worker VM, and registers it with Dynamic Kernel Module Support (DKMS). Registering with DKMS ensures the drivers remain active across minor kernel updates.</li> <li>
+<strong>Container-Optimized OS (COS)</strong>: The compilation behavior varies depending on the CPU architecture of your source base VM image: <ul> <li>
+<strong>ARM64 Images</strong>: Because ARM64 COS VMs don't support in-guest header compilation, Image Builder automatically cross-compiles your custom driver <code translate="no" dir="ltr">.run</code> utility inside the build container and installs the resulting bundle into <code translate="no" dir="ltr">/var/lib/nvidia</code> on the worker VM.</li> <li>
+<strong>x86-64 Images</strong>: Performs in-guest compilation directly on the worker VM.</li> </ul>
+</li> </ul></section> </div> <h2 id="whats-next">What's next</h2> <ul> <li>Review top-level schema blocks in the <a href="customization-recipe-schema">Image customization file schema</a>.</li> <li>Configure pipeline orchestration parameters in the <a href="build-configuration-schema">Cloud Build configuration file schema</a>.</li> <li>Follow the tutorial to <a href="create-pipeline">Create an Image Builder pipeline</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/images/image-builder/supported-customization-actions" class="_attribution-link">https://docs.cloud.google.com/compute/docs/images/image-builder/supported-customization-actions</a>
+  </p>
+</div>

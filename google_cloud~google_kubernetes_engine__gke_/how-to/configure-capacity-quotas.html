@@ -1,0 +1,209 @@
+<h1>Configure granular resource limits</h1>  <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>To improve how effectively you manage infrastructure costs and quota, you can define maximum resource limits for the Google Kubernetes Engine (GKE) cluster autoscaler. This document shows you how to use the CapacityQuota custom resource to specify autoscaling resource limits for subsets of nodes. Unlike <a href="node-auto-provisioning#resource-limits">cluster-wide resource limits</a>, you can select specific nodes in a CapacityQuota by using Kubernetes label selectors.</p> <p>This document is intended for platform administrators who manage cluster scaling and infrastructure. You should be familiar with Kubernetes node labels and the GKE <a href="../concepts/cluster-autoscaler">cluster autoscaler</a>.</p> <h2 id="how-capacityquota-works">How CapacityQuota resource limits work</h2> <p>A CapacityQuota is a cluster-scoped Kubernetes custom resource that you configure in a manifest and apply to the cluster. You use the following fields in the CapacityQuota specification to select nodes and specify resource limits:</p> <ul> <li>
+<code translate="no" dir="ltr">selector</code>: filter for specific nodes by using one or more label selectors. For example, you can select all of the nodes for a specific ComputeClass or nodes that have two specific labels.</li> <li>
+<code translate="no" dir="ltr">limits</code>: specify maximum resource limits for the nodes that match the selectors. For example, you can limit the amount of CPU that can be used by a specific custom ComputeClass, or limit the number of GPUs of a particular type.</li> </ul> <p>When a scale-up operation begins, the cluster autoscaler checks the proposed node against all CapacityQuotas that match the node labels and against any configured cluster-wide resource limits. GKE creates the node only if the node doesn't violate any configured resource limits.</p> <h2 id="limitations">Limitations</h2> <ul> <li>GKE rejects CapacityQuotas that specify the <code translate="no" dir="ltr">node.kubernetes.io/instance-type</code> and <code translate="no" dir="ltr">beta.kubernetes.io/instance-type</code> label selectors. To limit nodes that use a specific machine type, create a custom ComputeClass that has <code translate="no" dir="ltr">machineType</code> priority rules and select that ComputeClass in your CapacityQuota.</li> <li>Similarly to cluster-wide limits, CapacityQuotas might prevent ComputeClass <a href="../concepts/about-custom-compute-classes#active-migration">active migration</a> from happening. Because active migration is a scale-up operation, the cluster autoscaler checks the potential new node against all applicable CapacityQuotas and cluster-wide resource limits. If the new node violates any of these limits, then GKE doesn't create the node and the active migration doesn't occur. This situation happens only if the CapacityQuota is already at, or close to the configured limits.</li> <li>CapacityQuota limits aren't strict limits. In rare scenarios, you might notice that GKE exceeds the configured limits by a small margin.</li> <li>CapacityQuota limits are enforced only by the cluster autoscaler. You can exceed the limits by scaling up the cluster manually, or by changing the limits to lower than the current usage.</li> <li>If nodes in the cluster exceed the configured CapacityQuota limits, then the cluster autoscaler blocks the creation of new nodes that match the exceeded CapacityQuota. The cluster autoscaler doesn't scale down existing nodes that match the CapacityQuota.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure that you have an existing Autopilot or Standard cluster that runs at version 1.36.2-gke.2064000 or later. To create a new cluster, see <a href="creating-an-autopilot-cluster">Create an Autopilot cluster</a>.</li> </ul> <h2 id="configure_resource_limits_in_a_capacityquota">Configure resource limits in a CapacityQuota</h2> <p>You can select the nodes that a CapacityQuota applies to by using either or both of the following methods:</p> <ul> <li><p><a href="#select-node-labels">Select nodes by using exact node labels</a>: specify one or more node label key-value pairs in the <code translate="no" dir="ltr">matchLabels</code> field. GKE finds nodes that have all of the labels that you specify. This method is similar to using the <code translate="no" dir="ltr">nodeSelector</code> field in a Pod specification.</p></li> <li><p><a href="#select-expressions">Select nodes by using expressions</a>: specify one or more label selector expressions by specifying the label key, operators, and values. This method is similar to using the <code translate="no" dir="ltr">nodeAffinity</code> field in a Pod specification.</p></li> </ul> <aside class="caution"><strong>Caution:</strong><span> If you create a CapacityQuota without specifying selectors, the CapacityQuota matches all of the nodes in the cluster. The limits that you specify are cluster-wide limits.</span></aside> <h3 id="select-node-labels">Select nodes by using node labels</h3> <p>To construct a CapacityQuota based on node label matching by using the <code translate="no" dir="ltr">matchLabels</code> field, follow these steps:</p> <ol> <li>
+<p>Save one of the following example CapacityQuotas, each of which is intended for a specific use case:</p> <ul> <li>
+<p>Configure resource limits for an entire custom ComputeClass by specifying the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> label:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityQuota
+metadata:
+  name: capacity-quota-compute-class
+spec:
+  selector:
+    matchLabels:
+      cloud.google.com/compute-class: my-class
+  limits:
+    resources:
+      cpu: 12
+</pre> <p>This CapacityQuota restricts the cluster autoscaler to a maximum of 12 CPUs across all of the nodes that GKE creates for the <code translate="no" dir="ltr">my-class</code> ComputeClass.</p>
+</li> <li>
+<p>Configure limits for the number of GPUs of a specific type by using the <code translate="no" dir="ltr">cloud.google.com/gke-accelerator</code> label and the <code translate="no" dir="ltr">nvidia.com/gpu</code> resource name:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityQuota
+metadata:
+  name: capacity-quota-gpu
+spec:
+  selector:
+    matchLabels:
+      cloud.google.com/compute-class: my-gpu-class
+      cloud.google.com/gke-accelerator: nvidia-tesla-t4
+  limits:
+    resources:
+      nvidia.com/gpu: 16
+</pre> <p>This CapacityQuota restricts the cluster autoscaler to a maximum of 16 NVIDIA Tesla T4 GPUs in the <code translate="no" dir="ltr">my-gpu-class</code> ComputeClass. If you omit the ComputeClass selector, then the limit applies to all NVIDIA Tesla T4 GPU nodes in the cluster.</p>
+</li> <li>
+<p>Configure limits for the number of nodes that GKE creates in a specific zone by using the <code translate="no" dir="ltr">topology.kubernetes.io/zone</code> label and the <code translate="no" dir="ltr">nodes</code> resource name:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityQuota
+metadata:
+  name: capacity-quota-zone
+spec:
+  selector:
+    matchLabels:
+      topology.kubernetes.io/zone: us-central1-b
+  limits:
+    resources:
+      nodes: 64
+</pre> <p>This CapacityQuota restricts the cluster autoscaler to 64 nodes in the <code translate="no" dir="ltr">us-central1-b</code> zone.</p>
+</li> </ul>
+</li> <li>
+<p>Create the CapacityQuota:</p> 
+<pre>kubectl apply -f PATH_TO_MANIFEST_FILE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PATH_TO_MANIFEST_FILE</var></code> with the path to the CapacityQuota manifest file that you created.</p>
+</li> </ol> <h3 id="select-expressions">Select nodes by using expressions</h3> <p>For more complex targeting, CapacityQuota supports defining the <code translate="no" dir="ltr">matchExpressions</code> field in addition to the <code translate="no" dir="ltr">matchLabels</code> field. The <code translate="no" dir="ltr">matchExpressions</code> enables operators like <code translate="no" dir="ltr">In</code>, <code translate="no" dir="ltr">NotIn</code>, <code translate="no" dir="ltr">Exists</code>, and <code translate="no" dir="ltr">DoesNotExist</code>.</p> <ol> <li>
+<p>Create a CapacityQuota manifest that uses the <code translate="no" dir="ltr">matchExpressions</code> field. The following example CapacityQuota applies CPU and memory limits to nodes running on specific high-performance machine families by grouping them by using the <code translate="no" dir="ltr">In</code> operator:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityQuota
+metadata:
+  name: capacity-quota-high-perf-machines
+spec:
+  selector:
+    matchExpressions:
+      - key: cloud.google.com/machine-family
+        operator: In
+        values:
+          - c2
+          - c3
+          - c3d
+  limits:
+    resources:
+      cpu: 64
+      memory: 128Gi
+</pre>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f PATH_TO_MANIFEST_FILE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PATH_TO_MANIFEST_FILE</var></code> with the path to the CapacityQuota manifest file that you created.</p>
+</li> </ol> <h2 id="verify_the_capacityquota_configuration">Verify the CapacityQuota configuration</h2> <p>This section shows you how to verify that a CapacityQuota actively enforces limits by deploying an example workload that violates those limits. To perform this verification, follow these steps:</p> <ol> <li>
+<p>Save the following example ComputeClass as <code translate="no" dir="ltr">test-capacityquota-class.yaml</code>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: test-capacityquota-class
+spec:
+  priorities:
+  - machineFamily: n2
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <p>This ComputeClass can auto-create nodes that use the N2 machine series.</p>
+</li> <li>
+<p>Create the ComputeClass:</p> 
+<pre>kubectl apply -f test-capacityquota-class.yaml
+</pre>
+</li> <li>
+<p>Save the following example CapacityQuota as <code translate="no" dir="ltr">test-capacityquota.yaml</code>:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityQuota
+metadata:
+  name: test-capacityquota
+spec:
+  selector:
+    matchLabels:
+      cloud.google.com/compute-class: test-capacityquota-class
+  limits:
+    resources:
+      cpu: 8
+</pre> <p>This CapacityQuota restricts the autoscaler to a maximum of 8 CPU resources for the <code translate="no" dir="ltr">test-capacityquota-class</code> ComputeClass.</p>
+</li> <li>
+<p>Create the CapacityQuota:</p> 
+<pre>kubectl apply -f test-capacityquota.yaml
+</pre>
+</li> <li>
+<p>Save the following Deployment as <code translate="no" dir="ltr">test-capacityquota-workload.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-capacityquota-workload
+spec:
+  replicas: 16
+  selector:
+    matchLabels:
+      app: test-capacityquota-workload
+  template:
+    metadata:
+      labels:
+        app: test-capacityquota-workload
+    spec:
+      containers:
+      - name: test
+        image: gcr.io/google_containers/pause
+        resources:
+          limits:
+            cpu: 500m
+      nodeSelector:
+        cloud.google.com/compute-class: test-capacityquota-class
+</pre> <p>This Deployment creates 16 Pods, each of which requests 500 mCPU. Because nodes reserve some CPU for system components, the sum of the CPU resources across all of the nodes that GKE must create to run the 16 Pods is greater than <code translate="no" dir="ltr">8</code>.</p>
+</li> <li>
+<p>Create the Deployment:</p> 
+<pre>kubectl apply -f test-capacityquota-workload.yaml
+</pre>
+</li> <li>
+<p>Wait for about two minutes, and then verify the Pod scheduling status:</p> 
+<pre>kubectl get pods -l app=test-capacityquota-workload
+</pre> <p>The cluster autoscaler scales nodes up to the CapacityQuota limit of 8 CPUs. After this limit is reached, the autoscaler doesn't create nodes. As a result, some Pods in the Deployment remain in the <code translate="no" dir="ltr">Pending</code> status.</p>
+</li> <li>
+<p>To verify that the CapacityQuota is what caused the <code translate="no" dir="ltr">Pending</code> status, describe one of the pending Pods:</p> 
+<pre>kubectl describe pod PENDING_POD_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PENDING_POD_NAME</var></code> with the name of a Pod that's stuck in the <code translate="no" dir="ltr">Pending</code> state.</p> <p>The output is similar to the following, which indicates that the CapacityQuota blocked node scale-up:</p> 
+<pre>Pod didn't trigger scale-up: 1 exceeded quota: "CapacityQuota/test-capacityquota", resources: cpu
+</pre> <p>You can also view these events by using the <a href="cluster-autoscaler-visibility">cluster autoscaler visibility logs</a>. Check the <code translate="no" dir="ltr">noScaleUp</code> event, like in the following example:</p> 
+<pre>{
+  "jsonPayload": {
+    "noDecisionStatus": {
+      "noScaleUp": {
+        "skippedMigs": [
+          {
+            "reason": {
+              "parameters": [
+                "exceeded quota: \"CapacityQuota/test-capacityquota\", resources: cpu"
+              ],
+              "messageId": "no.scale.up.mig.skipped"
+            },
+            "mig": {
+              "name": "gke-test-grp",
+              "zone": "us-central1-f",
+              "nodepool": "nap-n2-highcpu-2-test"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+</pre>
+</li> </ol> <h2 id="check-usage-validity">Check the usage and validity of CapacityQuotas</h2> <p>The <code translate="no" dir="ltr">status</code> field in the CapacityQuota API resource provides information about resource usage for nodes that match the CapacityQuota and the validity of the CapacityQuota specification.</p> <p>To check the status of a CapacityQuota, run the following command:</p> 
+<pre>kubectl describe capacityquota CAPACITY_QUOTA_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CAPACITY_QUOTA_NAME</var></code> with the name of the CapacityQuota that you want to inspect.</p> <p>In the output, check the following fields:</p> <ul> <li>
+<p>To check the resource usage of matched nodes, use the <code translate="no" dir="ltr">status.used</code> field:</p> 
+<pre>status:
+  conditions:
+  - lastTransitionTime: "2026-07-27T10:00:00Z"
+    message: "CapacityQuota is valid"
+    reason: "Valid"
+    status: "True"
+    type: "cluster-autoscaler.kubernetes.io/valid"
+  used:
+    resources:
+      cpu: 32
+      memory: 128Gi
+</pre> <p>The <code translate="no" dir="ltr">status.used</code> field is intended for observability and isn't used by the cluster autoscaler to enforce limits. This field displays usage only after a successful scale-up operation. The cluster autoscaler also tracks pending nodes internally and factors those pending nodes into subsequent scale-up evaluations. This internal tracking helps to prevent limits from being exceeded.</p>
+</li> <li>
+<p>To check the validity of a CapacityQuota, use the <code translate="no" dir="ltr">status.conditions</code> field:</p> 
+<pre>status:
+  conditions:
+  - lastTransitionTime: "2026-07-27T10:00:00Z"
+    message: "CapacityQuota is valid"
+    reason: "Valid"
+    status: "True"
+    type: "cluster-autoscaler.kubernetes.io/valid"
+  used:
+    resources:
+      cpu: 32
+      memory: 128Gi
+</pre> <p>The <code translate="no" dir="ltr">cluster-autoscaler.kubernetes.io/valid</code> condition verifies whether the CapacityQuota uses a valid configuration, such as a correctly formatted selector. If the value in the <code translate="no" dir="ltr">status</code> field for this condition is <code translate="no" dir="ltr">True</code>, then the CapacityQuota is valid and your limits are enforced. However, if the value in the <code translate="no" dir="ltr">status</code> field is <code translate="no" dir="ltr">False</code>, or if the condition is not yet present, then the limits aren't enforced. The <code translate="no" dir="ltr">message</code> field provides details about why the CapacityQuota isn't valid.</p>
+</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="../concepts/cluster-autoscaler">how the cluster autoscaler works</a>.</li> <li>See the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/capacityquota">CapacityQuota API reference</a>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-capacity-quotas" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-capacity-quotas</a>
+  </p>
+</div>

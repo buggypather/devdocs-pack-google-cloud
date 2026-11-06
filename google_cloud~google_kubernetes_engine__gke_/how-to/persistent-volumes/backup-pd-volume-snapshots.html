@@ -1,0 +1,328 @@
+<h1>Back up Persistent Disk storage using volume snapshots</h1>  <p>Back up and restore your Persistent Disk storage in Google Kubernetes Engine (GKE) by using volume snapshots. A volume snapshot creates a point-in-time copy of your Persistent Disk data, allowing for efficient recovery and testing. This capability helps you safeguard against data loss, revert to previous states, and ensure business continuity for your workloads. To learn more about the fundamental concepts of volume snapshots in Kubernetes, see <a href="volume-snapshots">About Kubernetes volume snapshots</a>.</p> <h2 id="requirements">Requirements</h2> <p>To use volume snapshots on GKE, you must meet the following requirements:</p> <ul> <li>
+<p>Use a CSI driver that supports snapshots. The in-tree Persistent Disk driver does not support snapshots. To create and manage snapshots, you must use the same CSI driver as the underlying <code translate="no" dir="ltr">PersistentVolumeClaim</code> (PVC).</p> <ul> <li><p>For Persistent Disk (PD) volume snapshots, use the Compute Engine Persistent Disk CSI driver. The <a href="https://github.com/kubernetes-sigs/gcp-compute-persistent-disk-csi-driver">Compute Engine Persistent Disk CSI driver</a> is installed by default on new Linux clusters running GKE version 1.18.10-gke.2100 or later, or version 1.19.3-gke.2100 or later. You can also <a href="gce-pd-csi-driver#enabling_the_on_an_existing_cluster">enable the Compute Engine Persistent Disk CSI driver on an existing cluster</a>.</p></li> <li><p>For a list of all CSI drivers that support snapshots, see the <strong>Other features</strong> column in <a href="https://kubernetes-csi.github.io/docs/drivers.html">Drivers</a> in the Kubernetes documentation.</p></li> </ul>
+</li> <li><p>Use control plane <a href="https://docs.cloud.google.com/kubernetes-engine/versioning-and-upgrades">versions</a> 1.17 or later. To use the <a href="../gce-pd-csi-driver">Compute Engine Persistent Disk CSI driver</a> in a <code translate="no" dir="ltr">VolumeSnapshot</code>, use GKE versions 1.17.6-gke.4 or later.</p></li> </ul> <ul> <li>Have an existing <code translate="no" dir="ltr">PersistentVolumeClaim</code> to use for a snapshot. The <code translate="no" dir="ltr">PersistentVolume</code> you use for a snapshot source must be managed by a CSI driver. You can verify that you're using a CSI driver by checking that the <code translate="no" dir="ltr">PersistentVolume</code> spec has a <code translate="no" dir="ltr">csi</code> section with <code translate="no" dir="ltr">driver: pd.csi.storage.gke.io</code> or <code translate="no" dir="ltr">filestore.csi.storage.gke.io</code>. If the <code translate="no" dir="ltr">PersistentVolume</code> is <a href="../../concepts/persistent-volumes#dynamic_provisioning">dynamically provisioned</a> by the CSI driver as described in the following sections, it's managed by the CSI driver.</li> </ul> <h2 id="limitations">Limitations</h2> <p>All <a href="https://docs.cloud.google.com/compute/docs/disks/snapshots#restrictions">restrictions for creating a disk snapshot</a> on Compute Engine also apply to GKE.</p> <h2 id="best_practices">Best practices</h2> <p>Be sure to follow <a href="https://docs.cloud.google.com/compute/docs/disks/snapshot-best-practices">best practices for Compute Engine disk snapshots</a> when using Persistent Disk <code translate="no" dir="ltr">Volume</code> snapshots on GKE.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <h2 id="creating_and_using_a_volume_snapshot">Creating and using a volume snapshot</h2> <p>The examples in this document show you how to do the following tasks:</p> <ol> <li>
+<a href="#create-deployment">Create a <code translate="no" dir="ltr">PersistentVolumeClaim</code> and <code translate="no" dir="ltr">Deployment</code></a>.</li> <li>
+<a href="#add-file">Add a file to the <code translate="no" dir="ltr">PersistentVolume</code> that the <code translate="no" dir="ltr">Deployment</code> uses</a>.</li> <li>
+<a href="#create-snapshotclass">Create a <code translate="no" dir="ltr">VolumeSnapshotClass</code> to configure the snapshot</a>.</li> <li>
+<a href="#create-snapshot">Create a volume snapshot of the <code translate="no" dir="ltr">PersistentVolume</code></a>.</li> <li>
+<a href="#delete-file">Delete the test file</a>.</li> <li>
+<a href="#restore-snapshot">Restore the <code translate="no" dir="ltr">PersistentVolume</code> to the snapshot you created</a>.</li> <li>
+<a href="#verify-restore">Verify that the restoration worked</a>.</li> </ol> <p>To use a volume snapshot, you must complete the following steps:</p> <ol> <li>Create a <code translate="no" dir="ltr">VolumeSnapshotClass</code> object to specify the CSI driver and deletion policy for your snapshot.</li> <li>Create a <code translate="no" dir="ltr">VolumeSnapshot</code> object to request a snapshot of an existing <code translate="no" dir="ltr">PersistentVolumeClaim</code>.</li> <li>Reference the <code translate="no" dir="ltr">VolumeSnapshot</code> in a <code translate="no" dir="ltr">PersistentVolumeClaim</code> to restore a volume to that snapshot or create a new volume using the snapshot.</li> </ol> <h3 id="create-deployment">Create a <code translate="no" dir="ltr">PersistentVolumeClaim</code> and a <code translate="no" dir="ltr">Deployment</code>
+</h3> <ol> <li>
+<p>To create the <code translate="no" dir="ltr">PersistentVolumeClaim</code> object, save the following manifest as <code translate="no" dir="ltr">my-pvc.yaml</code>:</p> <div> <section><p class="_code-tab"><strong>Persistent Disk</strong></p>
+
+<pre data-language=""> apiVersion: v1
+ kind: PersistentVolumeClaim
+ metadata:
+   name: my-pvc
+ spec:
+   storageClassName: standard-rwo
+   accessModes:
+   - ReadWriteOnce
+   resources:
+     requests:
+       storage: 1Gi
+</pre> <p>This example uses the <code translate="no" dir="ltr">standard-rwo</code> storage class installed by default with the Compute Engine Persistent Disk CSI driver. To learn more, see <a href="gce-pd-csi-driver#enabling_the_on_a_new_cluster">Using the Compute Engine Persistent Disk CSI driver</a>.</p></section> </div> <p>For <code translate="no" dir="ltr">spec.storageClassName</code>, you can specify any storage class that uses a supported CSI driver.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f my-pvc.yaml
+</pre>
+</li> <li>
+<p>To create a <code translate="no" dir="ltr">Deployment</code>, save the following manifest as <code translate="no" dir="ltr">my-deployment.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-app
+spec:
+  selector:
+    matchLabels:
+      app: hello-app
+  template:
+    metadata:
+      labels:
+        app: hello-app
+    spec:
+      containers:
+      - name: hello-app
+        image: google/cloud-sdk:slim
+        args: [ "sleep", "3600" ]
+        volumeMounts:
+        - name: sdk-volume
+          mountPath: /usr/share/hello/
+      volumes:
+      - name: sdk-volume
+        persistentVolumeClaim:
+          claimName: my-pvc
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f my-deployment.yaml
+</pre>
+</li> <li>
+<p>Check the status of the <code translate="no" dir="ltr">Deployment</code>:</p> 
+<pre>kubectl get deployment hello-app
+</pre> <p>It might take some time for the <code translate="no" dir="ltr">Deployment</code> to become ready. You can run the preceding command until you see an output similar to the following:</p> 
+<pre>NAME        READY   UP-TO-DATE   AVAILABLE   AGE
+hello-app   1/1     1            1           2m55s
+</pre>
+</li> </ol> <h3 id="add-file">Add a test file to the volume</h3> <ol> <li>
+<p>List the <code translate="no" dir="ltr">Pods</code> in the <code translate="no" dir="ltr">Deployment</code>:</p> 
+<pre>kubectl get pods -l app=hello-app
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                         READY   STATUS    RESTARTS   AGE
+hello-app-6d7b457c7d-vl4jr   1/1     Running   0          2m56s
+</pre>
+</li> <li>
+<p>Create a test file in a <code translate="no" dir="ltr">Pod</code>:</p> 
+<pre>kubectl exec POD_NAME \
+    -- sh -c 'echo "Hello World!" &gt; /usr/share/hello/hello.txt'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">POD_NAME</var></code> with the name of the <code translate="no" dir="ltr">Pod</code>.</p>
+</li> <li>
+<p>Verify that the file exists:</p> 
+<pre>kubectl exec POD_NAME \
+    -- sh -c 'cat /usr/share/hello/hello.txt'
+</pre> <p>The output is similar to the following:</p> 
+<pre>Hello World!
+</pre>
+</li> </ol> <h3 id="create-snapshotclass">Create a <code translate="no" dir="ltr">VolumeSnapshotClass</code> object</h3> <p>Create a <code translate="no" dir="ltr">VolumeSnapshotClass</code> object to specify the CSI driver and <code translate="no" dir="ltr">deletionPolicy</code> for your volume snapshot. You can reference <code translate="no" dir="ltr">VolumeSnapshotClass</code> objects when you create <code translate="no" dir="ltr">VolumeSnapshot</code> objects.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">volumesnapshotclass.yaml</code>.</p> <div> <section><p class="_code-tab"><strong>Persistent Disk</strong></p>
+<p>Use the <code translate="no" dir="ltr">v1</code> API version for clusters running versions 1.21 or later.</p> 
+<pre data-language="">apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: my-snapshotclass
+driver: pd.csi.storage.gke.io
+deletionPolicy: Delete
+</pre> <p>In this example:</p> <ul> <li><p>The <code translate="no" dir="ltr">driver</code> field is used by the CSI driver to provision the snapshot. In this example, <code translate="no" dir="ltr">pd.csi.storage.gke.io</code> uses the <a href="../gce-pd-csi-driver">Compute Engine Persistent Disk CSI driver</a>.</p></li> <li>
+<p>The<code translate="no" dir="ltr">deletionPolicy</code> field tells GKE what to do with the <code translate="no" dir="ltr">VolumeSnapshotContent</code> object and the underlying snapshot when the bound <code translate="no" dir="ltr">VolumeSnapshot</code> object is deleted. Specify <code translate="no" dir="ltr">Delete</code> to delete the <code translate="no" dir="ltr">VolumeSnapshotContent</code> object and the underlying snapshot. Specify <code translate="no" dir="ltr">Retain</code> if you want to keep the <code translate="no" dir="ltr">VolumeSnapshotContent</code> and the underlying snapshot.</p> <p>To use a <a href="https://docs.cloud.google.com/compute/docs/disks/snapshots#custom_location">custom storage location</a>, add a <code translate="no" dir="ltr">storage-locations</code> parameter to the snapshot class. To use this parameter, your clusters must use version 1.21 or later.</p> 
+<pre data-language="">apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: my-snapshotclass
+parameters:
+  storage-locations: us-east2
+driver: pd.csi.storage.gke.io
+deletionPolicy: Delete
+</pre>
+</li> <li>
+<p>To create a <a href="https://docs.cloud.google.com/compute/docs/images">disk image</a>, add the following to the <code translate="no" dir="ltr">parameters</code> field:</p> 
+<pre data-language="">parameters:
+  snapshot-type: images
+  image-family: IMAGE_FAMILY
+</pre> <p>Replace <code translate="no" dir="ltr">IMAGE_FAMILY</code> with the name of your preferred image family, such as <code translate="no" dir="ltr">preloaded-data</code>.</p>
+</li> </ul></section> </div> </li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f volumesnapshotclass.yaml
+</pre>
+</li> </ol> <h3 id="create-snapshot">Create a <code translate="no" dir="ltr">VolumeSnapshot</code>
+</h3> <p>A <code translate="no" dir="ltr">VolumeSnapshot</code> object is a request for a snapshot of an existing <code translate="no" dir="ltr">PersistentVolumeClaim</code> object. When you create a <code translate="no" dir="ltr">VolumeSnapshot</code> object, GKE automatically creates and binds it with a <code translate="no" dir="ltr">VolumeSnapshotContent</code> object, which is a resource in your cluster like a <code translate="no" dir="ltr">PersistentVolume</code> object.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">volumesnapshot.yaml</code>.</p> 
+<pre>apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: my-snapshot
+spec:
+  volumeSnapshotClassName: my-snapshotclass
+  source:
+    persistentVolumeClaimName: my-pvc
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f volumesnapshot.yaml
+</pre> <p>After you create a <code translate="no" dir="ltr">Volume</code> snapshot, GKE creates a corresponding <code translate="no" dir="ltr">VolumeSnapshotContent</code> object in the cluster. This object stores the snapshot and bindings of <code translate="no" dir="ltr">VolumeSnapshot</code> objects. You don't interact with <code translate="no" dir="ltr">VolumeSnapshotContents</code> objects directly.</p>
+</li> <li>
+<p>Confirm that GKE created the <code translate="no" dir="ltr">VolumeSnapshotContents</code> object:</p> 
+<pre>kubectl get volumesnapshotcontents
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                               AGE
+snapcontent-cee5fb1f-5427-11ea-a53c-42010a1000da   55s
+</pre>
+</li> </ol> <p>After the <code translate="no" dir="ltr">Volume</code> snapshot content is created, the CSI driver you specified in the <code translate="no" dir="ltr">VolumeSnapshotClass</code> creates a snapshot on the corresponding storage system. After GKE creates a snapshot on the storage system and binds it to a <code translate="no" dir="ltr">VolumeSnapshot</code> object on the cluster, the snapshot is ready to use. You can check the status by running the following command:</p> 
+<pre>kubectl get volumesnapshot \
+  -o custom-columns='NAME:.metadata.name,READY:.status.readyToUse'
+</pre> <p>If the snapshot is ready to use, the output is similar to the following:</p> 
+<pre>NAME               READY
+my-snapshot        true
+</pre> <h3 id="delete-file">Delete the test file</h3> <ol> <li>
+<p>Delete the test file that you created:</p> 
+<pre>kubectl exec POD_NAME \
+    -- sh -c 'rm /usr/share/hello/hello.txt'
+</pre>
+</li> <li>
+<p>Verify that the file no longer exists:</p> 
+<pre>kubectl exec POD_NAME \
+    -- sh -c 'cat /usr/share/hello/hello.txt'
+</pre> <p>The output is similar to the following:</p> 
+<pre>cat: /usr/share/hello/hello.txt: No such file or directory
+</pre>
+</li> </ol> <h3 id="restore-snapshot">Restore the volume snapshot</h3> <p>You can reference a <code translate="no" dir="ltr">VolumeSnapshot</code> in a <code translate="no" dir="ltr">PersistentVolumeClaim</code> to provision a new volume with data from an existing volume or restore a volume to a state that you captured in the snapshot.</p> <p>To reference a <code translate="no" dir="ltr">VolumeSnapshot</code> in a <code translate="no" dir="ltr">PersistentVolumeClaim</code>, add the <code translate="no" dir="ltr">dataSource</code> field to your <code translate="no" dir="ltr">PersistentVolumeClaim</code>. The same process is used whether the <code translate="no" dir="ltr">VolumeSnapshotContents</code> refers to a disk image or a snapshot.</p> <p>In this example, you reference the <code translate="no" dir="ltr">VolumeSnapshot</code> that you created in a new <code translate="no" dir="ltr">PersistentVolumeClaim</code> and update the <code translate="no" dir="ltr">Deployment</code> to use the new claim.</p> <ol> <li>
+<p>Verify if you're using a disk or image snapshot, which differ as follows:</p> <ul> <li>
+<strong>Disk snapshots</strong>: Take snapshots frequently and restore infrequently.</li> <li>
+<strong>Image snapshots</strong>: Take snapshots infrequently and restore frequently. Image snapshots may also be slower to create than disk snapshots.</li> </ul> <p>For details see <a href="https://docs.cloud.google.com/compute/docs/disks/snapshot-best-practices#freq_limits">Snapshot frequency limits</a>. Knowing your snapshot type helps if you need to troubleshoot any issues.</p> <p>Inspect the <code translate="no" dir="ltr">VolumeSnapshot</code>:</p> 
+<pre>kubectl describe volumesnapshot SNAPSHOT_NAME
+</pre> <p>The <code translate="no" dir="ltr">volumeSnapshotClassName</code> field specifies the snapshot class.</p> 
+<pre>kubectl describe volumesnapshotclass SNAPSHOT_CLASS_NAME
+</pre> <p>The <code translate="no" dir="ltr">snapshot-type</code> parameter will specify <code translate="no" dir="ltr">snapshots</code> or <code translate="no" dir="ltr">images</code>. If it is not given, the default is <code translate="no" dir="ltr">snapshots</code>.</p> <p>If there is no snapshot class (for instance, if the snapshot was statically created), inspect the <code translate="no" dir="ltr">VolumeSnapshotContents</code>. <code translate="no" dir="ltr">sh
+kubectl describe volumesnapshotcontents <var translate="no">SNAPSHOT_CONTENTS_NAME</var></code> The format of a snapshot handle in the output tells you the type of snapshot, as follows: * <code translate="no" dir="ltr">projects/<var translate="no">PROJECT_NAME</var>/global/snapshots/<var translate="no">SNAPSHOT_NAME</var></code>: disk snapshot</p> <ul> <li>
+<code translate="no" dir="ltr">projects/<var translate="no">PROJECT_NAME</var>/global/images/<var translate="no">IMAGE_NAME</var></code>: image snapshot</li> </ul>
+</li> </ol> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">pvc-restore.yaml</code>:</p> <div> <section><p class="_code-tab"><strong>Persistent Disk</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-restore
+spec:
+  dataSource:
+    name: my-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  storageClassName: standard-rwo
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+</pre></section> </div> <aside class="note"><strong>Note:</strong><span> The namespace of the <code translate="no" dir="ltr">PersistentVolumeClaim</code> must be the same as the namespace of the <code translate="no" dir="ltr">VolumeSnapshot</code>.</span></aside>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f pvc-restore.yaml
+</pre>
+</li> <li>
+<p>Update the <code translate="no" dir="ltr">my-deployment.yaml</code> file to use the new <code translate="no" dir="ltr">PersistentVolumeClaim</code>:</p> 
+<pre>...
+volumes:
+- name: my-volume
+  persistentVolumeClaim:
+    claimName: pvc-restore
+</pre>
+</li> <li>
+<p>Apply the updated manifest:</p> 
+<pre>kubectl apply -f my-deployment.yaml
+</pre>
+</li> </ol> <h3 id="verify-restore">Check that the snapshot restored successfully</h3> <ol> <li>
+<p>Get the name of the new <code translate="no" dir="ltr">Pod</code> that GKE creates for the updated <code translate="no" dir="ltr">Deployment</code>:</p> 
+<pre> kubectl get pods -l app=hello-app
+</pre>
+</li> </ol> <p>Verify that the test file exists:</p> 
+<pre>   kubectl exec NEW_POD_NAME \
+       -- sh -c 'cat /usr/share/hello/hello.txt'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NEW_POD_NAME</var></code> with the name of the new <code translate="no" dir="ltr">Pod</code> that GKE created.</p> <p>The output is similar to the following:</p> 
+<pre>   Hello World!
+</pre> <h2 id="import-a-pre-existing-snapshot">Import a pre-existing snapshot</h2> <p>You can use an existing volume snapshot created outside the current cluster to manually provision the <code translate="no" dir="ltr">VolumeSnapshotContents</code> object. For example, you can populate a volume in GKE with a snapshot of another Google Cloud resource created in a different cluster.</p> <ol> <li>
+<p>Locate the name of your snapshot.</p> <div> <section><p class="_code-tab"><strong>Google Cloud console</strong></p>
+<p> <a href="https://console.cloud.google.com/compute/snapshots" target="console" track-type="commonIncludes" track-name="consoleLink" class="button button-primary">Go to Snapshots page</a> </p></section> <section><p class="_code-tab"><strong>Google Cloud CLI</strong></p>
+<p> Run the following command:</p> 
+<pre data-language="">gcloud compute snapshots list
+</pre> <p>The output is similar to the following:</p> 
+<pre data-language="">NAME                                           DISK_SIZE_GB  SRC_DISK                                                     STATUS
+snapshot-5e6af474-cbcc-49ed-b53f-32262959a0a0  1             us-central1-b/disks/pvc-69f80fca-bb06-4519-9e7d-b26f45c1f4aa READY
+</pre></section> </div>
+</li> <li>
+<p>Save the following <code translate="no" dir="ltr">VolumeSnapshot</code> manifest as <code translate="no" dir="ltr">restored-snapshot.yaml</code>.</p> 
+<pre>apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: restored-snapshot
+spec:
+  volumeSnapshotClassName: my-snapshotclass
+  source:
+    volumeSnapshotContentName: restored-snapshot-content
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f restored-snapshot.yaml
+</pre>
+</li> <li>
+<p>Save the following <code translate="no" dir="ltr">VolumeSnapshotContent</code> manifest as <code translate="no" dir="ltr">restored-snapshot-content.yaml</code>. Replace the <code translate="no" dir="ltr">snapshotHandle</code> field with your project ID and snapshot name. Both <code translate="no" dir="ltr">volumeSnapshotRef.name</code> and <code translate="no" dir="ltr">volumeSnapshotRef.namespace</code> must point to the previously created <code translate="no" dir="ltr">VolumeSnapshot</code> for the bi-directional binding to be valid.</p> 
+<pre>apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotContent
+metadata:
+  name: restored-snapshot-content
+spec:
+  deletionPolicy: Retain
+  driver: pd.csi.storage.gke.io
+  source:
+    snapshotHandle: projects/PROJECT_ID/global/snapshots/SNAPSHOT_NAME
+  volumeSnapshotRef:
+    kind: VolumeSnapshot
+    name: restored-snapshot
+    namespace: default
+</pre> </li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f restored-snapshot-content.yaml
+</pre>
+</li> <li>
+<p>Save the following <code translate="no" dir="ltr">PersistentVolumeClaim</code> manifest as <code translate="no" dir="ltr">restored-pvc.yaml</code>. The Kubernetes storage controller will find a <code translate="no" dir="ltr">VolumeSnapshot</code> named <code translate="no" dir="ltr">restored-snapshot</code> and then try to find, or dynamically create, a <code translate="no" dir="ltr">PersistentVolume</code> as the data source. You can then utilize this PVC in a Pod to access the restored data.</p> 
+<pre>apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restored-pvc
+spec:
+  dataSource:
+    name: restored-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  storageClassName: standard-rwo
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+</pre> </li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f restored-pvc.yaml
+</pre>
+</li> <li>
+<p>Save the following <code translate="no" dir="ltr">Pod</code> manifest as <code translate="no" dir="ltr">restored-pod.yaml</code> referring to the <code translate="no" dir="ltr">PersistentVolumeClaim</code>. The CSI driver will provision a <code translate="no" dir="ltr">PersistentVolume</code> and populate it from the snapshot.</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: restored-pod
+spec:
+  containers:
+  - name: busybox
+    image: busybox
+    args:
+    - sleep
+    - "3600"
+    volumeMounts:
+    - name: source-data
+      mountPath: /demo/data
+  volumes:
+  - name: source-data
+    persistentVolumeClaim:
+      claimName: restored-pvc
+      readOnly: false
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f restored-pod.yaml
+</pre>
+</li> <li>
+<p>Verify that the file has been restored:</p> 
+<pre>kubectl exec restored-pod -- sh -c 'cat /demo/data/hello.txt'
+</pre>
+</li> </ol> <h2 id="cleaning_up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used on this page, follow these steps.</p> <ol> <li>
+<p>Delete the <code translate="no" dir="ltr">VolumeSnapshot</code>:</p> 
+<pre>kubectl delete volumesnapshot my-snapshot
+</pre>
+<aside class="note"><strong>Note:</strong><span> If a volume snapshot's <code translate="no" dir="ltr">VolumeSnapshotClass</code> has <code translate="no" dir="ltr">deletionPolicy:Delete</code>, the corresponding <code translate="no" dir="ltr">VolumeSnapshotContent</code> and the physical snapshot on the storage system are also deleted. If it has a <code translate="no" dir="ltr">deletionPolicy:Retain</code>, GKE retains the underlying snapshot.</span></aside>
+</li> <li>
+<p>Delete the <code translate="no" dir="ltr">VolumeSnapshotClass</code>:</p> 
+<pre>kubectl delete volumesnapshotclass my-snapshotclass
+</pre>
+</li> <li>
+<p>Delete the <code translate="no" dir="ltr">Deployment</code>:</p> 
+<pre>kubectl delete deployments hello-app
+</pre>
+</li> <li>
+<p>Delete the <code translate="no" dir="ltr">PersistentVolumeClaim</code> objects:</p> 
+<pre>kubectl delete pvc my-pvc pvc-restore
+</pre>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>Read the <a href="https://kubernetes.io/blog/2019/12/09/kubernetes-1-17-feature-cis-volume-snapshot-beta/">Kubernetes Volume Snapshot</a> documentation.</li> <li>Learn about <a href="../volume-expansion">volume expansion</a>.</li> <li>Learn how to <a href="../install-csi-driver">manually install a CSI driver</a>. </li> <li>Learn about <a href="../../concepts/storage-overview#pd">block storage (Persistent Disk) for GKE</a>. </li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/backup-pd-volume-snapshots" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/backup-pd-volume-snapshots</a>
+  </p>
+</div>

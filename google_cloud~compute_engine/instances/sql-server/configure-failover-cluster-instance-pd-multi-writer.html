@@ -1,0 +1,517 @@
+<h1>Configuring a SQL Server failover cluster instance that uses Hyperdisk Balanced High Availability disks in multi-writer mode</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <p>Microsoft SQL Server <a href="https://docs.microsoft.com/en-us/sql/sql-server/failover-clusters/windows/always-on-failover-cluster-instances-sql-server" track-type="tutorial" track-name="externalLink" track-metadata-position="prereqs" track-metadata-end-goal="fci" class="external">Failover Cluster Instances</a> (FCI) is a single SQL Server instance that's deployed across multiple Windows Server Failover Cluster (WSFC) nodes. At any point in time, one of the cluster nodes actively hosts the SQL instance. In the event of a failure, WSFC automatically transfers ownership of the instance's resources to another node.</p> <p>SQL Server FCI requires data to be located on shared storage so that it can be accessed across all WSFC nodes. This guide describes how you can deploy a SQL Server 2022 failover cluster instance and use Hyperdisk Balanced High Availability in <a href="../../disks/sharing-disks-between-vms#hd-multi-writer">multi-writer mode</a> as regional (multi-zonal) shared storage.</p> <aside class="note"><strong>Note:</strong><span> In single zone deployment use Hyperdisk Balanced with multi-writer mode. In an on-premises environment, you can let WSFC perform <a href="https://en.wikipedia.org/wiki/Address_Resolution_Protocol#ARP_announcements">ARP announcements</a> if a failover occurs to <a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/virtualization/mac-address-changes-for-virtual-server">notify network equipment</a> about an IP address change. Google Cloud, however, disregards ARP announcements. Consequently, you must implement one of the following two options:</span></aside> <ul> <li>Internal load balancer (see <a href="../../tutorials/running-windows-server-failover-clustering#understanding_the_network_routing" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">Running Windows Server Failover Clustering</a>)</li> </ul> <p><img src="https://docs.cloud.google.com/static/compute/images/sqlserver-fci-pd-multi-writer-architecture.svg" alt="Architecture"></p> <ul> <li>Distributed network name (DNN) (see <a href="https://learn.microsoft.com/en-us/azure/azure-sql/virtual-machines/windows/failover-cluster-instance-distributed-network-name-dnn-configure" track-type="tutorial" track-name="computeEngineLink" track-metadata-end-goal="windowsTutorials">Configure a DNN for failover cluster instance</a>)</li> </ul> <p><img src="https://docs.cloud.google.com/static/compute/images/sqlserver-fci-pd-multi-writer-architecture-dnn.svg" alt="Architecture"></p> <p>The article assumes that you have already deployed Active Directory on Google Cloud and that you have basic knowledge of SQL Server, Active Directory, and Compute Engine.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Deploy a WSFC comprising two SQL Server VM instances and a third VM instance that acts as a file share witness.</li> <li>Deploy a SQL Server FCI on the WSFC.</li> <li>Configure a load balancer or distributed network name (DNN) to route traffic to your availability group with SQL Server.</li> <li>Verify that the cluster is working by simulating a failover.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p>This tutorial uses billable components of Google Cloud, including:</p> <ul> <li><a href="https://cloud.google.com/compute/vm-instance-pricing">Compute Engine</a></li> <li>
+<a href="https://docs.cloud.google.com/vpc/network-pricing#lb">Cloud Load Balancing</a> <strong>(not necessary with a DNN configuration)</strong>
+</li> </ul> <p>Use the <a href="https://cloud.google.com/products/calculator/" track-type="tutorial" track-name="pricingCalculator" track-metadata-position="costs" track-metadata-end-goal="estimateCosts">pricing calculator</a> to generate a cost estimate based on your projected usage.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>To complete this guide, you need the following:</p> <ul> <li>An Active Directory domain with at least one domain controller. You can create an Active Directory domain <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/create-domain">by using Managed Microsoft AD</a>. Alternatively, you can deploy a <a href="https://docs.cloud.google.com/solutions/deploy-fault-tolerant-active-directory-environment">custom Active Directory environment on Compute Engine</a> and <a href="../windows/best-practices#use_cloud_dns_private_forwarding_zones">set up a private DNS forwarding zone</a> that forwards DNS queries to your domain controllers.</li> <li>An Active Directory user that has permission to join computers to the domain and can sign in by using RDP. If you're using Managed Microsoft AD, you can use the <code translate="no" dir="ltr">setupadmin</code> user.</li> <li>A Google Cloud project and VPC with connectivity to your Active Directory domain controllers.</li> <li>A subnet to use for the WSFC VM instances.</li> </ul> <p>Make sure you've reviewed the <a href="../../disks/sharing-disks-between-vms#mw-limitations">limitations</a> of Hyperdisk volumes in multi-writer mode and chosen a <a href="../../disks/hd-types/hyperdisk-balanced-ha#supported-regions">region where Hyperdisk Balanced High Availability is available</a>.</p> <p>To complete the guide, you also need a Google Cloud project:</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> </cloud-free-trial> </ol> <p>When you finish this tutorial, you can avoid continued billing by deleting the resources you created.</p> </section> <div id="tutorial-content"> <h2 id="preparing_the_project_and_network">Preparing the project and network</h2> <p>To prepare your Google Cloud project and VPC for the deployment of SQL Server FCI, do the following:</p> <ol> <li>
+<p>In the Google Cloud console, open <a href="https://docs.cloud.google.com/shell/docs/starting-cloud-shell" track-type="tutorial" track-name="usingCloudShell" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="launchCloudShell">Cloud Shell</a> by clicking the <strong>Activate Cloud Shell</strong> <img src="https://docs.cloud.google.com/static/shell/docs/images/activate_cloud_shell.svg" alt="Activate Cloud Shell."> button.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="attachingInstallMedia" track-metadata-end-goal="useConsole" class="button button-primary">Go to the Google Cloud console</a> </p>
+</li> <li>
+<p>Initialize the following variables:</p> 
+<pre>
+VPC_NAME=VPC_NAME
+SUBNET_NAME=SUBNET_NAME
+</pre> <p>Where:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">VPC_NAME</var></code>: name of your VPC</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: name of your subnet</li> </ul>
+</li> <li>
+<p>Set your default <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project ID</a>:</p> 
+<pre>
+gcloud config set project PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the ID of your Google Cloud project.</p>
+</li> <li>
+<p>Set your default region:</p> 
+<pre>
+gcloud config set compute/region REGION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> with the ID of the region you want to deploy in.</p>
+</li> </ol> <h3 id="create_firewall_rules">Create firewall rules</h3> <p>To allow clients to connect to SQL Server, allow communication between the WSFC nodes, and to enable the load balancer to <a href="https://docs.cloud.google.com/load-balancing/docs/health-checks#fw-rule">perform health checks</a>, you need to create several firewall rules. To simplify the creation of these firewall rules, you use <a href="https://docs.cloud.google.com/vpc/docs/add-remove-network-tags">network tags</a>:</p> <ul> <li>The 2 WSFC nodes are annotated with the <code translate="no" dir="ltr">wsfc-node</code> tag.</li> <li>All servers (including the witness) are annotated with the <code translate="no" dir="ltr">wsfc</code> tag.</li> </ul> <p>Create firewall rules that use these network tags:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create firewall rules for the WSFC nodes:</p> 
+<pre>
+SUBNET_CIDR=$(gcloud compute networks subnets describe $SUBNET_NAME --format=value\('ipCidrRange'\))
+
+gcloud compute firewall-rules create allow-all-between-wsfc-nodes \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp,udp,icmp \
+  --enable-logging \
+  --source-tags=wsfc \
+  --target-tags=wsfc \
+  --network=$VPC_NAME \
+  --priority 10000
+
+gcloud compute firewall-rules create allow-sql-to-wsfc-nodes \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp:1433 \
+  --enable-logging \
+  --source-ranges=$SUBNET_CIDR \
+  --target-tags=wsfc-node \
+  --network=$VPC_NAME \
+  --priority 10000
+</pre>
+</li> <li>
+<p>Create a firewall rule that allows health checks from the <a href="https://docs.cloud.google.com/load-balancing/docs/health-check-concepts#ip-ranges">IP ranges of the Google Cloud probers</a>: <strong>(not necessary with a DNN configuration)</strong></p> 
+<pre>
+gcloud compute firewall-rules create allow-health-check-to-wsfc-nodes \
+  --direction=INGRESS \
+  --action=allow \
+  --rules=tcp \
+  --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+  --target-tags=wsfc-node \
+  --network=$VPC_NAME \
+  --priority 10000
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> Depending on how you've deployed Active Directory, you might need to create additional firewall rules to allow servers to join the domain. See <a href="https://docs.cloud.google.com/managed-microsoft-ad/docs/firewalls#accessing_from_within_your_vpc">Accessing Managed Microsoft AD from within your VPC</a> for further details.</span></aside> <h3 id="create_vm_instances">Create VM instances</h3> <p>You now deploy two VM instances for the failover cluster. At any point in time, only one of these VMs serves as the active FCI node while the other node serves as the failover node. The two VM instances must have:</p> <ul> <li>Windows Server Failover Clustering and SQL Server installed.</li> <li>
+<a href="https://github.com/GoogleCloudPlatform/guest-agent#windows-failover-cluster-support">Compute Engine WSFC support</a> enabled.</li> </ul> <p>You use a <a href="../../images/os-details#sql_server">SQL Server premium image</a> which has SQL Server 2022 preinstalled.</p> <aside class="note"><strong>Note:</strong><span> If you plan to bring your own licenses for SQL Server by using the <a href="../windows/ms-licensing">license mobility</a> program, select Windows Server base images for these nodes and install SQL Server using your own product keys.</span></aside> <p>To provide a tie-breaking vote and achieve a quorum for the failover scenario, you deploy a third VM that serves as Domain Controller and a <a href="https://docs.microsoft.com/en-us/windows-server/failover-clustering/manage-cluster-quorum#quorum-configuration-options" track-type="tutorial" track-name="externalLink" track-metadata-position="prereqs" track-metadata-end-goal="fci" class="external">file share witness</a>.</p> <aside class="note"><strong>Note:</strong><span> If highly available file share is not available or the design calls for disk quorum, use a Hyperdisk Balanced High Availability multi-writer disk for quorum configuration.</span></aside> <ol> <li><p>Return to your existing Cloud Shell session.</p></li> <li>
+<p>Create a <a href="../../startupscript#providing_a_startup_script_for_windows_instances">specialize script</a> for the WSFC nodes. The script installs the necessary Windows feature and creates firewall rules for WSFC and SQL Server:</p> 
+<pre>
+cat &lt;&lt; "EOF" &gt; specialize-node.ps1
+
+$ErrorActionPreference = "stop"
+
+# Install required Windows features
+Install-WindowsFeature Failover-Clustering -IncludeManagementTools
+Install-WindowsFeature RSAT-AD-PowerShell
+
+# Open firewall for WSFC
+netsh advfirewall firewall add rule name="Allow SQL Server health check" dir=in action=allow protocol=TCP localport=59997
+
+# Open firewall for SQL Server
+netsh advfirewall firewall add rule name="Allow SQL Server" dir=in action=allow protocol=TCP localport=1433
+
+EOF
+</pre>
+</li> <li>
+<p>Create the VM instances and enable the Windows Server Failover Clustering agent on the WSFC nodes by setting the metadata key <code translate="no" dir="ltr">enable-wsfc</code> to <code translate="no" dir="ltr">true</code>:</p> 
+<pre>
+MACHINE_TYPE=c3-standard-8
+REGION=$(gcloud config get-value compute/region)
+ZONE_1=$REGION-a
+ZONE_2=$REGION-b
+
+gcloud compute instances create node-1 \
+  --zone $ZONE_1 \
+  --machine-type $MACHINE_TYPE \
+  --subnet $SUBNET_NAME \
+  --image-family sql-ent-2022-win-2022 \
+  --image-project windows-sql-cloud \
+  --tags wsfc,wsfc-node \
+  --boot-disk-size 50 \
+  --boot-disk-type hyperdisk-balanced \
+  --boot-disk-device-name node-1 \
+  --metadata enable-wsfc=true \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-node.ps1
+
+gcloud compute instances create node-2 \
+  --zone $ZONE_2 \
+  --machine-type $MACHINE_TYPE \
+  --subnet $SUBNET_NAME \
+  --image-family sql-ent-2022-win-2022 \
+  --image-project windows-sql-cloud \
+  --tags wsfc,wsfc-node \
+  --boot-disk-size 50 \
+  --boot-disk-type hyperdisk-balanced \
+  --boot-disk-device-name node-2 \
+  --metadata enable-wsfc=true \
+  --metadata-from-file=sysprep-specialize-script-ps1=specialize-node.ps1
+
+gcloud compute instances create witness \
+  --machine-type n4-standard-2 \
+  --subnet $SUBNET_NAME \
+  --image-family=windows-2022 \
+  --image-project=windows-cloud \
+  --tags wsfc \
+  --boot-disk-size 50 \
+  --boot-disk-type hyperdisk-balanced \
+  --zone $ZONE_1 \
+  --metadata sysprep-specialize-script-ps1="add-windowsfeature FS-FileServer"
+</pre> <aside class="note"><strong>Note:</strong><span> Depending on your <a href="../../disks/performance#optimize_disk_performance">performance requirements</a>, consider using a machine type larger than <code translate="no" dir="ltr">c3-standard-8</code> for the WSFC nodes. For more information, see the list of <a href="../../disks/sharing-disks-between-vms#hd-mw-disk-types">supported machine types</a> for Hyperdisk Balanced High Availability in multi-writer mode.</span></aside>
+</li> <li>
+<p>To join the 3 VM instances to Active Directory, do the following for each of the 3 VM instances:</p> <ol> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAME</var></code> with the name of the VM instance.</p> <p>Wait about 3 minutes until you see the output <code translate="no" dir="ltr">Instance setup finished</code>, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li><p><a href="../windows/creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance</p></li> <li><p><a href="../connecting-to-windows">Connect to the VM by using Remote Desktop</a> and sign in using the username and password created in the previous step.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</p></li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>Join the computer to your Active Directory domain and restart:</p> 
+<pre>
+Add-Computer -Domain DOMAIN -Restart
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DOMAIN</var></code> with the DNS name of your Active Directory domain.</p> <p>Wait for approximately 1 minute for the restart to complete.</p>
+</li> </ol>
+</li> </ol> <h3 id="create_hyperdisk_balanced_in_multi-writer_mode">Create Hyperdisk Balanced High Availability disks in multi-writer mode</h3> <p>You now create a Hyperdisk Balanced High Availability disk in multi-writer mode and attach it to both WSFC nodes. One of the benefits of Hyperdisk is the ability to set IOPS and throughput to match the application needs. For more information, see <a href="../../disks/hd-types/hyperdisk-balanced-ha">About Hyperdisk Balanced High Availability</a>.</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a Hyperdisk Balanced High Availability disk:</p> 
+<pre>
+SIZE=200
+
+gcloud compute disks create multiwriter-datadisk-1 \
+  --size $SIZE \
+  --provisioned-throughput 200 \
+  --provisioned-iops 5000 \
+  --access-mode READ_WRITE_MANY \
+  --type hyperdisk-balanced-high-availability \
+  --replica-zones $ZONE_1,$ZONE_2
+</pre> <aside class="note"><strong>Note:</strong><span> For the purpose of this tutorial, the size of the disk attached to each VM is smaller than it would be in a production environment.</span></aside>
+</li> <li>
+<p>Attach the disk to <code translate="no" dir="ltr">node-1</code>:</p> 
+<pre>
+gcloud compute instances attach-disk node-1 \
+  --disk multiwriter-datadisk-1 \
+  --zone $ZONE_1 \
+  --disk-scope=regional
+</pre>
+</li> <li>
+<p>Attach the disk to <code translate="no" dir="ltr">node-2</code>:</p> 
+<pre>
+gcloud compute instances attach-disk node-2 \
+  --disk multiwriter-datadisk-1 \
+  --zone $ZONE_2 \
+  --disk-scope=regional
+</pre>
+</li> </ol> <h3 id="reserve_cluster_ip_addresses">Reserve cluster IP addresses</h3> <p>You now reserve two static IP addresses in your VPC. One IP address is used as the WSFC cluster IP address, the other is used by the internal load balancer.</p> <ol> <li>
+<p>Reserve a static IP for the internal load balancer and capture the address in a new environment variable named <code translate="no" dir="ltr">LOADBALANCER_ADDRESS</code>:</p> 
+<pre>
+gcloud compute addresses create wsfc \
+  --region $REGION \
+  --subnet $SUBNET_NAME
+
+LOADBALANCER_ADDRESS=$(gcloud compute addresses describe wsfc \
+  --region $REGION \
+  --format=value\(address\)) &amp;&amp; \
+echo "Load Balancer IP: $LOADBALANCER_ADDRESS"
+</pre> <p>Note the IP address, you need it later.</p>
+</li> <li>
+<p>Reserve another static IP address that you use as cluster IP: <strong>(not necessary with a DNN configuration)</strong></p> 
+<pre>
+gcloud compute addresses create wsfc-cluster \
+  --subnet $SUBNET_NAME \
+  --region $REGION &amp;&amp; \
+CLUSTER_ADDRESS=$(gcloud compute addresses describe wsfc-cluster \
+  --region $REGION \
+  --format=value\(address\)) &amp;&amp; \
+echo "Cluster IP: $CLUSTER_ADDRESS"
+</pre> <p>Note the IP address, you need it later.</p>
+</li> </ol> <p>Your project and VPC are now ready for the deployment of the WSFC and SQL Server.</p> <h3 id="create_a_witness_file_share">Create a witness file share</h3> <p>To prepare <code translate="no" dir="ltr">witness</code> to serve as file share witness, create a file share and grant yourself and the two WSFC nodes access to the file share:</p> <ol> <li>Connect to <code translate="no" dir="ltr">witness</code> <a href="../connecting-to-windows">by using Remote Desktop</a>. Sign in with your domain user account.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Create the witness folder and share the folder:</p> 
+<pre>
+New-Item 'C:\QWitness' -type directory
+
+New-SmbShare `
+-Name QWitness `
+-Path 'C:\QWitness' `
+-Description 'SQL File Share Witness' `
+-FullAccess  $env:username,node-1$,node-2$
+
+Grant-SmbShareAccess -Name 'QWitness' -AccountName 'node-1$' -AccessRight Full -Force
+Grant-SmbShareAccess -Name 'QWitness' -AccountName 'node-2$' -AccessRight Full -Force
+</pre>
+</li> </ol> <h2 id="deploying_the_failover_cluster">Deploying the failover cluster</h2> <p>You now use the VM instances to deploy a WSFC and SQL Server.</p> <h3 id="deploy_wsfc">Deploy WSFC</h3> <p>You are now ready to create the failover cluster:</p> <ol> <li>Connect to <code translate="no" dir="ltr">node-1</code> <a href="../connecting-to-windows">by using Remote Desktop</a>. Sign in with your domain user account.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Create a new cluster:</p> <ul> <li>For load balancer configuration</li> </ul> 
+<pre>
+New-Cluster `
+  -Name sql-cluster `
+  -Node node-1,node-2 `
+  -NoStorage `
+  -StaticAddress CLUSTER_ADDRESS
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CLUSTER_ADDRESS</var></code> with the cluster IP address that you created earlier.</p> <ul> <li>For DNN configuration</li> </ul> 
+<pre>
+New-Cluster `
+  -Name sql-cluster `
+  -Node node-1,node-2 `
+  -NoStorage `
+  -ManagementPointNetworkType Distributed
+</pre>
+</li> <li>
+<p>Return to the PowerShell session on <code translate="no" dir="ltr">witness</code> and grant the virtual computer object of the cluster permission to access the file share:</p> 
+<pre>
+icacls C:\QWitness\ /grant 'sql-cluster$:(OI)(CI)(M)'
+Grant-SmbShareAccess `
+  -Name QWitness `
+  -AccountName 'sql-cluster$' `
+  -AccessRight Full `
+  -Force
+</pre>
+</li> <li>
+<p>Return to the PowerShell session on <code translate="no" dir="ltr">node-1</code> and configure the cluster to use the file share on <code translate="no" dir="ltr">witness</code> as a cluster quorum:</p> 
+<pre>
+Set-ClusterQuorum -FileShareWitness \\witness\QWitness
+</pre>
+</li> <li>
+<p>Verify that the cluster was created successfully:</p> 
+<pre>
+Test-Cluster
+</pre> <p>You might see some warnings that can be safely ignored:</p> 
+<pre>
+WARNING: System Configuration - Validate All Drivers Signed: The test reported some warnings..
+WARNING: Network - Validate Network Communication: The test reported some warnings..
+WARNING:
+Test Result:
+HadUnselectedTests, ClusterConditionallyApproved
+Testing has completed for the tests you selected. You should review the warnings in the Report.  A cluster solution is
+supported by Microsoft only if you run all cluster validation tests, and all tests succeed (with or without warnings).
+</pre> <p>You can also launch the Failover Cluster Manager MMC snap-in to review the cluster's health by running <code translate="no" dir="ltr">cluadmin.msc</code>.</p>
+</li> <li>
+<p>If you're using Managed AD, add the computer account used by WSFC to the <strong>Cloud Service Domain Join Accounts</strong> group so that it can join computers to the domain:</p> 
+<pre>
+Add-ADGroupMember `
+  -Identity "Cloud Service Domain Join Accounts" `
+  -Members sql-cluster$
+</pre>
+</li> </ol> <h3 id="add_cluster_disk">Add cluster disk</h3> <p>You now initialize the shared Hyperdisk Balanced High Availability disk that you created earlier and add it to the cluster:</p> <ol> <li>Return to the PowerShell session on <code translate="no" dir="ltr">node-1</code>.</li> <li>
+<p>Initialize the Hyperdisk Balanced High Availability disk:</p> 
+<pre>
+$NodeName = [System.Net.Dns]::GetHostName()
+
+$ClusterDisks = Get-PhysicalDisk -CanPool $True |
+  Where-Object { ($_ |
+    Get-PhysicalDiskStorageNodeView |
+    Select-Object -Property StorageNodeObjectId) -like ('*' + $NodeName + '*') }
+Initialize-Disk -Number $ClusterDisks[0].DeviceId
+</pre>
+</li> <li>
+<p>On the disk, create a new partition that uses NTFS file system and format the disk with 64 KB block size:</p> 
+<pre>
+New-Partition -DiskNumber $ClusterDisks[0].DeviceId `
+    -UseMaximumSize  -DriveLetter D | Format-Volume `
+    -FileSystem NTFS -newfilesystemlabel DataDisk -AllocationUnitSize 65536
+</pre>
+</li> <li>
+<p>Add the disk to the cluster:</p> 
+<pre>
+Get-ClusterAvailableDisk | Add-ClusterDisk
+</pre> <p>The disk automatically shows up on <code translate="no" dir="ltr">node-2</code> since the underlying Hyperdisk Balanced High Availability disk is attached to both VM instances.</p>
+</li> <li>
+<p>Open the <strong>Failover Cluster Manager</strong> MMC snap-in:</p> 
+<pre>
+cluadmin.msc
+</pre>
+</li> </ol> <h3 id="testing_disk_failover">Testing disk failover</h3> <p>Optionally, you can now test whether the disk failover works properly:</p> <ol> <li>Connect to <code translate="no" dir="ltr">node-2</code> <a href="../connecting-to-windows">by using Remote Desktop</a>. Sign in with your domain user account.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and select <strong>Run</strong>
+</li> <li>Enter <code translate="no" dir="ltr">cluadmin.msc</code> and select <strong>OK</strong>.</li> <li>
+<p>In the left window pane, navigate to <strong>Failover Cluster Manager &gt; sql-cluster &gt; Storage &gt; Disks</strong>.</p> <p>You should see a disk named <strong>Cluster Disk 1</strong> with <strong>Owner node</strong> set to <code translate="no" dir="ltr">node-1</code>.</p>
+</li> <li>
+<p>Return to Cloud Shell and reset <code translate="no" dir="ltr">node-1</code> VM to simulate a failover:</p> 
+<pre>
+gcloud compute instances reset node-1
+</pre>
+</li> <li><p>Return to the <strong>Failover Cluster Manager</strong> on <code translate="no" dir="ltr">node-2</code>.</p></li> <li>
+<p>Observe the status of the disk by repeatedly pressing <strong>F5</strong> to refresh the view.</p> <p>After about 30 seconds, the <strong>owner node</strong> should automatically switch to <code translate="no" dir="ltr">node-2</code>.</p>
+</li> </ol> <h3 id="remove_the_default_sql_server_installation">Remove the default SQL Server installation</h3> <p>You now remove the default SQL Server installation from the two nodes and replace it with a new FCI configuration.</p> <p>For each of the two WSFC nodes, <code translate="no" dir="ltr">node-1</code> and <code translate="no" dir="ltr">node-2</code>, perform the following steps:</p> <ol> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Remove the default SQL Server instance:</p> 
+<pre>
+C:\sql_server_install\Setup.exe /Action=Uninstall /FEATURES=SQL,AS,IS,RS /INSTANCENAME=MSSQLSERVER /Q
+</pre>
+</li> <li>
+<p>Remove Microsoft OLE Driver:</p> 
+<pre>
+Get-Package -Name "Microsoft OLE*" | Uninstall-Package -Force
+</pre>
+</li> <li>
+<p>Remove Microsoft ODBC Driver:</p> 
+<pre>
+Get-Package -Name "Microsoft ODBC*" | Uninstall-Package -Force
+</pre>
+</li> <li>
+<p>Restart the computer:</p> 
+<pre>
+Restart-Computer
+</pre>
+</li> <li><p>Wait for approximately 1 minute for the restart to complete.</p></li> </ol> <h3 id="install_sql_server_fci">Install SQL Server FCI</h3> <p>Before you install the new FCI configuration, verify that the <code translate="no" dir="ltr">node-1</code> is the active node in the cluster:</p> <ol> <li>Reconnect to <code translate="no" dir="ltr">node-1</code> <a href="../connecting-to-windows">by using Remote Desktop</a> and sign in using your domain user.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and select <strong>Run</strong>
+</li> <li>Enter <code translate="no" dir="ltr">cluadmin.msc</code> and select <strong>OK</strong>.</li> <li>
+<p>In the left window pane, navigate to <strong>Failover Cluster Manager &gt; sql-cluster</strong>.</p> <p>Verify that the <strong>current host server</strong> is set to <code translate="no" dir="ltr">node-1</code>.</p> <p>If the <strong>current host server</strong> is set to <code translate="no" dir="ltr">node-2</code>, right-click <strong>sql-cluster</strong> in the left window pane and select <strong>More actions &gt; Move core cluster resources &gt; Select node… &gt; node-1</strong> and click <strong>OK</strong>.</p>
+</li> <li>
+<p>In the left window pane, navigate to <strong>Failover Cluster Manager &gt; sql-cluster &gt; Storage &gt; Disks</strong>.</p> <p>Verify that the <strong>owner node</strong> of <strong>Cluster Disk 1</strong> is set to <code translate="no" dir="ltr">node-1</code>.</p> <p>If the <strong>owner node</strong> is set to <code translate="no" dir="ltr">node-2</code>, click <strong>Move Available Storage &gt; Select node... &gt; node-1</strong> from the right-hand side Actions menu <strong>OK</strong>.</p>
+</li> </ol> <p>You now create a new SQL Server failover cluster installation on <code translate="no" dir="ltr">node-1</code>:</p> <ol> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Create a domain user account for SQL server and the SQL agent and assign a password:</p> 
+<pre>
+$Credential = Get-Credential -UserName sql_server -Message 'Enter password'
+New-ADUser `
+  -Name "sql_server" `
+  -Description "SQL Agent and SQL Admin account." `
+  -AccountPassword $Credential.Password `
+  -Enabled $true -PasswordNeverExpires $true
+</pre> <aside class="note"><strong>Note:</strong><span> If you use Managed AD, append <code translate="no" dir="ltr">-Path "OU=Cloud,DC=example,DC=org"</code> to the command to create the user in the <code translate="no" dir="ltr">Cloud</code> OU.</span></aside>
+</li> <li>
+<p>Start the SQL Server setup:</p> 
+<pre>
+&amp; c:\sql_server_install\setup.exe
+</pre>
+</li> <li><p>In the menu on the left, select <strong>Installation</strong>.</p></li> <li><p>Select <strong>New SQL Server failover cluster installation</strong></p></li> <li><p>On the <strong>Edition</strong> page, check <strong>I have a SQL Server license only</strong> and select <strong>Next</strong>.</p></li> <li><p>On the <strong>License Terms</strong> page, review the terms and, if you accept, select <strong>Next</strong>.</p></li> <li><p>On the <strong>Microsoft Update</strong> page, select <strong>Next</strong> to start the installation.</p></li> <li><p>On the <strong>Install Failover Cluster Rules</strong> page, you see a Warning <strong>MSCS cluster verification warnings</strong> and <strong>Windows firewall</strong>. You can ignore these warnings and select <strong>Next</strong>.</p></li> <li><p>On the <strong>Feature Selection</strong> page, select <strong>Database Engine Services</strong> and select <strong>Next</strong>.</p></li> <li><p>On the <strong>Instance Configuration</strong> page, enter <code translate="no" dir="ltr">sql</code> as network name and select <strong>Next</strong>.</p></li> <li><p>On the <strong>Cluster Resource Group</strong> page, keep the defaults and select <strong>Next</strong>.</p></li> <li><p>On the <strong>Cluster Disk Selection</strong> page, select <strong>Cluster Disk 1</strong> and select <strong>Next</strong>.</p></li> <li>
+<p>On the <strong>Cluster Network Configuration</strong> page, configure the following settings, then select <strong>Next</strong>:</p> <ul> <li>
+<strong>DHCP</strong>: clear</li> <li>
+<strong>IP address:</strong> enter the IP address of the internal load balancer.</li> </ul>
+</li> <li>
+<p>On the <strong>Server configuration</strong> page, configure the following settings for both <strong>SQL Server Agent</strong> and <strong>SQL Server Database Engine</strong>:</p> <ul> <li>
+<strong>Account name</strong>: <code translate="no" dir="ltr"><var translate="no">DOMAIN</var>\sql_server</code> where <code translate="no" dir="ltr"><var translate="no">DOMAIN</var></code> is the NetBIOS name of your Active Directory domain</li> <li>
+<strong>Password</strong>: Enter the password that you created earlier</li> </ul>
+</li> <li><p>Select the <strong>Collation</strong> tab and select the collation that you want to use. Then click <strong>Next</strong>.</p></li> <li><p>On the <strong>Database Engine Configuration</strong> page, select <strong>Add current user</strong> to designate the current user as SQL Server administrator. Then select <strong>Next</strong>.</p></li> <li><p>On the <strong>Ready to Install</strong> page, review the settings, then select <strong>Install</strong>.</p></li> <li><p>After the installation completes, select <strong>Close</strong>.</p></li> </ol> <p>Now add <code translate="no" dir="ltr">node-2</code> to the SQL Server failover cluster:</p> <ol> <li>Connect to <code translate="no" dir="ltr">node-2</code> <a href="../connecting-to-windows">by using Remote Desktop</a> and sign in using your domain user.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</li> <li>Confirm the elevation prompt by clicking <strong>Yes</strong>.</li> <li>
+<p>Start the SQL Server setup:</p> 
+<pre>
+&amp; c:\sql_server_install\setup.exe
+</pre>
+</li> <li><p>In the menu on the left, select <strong>Installation</strong>.</p></li> <li><p>Select <strong>Add node to a SQL Server failover cluster</strong>.</p></li> <li><p>Follow the instructions of the installation wizard and accept the default settings until you reach the page <strong>Service Accounts</strong>.</p></li> <li><p>On the <strong>Service Accounts</strong> page, enter the password that you created earlier for both <strong>SQL Server Agent</strong> and <strong>SQL Server Database Engine</strong>. Then select <strong>Next</strong>.</p></li> <li><p>On the <strong>Ready to Install</strong> page, review the settings, then select <strong>Install</strong>.</p></li> <li><p>After the installation completes, select <strong>Close</strong>.</p></li> </ol> <h3 id="configure_health_checks">Configure health checks</h3> <aside class="note"><strong>Note:</strong><span> The following section does not apply to DNN configuration.</span></aside> <p>As a final step, configure the cluster to expose a health check endpoint that can be used by an internal load balancer:</p> <ol> <li>Return to the PowerShell session on <code translate="no" dir="ltr">node-2</code>
+</li> <li>
+<p>Initialize a variable with the IP address of the load balancer.</p> 
+<pre>
+$LoadBalancerIP = 'IP_ADDRESS'
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">IP_ADDRESS</var></code> with the IP address of the <code translate="no" dir="ltr">wsfc</code> address that you reserved earlier.</p>
+</li> <li>
+<p>Configure the Failover Cluster to respond to the health check service:</p> 
+<pre>
+$SqlGroup = Get-ClusterGroup |
+  Where-Object {$_.Name.StartsWith("SQL Server")}
+$SqlIpAddress = Get-ClusterResource |
+  Where-Object {$_.Name.StartsWith("SQL IP Address")}
+
+$SqlIpAddress | Set-ClusterParameter -Multiple @{
+ 'Address'=$LoadBalancerIP;
+ 'ProbePort'= 59997;
+ 'SubnetMask'='255.255.255.255';
+ 'Network'= (Get-ClusterNetwork).Name;
+ 'EnableDhcp'=0; }
+</pre>
+</li> <li>
+<p>Restart the cluster resource:</p> 
+<pre>
+$SqlIpAddress | Stop-ClusterResource
+$SqlIpAddress | Start-ClusterResource
+</pre>
+</li> <li>
+<p>Restart the cluster group:</p> 
+<pre>
+$SqlGroup | Stop-ClusterGroup
+$SqlGroup | Start-ClusterGroup
+</pre>
+</li> </ol> <h2 id="create_an_internal_load_balancer">Create an internal load balancer</h2> <aside class="note"><strong>Note:</strong><span> The following section does not apply to DNN configuration.</span></aside> <p>To provide a single endpoint for SQL Server clients, you now deploy an <a href="../../load-balancing/internal#deploying_internal_load_balancing">internal load balancer</a>. The load balancer uses a health check which ensures that traffic is directed to the active node of the WSFC.</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create an <a href="../../instance-groups/creating-groups-of-unmanaged-instances">unmanaged instance group</a>, and add the two nodes to the group:</p> 
+<pre>
+gcloud compute instance-groups unmanaged create wsfc-group-1 \
+--zone $ZONE_1
+gcloud compute instance-groups unmanaged add-instances wsfc-group-1 \
+--zone $ZONE_1 \
+--instances node-1
+
+gcloud compute instance-groups unmanaged create wsfc-group-2 \
+--zone $ZONE_2
+gcloud compute instance-groups unmanaged add-instances wsfc-group-2 \
+--zone $ZONE_2 \
+--instances node-2
+</pre>
+</li> <li>
+<p>Create a health check that the load balancer can use to determine which is the active node.</p> 
+<pre>
+gcloud compute health-checks create tcp wsfc-healthcheck \
+  --check-interval="2s" \
+  --healthy-threshold=1 \
+  --unhealthy-threshold=2 \
+  --port=59997 \
+  --timeout="1s"
+</pre> <p>The health check probes port <code translate="no" dir="ltr">59997</code>, which is the port you previously configured as <code translate="no" dir="ltr">ProbePort</code> for the WSFC cluster IP address.</p>
+</li> <li>
+<p>Create a backend service and add the instance group:</p> 
+<pre>
+gcloud compute backend-services create wsfc-backend \
+--load-balancing-scheme internal \
+--region $REGION \
+--health-checks wsfc-healthcheck \
+--protocol tcp
+
+gcloud compute backend-services add-backend wsfc-backend \
+--instance-group wsfc-group-1 \
+--instance-group-zone $ZONE_1 \
+--region $REGION
+
+gcloud compute backend-services add-backend wsfc-backend \
+--instance-group wsfc-group-2 \
+--instance-group-zone $ZONE_2 \
+--region $REGION
+</pre>
+</li> <li>
+<p>Create the internal load balancer:</p> 
+<pre>
+gcloud compute forwarding-rules create wsfc-sql \
+  --load-balancing-scheme internal \
+  --address $LOADBALANCER_ADDRESS \
+  --ports 1433 \
+  --network $VPC_NAME \
+  --subnet $SUBNET_NAME \
+  --region $REGION \
+  --backend-service wsfc-backend
+</pre>
+</li> </ol> <h3 id="configure_a_dnn_resource_and_dnn_dns_name">Configure a DNN resource and DNN DNS name</h3> <aside class="note"><strong>Note:</strong><span> The following section does not apply to load balancer configuration.</span></aside> <p>Similar to the internal load balancer, the DNN resource acts as a single gateway for SQL Server clients. During failovers, the cluster seamlessly routes traffic to the active SQL Server FCI node. Clients connect to the SQL Server FCI with the DNS name.</p> <ol> <li>Return to the PowerShell session on <code translate="no" dir="ltr">node-1</code>.</li> <li>
+<p>Execute the script to create DNN resource</p> 
+<pre>
+  $DNNResourceName='fci-dnn'
+  $DNN_DNSName='fcidnn'
+
+  # create the DNN resource
+  Add-ClusterResource -Name $DNNResourceName -ResourceType 'Distributed Network Name' -Group 'SQL Server (MSSQLSERVER)'
+
+  # set the DNS name of the DNN resource
+  Get-ClusterResource -Name $DNNResourceName | Set-ClusterParameter -Name DnsName -Value $DNN_DNSName
+
+  # start the DNN resource
+  Start-ClusterResource -Name $DNNResourceName
+</pre>
+</li> <li><p>Restart <code translate="no" dir="ltr">node-1</code> and <code translate="no" dir="ltr">node-2</code></p></li> </ol> <h2 id="testing_the_failover_cluster">Testing the failover cluster</h2> <p>You've completed the installation of the failover cluster, but you still have to test whether the cluster works correctly.</p> <h3 id="prepare_a_client">Prepare a client</h3> <p>Create a new VM instance which you can use to connect to the failover cluster:</p> <ol> <li>Return to your existing Cloud Shell session.</li> <li>
+<p>Create a new VM instance:</p> 
+<pre>
+gcloud compute instances create sqlclient \
+  --machine-type n2-standard-2 \
+  --subnet $SUBNET_NAME \
+  --image-family sql-ent-2022-win-2022 \
+  --image-project windows-sql-cloud \
+  --boot-disk-size 50 \
+  --boot-disk-type pd-ssd
+</pre>
+</li> <li>
+<p>Monitor the initialization process of the VM by viewing its serial port output:</p> 
+<pre>
+gcloud compute instances tail-serial-port-output sqlclient
+</pre> <p>Wait about 3 minutes until you see the output Instance setup finished, then press Ctrl+C. At this point, the VM instance is ready to be used.</p>
+</li> <li><p><a href="../windows/creating-passwords-for-windows-instances">Create a username and password</a> for the VM instance</p></li> <li><p><a href="../connecting-to-windows">Connect to the VM by using Remote Desktop</a> and sign in using the username and password created in the previous step.</p></li> <li><p>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell (Admin)</strong>.</p></li> <li><p>Confirm the elevation prompt by clicking <strong>Yes</strong>.</p></li> <li>
+<p>Join the computer to your Active Directory domain:</p> 
+<pre>
+Add-Computer -Domain DOMAIN
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DOMAIN</var></code> with the DNS name of your Active Directory domain.</p>
+</li> <li>
+<p>Restart the computer:</p> 
+<pre>
+Restart-Computer
+</pre> <p>Wait for approximately 1 minute for the restart to complete.</p>
+</li> </ol> <h3 id="run_the_test">Run the test</h3> <p>Use the <code translate="no" dir="ltr">sqlclient</code> VM to test that you can connect to the failover cluster and to verify that the failover works correctly:</p> <ol> <li>Connect to <code translate="no" dir="ltr">sqlclient</code> <a href="../connecting-to-windows">by using Remote Desktop</a> and sign in using your domain user.</li> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell</strong>.</li> <li>
+<p>Connect to SQL Server cluster by using its network name <code translate="no" dir="ltr">sql</code> and query the <code translate="no" dir="ltr">dm_os_cluster_nodes</code> table:</p> 
+<pre>
+&amp; "$env:ProgramFiles\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE" `
+   -S SQL_SERVER_NAME -E -Q "SELECT * FROM sys.dm_os_cluster_nodes"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SQL_SERVER_NAME</var></code> with the <code translate="no" dir="ltr">sql</code> for <strong>load balancer configuration</strong> or <code translate="no" dir="ltr">fcidnn</code> for <strong>DNN configuration</strong>.</p> <p>The output should look like this:</p> 
+<pre>
+NodeName                       status      status_description is_current_owner
+------------------------------ ----------- ------------------ ----------------
+NODE-1                                   0 up                                1
+NODE-2                                   0 up                                0
+
+(2 rows affected)
+</pre> <p>Notice that <code translate="no" dir="ltr">node-1</code> is the current owner of the SQL Server failover cluster resource.</p>
+</li> <li>
+<p>Return to Cloud Shell and bring down the node-1 VM to test the failover scenario.</p> 
+<pre>
+gcloud compute instances stop node-1
+</pre>
+</li> <li>
+<p>Repeat the query:</p> 
+<pre>
+&amp; "$env:ProgramFiles\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE" `
+   -S SQL_SERVER_NAME -E -Q "SELECT * FROM sys.dm_os_cluster_nodes"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SQL_SERVER_NAME</var></code> with the <code translate="no" dir="ltr">sql</code> for <strong>load balancer configuration</strong> or <code translate="no" dir="ltr">fcidnn</code> for <strong>DNN configuration</strong>.</p> <p>The output should now look like this:</p> 
+<pre>
+NodeName                       status      status_description is_current_owner
+------------------------------ ----------- ------------------ ----------------
+NODE-1                                   1 down                              0
+NODE-2                                   0 up                                1
+
+(2 rows affected)
+</pre> <p>Notice that despite the loss of <code translate="no" dir="ltr">node-1</code>, the query succeeds, and shows that <code translate="no" dir="ltr">node-2</code> is now the current owner of the failover cluster.</p>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> 
+<p> After you finish the tutorial, you can clean up the resources that you created so that they stop using quota and incurring charges. The following sections describe how to delete or turn off these resources. </p> <h3 id="deleting_the_project">Deleting the project</h3> 
+<p> The easiest way to eliminate billing is to delete the project that you created for the tutorial. </p> <p>To delete the project: </p>
+<ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Read more about <a href="../../disks/sharing-disks-between-vms#hd-multi-writer" track-type="tutorial" track-name="computeEngineLink" track-metadata-position="whatsNext" track-metadata-end-goal="windowsTutorials">Sharing disks in multi-writer mode</a>.</li> <li>Learn how you can <a href="configure-failover-cluster-instance" track-type="tutorial" track-name="computeEngineLink" track-metadata-position="whatsNext" track-metadata-end-goal="windowsTutorials">configure a SQL Server failover cluster instance that uses Storage Spaces Direct</a>.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/instances/sql-server/configure-failover-cluster-instance-pd-multi-writer" class="_attribution-link">https://docs.cloud.google.com/compute/docs/instances/sql-server/configure-failover-cluster-instance-pd-multi-writer</a>
+  </p>
+</div>

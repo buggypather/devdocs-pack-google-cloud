@@ -1,0 +1,362 @@
+<h1>Restrict access to modify and select ComputeClasses</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>You can use Google Kubernetes Engine (GKE) <a href="../concepts/about-compute-classes">ComputeClasses</a> to create nodes that meet various workload requirements. Pods can use ComputeClasses to create hardware. Depending on the ComputeClass, that hardware might be in-demand, limited in availability, or relatively expensive for your enterprise. This tutorial shows you how to use Kubernetes RBAC and <a href="https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/">ValidatingAdmissionPolicies</a> to restrict the creation, deletion, modification, and selection of ComputeClasses.</p> <p>These restrictions can help you to prevent situations like the following:</p> <ul> <li>Pods that don't need specialized hardware like GPUs or TPUs select ComputeClasses that request that hardware.</li> <li>An unauthorized entity creates or modifies ComputeClasses to get access to hardware that's reserved for critical workloads.</li> </ul> <p>This document uses an example ValidatingAdmissionPolicy that blocks common types of misuse, such as wildcard ComputeClass tolerations or the selection of specific disallowed ComputeClasses. You can modify the ValidatingAdmissionPolicy to meet requirements that are specific to your organization, such as blocking workloads from certain teams from using ComputeClasses.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Use a ValidatingAdmissionPolicy to limit the ComputeClasses that Pods can select in each namespace to an approved list.</li> <li>Use role-based access control (RBAC) to restrict who can create, modify, or delete ComputeClasses in your clusters.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing">Kubernetes Engine</a></li> <li>
+<a href="https://workspace.google.com/pricing">Google Workspace</a> or <a href="https://cloud.google.com/identity/pricing">Cloud Identity</a>
+</li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> If you're using an existing project for this guide, <a href="#required-roles">verify that you have the permissions required to complete this guide</a>. If you created a new project, then you already have the required permissions. </p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine API, if it is not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> If you're using an existing project for this guide, <a href="#required-roles">verify that you have the permissions required to complete this guide</a>. If you created a new project, then you already have the required permissions. </p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Kubernetes Engine API, if it is not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable container.googleapis.com</pre>
+</li> </div> </cloud-free-trial> <li>If you use a local shell, install the <code translate="no" dir="ltr">kubectl</code> component: 
+<pre>gcloud components install kubectl</pre>
+</li> <li>Ensure that you have a GKE cluster that uses version 1.30 or later. You can also <a href="../how-to/creating-an-autopilot-cluster#set-version">create an Autopilot cluster</a> for this tutorial.</li> <li>Configure your cluster for Google Groups for RBAC: <ol> <li>Set up the <code translate="no" dir="ltr">gke-security-groups</code> group in your domain.</li> <li>Enable Google Groups for RBAC in your cluster.</li> </ol> <p>For more information, see <a href="../how-to/google-groups-rbac#setup-group">Set up your Google Groups</a>.</p>
+</li> </ol> <h3 id="required-roles">Required roles</h3> <p> To get the permissions that you need to create RBAC policies and Kubernetes objects in your cluster, ask your administrator to grant you the Kubernetes Engine Admin (<code translate="no" dir="ltr">role/container.admin</code>) IAM role on your project. For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> </section> <div id="tutorial-content"> <h2 id="prepare-environment">Prepare the environment</h2> <p>To prepare your cluster for the creation and verification tasks in this tutorial, follow these steps:</p> <ol> <li>
+<p>Connect to your cluster:</p> 
+<pre>gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTROL_PLANE_LOCATION</var></code>: the <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">region or zone</a> of the cluster control plane, such as <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">us-central1-a</code>.</li> </ul>
+</li> <li>
+<p>Create a namespace to use for this tutorial. You can also use any existing namespace in the cluster.</p> 
+<pre>kubectl create namespace computeclass-vap-tutorial
+</pre>
+</li> <li>
+<p>Create an RBAC policy that grants access to manage ValidatingAdmissionPolicies and ValidatingAdmissionPolicyBindings:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">validatingadmissionpolicy-editor.yaml</code>:</p> 
+<pre>apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: validatingadmissionpolicy-editor
+rules:
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingadmissionpolicies","validatingadmissionpolicybindings"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: edit-validatingadmissionpolicies
+subjects:
+- kind: User
+  name: USER_ACCOUNT
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: validatingadmissionpolicy-editor
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">USER_ACCOUNT</var></code> with the email address of your user account.</p>
+</li> <li>
+<p>Create the RBAC policy:</p> 
+<pre>kubectl apply -f validatingadmissionpolicy-editor.yaml
+</pre>
+</li> </ol>
+</li> <li>
+<p>Create a ComputeClass in your cluster. If the cluster already has a ComputeClass, skip this step.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">access-computeclass.yaml</code>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: access-restriction-class
+spec:
+  priorities:
+  - machineFamily: e2
+  nodePoolAutoCreation:
+    enabled: true
+  whenUnsatisfiable: ScaleUpAnyway
+</pre>
+</li> <li>
+<p>Create the ComputeClass:</p> 
+<pre>kubectl apply -f access-computeclass.yaml
+</pre>
+</li> </ol>
+</li> </ol> <h2 id="create-validatingadmissionpolicy">Create a ValidatingAdmissionPolicy</h2> <p>To restrict the ComputeClasses that Pods can select, you create a ValidatingAdmissionPolicy and enforce it in a specific namespace. You use the ValidatingAdmissionPolicy specification to control how Pods can select ComputeClasses. The following steps show you how to create and enforce this policy:</p> <ol> <li>
+<p>Save the following ValidatingAdmissionPolicy manifest as <code translate="no" dir="ltr">restrict-computeclass-usage-vap.yaml</code>:</p>  
+<pre>apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: restrict-computeclass-usage
+spec:
+  failurePolicy: Fail # If an internal error occurs, deny the request.
+  variables:
+  # Check whether the admission request is for a Deployment.
+  - name: isDeployment
+    expression: "object.kind == 'Deployment'"
+  # Get the Pod specification from the admission request by reading the
+  # spec.template.spec field for Deployments or the spec field for static Pods.
+  - name: podSpec
+    expression: "variables.isDeployment ? object.spec.template.spec : object.spec"
+  # Check whether a node selector or an affinity rule that explicitly requests a
+  # disallowed ComputeClass.
+  - name: hasForbiddenNodeSelectorOrAffinity
+    expression: &gt;-
+      (has(variables.podSpec.nodeSelector) &amp;&amp;
+      variables.podSpec.nodeSelector['cloud.google.com/compute-class'] == 'COMPUTECLASS_NAME') ||
+      (has(variables.podSpec.affinity) &amp;&amp;
+      has(variables.podSpec.affinity.nodeAffinity) &amp;&amp;
+      has(variables.podSpec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution) &amp;&amp;
+      variables.podSpec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.exists(term, has(term.matchExpressions) &amp;&amp;
+        term.matchExpressions.exists(
+          exp, exp.key == 'cloud.google.com/compute-class' &amp;&amp;
+          exp.operator == 'In' &amp;&amp; exp.values.exists(v, v == 'COMPUTECLASS_NAME')
+        )
+      ))
+
+  # Check whether the Pod has a toleration for the taint that corresponds to a
+  # disallowed ComputeClass.
+  - name: hasForbiddenComputeClassToleration
+    expression: &gt;-
+      has(variables.podSpec.tolerations) &amp;&amp;
+      variables.podSpec.tolerations.exists(t, 
+        t.key == 'cloud.google.com/compute-class' &amp;&amp;
+        (t.operator == 'Exists' || (t.operator == 'Equal' &amp;&amp; t.value == 'COMPUTECLASS_NAME')) &amp;&amp;
+        has(t.effect) &amp;&amp; t.effect == 'NoSchedule')
+
+  # Check whether the Pod has a toleration that could match any taint.
+  - name: hasWildcardToleration
+    expression: &gt;-
+      has(variables.podSpec.tolerations) &amp;&amp;
+      variables.podSpec.tolerations.exists(t, 
+        (t.operator == 'Exists' &amp;&amp; !(has(t.key) &amp;&amp; t.key != ''))
+      )
+
+  # Trigger the ValidatingAdmissionPolicy when Pods or Deployments are created or
+  # updated.
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["pods"]
+    - apiGroups: ["apps"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["deployments"]
+
+  # Validate whether any of the expressions in the variables section evaluate to
+  # true.
+  validations:
+    - expression: &gt;-
+        !(variables.hasForbiddenNodeSelectorOrAffinity ||
+          variables.hasForbiddenComputeClassToleration ||
+          variables.hasWildcardToleration)
+      message: &gt;-
+        Pods and Deployments in this namespace cannot request ComputeClass
+        COMPUTECLASS_NAME or use wildcard
+        tolerations.
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">COMPUTECLASS_NAME</var></code> with the name of a ComputeClass that you want to prevent Pods from selecting.</p> <p>This ValidatingAdmissionPolicy has the following properties:</p> <ul> <li>Triggers for static Pods or Pods in Deployments.</li> <li>
+<p>Finds Pods that do any of the following:</p> <ul> <li>Use a node selector or a node affinity rule to explicitly select a specific disallowed ComputeClass.</li> <li>Use a <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/" target="k8sLink" track-name="k8sLink" track-type="tutorial">toleration</a> that corresponds to a node taint for a specific disallowed ComputeClass.</li> <li>Use a toleration that matches all node taints in the cluster.</li> </ul>
+</li> </ul> <p>This ValidatingAdmissionPolicy is an example. You can use expressions to trigger the policy based on your own conditions, such as preventing Pods that have specific labels from selecting certain ComputeClasses.</p>
+</li> <li>
+<p>Create the ValidatingAdmissionPolicy:</p> 
+<pre>kubectl apply -f restrict-computeclass-usage-vap.yaml
+</pre>
+</li> <li>
+<p>Save the following ValidatingAdmissionPolicyBinding as <code translate="no" dir="ltr">restrict-computeclass-usage-binding.yaml</code>:</p> 
+<pre>apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: restrict-computeclass-usage-binding
+spec:
+  policyName: restrict-computeclass-usage
+  validationActions: ["Deny","Audit"]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: computeclass-vap-tutorial # Replace with the name of any namespace in the cluster.
+</pre> <p>This ValidatingAdmissionPolicyBinding enforces the ValidatingAdmissionPolicy from the previous step in the <code translate="no" dir="ltr">computeclass-vap-tutorial</code> namespace. The values in the <code translate="no" dir="ltr">validationActions</code> field reject Pods or Deployments that violate the ValidatingAdmissionPolicy and add an entry to the Kubernetes audit log.</p>
+</li> <li>
+<p>Create the ValidatingAdmissionPolicyBinding:</p> 
+<pre>kubectl apply -f restrict-computeclass-usage-binding.yaml
+</pre>
+</li> </ol> <h2 id="configure-rbac">Configure RBAC policies</h2> <p>In addition to using a ValidatingAdmissionPolicy to prevent workloads from using certain ComputeClasses, use RBAC to prevent unauthorized principals from creating and modifying the ComputeClasses in your cluster. The following steps show you how to grant access to ComputeClasses to a specific group of users by using Google Groups for RBAC:</p> <ol> <li>
+<p>Create a group for ComputeClass editors:</p> <ol> <li>
+<p>In the Google Admin console, go to the <strong>Groups</strong> page.</p> <p><a class="button button-primary" target="console" href="https://admin.google.com/ac/groups">Go to Groups</a></p>
+</li> <li><p>Click <strong>Create group</strong>.</p></li> <li>
+<p>On the <strong>Group details</strong> page, do the following:</p> <ol> <li>In the <strong>Group name</strong> field, specify <code translate="no" dir="ltr">computeclass-editors</code>.</li> <li>In the <strong>Group email</strong> field, specify <code translate="no" dir="ltr">computeclass-editors</code>.</li> <li>Select the <strong>Security</strong> checkbox.</li> <li>Click <strong>Next</strong>.</li> </ol>
+</li> <li><p>On the <strong>Access type</strong> page, in the <strong>Group members</strong> column, verify that the <strong>Who can view members</strong> checkbox is selected.</p></li> <li><p>Click <strong>Create group</strong>.</p></li> <li><p>In the navigation menu, click <strong>Directory</strong> <span aria-label="and then">&gt;</span> <strong>Groups</strong>.</p></li> <li><p>Hover over the <strong>gke-security-groups</strong> row, and then click <strong>Add members</strong>.</p></li> <li><p>In the <strong>Add members to gke-security-groups</strong> dialog, specify <code translate="no" dir="ltr">computeclass-editors</code> and select that group from the results.</p></li> <li><p>Click <strong>Add to group</strong>.</p></li> </ol>
+</li> <li><p>Add the email addresses of authorized users to the <code translate="no" dir="ltr">computeclass-editors</code> group.</p></li> <li>
+<p>Save the following ClusterRole as <code translate="no" dir="ltr">computeclass-editor-clusterrole.yaml</code>:</p> 
+<pre>apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: computeclass-editor
+rules:
+-   apiGroups: ["cloud.google.com"]
+  resources: ["computeclasses"]
+  verbs: ["create","update"]
+</pre>
+</li> <li>
+<p>Create the ClusterRole:</p> 
+<pre>kubectl apply -f computeclass-editor-clusterrole.yaml
+</pre>
+</li> <li>
+<p>Save the following ClusterRoleBinding as <code translate="no" dir="ltr">computeclass-editor-role-binding.yaml</code>:</p> 
+<pre>apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: computeclass-editor-role-binding
+subjects:
+- kind: Group
+  name: computeclass-editors@GROUP_DOMAIN
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: computeclass-editor
+  apiGroup: rbac.authorization.k8s.io # Required for role references
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GROUP_DOMAIN</var></code> with the domain name of the <code translate="no" dir="ltr">computeclass-editors</code> group.</p>
+</li> <li>
+<p>Create the ClusterRoleBinding:</p> 
+<pre>kubectl apply -f computeclass-editor-role-binding.yaml
+</pre>
+</li> </ol> <h2 id="verify">Verify your restrictions</h2> <p>The following sections show you how to verify that the restrictions that you configured in the preceding sections work as expected. If you configure your own restrictions in ValidatingAdmissionPolicies or RBAC policies, then test the restrictions by creating a workload that violates those policies.</p> <h3 id="verify-vap">Verify the ValidatingAdmissionPolicy</h3> <ol> <li>
+<p>Save any of the following manifests, each of which violates a different condition of the ValidatingAdmissionPolicy:</p> <ul> <li>
+<p>Deployment that uses a node selector to select a disallowed ComputeClass:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: disallowed-computeclass-deployment
+  namespace: computeclass-vap-tutorial
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forbidden-selector-app
+  template:
+    metadata:
+      labels:
+        app: forbidden-selector-app
+    spec:
+      containers:
+      - name: my-app-container
+        image: nginx:latest
+      # The node selector triggers the policy.
+      nodeSelector:
+        cloud.google.com/compute-class: COMPUTECLASS_NAME
+</pre>
+</li> <li>
+<p>Deployment that has a toleration for a disallowed ComputeClass:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: disallowed-computeclass-deployment-toleration
+  namespace: computeclass-vap-tutorial
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forbidden-selector-app
+  template:
+    metadata:
+      labels:
+        app: forbidden-selector-app
+    spec:
+      containers:
+      - name: my-app-container
+        image: nginx:latest
+      tolerations:
+      - key: cloud.google.com/compute-class
+        operator: Equal
+        value: COMPUTECLASS_NAME
+        effect: NoSchedule
+</pre>
+</li> <li>
+<p>Deployment that has a node affinity rule for a disallowed ComputeClass:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: disallowed-computeclass-deployment-toleration
+  namespace: computeclass-vap-tutorial
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forbidden-selector-app
+  template:
+    metadata:
+      labels:
+        app: forbidden-selector-app
+    spec:
+      containers:
+      - name: my-app-container
+        image: nginx:latest
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/compute-class
+                operator: In
+                values:
+                - COMPUTECLASS_NAME
+</pre>
+</li> <li>
+<p>Pod that has a toleration for any node taint in the cluster:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: disallowed-computeclass-deployment-toleration
+  namespace: computeclass-vap-tutorial
+spec:
+  containers:
+  - name: my-app-container
+    image: nginx:latest
+  tolerations:
+  - operator: Exists
+    effect: NoSchedule
+</pre>
+</li> </ul>
+</li> <li>
+<p>Create the test workload:</p> 
+<pre>kubectl apply -f PATH_TO_WORKLOAD_MANIFEST
+</pre> <p>The output is similar to the following:</p> 
+<pre>Error from server (BadRequest): admission webhook "validation-policy.kubernetes.io" denied the request: Pods and Deployments in this namespace cannot request ComputeClass COMPUTECLASS_NAME or use wildcard tolerations.
+</pre>
+</li> </ol> <h3 id="verify-rbac">Verify the RBAC configuration</h3> <p>To verify your RBAC configuration, follow these steps:</p> <ol> <li><p>Authenticate to the cluster by using the credentials of the a user who is a member of the <code translate="no" dir="ltr">computeclass-editors</code> group.</p></li> <li>
+<p>Check whether the user can create a ComputeClass:</p> 
+<pre>kubectl auth can-i create computeclasses.cloud.google.com \
+    --as=MEMBER_USER
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">MEMBER_USER</var></code> with the email address of a user who is a member of the group.</p> <p>The output is <code translate="no" dir="ltr">yes</code>.</p>
+</li> <li><p>Authenticate to the cluster by using the credentials of the a user who isn't a member of the <code translate="no" dir="ltr">computeclass-editors</code> group.</p></li> <li>
+<p>Check whether the user can create a ComputeClass:</p> 
+<pre>kubectl auth can-i create computeclasses.cloud.google.com \
+    --as=NON_MEMBER_USER
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NON_MEMBER_USER</var></code> with the email address of a user who isn't a member of the group.</p> <p>The output is <code translate="no" dir="ltr">no</code>.</p>
+</li> </ol> <p>If the output of the <code translate="no" dir="ltr">kubectl auth can-i</code> command is <code translate="no" dir="ltr">yes</code> for a user who isn't a member of the group, verify the following:</p> <ul> <li>The <code translate="no" dir="ltr">computeclass-editors</code> group is a member of the <code translate="no" dir="ltr">gke-security-groups</code> group.</li> <li>The email address of the group in your ClusterRoleBinding is the exact email address of the group, such as <code translate="no" dir="ltr">computeclass-editors@example.com</code>.</li> </ul> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <p>If you deploy the ValidatingAdmissionPolicy and RBAC policies in this tutorial in a production cluster, then GKE blocks incoming Pods and API requests that violate the policies. To keep these policies active, skip this section. The following sections show you how to delete the project or individual resources if you followed this tutorial in a learning or testing environment.</p> <h3 id="delete-project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </ol> <h3 id="delete-resources">Delete individual resources</h3> <ol> <li>
+<p>Delete the ComputeClass that you created:</p> 
+<pre>kubectl delete computeclass access-restriction-class
+</pre>
+</li> <li>
+<p>Delete the ValidatingAdmissionPolicy and the ValidatingAdmissionPolicyBinding:</p> 
+<pre>kubectl delete validatingadmissionpolicy restrict-computeclass-usage
+kubectl delete validatingadmissionpolicybinding restrict-computeclass-usage-binding
+</pre>
+</li> <li>
+<p>Delete the ClusterRoles and the ClusterRoleBindings:</p> 
+<pre>kubectl delete clusterroles \
+    computeclass-editor validatingadmissionpolicy-editor
+kubectl delete clusterrolebindings \
+    computeclass-editor-role-binding edit-validatingadmissionpolicies
+</pre>
+</li> <li>
+<p>Delete the example namespace:</p> 
+<pre>kubectl delete namespace computeclass-vap-tutorial
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li><a href="../best-practices/computeclasses">Review best practices for ComputeClasses</a></li> <li><a href="../how-to/hardening-your-cluster">Review best practices for cluster security</a></li> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/restrict-computeclass-usage-admission" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/restrict-computeclass-usage-admission</a>
+  </p>
+</div>

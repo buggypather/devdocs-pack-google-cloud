@@ -1,0 +1,305 @@
+<h1>Deploy GKE Inference Gateway powered by llm-d</h1>  <p>This document describes how to deploy GKE Inference Gateway.</p> <p>This document is intended for Networking specialists responsible for managing GKE infrastructure and platform administrators who manage AI workloads.</p> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li>
+<a href="../concepts/about-gke-inference-gateway">About GKE Inference Gateway</a>.</li> <li>
+<a href="../integrations/ai-infra">AI/ML orchestration on GKE</a>.</li> <li>
+<a href="https://docs.cloud.google.com/vertex-ai/generative-ai/docs/glossary-genai">Generative AI glossary</a>.</li> <li>
+<a href="https://docs.cloud.google.com/load-balancing/docs/load-balancing-overview">Load balancing in Google Cloud</a>, especially how load balancers interact with GKE.</li> <li>GKE Service Extensions. For more information, see the <a href="../concepts/gateway-api#gateway_controller"> GKE Gateway controller</a> documentation.</li> <li>
+<a href="configure-gke-service-extensions">Customize GKE Gateway traffic using Service Extensions</a>.</li> </ul> <p>GKE Inference Gateway enhances Google Kubernetes Engine (GKE) Gateway to optimize the serving of generative AI applications and workloads on GKE. It provides efficient management and scaling of AI workloads, enables workload-specific performance objectives such as latency, and enhances resource utilization, observability, and AI safety.</p> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<p>Enable the Compute Engine API, the Kubernetes Engine API, the Network Services API, and the Model Armor API if needed.</p> <p>Go to <a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Enable access to APIs</a> and follow the instructions.</p>
+</li> <li><p>Make sure that you have the following roles on the project: <code translate="no" dir="ltr">roles/container.admin</code>, <code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>.</p></li> <li><p>Ensure your project has sufficient quota for H100 GPUs. To learn more, see <a href="../concepts/gpus#gpu-quota">Plan GPU quota</a> and <a href="https://docs.cloud.google.com/compute/resource-usage#gpu_quota">Allocation quotas</a>.</p></li> <li><p>Create a <a href="https://huggingface.co/">Hugging Face</a> account if you don't already have one. You will need this to access the model resources for this tutorial.</p></li> <li>
+<p>Request access to the Llama 3.1 model and generate an access token. Access to this model requires an approved request on Hugging Face, and the deployment will fail if access has not been granted.</p> <ul> <li>
+<strong>Sign the license consent agreement:</strong> You must sign the consent agreement to use the Llama 3.1 model. Go to the model's page on Hugging Face, verify your account, and accept the terms.</li> <li>
+<strong>Generate an access token:</strong> To access the model, you need a Hugging Face token. In your Hugging Face account, go to <strong>Your Profile &gt; Settings &gt; Access Tokens</strong>, create a new token with at least Read permissions, and copy it to your clipboard.</li> </ul>
+</li> <li><p><a href="deploying-gateways#configure_a_proxy-only_subnet">Configure a proxy-only subnet</a> for your VPC network. The Gateway controller requires an active proxy-only subnet in the region to provision the Application Load Balancer.</p></li> </ul> <h3 id="gateway-controller-requirements">GKE Gateway controller requirements</h3> <ul> <li>GKE version 1.32.3 or later.</li> <li>Google Cloud CLI version 407.0.0 or later.</li> <li>Gateway API is supported on VPC-native clusters only.</li> <li>Your cluster must have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled.</li> <li>If you are using Istio, you must upgrade Istio to one of the following versions: <ul> <li>1.15.2 or later</li> <li>1.14.5 or later</li> <li>1.13.9 or later</li> </ul>
+</li> <li>If you are using Shared VPC, then in the host project, you need to assign the <code translate="no" dir="ltr">Compute Network User</code> role to the GKE Service account for the service project.</li> </ul> <h3 id="restrictions">Restrictions and limitations</h3> <p>The following restrictions and limitations apply:</p> <ul> <li>GKE Inference Gateway is only supported on the <code translate="no" dir="ltr">gke-l7-regional-external-managed</code> and <code translate="no" dir="ltr">gke-l7-rilb</code> GatewayClass resources.</li> <li>Cross-region internal Application Load Balancers are not supported.</li> <li>An InferencePool can have a maximum of eight <code translate="no" dir="ltr">targetPorts</code>.</li> </ul> <h2 id="configure">Configure GKE Inference Gateway</h2> <p>To configure GKE Inference Gateway, consider this example. A team runs <a href="https://docs.vllm.ai/en/latest/"><code translate="no" dir="ltr">vLLM</code></a> and <a href="https://www.llama.com/"><code translate="no" dir="ltr">Llama3</code></a> models and actively experiments with two distinct LoRA fine-tuned adapters: "food-review" and "cad-fabricator".</p> <p>The high-level workflow for configuring GKE Inference Gateway is as follows:</p> <ol> <li>
+<a href="#prepare-environment">Prepare your environment</a>: set up the necessary infrastructure and components.</li> <li>
+<a href="#create-inference-pool">Create an inference pool</a>: define a pool of model servers using the InferencePool Custom Resource.</li> <li>
+<a href="#specify-inference-objectives">Specify inference objectives</a>: specify inference objectives using the <code translate="no" dir="ltr">InferenceObjective</code> Custom Resource</li> <li>
+<a href="#create-gateway">Create the Gateway</a>: expose the inference service using Gateway API.</li> <li>
+<a href="#create-httproute">Create the <code translate="no" dir="ltr">HTTPRoute</code></a>: define how HTTP traffic is routed to the inference service.</li> <li>
+<a href="#send-inference-request">Send inference requests</a>: make requests to the deployed model.</li> </ol> <h3 id="create-gateway">Create the Gateway</h3> <p>The Gateway resource is the entry point for external traffic into your Kubernetes cluster. It defines the listeners that accept incoming connections.</p> <p>The GKE Inference Gateway works with the following Gateway Classes:</p> <ul> <li>
+<code translate="no" dir="ltr">gke-l7-rilb</code>: for regional internal Application Load Balancers.</li> <li>
+<code translate="no" dir="ltr">gke-l7-regional-external-managed</code>: for regional external Application Load Balancers.</li> </ul> <p>For more information, see <a href="../concepts/gateway-api#gateway_classes">Gateway Classes</a> documentation.</p> <p>To create a Gateway, perform the following steps:</p> <ol> <li>
+<p>Save the following sample manifest as <code translate="no" dir="ltr">gateway.yaml</code>:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: GATEWAY_NAME
+spec:
+  gatewayClassName: GATEWAY_CLASS
+  listeners:
+    - protocol: HTTP
+      port: 80
+      name: http
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: a unique name for your Gateway resource. For example, <code translate="no" dir="ltr">inference-gateway</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_CLASS</var></code>: the Gateway Class you want to use. For example, <code translate="no" dir="ltr">gke-l7-regional-external-managed</code>.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f gateway.yaml
+</pre>
+</li> </ol> <p><strong>Note</strong>: For more information about configuring TLS to secure your Gateway with HTTPS, see the GKE documentation on <a href="secure-gateway#https">TLS configuration</a>.</p> <h3 id="prepare-environment">Prepare your environment</h3> <ol> <li><p>Install <a href="https://helm.sh/docs/intro/install/">Helm</a>.</p></li> <li>
+<p>Create a GKE cluster:</p> <ul> <li>Create a GKE Autopilot or Standard cluster with version 1.32.3 or later. For a one-click deployment reference setup, see the <a href="https://github.com/GoogleCloudPlatform/cluster-toolkit/blob/main/examples/README.md#gke-a3-highgpuyaml-"><code translate="no" dir="ltr">cluster-toolkit gke-a3-highgpu</code> sample</a>.</li> <li>Configure the nodes with your preferred compute family and accelerator.</li> <li>Use <a href="machine-learning/inference/inference-quickstart">GKE Inference Quickstart</a> for pre-configured and tested deployment manifests, based on your selected accelerator, model, and performance needs.</li> </ul>
+</li> <li>
+<p>Install needed Custom Resource Definitions (CRDs) in your GKE cluster:</p> <ul> <li>
+<p>For GKE versions <code translate="no" dir="ltr">1.34.0-gke.1626000</code> or later, the <code translate="no" dir="ltr">InferencePool</code> CRD is included by default. Therefore, install only the alpha <code translate="no" dir="ltr">InferenceObjective</code> CRD:</p> 
+<pre>kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/v1.5.0/config/crd/bases/inference.networking.x-k8s.io_inferenceobjectives.yaml
+</pre>
+</li> <li>
+<p>For GKE versions earlier than <code translate="no" dir="ltr">1.34.0-gke.1626000</code>, install both the v1 InferencePool and alpha <code translate="no" dir="ltr">InferenceObjective</code> CRDs:</p> 
+<pre>kubectl apply -f  https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/manifests.yaml
+</pre> <p>For more information, see the <a href="deploy-gke-inference-gateway#compatibility">compatibility matrix</a>.</p>
+</li> </ul>
+</li> <li>
+<p>If you are using GKE version earlier than <code translate="no" dir="ltr">v1.32.2-gke.1182001</code> and you want to use Model Armor with GKE Inference Gateway, you must install the traffic and routing extension CRDs:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/heads/main/config/crd/networking.gke.io_gcptrafficextensions.yaml
+kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-gateway-api/refs/heads/main/config/crd/networking.gke.io_gcproutingextensions.yaml
+</pre>
+</li> <li>
+<p>Set the following environment variables:</p> 
+<pre>export GAIE_VERSION=v1.5.0
+export GUIDE_NAME="optimized-baseline"
+export NAMESPACE=llm-d-optimized-baseline
+export INFRA_PROVIDER=gke   # gke | base
+</pre>
+</li> <li>
+<p>Install the Gateway API Inference Extension custom resource definitions (CRDs) required by the llm-d endpoint picker (EPP):</p> 
+<pre>kubectl apply -k \
+  "https://github.com/kubernetes-sigs/gateway-api-inference-extension/config/crd?ref=${GAIE_VERSION}"
+</pre>
+</li> <li>
+<p>Create the target namespace:</p> 
+<pre>kubectl create namespace ${NAMESPACE}
+</pre>
+</li> </ol> <h3 id="create-model-deployment">Create a model server and model deployment</h3> <p>This section shows how to deploy a model server and model. The example uses a <code translate="no" dir="ltr">vLLM</code> model server with a <code translate="no" dir="ltr">Llama3</code> model. The deployment is labeled as <code translate="no" dir="ltr">app:vllm-llama3-8b-instruct</code>. This deployment also uses two LoRA adapters named <code translate="no" dir="ltr">food-review</code> and <code translate="no" dir="ltr">cad-fabricator</code> from Hugging Face.</p> <p>You can adapt this example with your own model server container and model, serving port, and deployment name. You can also configure LoRA adapters in the deployment, or deploy the base model. The following steps describe how to create the necessary Kubernetes resources.</p> <ol> <li>
+<p>Create a Kubernetes Secret to store your Hugging Face token. This token is used to access the base model and the LoRA adapters:</p> 
+<pre>kubectl create secret generic hf-token --from-literal=token=HF_TOKEN
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">HF_TOKEN</var></code> with your Hugging Face token.</p>
+</li> <li>
+<p>Deploy the vLLM model server using the GKE-specific Kustomize overlay from the llm-d optimized-baseline guide. Setting <code translate="no" dir="ltr">INFRA_PROVIDER=gke</code> applies GKE-specific configurations including Cloud Monitoring integration:</p> 
+<pre>kubectl apply -n ${NAMESPACE} \
+  -k guides/${GUIDE_NAME}/modelserver/gpu/vllm/${INFRA_PROVIDER}/
+</pre>
+</li> </ol> <p><strong>Note:</strong> GKE provides automatic application monitoring by default. The llm-d monitoring stack is not required for GKE, but is available if you prefer to use it.</p> <p>If your model server requires multiple ports, ensure the container spec exposes each port. The following example defines a Deployment where the container exposes three ports:</p> <h4 id="multiport_deployment_example">Multiport Deployment example</h4> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multiport-model-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: multiport-model-server
+  template:
+    metadata:
+      labels:
+        app: multiport-model-server
+    spec:
+      containers:
+      - name: model-server
+        image: your-model-server-image
+        ports:
+        - containerPort: 8080
+        - containerPort: 8081
+        - containerPort: 9000
+</pre> <h3 id="create-inference-pool">Create an inference pool</h3> <p>The InferencePool Kubernetes custom resource defines a group of Pods with a common base large language model (LLM) and compute configuration. The <code translate="no" dir="ltr">selector</code> field specifies which Pods belong to this pool. The labels in this selector must exactly match the labels applied to your model server Pods. The <code translate="no" dir="ltr">targetPorts</code> field defines the ports that the model server uses within the Pods. You can specify up to eight ports. The <code translate="no" dir="ltr">extensionRef</code> field references an extension service that provides additional capability for the inference pool. The InferencePool enables GKE Inference Gateway to route traffic to your model server Pods.</p> <aside class="note"><strong>Note:</strong><span> Each entry in <code translate="no" dir="ltr">targetPorts</code> field will result in a dedicated Network Endpoint Group (NEG), but all NEGs for the InferencePool are attached to a single Google Cloud Backend Service.</span></aside> <p>The following InferencePool manifest specifies multiple targetPorts that correspond to the ports exposed by the model server Deployment:</p> <h4 id="multiport_inferencepool_example">Multiport InferencePool example</h4> 
+<pre>apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: my-multiport-pool
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: multiport-model-server
+  targetPorts:
+    - number: 8080
+    - number: 8081
+    - number: 9000
+</pre> <p>Before you create the InferencePool, ensure that the model server Pods that the InferencePool selects are already running.</p> <p>Clone the recipes and recommendations for the InferencePool from the <a href="https://github.com/llm-d/llm-d">llm-d GitHub repository</a>. This step is required.:</p> 
+<pre>git clone https://github.com/llm-d/llm-d -b v0.7.0 &amp;&amp; cd llm-d
+</pre> <p>To create an InferencePool and Endpoint Picker using Helm, perform the following steps:</p> 
+<pre>helm install ${GUIDE_NAME} \
+  -f guides/recipes/scheduler/base.values.yaml \
+  -f guides/${GUIDE_NAME}/scheduler/${GUIDE_NAME}.values.yaml \
+  --set provider.name=gke \
+  --set inferenceExtension.monitoring.gke.enabled=true \
+  -n ${NAMESPACE} \
+  --version ${GAIE_VERSION} \
+  oci://LLM_D_REGISTRY_PATH
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GAIE_VERSION</var></code>: the version of the Helm chart. For example, <code translate="no" dir="ltr">v1.5.0</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LLM_D_REGISTRY_PATH</var></code>: the OCI registry path for the Helm chart. For example, <code translate="no" dir="ltr">registry.k8s.io/gateway-api-inference-extension/charts/inferencepool</code>.</li> </ul> <p>In the <code translate="no" dir="ltr">guides/recipes/scheduler/base.values.yaml</code> file, change the following field to match the label of your model Deployment Pod:</p> <ul> <li>
+<p><code translate="no" dir="ltr">inferencePool.modelServers.matchLabels</code>: the key and value of the label used to select your model server Pods.</p> <p><strong>Note</strong>: The key and value align with the <code translate="no" dir="ltr">optimized-baseline</code> guide example, so we are replacing it to match your Deployment Pod labels.</p>
+</li> </ul> <p>For monitoring, metrics scraping for Google Cloud Managed Service for Prometheus is enabled by default.</p> <ul> <li>To disable this feature, add the <code translate="no" dir="ltr">--set
+inferenceExtension.monitoring.prometheus.enabled=false</code> flag to the command.</li> <li>If you use the default monitoring on a GKE Autopilot cluster, you must also add the <code translate="no" dir="ltr">--set provider.gke.autopilot=true</code> flag.</li> </ul> <p>The Helm install automatically installs the necessary timeout policy, endpoint-picker and the Pods needed for observability.</p> <p>This creates an InferencePool object: <code translate="no" dir="ltr">vllm-llama3-8b-instruct</code> referencing the model endpoint services within the Pods. It also creates a deployment of the Endpoint Picker named <code translate="no" dir="ltr">app:vllm-llama3-8b-instruct-epp</code> for this created InferencePool.</p> <h4 id="deploy-endpoint-picker-ha">Deploy Endpoint Picker with high availability</h4> <p>Deploying Endpoint Picker (EPP) with <a href="https://docs.cloud.google.com/load-balancing/docs/service-lb-policy#preferred-backends">preferred backends</a> enables an active-passive routing topology backed by Cloud Load Balancing.</p> <p>Using Endpoint Picker with preferred backends helps you achieve the following:</p> <ul> <li>
+<strong>State consistency</strong>: Cloud Load Balancing directs 100% of steady-state <code translate="no" dir="ltr">ext_proc</code> traffic to the primary Endpoint Picker replica (<code translate="no" dir="ltr">epp-0</code>), preserving key-value (KV) cache state and request scheduling context.</li> <li>
+<strong>Zero-downtime failover</strong>: If the primary Endpoint Picker Pod crashes or undergoes maintenance, Cloud Load Balancing detects the failure using active gRPC health checks and immediately routes traffic to the standby replica (<code translate="no" dir="ltr">epp-1</code>).</li> <li>
+<strong>Fail-open resilience</strong>: When paired with <code translate="no" dir="ltr">failureMode: FailOpen</code>, transient routing failures bypass Endpoint Picker and allow requests to forward directly to model servers without dropping user requests.</li> </ul> <p>When you enable preferred backends, GKE modifies the architecture and routing in the following ways:</p> <ul> <li>
+<strong>Endpoint Picker StatefulSet architecture</strong>: Endpoint Picker is deployed as a StatefulSet instead of a Deployment. Pod ordinals designate the replica roles: ordinal <code translate="no" dir="ltr">epp-0</code> serves as the primary replica pinned to the <code translate="no" dir="ltr">PREFERRED</code> backend tier, and ordinal <code translate="no" dir="ltr">epp-1</code> serves as the standby replica pinned to the <code translate="no" dir="ltr">DEFAULT</code> tier.</li> <li>
+<strong>Routing state stays centralized</strong>: Steady-state <code translate="no" dir="ltr">ext_proc</code> traffic routes exclusively to the primary Endpoint Picker replica (<code translate="no" dir="ltr">epp-0</code>) to keep key-value (KV) cache tracking and request scheduling state centralized. If <code translate="no" dir="ltr">epp-0</code> becomes unhealthy, Cloud Load Balancing shifts traffic to the standby replica (<code translate="no" dir="ltr">epp-1</code>).</li> <li>
+<strong>Dual-Service architecture</strong>: The Helm chart creates a primary Service (<code translate="no" dir="ltr">Service/${GUIDE_NAME}-epp</code>) and a standby backup Service (<code translate="no" dir="ltr">Service/${GUIDE_NAME}-epp-backup</code>). The <code translate="no" dir="ltr">InferencePool</code> resource declaratively targets the standby backup Service. Anchoring declarative Gateway ownership to the standby Service ensures that GKE Gateway controller reconciliation loops don't detach the primary network endpoint groups (NEGs) that you attach to the backend service.</li> </ul> <p>To create an InferencePool and Endpoint Picker with high availability using Helm, perform the following steps:</p> <ol> <li>
+<p>Deploy the InferencePool and Endpoint Picker with preferred backends by using Helm:</p> 
+<pre>helm install ${GUIDE_NAME} \
+  -f guides/recipes/scheduler/base.values.yaml \
+  -f guides/${GUIDE_NAME}/scheduler/${GUIDE_NAME}.values.yaml \
+  --set provider.name=gke \
+  --set inferenceExtension.monitoring.gke.enabled=true \
+  --set provider.gke.preferredBackends.enabled=true \
+  --set provider.gke.preferredBackends.preferredReplicas=1 \
+  --set provider.gke.preferredBackends.defaultReplicas=1 \
+  -n ${NAMESPACE} \
+  --version ${GAIE_VERSION} \
+  oci://LLM_D_REGISTRY_PATH
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GAIE_VERSION</var></code>: the Gateway API Inference Extension (GAIE) version of the Helm chart. For example, <code translate="no" dir="ltr">v1.5.0</code>. Preferred backends requires Helm chart version <code translate="no" dir="ltr">v1.5.0</code> or later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LLM_D_REGISTRY_PATH</var></code>: the OCI registry path for the Helm chart. For example, <code translate="no" dir="ltr">registry.k8s.io/gateway-api-inference-extension/charts/inferencepool</code>.</li> </ul> <p>For a complete list of parameters, see <a href="https://github.com/llm-d/llm-d-router/blob/main/config/charts/llm-d-router-gateway/values.yaml"><code translate="no" dir="ltr">values.yaml</code></a>.</p>
+</li> <li>
+<p>Attach the primary NEG to the <code translate="no" dir="ltr">BackendService</code>:</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export REGION=REGION
+
+export BACKEND_SERVICE=$(gcloud compute backend-services list --project=${PROJECT_ID} --format="value(name)" | grep "${GUIDE_NAME}-epp")
+
+export PRIMARY_NEG=$(kubectl get svc ${GUIDE_NAME}-epp -n ${NAMESPACE} -o jsonpath='{.metadata.annotations.cloud\.google\.com/neg-status}' | jq -r '.network_endpoint_groups["9002"]')
+
+for ZONE in $(kubectl get svc ${GUIDE_NAME}-epp -n ${NAMESPACE} -o jsonpath='{.metadata.annotations.cloud\.google\.com/neg-status}' | jq -r '.zones[]'); do
+  gcloud compute backend-services add-backend ${BACKEND_SERVICE} \
+    --network-endpoint-group=${PRIMARY_NEG} \
+    --network-endpoint-group-zone=${ZONE} \
+    --region=${REGION} \
+    --project=${PROJECT_ID} \
+    --balancing-mode=RATE \
+    --max-rate-per-endpoint=100 \
+    --preference=PREFERRED
+  sleep 15
+done
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region of your cluster and backend service.</li> </ul>
+</li> </ol> <p>After zonal NEGs are attached to the Google Cloud <code translate="no" dir="ltr">BackendService</code>, scaling replica counts (<code translate="no" dir="ltr">preferredReplicas</code> or <code translate="no" dir="ltr">defaultReplicas</code>) or restarting Pods doesn't require running <code translate="no" dir="ltr">gcloud</code> commands again. The GKE NEG controller automatically synchronizes individual Pod IP addresses into the registered zonal NEGs.</p> <p>If you delete and recreate the parent <code translate="no" dir="ltr">Gateway</code> or <code translate="no" dir="ltr">InferencePool</code> resource, the GKE Gateway controller recreates the underlying Google Cloud <code translate="no" dir="ltr">BackendService</code> with a new cloud identifier. In that event, execute the preceding attachment workflow to attach primary zonal NEGs to the newly created <code translate="no" dir="ltr">BackendService</code>.</p> <h3 id="create-httproute">Create the <code translate="no" dir="ltr">HTTPRoute</code>
+</h3> <p>The <code translate="no" dir="ltr">HTTPRoute</code> resource defines how the GKE Gateway routes incoming HTTP requests to backend services, such as your InferencePool. The <code translate="no" dir="ltr">HTTPRoute</code> resource specifies matching rules (for example, headers or paths) and the backend to which traffic should be forwarded.</p> <ol> <li>
+<p>To create an <code translate="no" dir="ltr">HTTPRoute</code>, save the following sample manifest as <code translate="no" dir="ltr">httproute.yaml</code>:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: HTTPROUTE_NAME
+spec:
+  parentRefs:
+  - name: GATEWAY_NAME
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: PATH_PREFIX
+    backendRefs:
+    - name: INFERENCE_POOL_NAME
+      group: "inference.networking.k8s.io"
+      kind: InferencePool
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">HTTPROUTE_NAME</var></code>: a unique name for your <code translate="no" dir="ltr">HTTPRoute</code> resource. For example, <code translate="no" dir="ltr">my-route</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: the name of the <code translate="no" dir="ltr">Gateway</code> resource that you created. For example, <code translate="no" dir="ltr">inference-gateway</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_PREFIX</var></code>: the path prefix that you use to match incoming requests. For example, <code translate="no" dir="ltr">/</code> to match all.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INFERENCE_POOL_NAME</var></code>: the name of the InferencePool resource that you want to route traffic to. For example, <code translate="no" dir="ltr">vllm-llama3-8b-instruct</code>.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f httproute.yaml
+</pre>
+<aside class="note"><strong>Note:</strong><span> To configure Cross-Origin Resource Sharing (CORS) for your inference endpoints by using a <code translate="no" dir="ltr">CORS</code> filter in the <code translate="no" dir="ltr">HTTPRoute</code>, see <a href="deploying-gateways#configure-cors">Configure Cross-Origin Resource Sharing (CORS)</a>.</span></aside>
+</li> </ol> <h3 id="specify-inference-objectives">Specify inference objectives</h3> <p>The <code translate="no" dir="ltr">InferenceObjective</code> custom resource lets you specify priority of requests.</p> <p>The <code translate="no" dir="ltr">metadata.name</code> field of the <code translate="no" dir="ltr">InferenceObjective</code> resource specifies the name of the Inference Objective, the <code translate="no" dir="ltr">Priority</code> field specifies its serving criticality, and the <code translate="no" dir="ltr">poolRef</code> field specifies the InferencePool on which the model is served.</p> 
+<pre>apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: NAME
+spec:
+  priority: VALUE
+  poolRef:
+    name: INFERENCE_POOL_NAME
+    group: "inference.networking.k8s.io"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAME</var></code>: the name of your Inference Objective. For example, <code translate="no" dir="ltr">food-review</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VALUE</var></code>: the priority for the Inference Objective. This is an integer where a higher value indicates a more critical request. For example, 10.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INFERENCE_POOL_NAME</var></code>: the name of the InferencePool you created in the previous step. For example, <code translate="no" dir="ltr">vllm-llama3-8b-instruct</code>.</li> </ul> <p>To create an <code translate="no" dir="ltr">InferenceObjective</code>, perform the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">inference-objectives.yaml</code>. This manifest creates two <code translate="no" dir="ltr">InferenceObjective</code> resources. The first configures the <code translate="no" dir="ltr">food-review</code> Inference Objective on the <code translate="no" dir="ltr">vllm-llama3-8b-instruct</code> InferencePool with a priority of 10. The second configures the <code translate="no" dir="ltr">llama3-base-model</code> Inference Objective to be served with a higher priority of 20.</p> 
+<pre>apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: food-review
+spec:
+  priority: 10
+  poolRef:
+    name: vllm-llama3-8b-instruct
+    group: "inference.networking.k8s.io"
+---
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: llama3-base-model
+spec:
+  priority: 20 # Higher priority
+  poolRef:
+    name: vllm-llama3-8b-instruct
+</pre>
+</li> <li>
+<p>Apply the sample manifest to your cluster:</p> 
+<pre>kubectl apply -f inference-objectives.yaml
+</pre>
+</li> </ol> <h3 id="verify-deployment">Verify the deployment</h3> <p>To verify that all components are running, run the following commands:</p> 
+<pre>kubectl get inferencepool
+kubectl get inferenceobjective
+kubectl get pods -l app=vllm-llama3-8b-instruct-epp
+</pre> <h3 id="send-inference-request">Send inference request</h3> <p>After you have configured GKE Inference Gateway, you can send inference requests to your deployed model. This lets you generate text based on your input prompt and specified parameters.</p> <p>To send inference requests, perform the following steps:</p> <ol> <li>
+<p>Set the following environment variables:</p> 
+<pre>export GATEWAY_NAME=GATEWAY_NAME
+export PORT_NUMBER=PORT_NUMBER # Use 80 for HTTP
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: the name of your Gateway resource.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PORT_NUMBER</var></code>: the port number you configured in the Gateway.</li> </ul>
+</li> <li>
+<p>To get the Gateway endpoint, run the following command:</p> 
+<pre>echo "Waiting for the Gateway IP address..."
+IP=""
+while [ -z "$IP" ]; do
+  IP=$(kubectl get gateway/${GATEWAY_NAME} -o jsonpath='{.status.addresses[0].value}' 2&gt;/dev/null)
+  if [ -z "$IP" ]; then
+    echo "Gateway IP not found, waiting 5 seconds..."
+    sleep 5
+  fi
+done
+
+echo "Gateway IP address is: $IP"
+PORT=${PORT_NUMBER}
+</pre>
+</li> <li>
+<p>To send a request to the <code translate="no" dir="ltr">/v1/completions</code> endpoint using <code translate="no" dir="ltr">curl</code>, run the following command:</p> 
+<pre>curl -i -X POST ${IP}:${PORT}/v1/completions \
+-H 'Content-Type: application/json' \
+-H 'Authorization: Bearer $(gcloud auth application-default print-access-token)' \
+-d '{
+    "model": "MODEL_NAME",
+    "prompt": "PROMPT_TEXT",
+    "max_tokens": MAX_TOKENS,
+    "temperature": "TEMPERATURE"
+}'
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MODEL_NAME</var></code>: the name of the model or LoRA adapter to use.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROMPT_TEXT</var></code>: the input prompt for the model.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAX_TOKENS</var></code>: the maximum number of tokens to generate in the response.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TEMPERATURE</var></code>: controls the randomness of the output. Use the value <code translate="no" dir="ltr">0</code> for deterministic output, or a higher number for more creative output.</li> </ul>
+</li> </ol> <p>The following example shows you how to send a sample request to GKE Inference Gateway:</p> 
+<pre>curl -i -X POST ${IP}:${PORT}/v1/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer $(gcloud auth application-default print-access-token)' -d '{
+    "model": "food-review-1",
+    "prompt": "What is the best pizza in the world?",
+    "max_tokens": 2048,
+    "temperature": 0
+}'
+</pre> <p>Be aware of the following behaviours:</p> <ul> <li>
+<strong>Request body</strong>: the request body can include additional parameters like <code translate="no" dir="ltr">stop</code> and <code translate="no" dir="ltr">top_p</code>. Refer to the <a href="https://platform.openai.com/docs/api-reference/completions">OpenAI API specification</a> for a complete list of options.</li> <li>
+<strong>Error handling</strong>: implement proper error handling in your client code to handle potential errors in the response. For example, check the HTTP status code in the <code translate="no" dir="ltr">curl</code> response. A non-<code translate="no" dir="ltr">200</code> status code generally indicates an error.</li> <li>
+<strong>Authentication and authorization</strong>: for production deployments, secure your API endpoint with authentication and authorization mechanisms. Include the appropriate headers (for example, <code translate="no" dir="ltr">Authorization</code>) in your requests.</li> </ul> <h2 id="compatibility">Compatibility matrix</h2> <aside class="note"><strong>Note:</strong><span> Starting from GKE version <code translate="no" dir="ltr">1.34.0-gke.1626000</code>, Google Kubernetes Engine automatically manages the v1 <code translate="no" dir="ltr">InferencePool</code> CustomResourceDefinition. Attempting to install the v1 <code translate="no" dir="ltr">InferencePool</code> CustomResourceDefinition might cause unexpected issues and results in a warning.</span></aside> <p>The table outlines the compatibility and support matrix for the Gateway API Inference Extension Custom Resource Definitions (CRDs). It details which CustomResourceDefinition versions are supported by GKE compared to the open-source (OSS) Gateway API Inference Extension project, including specific version requirements and installation notes.</p> <table> <thead> <tr> <th>CustomResourceDefinition Name</th> <th>CustomResourceDefinition API Version</th> <th>GKE Managed Support</th> <th>OSS (Gateway API Inference Extension) Support</th> </tr> </thead> <tbody> <tr> <td>V1 InferencePool</td> <td>inference.networking.k8s.io/v1</td> <td>Supported on GKE 1.32.3 or later and CustomResourceDefinition installed by default on GKE 1.34.0-gke.1626000 or later</td> <td>Supported starting from Gateway API Inference Extension v1.0.0</td> </tr> <tr> <td>Alpha InferencePool <em>(Recommend users starting with v1 InferencePool as alpha InferencePool version has been deprecated)</em>
+</td> <td>inference.networking.x-k8s.io/v1alpha2</td> <td>Supported on GKE 1.32.3 or later. However, CustomResourceDefinition is <em>not</em> installed by default on GKE. Users need to manually install the CustomResourceDefinition from Gateway API Inference Extension.</td> <td>Supported starting from Gateway API Inference Extension v0.2.0</td> </tr> <tr> <td>Alpha InferenceObjective</td> <td>inference.networking.x-k8s.io/v1alpha2</td> <td>GKE doesn't manage InferenceObjective</td> <td>Supported starting from Gateway API Inference Extension v1.0.0</td> </tr> <tr> <td>Alpha InferenceModel <em>(Recommend users starting with InferenceObjective as InferenceModel has been deprecated)</em>
+</td> <td>inference.networking.x-k8s.io/v1alpha2</td> <td>GKE doesn't manage InferenceModel</td> <td>Supported starting from Gateway API Inference Extension v0.2.0.</td> </tr> </tbody> </table> <h2 id="secure_your_inference_backend_with_backend_tls">Secure your inference backend with backend TLS</h2> <p>Backend TLS enables the GKE Gateway load balancer to verify the identity of the inference backends it connects to. Backend TLS adds an explicit verification step during the TLS handshake between the Gateway and the backend Pod. This verification helps ensure that the Gateway communicates only with trusted model servers.</p> <p>To configure backend TLS for your inference workloads, attach a BackendTLSPolicy to an InferencePool or GCPInferencePoolImport resource.</p> <p>For more information, see <a href="secure-gateway#configure-backend-tls">Configure backend TLS</a>.</p> <h2 id="whats-next">What's next</h2> <ul> <li><a href="customize-gke-inference-gateway-configurations">Customize GKE Inference Gateway configuration</a></li> <li><a href="configure-body-based-routing">Configure Body-Based Routing</a></li> <li><a href="../tutorials/serve-with-gke-inference-gateway">Serve an LLM with GKE Inference Gateway</a></li> <li><a href="use-predicted-latency-based-routing">Use predicted latency-based routing with GKE Inference Gateway</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-gke-inference-gateway" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-gke-inference-gateway</a>
+  </p>
+</div>

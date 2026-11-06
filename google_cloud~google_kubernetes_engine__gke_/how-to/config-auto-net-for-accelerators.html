@@ -1,0 +1,263 @@
+<h1>Configure automated networking for accelerator VMs</h1>  <p>This document shows you how to use <em>automated networking</em> for accelerator VMs, such as GPUs and TPUs, to simplify the network configuration for Google Kubernetes Engine (GKE) accelerator workloads. This is essential for running artificial intelligence (AI), machine learning (ML), and high performance computing (HPC) on accelerator-optimized machines.</p> <p>This document assumes familiarity with fundamental GKE concepts, GPU and TPU workloads, and VPC networking. Specifically, you should be familiar with:</p> <ul> <li><a href="https://kubernetes.io/docs/concepts/">Kubernetes</a></li> <li><a href="../concepts/network-overview">GKE networking</a></li> <li><a href="https://docs.cloud.google.com/vpc/docs/vpc">VPC networking concepts</a></li> </ul> <p>This page is intended for Cloud architects and Networking specialists who design and architect their organization's network. For an overview of all GKE documentation sets, see <a href="../about">Explore GKE documentation</a>. To learn more about common roles and example tasks referenced in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>GKE simplifies running high-performance AI and ML on specialized accelerators. With automated networking for accelerator VMs, you can enable high-speed, multi-network connectivity—essential for protocols like RDMA—with a single configuration flag. This automation eliminates the complex, manual process of setting up multiple VPC networks, managing IP address ranges, and configuring network interfaces for every node pool and Pod. By using a single parameter when creating a node pool, GKE provides all the necessary cloud and Kubernetes networking resources.</p> <h2 id="terminology">Terminology</h2> <p>The following terms are key to understanding the networking architecture for accelerator VMs.</p> <ul> <li>
+<strong>Virtual Private Cloud (VPC)</strong>: a <a href="https://docs.cloud.google.com/vpc/docs/vpc">VPC</a> is a virtual version of a physical network, implemented inside of Google's production network. It provides connectivity for your Compute Engine virtual machine (VM) instances, GKE clusters, and other resources.</li> <li>
+<strong><a href="https://cloud.google.com/titanium">Titanium NIC</a></strong>: a smart NIC that offloads network processing tasks from the CPU, freeing the CPU to focus on your workloads. On GPU machines, they handle all traffic that is not direct GPU-to-GPU communication. On TPU machines, all NICs are Titanium NICs.</li> <li>
+<strong>Subnetwork</strong>: a <a href="https://docs.cloud.google.com/vpc/docs/subnets">subnetwork</a> is a segmented piece of a larger VPC. Each subnetwork is associated with a region and has a defined IP address range.</li> <li>
+<strong>Network Interface Controller (NIC)</strong>: a <a href="https://docs.cloud.google.com/compute/docs/multiple-interfaces-concepts">NIC</a> is a virtual network interface that connects a VM instance to a network. Each NIC is attached to a specific VPC and subnetwork.</li> <li>
+<strong>Host network</strong>: the primary network used by the node's main network interfaces (NICs) for general cluster communication, such as control plane traffic and regular Pod networking.</li> <li>
+<strong>Data network</strong>: a dedicated network for high-performance data transfer between accelerator VMs. For GPUs, this is often a GPUDirect VPC with RDMA. For TPUs, this might be a second host network.</li> <li>
+<strong>Remote Direct Memory Access(RDMA)</strong>: <a href="https://en.wikipedia.org/wiki/Remote_direct_memory_access">RDMA</a> is a technology that allows network devices to exchange data directly with the main memory of a computer without involving the operating system or CPU. This significantly reduces latency and improves throughput, which is critical for HPC and ML workloads.</li> <li>
+<strong>NVLink</strong>: <a href="https://www.nvidia.com/en-us/data-center/nvlink/">NVLink</a> is a high-speed interconnect technology developed by NVIDIA to connect multiple GPUs within a single node, enabling them to share memory and work together on large datasets.</li> <li>
+<strong>Kubernetes dynamic resource allocation (DRA)</strong>: <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/">DRA</a> is a Kubernetes feature that provides a more flexible way for Pods to request and consume resources, such as GPUs and other specialized hardware. It allows for fine-grained control over resource allocation.</li> </ul> <h2 id="how-auto-net-works">How automated networking works</h2> <p>Accelerator-optimized machines have a specialized network architecture to support high-throughput, low-latency communication between GPUs and TPUs. Each physical machine contains multiple GPUs or TPUs, often connected by high-speed interconnects like NVLink. The machines also have one or more NICs for general networking and multiple GPU NICs for high-speed interconnects.</p> <p>When you create a GKE node that uses an accelerator-optimized machine type, GKE configures multiple NICs on the underlying VM. Host NICs connect to host VPC networks for general cluster communication and management to communicate with the control plane. GPU NICs connect to a dedicated, high-performance VPC network, often with RDMA enabled and a high MTU setting (8896), to facilitate GPUDirect communication.</p> <p>When a Pod requests GPUs or TPUs, you can configure it to access the high-performance network interfaces on the node. You can request all available NICs or a specific subset. Each claimed network interface is dedicated to a single Pod and isn't shared. This network configuration helps ensure the Pod has sole access to the full bandwidth and resources of that interface, a key benefit for performance-sensitive workloads.</p> <h2 id="limitations">Limitations</h2> <ul> <li>Automated networking requires the cluster to use GKE Dataplane V2.</li> <li>Automated networking is supported on A3, A4, and TPU Trillium (v6e) accelerator-optimized machine families, as well as the Z4M storage-optimized machine series.</li> <li>You must use a node pool with a single zone.</li> <li>You can't use automated networking in a cluster that uses <a href="cluster-shared-vpc">Shared VPC</a>.</li> <li>When using GKE managed DRANET to configure workloads, see the <a href="allocate-network-resources-dra#key-considerations">key considerations</a> and <a href="allocate-network-resources-dra#limitations">limitations</a> for GKE managed DRANET.</li> <li>You can't use both the <a href="setup-multinetwork-support-for-pods#create-gke-node-pool">multi-network API</a> and DRANET in the same nodepool. You must choose one method for network attachment for your Pods.</li> <li>For regional clusters, you must specify the target zone when you enable accelerator network profiles. If your workload spans multiple zones, you must enable the network profile for each zone independently.</li> </ul>  <h2 id="machine-network-configurations">Machine network configurations</h2> <p>Accelerator-optimized and storage-optimized machines have varying network configurations depending on their type. The following tables summarize the network specifications for various machine types.</p> <h3 id="gpu-accelerator-vm">GPU accelerator VMs</h3> <table> <thead> <tr> <th>Machine type</th> <th>Number of GPUs</th> <th>Number of Titanium NICs</th> <th>Number of GPU NICs</th> <th>GPUDirect Technology</th> <th>Additional VPCs</th> </tr> </thead> <tbody> <tr> <td>A3</td> <td>8 (H100)</td> <td>1</td> <td>4</td> <td>TCPX</td> <td>4 for GPU NICs</td> </tr> <tr> <td>A3 Mega</td> <td>8 (H100)</td> <td>1</td> <td>8</td> <td>TCPXO</td> <td>8 for GPU NICs</td> </tr> <tr> <td>A3 Ultra</td> <td>8 (H200)</td> <td>2</td> <td>8</td> <td>RDMA</td> <td>2 (1 for second NIC, 1 for GPU NICs)</td> </tr> <tr> <td>A4</td> <td>8 (B200)</td> <td>2</td> <td>8</td> <td>RDMA</td> <td>2 (1 for second NIC, 1 for GPU NICs)</td> </tr> <tr> <td>A4X</td> <td>4 (GB200)</td> <td>2</td> <td>4</td> <td>RDMA</td> <td>2 (1 for second NIC, 1 for GPU NICs)</td> </tr> <tr> <td>A4X BM</td> <td>8</td> <td>2</td> <td>8</td> <td>BM-RDMA</td> <td>2 (1 for second NIC, 1 for GPU NICs)</td> </tr> </tbody> </table> <h3 id="tpu-accelerator-vm">TPU accelerator VMs</h3> <table> <thead> <tr> <th>Machine type</th> <th>Number of TPU chips</th> <th>Number of NICs</th> <th>Additional VPCs</th> </tr> </thead> <tbody> <tr> <td>TPU Trillium (v6e) (ct6e-standard-1t)</td> <td>1</td> <td>0.25</td> <td>1</td> </tr> <tr> <td>TPU Trillium (v6e) (ct6e-standard-4t)</td> <td>4</td> <td>2</td> <td>2 (1 for 2nd NIC, 1 for extra VNIC on 1st NIC)</td> </tr> <tr> <td>TPU Trillium (v6e) (ct6e-standard-8t)</td> <td>8</td> <td>4</td> <td>4</td> </tr> <tr> <td>tpu7x-standard-4t</td> <td>4</td> <td>2</td> <td>2</td> </tr> </tbody> </table> <h3 id="storage-optimized-vm">Storage-optimized VMs</h3> <p>On Z4M instances, the two physical Titanium NICs support both general network traffic (gVNIC) and up to two IRDMA virtual network interfaces (vNICs) for Cloud RDMA communication.</p> <table> <thead> <tr> <th scope="col">Machine type</th> <th scope="col">Number of physical Titanium NICs</th> <th scope="col">Number of RDMA vNICs</th> <th scope="col">Networking technology</th> <th scope="col">Additional VPCs</th> </tr> </thead> <tbody> <tr> <td>Z4M (<code translate="no" dir="ltr">z4m-highmem-192</code>)</td> <td>2</td> <td>Up to 2 (shared on physical NICs)</td> <td>RDMA</td> <td>2 for RDMA vNICs</td> </tr> </tbody> </table> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure your cluster uses GKE version 1.34.1-gke.2037000 or later.</li> <li><p>To enable <a href="../concepts/node-auto-provisioning">node auto-provisioning</a> and <a href="../concepts/about-custom-compute-classes">custom ComputeClasses</a>, ensure that your cluster uses GKE version 1.35.2-gke.1302000 or later.</p></li> <li><p>Ensure that the GKE service account in your project has the <code translate="no" dir="ltr">compute.networkAdmin</code> role.</p></li> <li>
+<p>Ensure that your cluster has GKE Dataplane V2 enabled. You can enable GKE Dataplane V2 only when you create a new cluster on GKE version 1.34.1-gke.2037000 or later. You can't enable GKE Dataplane V2 on clusters prior to this version.</p> 
+<pre>  gcloud container clusters create CLUSTER_NAME \
+    --cluster-version=CLUSTER_VERSION \
+    --enable-dataplane-v2
+</pre>
+</li> <li>
+<p>If you plan to deploy GPU or Z4M workloads that use RDMA, verify the existence of the <code translate="no" dir="ltr">DeviceClass</code> resources (<code translate="no" dir="ltr">mrdma.google.com</code> for GPUs or <code translate="no" dir="ltr">irdma.google.com</code> for Z4M):</p> 
+<pre>kubectl get deviceclass mrdma.google.com
+</pre>
+</li> </ul> <h2 id="configure-automated-networking">Configure automated networking</h2> <p>You can enable automated networking by specifying an accelerator network profile when you create a node pool. You can also create a ComputeClass resource for clusters that use node auto-provisioning.</p> <h3 id="create-a-node-pool">Create a node pool with a default network profile</h3> <p>To automatically create a network that connects all GPUs or TPUs machines within a single zone, create a node pool with the <code translate="no" dir="ltr">auto</code> accelerator network profile.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To create a node pool with an automatically configured network profile, run the following command:</p> 
+<pre data-language="bash">gcloud beta container node-pools create NODE_POOL_NAME \
+    --accelerator-network-profile=auto \
+    --node-locations=ZONE \
+    --machine-type=MACHINE_TYPE
+</pre> <p>When you create a node pool with the <code translate="no" dir="ltr">--accelerator-network-profile=auto</code> flag, GKE automatically adds the <code translate="no" dir="ltr">gke.networks.io/accelerator-network-profile: auto</code> label to the nodes. To schedule workloads on these nodes, you must include this label in your workload's <code translate="no" dir="ltr">nodeSelector</code>.</p> <p>For more information about creating node pools with accelerators, see <a href="gpus">Run GPUs in Autopilot node pools</a> and <a href="tpus">Deploy TPU workloads in Autopilot</a>. When you follow the instructions in these documents, append the <code translate="no" dir="ltr">--accelerator-network-profile=auto</code> flag to the <code translate="no" dir="ltr">gcloud container node-pools create</code> command.</p> <p>For multi-host TPU slice node pools, you also need to add the <code translate="no" dir="ltr">--tpu-topology</code> flag.</p> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone for the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type for the nodes, for example, <code translate="no" dir="ltr">a3-ultragpu-8g</code>.</li> </ul></section> <section><p class="_code-tab"><strong>REST</strong></p>
+<p>In a request to the <code translate="no" dir="ltr">nodePools.create</code> method, specify the <code translate="no" dir="ltr">accelerator_network_profile</code> field:</p> 
+<pre data-language="">{
+  "nodePool": {
+    "name": "NODE_POOL_NAME",
+    "machineType": "MACHINE_TYPE",
+    ...
+    "accelerator_network_profile": "auto"
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type for the nodes, for example, <code translate="no" dir="ltr">a3-ultragpu-8g</code>.</li> </ul></section> </div> <h3 id="enable-with-nap">Enable automated networking with node auto-provisioning</h3> <p>To configure automated networking in Autopilot clusters or Standard clusters that use node auto-provisioning, add the <code translate="no" dir="ltr">acceleratorNetworkProfile</code> field to a ComputeClass resource.</p> <ol> <li>
+<p>The following example ComputeClass manifest enables automated networking for A3 Mega machines. Save the following manifest as <code translate="no" dir="ltr">anp-compute-class.yaml</code>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: anp-a3-mega-class
+spec:
+  autopilot:
+    enabled: true
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  # Priority 1: A3 Mega in us-central1-a
+  - machineType: a3-megagpu-8g
+    gpu:
+      count: 8
+      driverVersion: default
+      type: nvidia-h100-mega-80gb
+    flexStart:
+      enabled: true
+    location:
+      zones: [us-central1-a]
+    acceleratorNetworkProfile: auto
+  whenUnsatisfiable: DoNotScaleUp
+</pre>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f anp-compute-class.yaml
+</pre>
+</li> </ol> <p>When you deploy a workload that selects this ComputeClass resource, GKE automatically configures the necessary network interfaces for the provisioned nodes.</p> <h2 id="schedule-gpu-workload">Schedule a workload that uses GPUs</h2> <p>The following sections show you how to configure a GPU node pool and workload to use RDMA network interfaces with GKE managed DRANET. For more details, see <a href="allocate-network-resources-dra">Allocate network resources using GKE managed DRANET</a>.</p> <h3 id="enable-dra-driver-gpu">Enable GKE managed DRANET driver on a GPU node pool</h3> <p>To enable the GKE DRANET driver on a GPU node pool that supports RDMA, add the <code translate="no" dir="ltr">cloud.google.com/gke-networking-dra-driver=true</code> label when you create the node pool.</p> 
+<pre>gcloud beta container node-pools create NODE_POOL_NAME \
+  --region=REGION \
+  --cluster=CLUSTER_NAME \
+  --node-locations=NODE_LOCATIONS \
+  --accelerator type=ACCELERATOR_TYPE,count=ACCELERATOR_COUNT,gpu-driver-version=DRIVER_VERSION \
+  --machine-type=MACHINE_TYPE \
+  --num-nodes=NUM_NODES \
+  --reservation-affinity=specific \
+  --reservation=projects/RESERVATION_PROJECT/reservations/RESERVATION_NAME/reservationBlocks/RESERVATION_BLOCK \
+  --accelerator-network-profile=auto \
+  --node-labels=cloud.google.com/gke-networking-dra-driver=true
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region for your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">ACCELERATOR_TYPE</var></code>: the type of <a href="https://docs.cloud.google.com/compute/docs/gpus">GPU accelerator</a>:</p> <p>For example:</p> <ul> <li>A4 VMs: enter <code translate="no" dir="ltr">nvidia-b200</code>.</li> <li>A3 Ultra VMs: enter <code translate="no" dir="ltr">nvidia-h200-141gb</code>.</li> </ul>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">ACCELERATOR_COUNT</var></code>: the number of GPUs to attach to nodes in the node pool. For example, for both a4-highgpu-8g and a3-ultragpu-8g VMs, the amount of GPUs is 8.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">DRIVER_VERSION</var></code>: the GPU driver version to use. For example, <code translate="no" dir="ltr">default</code> or <code translate="no" dir="ltr">latest</code>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the machine type for the node pool, for example, <code translate="no" dir="ltr">a3-ultragpu-8g</code>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: the number of nodes for the node pool. For flex-start, this value must be set to 0.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">RESERVATION_PROJECT</var></code>: the project ID of the reservation.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">RESERVATION_NAME</var></code>: the name of your reservation. To find this value, see <a href="https://docs.cloud.google.com/compute/docs/instances/reservations-view#view-future-reservations">View future reservation requests</a>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">RESERVATION_BLOCK</var></code>: the name of a specific block within the reservation. To find this value, see <a href="https://docs.cloud.google.com/compute/docs/instances/reservations-view#view-future-reservations">View future reservation requests</a>.</p></li> </ul> <p>This command uses accelerator network profiles to automatically configure VPC networks and subnets for your accelerator VMs. Alternatively, you can explicitly <a href="setup-multinetwork-support-for-pods#create-gke-node-pool">specify your VPC network</a> and subnets.</p> <h3 id="deploy-workload-rdma">Deploy a workload RDMA resources</h3> <p>To allocate RDMA resources for a Pod, specify a <code translate="no" dir="ltr">ResourceClaimTemplate</code>.</p> <ol> <li>
+<p>Create a <code translate="no" dir="ltr">ResourceClaimTemplate</code> to define how to allocate the RDMA devices. The following manifest requests all available <code translate="no" dir="ltr">mrdma</code> devices on the node. Save the manifest as <code translate="no" dir="ltr">all-mrdma-template.yaml</code>:</p> 
+<pre>apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: all-mrdma
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-mrdma
+        exactly:
+          deviceClassName: mrdma.google.com
+          allocationMode: All
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f all-mrdma-template.yaml
+</pre>
+</li> <li>
+<p>Deploy your workload and reference the <code translate="no" dir="ltr">ResourceClaimTemplate</code>. The following manifest deploys a Pod that references the <code translate="no" dir="ltr">all-mrdma</code> template, which grants the Pod access to the RDMA interfaces on the node. Save the manifest as <code translate="no" dir="ltr">agnhost-rdma-pod.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: agnhost-rdma
+  namespace: default
+  labels:
+    app: agnhost
+spec:
+  containers:
+  - name: agnhost
+    image: registry.k8s.io/e2e-test-images/agnhost:2.39
+    args: ["netexec", "--http-port", "80"]
+    ports:
+    - name: agnhost-port
+      containerPort: 80
+    resources:
+      claims:
+      - name: rdma
+      limits:
+        nvidia.com/gpu: 1
+  resourceClaims:
+  - name: rdma
+    resourceClaimTemplateName: all-mrdma
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f agnhost-rdma-pod.yaml
+</pre>
+</li> <li>
+<p>Verify that the additional allocated network interfaces are visible inside the Pod.</p> 
+<pre>kubectl exec agnhost-rdma -- ls /sys/class/net
+</pre> <p>The following example output shows the default <code translate="no" dir="ltr">eth0</code> and <code translate="no" dir="ltr">lo</code> interfaces, as well as the allocated RDMA interfaces, such as <code translate="no" dir="ltr">gpu0rdma0</code>. The number and names of the network interfaces (NICs) vary based on the GKE node's machine type.</p> 
+<pre>eth0
+gpu0rdma0
+gpu1rdma0
+gpu2rdma0
+gpu3rdma0
+lo
+</pre>
+</li> </ol> <h2 id="schedule-tpu-workload">Schedule a workload that uses TPUs</h2> <p>The following sections show you how to configure a TPU node pool and workload to use non-RDMA network interfaces with GKE managed DRANET. For more details, see <a href="allocate-network-resources-dra">Allocate network resources using GKE managed DRANET</a>.</p> <h3 id="verify-deviceclasses-tpu">Verify networking DeviceClasses</h3> <p>Verify that the <code translate="no" dir="ltr">DeviceClass</code> resources for networking exist in your cluster.</p> 
+<pre>kubectl get deviceclass netdev.google.com
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                AGE
+netdev.google.com   2d22h
+</pre> <h3 id="enable-dra-driver-tpu">Enable GKE managed DRANET driver on a TPU slice node pool</h3> <p>To enable the GKE DRANET driver when creating a TPU slice node pool, add the <code translate="no" dir="ltr">cloud.google.com/gke-networking-dra-driver=true</code> label.</p> 
+<pre>gcloud beta container node-pools create NODE_POOL_NAME \
+    --location=LOCATION \
+    --cluster=CLUSTER_NAME \
+    --node-locations=NODE_LOCATIONS \
+    --machine-type=MACHINE_TYPE \
+    --tpu-topology=TPU_TOPOLOGY \
+    --num-nodes=NUM_NODES \
+    --accelerator-network-profile=auto \
+    --node-labels=cloud.google.com/gke-networking-dra-driver=true
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: The name of your new node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The Google Cloud region or zone for your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: The name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_LOCATIONS</var></code>: The Google Cloud zones for the nodes in the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: The type of machine to use for nodes. For more information about TPU-compatible machine types, see <a href="../concepts/plan-tpus#choose-tpu-version">Choose the TPU version</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: The TPU topology, for example, <code translate="no" dir="ltr">2x4x4</code>. The format of the topology depends on the TPU version. To learn more about TPU topologies, see <a href="../concepts/plan-tpus#topology">Choose a topology</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NUM_NODES</var></code>: The number of nodes in the node pool.</li> </ul> <p>For more information, see <a href="tpus#single-host">Create a single-host TPU slice node pool</a>.</p> <h3 id="deploy-workload-tpu">Deploy a workload claiming all network devices</h3> <p>To allocate non-RDMA network devices for a Pod, specify a <code translate="no" dir="ltr">ResourceClaimTemplate</code>.</p> <ol> <li>
+<p>Create a <code translate="no" dir="ltr">ResourceClaimTemplate</code> that references the <code translate="no" dir="ltr">netdev.google.com</code> <code translate="no" dir="ltr">DeviceClass</code>. The following manifest requests all available non-RDMA network devices on the node.</p> <p>Save the manifest as <code translate="no" dir="ltr">all-netdev-template.yaml</code>:</p> 
+<pre>apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: all-netdev
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-netdev
+        exactly:
+          deviceClassName: netdev.google.com
+          allocationMode: All
+</pre>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f all-netdev-template.yaml
+</pre>
+</li> <li>
+<p>Deploy your workload and reference the <code translate="no" dir="ltr">ResourceClaimTemplate</code>. The following manifest deploys a Pod that uses the <code translate="no" dir="ltr">all-netdev</code> template to grant the Pod access to all non-RDMA network devices on the node. Save the manifest as <code translate="no" dir="ltr">netdev-pod.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: agnhost-netdev
+  namespace: default
+  labels:
+    app: agnhost
+spec:
+  containers:
+  - name: agnhost
+    image: registry.k8s.io/e2e-test-images/agnhost:2.39
+    args: ["netexec", "--http-port", "80"]
+    ports:
+    - name: agnhost-port
+      containerPort: 80
+    resources:
+      claims:
+      - name: netdev
+      limits:
+        google.com/tpu: 4
+  nodeSelector:
+    cloud.google.com/gke-tpu-accelerator: TPU_ACCELERATOR
+    cloud.google.com/gke-tpu-topology: TPU_TOPOLOGY
+  resourceClaims:
+  - name: netdev
+    resourceClaimTemplateName: all-netdev
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_ACCELERATOR</var></code>: The TPU accelerator type, for example, <code translate="no" dir="ltr">tpu-v5p-slice</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TPU_TOPOLOGY</var></code>: The TPU topology, for example, <code translate="no" dir="ltr">2x4x4</code>.</li> </ul>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f netdev-pod.yaml
+</pre>
+</li> <li>
+<p>Verify that the additional allocated network interfaces are visible inside the Pod.</p> 
+<pre>kubectl exec agnhost-netdev -- ls /sys/class/net
+</pre> <p>The following example output shows the default <code translate="no" dir="ltr">eth0</code> and <code translate="no" dir="ltr">lo</code> interfaces, along with the allocated network devices, which have names like <code translate="no" dir="ltr">eth1</code> and <code translate="no" dir="ltr">eth2</code>. The number of NICs and their names will vary based on the machine type of the GKE node.</p> 
+<pre>eth0
+eth1
+eth2
+lo
+</pre>
+</li> </ol> <h2 id="ipv6-multi-nic">Configure multi-NIC node networks on single-stack IPv6 clusters</h2> <p>In Standard <a href="single-stack-ipv6">single-stack IPv6 clusters</a> (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>), you can configure node pools with multiple network interfaces (multi-NIC) to attach secondary data networks (<code translate="no" dir="ltr">RDMA</code> or <code translate="no" dir="ltr">DIORITE</code>) for AI/ML workloads.</p> <p>Although your cluster control plane and default Pod network operate on IPv6-only subnetworks, secondary network interfaces can run on IPv4-only, dual-stack, or IPv6-only subnetworks depending on your machine profile and network setup:</p> <ul> <li><p><strong>Automated multi-NIC (<code translate="no" dir="ltr">Managed DRANET</code>):</strong> you can use automated networking on node pools inside single-stack IPv6 clusters. To automatically provision and attach high-performance secondary networks, append the <code translate="no" dir="ltr">--accelerator-network-profile=auto</code> flag when you create your node pool as described in <a href="#create-a-node-pool">Create a node pool with a default network profile</a>.</p></li> <li>
+<p><strong>Manual multi-NIC:</strong> you can manually define secondary node networks when you create a node pool by using the <code translate="no" dir="ltr">--additional-node-network</code> flag, which accepts the following parameters:</p> <p><code translate="no" dir="ltr">--additional-node-network="network=<var translate="no">NETWORK</var>,subnetwork=<var translate="no">SUBNET</var>,stack_type=<var translate="no">STACK_TYPE</var>"</code></p> <p>You can set the <code translate="no" dir="ltr">stack_type</code> parameter to <code translate="no" dir="ltr">IPV4</code> (IPv4-only), <code translate="no" dir="ltr">IPV4_IPV6</code> (dual-stack), or <code translate="no" dir="ltr">IPV6</code> (IPv6-only). Choose the stack type based on your secondary network profile:</p> <ul> <li>
+<strong>RDMA IPv4 NICs:</strong> VPC network created with an RDMA network profile; subnetwork created with an IPv4 stack type or dual-stack stack type.</li> <li>
+<strong>DIORITE IPv4 NICs:</strong> VPC network created without an RDMA network profile; subnetwork created with an IPv4 stack type or dual-stack stack type.</li> <li>
+<strong>DIORITE IPv6 NICs:</strong> VPC network created without an RDMA network profile; subnetwork created with an IPv6-only stack type or dual-stack stack type.</li> <li>
+<strong>IPv6 RDMA NICs on <code translate="no" dir="ltr">a4-max</code> bare-metal machines:</strong> VPC network created with a bare-metal RDMA network profile. An IPv6-only subnetwork is automatically created alongside the network profile.</li> </ul> <p>For example, the following command creates a node pool inside a single-stack IPv6 cluster with an additional network interface configured for dual-stack (<code translate="no" dir="ltr">IPV4_IPV6</code>) communication:</p> 
+<pre>gcloud container node-pools create POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --additional-node-network=network=NETWORK_NAME,subnetwork=SUBNET_NAME,stack_type=IPV4_IPV6 \
+    --node-locations=COMPUTE_ZONE \
+    --machine-type=MACHINE_TYPE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_NAME</var></code>: the name of your new multi-NIC node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your existing single-stack IPv6 cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK_NAME</var></code>: the name of the secondary VPC network.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNET_NAME</var></code>: the name of the secondary subnetwork.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">COMPUTE_ZONE</var></code>: the Compute Engine zone for your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MACHINE_TYPE</var></code>: the accelerator-equipped machine type for your nodes.</li> </ul>
+</li> </ul> <p>To learn more about the <code translate="no" dir="ltr">--additional-node-network</code> parameter and secondary Pod networks, see <a href="setup-multinetwork-support-for-pods">Set up multi-network support for Pods</a>.</p> <h2 id="troubleshoot">Troubleshoot</h2> <p>To check the network setup for a node pool, run the following command:</p> 
+<pre>gcloud beta container node-pools describe NODE_POOL_NAME \
+    --zone=ZONE \
+    --cluster=CLUSTER_NAME
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NODE_POOL_NAME</var></code>: the name of your node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone of the node pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> </ul> <p>The output shows the additional networks and subnetworks attached to the node pool.</p> <h2 id="whats-next">What's next</h2> <ul> <li>Read about <a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines">accelerator-optimized machines</a>.</li> <li>Learn how to <a href="set-up-dra">Provision GPUs with DRA</a>.</li> <li>Learn how to <a href="setup-multinetwork-support-for-pods">Set up multi-network support for Pods</a>.</li> <li>Learn about <a href="allocate-network-resources-dra">Allocate network resources using GKE managed DRANET</a>
+</li> <li>Learn how to <a href="single-stack-ipv6">Create and manage single-stack IPv6 clusters</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/config-auto-net-for-accelerators" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/config-auto-net-for-accelerators</a>
+  </p>
+</div>

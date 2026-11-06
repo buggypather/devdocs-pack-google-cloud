@@ -1,0 +1,557 @@
+<h1>Serve Gemma open models using multi-host TPUs on GKE with Ray</h1>  <p>This tutorial walks you through deploying a multi-host TPU inference service using <a href="https://docs.ray.io/en/latest/serve/llm/index.html">Ray Serve LLM</a>. By leveraging Ray's native TPU support to atomically co-schedule distributed engine workers across complex accelerator topologies, you can deploy large models over a multi-host TPU slice for inference.</p> <aside class="tip"><strong>Tip:</strong><span> For production deployments on GKE, we recommend using <a href="../how-to/machine-learning/inference-quickstart">Inference Quickstart</a> is recommended to get tailored best practices and configurations for your model inference.</span></aside> <p>This tutorial is intended for Machine learning (ML) engineers, Platform admins and operators, and for Data and AI specialists who are interested in using Kubernetes container orchestration capabilities for serving AI/ML workloads on distributed, multi-host TPU slices. To learn more about common roles and example tasks referenced in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before reading this page, ensure that you're familiar with the following:</p> <ul> <li><a href="../concepts/choose-cluster-mode">Autopilot mode and Standard mode</a></li> <li><a href="../concepts/tpus">TPUs in GKE</a></li> <li><a href="../concepts/tpus#multi-host">Multi-host TPU slices</a></li> <li><a href="../how-to/allocate-network-resources-dra">GKE managed DRANET</a></li> </ul> <h2 id="background">Background</h2> <p>This section describes the key technologies used in this guide.</p> <h3 id="tpus">TPUs</h3> <p><a href="https://cloud.google.com/tpu">Tensor Processing Units</a> (TPUs) let you accelerate specific workloads running on your nodes, such as machine learning and data processing. The primary advantage of TPUs is performance at scale. This tutorial uses <a href="../concepts/tpus#trillium-benefits">TPU Trillium</a>, the sixth generation of <a href="https://docs.cloud.google.com/tpu/docs/v6e">Cloud TPU</a>. Multi-host TPU slices consist of multiple physical nodes communicating using a high-speed inter-chip interconnect (ICI), which works well for high-throughput and low-latency serving.</p> <h3 id="vllm-on-ray">vLLM on Ray</h3> <p><a href="https://docs.vllm.ai/en/latest/">vLLM</a> is a high-throughput, memory-efficient LLM serving engine. By integrating with <a href="https://docs.ray.io/en/latest/serve/index.html">Ray Serve</a>, vLLM can scale across multiple hosts and access physical hardware topologies natively. This tutorial demonstrates using Ray Serve's <code translate="no" dir="ltr">LLMConfig</code> and <code translate="no" dir="ltr">LLMServer</code> deployments to orchestrate vLLM inference across multi-host slices, letting the framework handle topology distribution and placement group spreading automatically.</p> <h2 id="objectives">Objectives</h2> <p>This tutorial provides a foundation for understanding and exploring practical LLM deployment for inference in a managed Kubernetes environment that uses multi-host TPUs.</p> <ol> <li>Prepare your environment with a GKE cluster in Autopilot or Standard.</li> <li>Build a custom container image with baked-in dependencies.</li> <li>Deploy a Ray LLM Python script to your cluster to orchestrate vLLM inference over a TPU slice.</li> <li>Use Ray LLM to serve the Gemma 4 model through <code translate="no" dir="ltr">curl</code> and an optional web chat interface.</li> </ol> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Ensure your project has sufficient quota for TPU Trillium (v6e) capacity in your selected region. For more information, see <a href="https://docs.cloud.google.com/tpu/docs/quota">Cloud TPU quotas</a>.</li> <li>Ensure your GKE cluster uses GKE Dataplane V2 and satisfies version requirements for DRANET: <strong>1.35.2-gke.1842000 or later</strong> for both Standard and Autopilot.</li> <li>Ensure that you have the following <a href="https://docs.cloud.google.com/iam/docs/roles-permissions">IAM roles</a>: <ul> <li><code translate="no" dir="ltr">roles/container.admin</code></li> <li><code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code></li> </ul>
+</li> </ul> <h2 id="prepare-your-environment">Prepare your environment</h2> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell">Cloud Shell</a> to manage resources hosted on Google Cloud. Cloud Shell comes preinstalled with the software you need for this tutorial, including <code translate="no" dir="ltr">kubectl</code> and the <code translate="no" dir="ltr">gcloud</code> CLI.</p> <p>To set up your environment with Cloud Shell, follow these steps:</p> <ol> <li><p>In the Google Cloud console, launch a Cloud Shell session by clicking <strong>Activate Cloud Shell</strong> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/cloud-shell.png" alt="Activate Shell Button">. This launches a session in the bottom pane of the Google Cloud console.</p></li> <li>
+<p>Create and activate a Python virtual environment:</p> 
+<pre>python3 -m venv ray-env
+source ray-env/bin/activate
+</pre>
+</li> <li>
+<p>Install the Ray CLI:</p> 
+<pre>pip install "ray"
+</pre>
+</li> <li>
+<p>Set the default environment variables:</p> 
+<pre>export PROJECT_ID=$(gcloud config get project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export CLUSTER_NAME=ray-llm-cluster
+export REGION=REGION
+export ZONE=ZONE
+export NAMESPACE=default
+export KSA_NAME=ray-ksa
+export NETWORK_NAME=${CLUSTER_NAME}-net
+export GS_BUCKET=BUCKET_NAME
+export REPO_NAME=ray-repo
+export CUSTOM_IMAGE_URI=REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/vllm-tpu-ray:vllm-tpu
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region where your TPU Trillium capacity is available.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where your TPU Trillium capacity is available. For more information, see <a href="../concepts/plan-tpus#availability">TPU availability in GKE</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REPOSITORY</var></code>: the name of your Artifact Registry repository.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_NAME</var></code>: the name of your storage bucket.</li> </ul>
+</li> </ol> <h2 id="create-resources">Create and configure Google Cloud resources</h2> <p>Follow these instructions to create the required resources.</p> <h3 id="create-cluster">Create a GKE cluster and node pool</h3> <p>You can serve Gemma on TPUs in a GKE Autopilot or Standard cluster. GKE managed DRANET dynamically requests and manages high-performance networking resources for your distributed Pods, allowing GKE to automatically provision secondary high-speed networks for accelerator inter-communication without requiring manual VPC setup.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ol> <li>
+<p>In Cloud Shell, create the Autopilot cluster:</p> 
+<pre data-language="">gcloud container clusters create-auto ${CLUSTER_NAME} \
+    --project=${PROJECT_ID} \
+    --enable-ray-operator \
+    --location=${REGION}
+</pre>
+</li> <li>
+<p>Configure <code translate="no" dir="ltr">kubectl</code> to communicate with your cluster:</p> 
+<pre data-language="">gcloud container clusters get-credentials ${CLUSTER_NAME} \
+    --location=${REGION}
+</pre>
+</li> <li>
+<p>To use GKE managed DRANET in Autopilot mode, deploy the custom ComputeClass resource provided in the repository to opt-in to dynamic networking:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: dranet-compute-class
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  nodePoolConfig:
+    dra:
+      networking:
+        enabled: true
+  priorities:
+  - machineType: ct6e-standard-4t
+    acceleratorNetworkProfile: auto</pre> </div> </li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre data-language="">kubectl apply -f ai-ml/gke-ray/rayserve/llm/tpu/networking/dranet-compute-class.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>In Cloud Shell, create a Standard cluster that enables the Ray operator and uses GKE Dataplane V2:</p> 
+<pre data-language="">gcloud container clusters create ${CLUSTER_NAME} \
+    --project=${PROJECT_ID} \
+    --addons=RayOperator,GcsFuseCsiDriver \
+    --machine-type=n2-standard-8 \
+    --enable-dataplane-v2 \
+    --workload-pool=${PROJECT_ID}.svc.id.goog \
+    --location=${ZONE}
+</pre>
+</li> <li>
+<p>Create a multi-host TPU slice node pool with the DRANET driver enabled:</p> 
+<pre data-language="">gcloud container node-pools create v6e-16 \
+    --location=${ZONE} \
+    --cluster=${CLUSTER_NAME} \
+    --machine-type=ct6e-standard-4t \
+    --tpu-topology=4x4 \
+    --num-nodes=4 \
+    --enable-gvnic \
+    --scopes=https://www.googleapis.com/auth/cloud-platform \
+    --accelerator-network-profile=auto \
+    --node-labels=cloud.google.com/gke-networking-dra-driver=true
+</pre>
+</li> </ol></section> </div> <h3 id="configure_storage_and_authentication">Configure storage and authentication</h3> <p>Create a Cloud Storage bucket and initialize a Rapid Cache instance to accelerate model loading, then configure authentication for Hugging Face:</p> <ol> <li>
+<p>In your TPU zone, create a storage bucket and initialize the Rapid Cache instance:</p> 
+<pre>gcloud storage buckets create gs://${GS_BUCKET} \
+    --project=${PROJECT_ID} \
+    --default-storage-class=STANDARD \
+    --location=${REGION} \
+    --uniform-bucket-level-access
+
+gcloud storage buckets anywhere-caches create gs://${GS_BUCKET} ${ZONE} \
+    --ttl=1d \
+    --admission-policy=ADMIT_ON_FIRST_MISS
+</pre>
+</li> <li>
+<p>To allow your GKE Pods to mount the weight bucket, create a Kubernetes ServiceAccount:</p> 
+<pre>kubectl create serviceaccount ${KSA_NAME} --namespace ${NAMESPACE}
+</pre>
+</li> <li>
+<p>Grant the Kubernetes ServiceAccount the Storage Object Admin role (<code translate="no" dir="ltr">roles/storage.objectAdmin</code>) on the bucket:</p> 
+<pre>gcloud storage buckets add-iam-policy-binding gs://${GS_BUCKET} \
+    --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/${NAMESPACE}/sa/${KSA_NAME}" \
+    --role="roles/storage.objectAdmin" \
+    --condition=None
+</pre>
+</li> <li><p>To download the Gemma 4 model weights, you must acknowledge Google's license agreement on Hugging Face. Go to the <a href="https://huggingface.co/google/gemma-4-31B-it">Gemma 4 model page on Hugging Face</a>.</p></li> <li><p>Sign in accept the license terms by clicking <strong>Agree and access repository</strong>.</p></li> <li><p>Navigate to your Hugging Face account settings and generate an <a href="https://huggingface.co/settings/tokens">Access Token</a> with the <code translate="no" dir="ltr">Read</code> role.</p></li> <li>
+<p>Export your Hugging Face token and create a Kubernetes secret so Ray can pull the model weights:</p> 
+<pre>export HF_TOKEN=YOUR_HUGGING_FACE_TOKEN
+
+kubectl create secret generic hf-secret \
+  --from-literal=hf_api_token=${HF_TOKEN}
+</pre>
+</li> </ol> <h2 id="build-image">Build the custom container image</h2> <p>To ensure the multi-host environment has all required dependencies, build a custom image based on vLLM's TPU image and copy your serving script into it.</p> <ol> <li>
+<p>Create an Artifact Registry repository:</p> 
+<pre>gcloud artifacts repositories create ${REPO_NAME} \
+    --repository-format=docker \
+    --location=${REGION}
+</pre>
+</li> <li>
+<p>Authenticate Docker to your project:</p> 
+<pre>gcloud auth configure-docker ${REGION}-docker.pkg.dev
+</pre>
+</li> <li>
+<p>Inspect the <code translate="no" dir="ltr">Dockerfile</code> in the sample repository:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>FROM vllm/vllm-tpu:v0.21.0
+
+ENV VLLM_TARGET_DEVICE=tpu
+ENV VLLM_XLA_CACHE_PATH=/data
+
+USER root
+
+RUN pip install --no-cache-dir -U \
+    "https://s3-us-west-2.amazonaws.com/ray-wheels/master/75b85027a859439fae5634e49aa6443f6fbecfeb/ray-3.0.0.dev0-cp312-cp312-manylinux2014_x86_64.whl" &amp;&amp; \
+    pip install --no-cache-dir --no-deps "ray[llm]"
+
+COPY serve_tpu_multihost.py /home/ray/serve_tpu_multihost.py</pre> </div> </li> <li>
+<p>Build and push the image to Artifact Registry:</p> 
+<pre>docker build -t ${CUSTOM_IMAGE_URI} .
+docker push ${CUSTOM_IMAGE_URI}
+</pre>
+</li> </ol> <h2 id="pre-stage-weights">Pre-stage model weights to Cloud Storage</h2> <p>Before deploying the RayCluster, optimize model loading performance and help ensure high availability across your distributed TPU slice by pre-staging the model weights directly in your Cloud Storage bucket by using a standalone Kubernetes Job. This decoupled approach allows for coordinated parallel streaming, accelerating cluster startup times.</p> <ol> <li>
+<p>The manifest for the downloader job is available in the repository. Review the manifest configuration:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-downloader
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/memory-limit: "0"
+    spec:
+      serviceAccountName: ${KSA_NAME}
+      restartPolicy: OnFailure
+      containers:
+      - name: downloader
+        image: python:3.10-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          pip install -U huggingface_hub filelock
+
+          python -c '
+          import filelock
+
+          class DummyLock:
+              def __init__(self, *args, **kwargs): pass
+              def __enter__(self): return self
+              def __exit__(self, *args): pass
+              def acquire(self, *args, **kwargs): pass
+              def release(self, *args, **kwargs): pass
+
+          filelock.FileLock = DummyLock
+
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id="google/gemma-4-31B-it", 
+              local_dir="/data/google/gemma-4-31B-it"
+          )
+          '
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-secret
+              key: hf_api_token
+        volumeMounts:
+        - name: gcs-fuse-csi-ephemeral
+          mountPath: /data
+      volumes:
+      - name: gcs-fuse-csi-ephemeral
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: ${GS_BUCKET}
+            mountOptions: "implicit-dirs"</pre> </div> </li> <li>
+<p>Create the downloader job by applying the file in the repository:</p> 
+<pre>envsubst &lt; ai-ml/gke-ray/rayserve/llm/tpu/components/model-downloader-job.yaml | kubectl apply -f -
+</pre>
+</li> <li>
+<p>Monitor the job until the download stream reports success:</p> 
+<pre>kubectl logs -f job/model-downloader
+</pre>
+</li> </ol> <h2 id="create-script">Create the inference script</h2> <p>The following Python script defines a Ray Serve application powered by Ray Serve's high-level <code translate="no" dir="ltr">LLMConfig</code> wrapper.</p> <ol> <li>
+<p>Inspect the <code translate="no" dir="ltr">serve_tpu_multihost.py</code> script in the sample repository:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>import os
+import ray
+from ray import serve
+from ray.serve.llm import LLMConfig, ModelLoadingConfig, LLMServingArgs, build_openai_app
+
+# Read configurations from environment variables
+MODEL_ID = os.environ.get("MODEL_ID", "google/gemma-4-31B-it")
+MODEL_SOURCE = os.environ.get("MODEL_SOURCE", "/data/google/gemma-4-31B-it")
+
+# TPU hardware options (i.e. TPU-V6E, TPU-V7X etc.)
+ACCELERATOR_TYPE = os.environ.get("ACCELERATOR_TYPE", "TPU-V6E")
+TPU_TOPOLOGY = os.environ.get("TPU_TOPOLOGY", "4x4")
+
+# vLLM engine parameters
+TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", "16"))
+MAX_MODEL_LEN = int(os.environ.get("MAX_MODEL_LEN", "8192"))
+MAX_NUM_BATCHED_TOKENS = int(os.environ.get("MAX_NUM_BATCHED_TOKENS", "4096"))
+
+# Define the multi-host TPU LLM config
+llm_config = LLMConfig(
+    model_loading_config=dict(
+        model_id=MODEL_ID,
+        model_source=MODEL_SOURCE
+    ),
+    accelerator_type=ACCELERATOR_TYPE,
+    accelerator_config={"kind": "tpu", "topology": TPU_TOPOLOGY},
+    engine_kwargs={
+        "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
+        "max_model_len": MAX_MODEL_LEN,
+        "max_num_batched_tokens": MAX_NUM_BATCHED_TOKENS,
+        "distributed_executor_backend": "ray",
+    }
+)
+
+deployment = build_openai_app(
+    LLMServingArgs(
+        llm_configs=[llm_config]
+    )
+)</pre> </div> </li> </ol> <h3 id="understand-ray-llm-api">Understand the Ray LLM API</h3> <p>The script leverages Ray Serve's native <code translate="no" dir="ltr">ray.serve.llm</code> library to abstract away the complexity of multi-host TPU orchestration. By wrapping the vLLM engine, Ray Serve LLM provides a high-performance, scalable framework specifically designed for highly distributed inference workloads in production.</p> <p>Using the Ray LLM API provides several key benefits:</p> <ul> <li>
+<strong>Multi-node deployments:</strong> Ray Serve LLM enables users to serve massive models that span multiple distributed hosts (like a TPU multi-host slice) with automatic placement, coordination, and topology distribution natively.</li> <li>
+<strong>vLLM compatibility:</strong> Ray Serve LLM provides an OpenAI-compatible API that aligns with vLLM's server. You can also access vLLM's advanced feature set (such as structured output, multimodal capabilities, and reasoning models) while scaling the workload across your Kubernetes cluster.</li> <li>
+<strong>Production-ready features:</strong> Ray Serve LLM includes enterprise-grade capabilities like built-in autoscaling, custom request routing for maximized cache hits, and built-in integrations for metrics and observability.</li> </ul> <p>In the provided inference script, the deployment is defined by two main components:</p> <ul> <li>
+<strong><code translate="no" dir="ltr">LLMConfig</code>:</strong> this object defines the serving configuration. It specifies the model source, the engine parameters for vLLM, and the <code translate="no" dir="ltr">accelerator_config</code>. By setting <code translate="no" dir="ltr">{"kind": "tpu", "topology": "4x4"}</code>, Ray Serve LLM automatically provisions a distributed placement group that maps exactly to your physical 16-chip TPU v6e slice.</li> <li>
+<strong><code translate="no" dir="ltr">build_openai_app</code>:</strong> this API automatically wraps the configured vLLM engine in an OpenAI-compatible FastAPI server, giving you an industry-standard REST API (like <code translate="no" dir="ltr">/v1/chat/completions</code>) out of the box without writing any custom server code.</li> </ul> <h2 id="deploy-service">Deploy the RayService</h2> <p>Deploy the Dynamic Resource Allocation (DRA) networking configuration and the <code translate="no" dir="ltr">RayService</code> serving manifest:</p> <ol> <li>
+<p>Request all available NetDevice interfaces on each node by deploying the <code translate="no" dir="ltr">ResourceClaimTemplate</code> provided in the repository:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: all-netdev
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-netdev
+        exactly:
+          deviceClassName: netdev.google.com
+          allocationMode: All</pre> </div> </li> <li>
+<p>Apply the template manifest to your cluster:</p> 
+<pre>kubectl apply -f ai-ml/gke-ray/rayserve/llm/tpu/networking/all-netdev-template.yaml
+</pre>
+</li> <li>
+<p>The <code translate="no" dir="ltr">RayService</code> serving manifest is available in the repository. Review the manifest configuration:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: vllm-tpu-multihost
+  labels:
+    ai.gke.io/model: "gemma-4-31B-it"
+    ai.gke.io/inference-server: "vllm"
+spec:
+  serveConfigV2: |
+    http_options:
+      host: 0.0.0.0
+      port: 8000
+    applications:
+      - name: llm
+        import_path: ai-ml.gke-ray.rayserve.llm.tpu.serve_tpu_multihost:deployment
+        runtime_env:
+          working_dir: "https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/archive/main.zip"
+          env_vars:
+            # Use local disk to prevent multi-host GCSFuse race conditions
+            VLLM_XLA_CACHE_PATH: "/tmp/vllm_xla_cache"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+          - name: ray-head
+            image: $CUSTOM_IMAGE_URI
+            imagePullPolicy: Always
+            ports:
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+            resources:
+              limits:
+                cpu: "2"
+                memory: 16Gi
+              requests:
+                cpu: "2"
+                memory: 16Gi
+            volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: gcs-fuse-csi-ephemeral
+              mountPath: /data
+          volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GS_BUCKET
+                mountOptions: "implicit-dirs"
+    workerGroupSpecs:
+    - groupName: tpu-group
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      numOfHosts: 4
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+            gke-gcsfuse/cpu-limit: "0"
+            gke-gcsfuse/memory-limit: "0"
+            gke-gcsfuse/ephemeral-storage-limit: "0"
+        spec:
+          serviceAccountName: $KSA_NAME
+          containers:
+            - name: ray-worker
+              image: $CUSTOM_IMAGE_URI
+              imagePullPolicy: Always
+              resources:
+                limits:
+                  cpu: "20"
+                  google.com/tpu: "4"
+                  memory: 200Gi
+                requests:
+                  cpu: "20"
+                  google.com/tpu: "4"
+                  memory: 200Gi
+                claims:
+                - name: netdev
+              env:
+                - name: HF_HOME
+                  value: "/data/huggingface"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_api_token
+                - name: JAX_PLATFORMS
+                  value: "tpu,cpu"
+                - name: NODE_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.hostIP
+                - name: VBAR_CONTROL_SERVICE_URL
+                  value: $(NODE_IP):8353
+                - name: TPU_MULTIHOST_BACKEND
+                  value: "ray"
+                - name: TPU_BACKEND_TYPE
+                  value: "jax"
+                - name: ENABLE_PJRT_COMPATIBILITY
+                  value: "true"
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: gcs-fuse-csi-ephemeral
+                mountPath: /data
+          volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: gke-gcsfuse-cache
+            emptyDir:
+              medium: Memory
+          - name: gcs-fuse-csi-ephemeral
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: $GS_BUCKET
+                mountOptions: "implicit-dirs"
+          resourceClaims:
+            - name: netdev
+              resourceClaimTemplateName: all-netdev
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 4x4</pre> </div> </li> <li>
+<p>Deploy the service by using the manifest:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ol> <li>
+<p>To deploy the service in an Autopilot cluster, you must first download the manifest and edit it locally to add the opt-in <code translate="no" dir="ltr">ComputeClass</code> <code translate="no" dir="ltr">nodeSelector</code>, which is required for DRANET networking on Autopilot:</p> 
+<pre data-language="">curl -O https://raw.githubusercontent.com/GoogleCloudPlatform/kubernetes-engine-samples/main/ai-ml/gke-ray/rayserve/llm/tpu/ray-service.tpu-v6e-multihost.yaml
+</pre>
+</li> <li>
+<p>Add the label under the <code translate="no" dir="ltr">nodeSelector</code> field so that it looks like this:</p> 
+<pre data-language="">nodeSelector:
+  cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+  cloud.google.com/gke-tpu-topology: 4x4
+  cloud.google.com/compute-class: dranet-compute-class
+</pre>
+</li> <li>
+<p>Then, deploy the service by using the modified local manifest:</p> 
+<pre data-language="">envsubst &lt; ray-service.tpu-v6e-multihost.yaml | kubectl apply -f -
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>To deploy the service in a Standard cluster, deploy the manifest directly from the repository:</p> 
+<pre data-language="">envsubst &lt; ai-ml/gke-ray/rayserve/llm/tpu/ray-service.tpu-v6e-multihost.yaml | kubectl apply -f -
+</pre></section> </div>
+</li> </ol> <h3 id="verification">Verification</h3> <aside class="note"><strong>Note:</strong><span> With multi-host TPU topologies, only the TPU coordinator node runs the serving replica. It is expected behavior for the <code translate="no" dir="ltr">:8000/healthz</code> probes on the other worker Pods in the slice to fail. Avoid using individual Pod readiness to determine Serve deployment health. Instead, wait for the overall <code translate="no" dir="ltr">RayService</code> status to become <code translate="no" dir="ltr">ready</code> before sending prompt requests.</span></aside> <ol> <li>
+<p>Wait for the RayService to be available:</p> 
+<pre>kubectl wait --for=condition=Ready --timeout=1800s rayservice/vllm-tpu-multihost
+</pre>
+</li> <li>
+<p>To confirm the model loaded successfully, view the logs from the Ray head Pod:</p> 
+<pre>kubectl logs -f -l ray.io/node-type=head -c ray-head
+</pre>
+</li> </ol> <h2 id="serve-model">Serve the model</h2> <p>In this section, you interact with the model. Make sure the model is fully downloaded before proceeding.</p> <h3 id="set_up_port_forwarding">Set up port forwarding</h3> <p>Set up port forwarding to the model by running the following command:</p> 
+<pre>kubectl port-forward svc/vllm-tpu-multihost-head-svc 8000:8000 2&gt;&amp;1 &gt;/dev/null &amp;
+</pre> <h3 id="interact_with_the_model_using_curl">Interact with the model using curl</h3> <p>This section shows how you can perform a basic smoke test to verify your deployed Gemma 4 model.</p> <p>In a new terminal session, use <code translate="no" dir="ltr">curl</code> to chat with your model:</p> 
+<pre>curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "google/gemma-4-31B-it",
+        "messages": [
+            {
+              "role": "user",
+              "content": "Why is GKE managed DRANET preferred for multi-host TPU networking?"
+            }
+        ],
+        "max_tokens": 256
+    }'
+</pre> <p>The output looks similar to the following:</p> 
+<pre>{
+  "id": "chatcmpl-392692d3-5325-4832-a3a3-0b084c1045b0",
+  "object": "chat.completion",
+  "created": 1779883255,
+  "model": "google/gemma-4-31B-it",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "To understand why GKE-managed **DRANET** (Distributed RANET) is preferred for multi-host TPU networking, it is first necessary to understand the fundamental challenge of TPU pods: **the need for massive, low-latency, all-to-all communication.**\n\nWhen you scale a model across multiple TPU hosts (multi-host), the hosts must synchronize gradients and weights constantly. Standard TCP/IP networking introduces too much overhead (latency and CPU jitter) for these operations.\n\nHere is the detailed breakdown of why GKE-managed DRANET is the preferred architecture:\n\n### 1. Bypassing the Kernel (Zero-Copy Networking)\nStandard networking requires the operating system kernel to handle packets, moving data from the network card to kernel space and then to user space.\n*   **The DRANET Advantage:** DRANET implements a specialized networking stack that allows for **Kernel Bypass**. It enables the TPU hardware/drivers to write data directly into the memory of the destination host. This reduces latency and eliminates the CPU overhead associated with processing network interrupts.\n\n### 2. High-Bandwidth, Low-Latency Interconnect\nMulti-host TPU training relies on a specialized topology (like a 2D or 3D"
+      },
+      "finish_reason": "length"
+    }
+  ]
+}
+</pre>
+<aside class="success"><strong>Success:</strong><span> You've successfully served Gemma by using TPUs on GKE with Ray LLM. You can now interact with the model.</span></aside> <h2 id="gradio-chat">(Optional) Interact with the model through a Gradio chat interface</h2> <p>In this section, you build a web chat application that lets you interact with your instruction tuned model.</p> <p>Gradio is a Python library that has a <code translate="no" dir="ltr">ChatInterface</code> wrapper that creates user interfaces for chatbots.</p> <h3 id="deploy_the_chat_interface">Deploy the chat interface</h3> <p>The manifest for the chat interface is available in the repository. Review the manifest configuration:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gradio
+  labels:
+    app: gradio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gradio
+  template:
+    metadata:
+      labels:
+        app: gradio
+    spec:
+      containers:
+      - name: gradio
+        image: us-docker.pkg.dev/google-samples/containers/gke/gradio-app:v1.0.7
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        env:
+        - name: CONTEXT_PATH
+          value: "/v1/chat/completions"
+        - name: HOST
+          value: "http://vllm-tpu-multihost-serve-svc:8000"
+        - name: LLM_ENGINE
+          value: "openai-chat"
+        - name: MODEL_ID
+          value: "google/gemma-4-31B-it"
+        - name: DISABLE_SYSTEM_MESSAGE
+          value: "true"
+        ports:
+        - containerPort: 7860
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gradio
+spec:
+  selector:
+    app: gradio
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 7860
+  type: ClusterIP</pre> </div> <p>Apply the manifest:</p> 
+<pre>kubectl apply -f ai-ml/gke-ray/rayserve/llm/tpu/components/gradio.yaml
+</pre> <p>Wait for the deployment to be available:</p> 
+<pre>kubectl wait --for=condition=Available --timeout=900s deployment/gradio
+</pre> <h3 id="use_the_chat_interface">Use the chat interface</h3> <p>In Cloud Shell, run the following command:</p> 
+<pre>kubectl port-forward service/gradio 8080:8080
+</pre> <p>This creates a port forward from Cloud Shell to the Gradio service.</p> <p>Click the <strong>Web Preview</strong> icon <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/web-preview.png" alt="Web Preview button"> which can be found on the top right of the Cloud Shell taskbar. Click <strong>Preview on Port 8080</strong>. A new tab opens in your browser.</p> <p>Interact with Gemma using the Gradio chat interface. Add a prompt and click <strong>Submit</strong>.</p> <h2 id="observe-performance">Observe model performance</h2> <p>To view the dashboards for observability metrics of a model running on KubeRay, you can use the dedicated Ray on GKE dashboards.</p> <p>For detailed instructions on configuring your cluster and accessing the observability dashboards, see <a href="../add-on/ray-on-gke/how-to/collect-view-logs-metrics">Collect and view logs and metrics for RayClusters on Google Kubernetes Engine (GKE)</a>.</p> <h3 id="ray-dashboard">Access the Ray Dashboard</h3> <p>To inspect the status of your Ray actors, view detailed application logs, and monitor node-level utilization natively in Ray, you can access the Ray Dashboard.</p> <ol> <li>
+<p>Port-forward the Ray head node service to your local machine:</p> 
+<pre>kubectl port-forward svc/vllm-tpu-multihost-head-svc 8265:8265
+</pre>
+</li> <li><p>Open your browser and navigate to <code translate="no" dir="ltr">http://localhost:8265</code>. If you are using Cloud Shell, click the <strong>Web Preview</strong> button and select <strong>Preview on port 8265</strong>.</p></li> <li><p>To view your vLLM deployments, model replica health, and query latencies, click the <strong>Serve</strong> tab.</p></li> </ol> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, delete the resources:</p> <ol> <li>
+<p>Delete the RayService:</p> 
+<pre>kubectl delete rayservice vllm-tpu-multihost
+</pre>
+</li> <li>
+<p>Delete the GKE cluster:</p> 
+<pre>gcloud container clusters delete ${CLUSTER_NAME} --zone=${ZONE}
+</pre>
+</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>Learn about <a href="https://docs.ray.io/en/latest/cluster/kubernetes/index.html">Ray on Kubernetes</a>.</li> <li>Learn how to <a href="serve-vllm-tpu">serve vLLM on GKE with TPUs</a>.</li> <li>Learn more <a href="../concepts/tpus">about TPUs in GKE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-multi-host-tpu-llm" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/serve-multi-host-tpu-llm</a>
+  </p>
+</div>

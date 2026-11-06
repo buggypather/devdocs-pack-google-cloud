@@ -1,0 +1,228 @@
+<h1>Process more messages with concurrency control</h1> <aside class="key-point"><strong>Key Point:</strong><span> Concurrency control lets you configure the number of threads or streams that the Pub/Sub client library uses to pull messages. With more threads, you can process more messages concurrently.</span></aside> <p>Concurrency control is an available feature in the Pub/Sub <a href="pull#high_client_library">high-level client library</a>. You can also implement your own concurrency control when you're using a <a href="pull#low_client_library">low-level library</a>.</p> <p>Support for concurrency control depends on the programming language of the client library. For language implementations that support parallel threads, such as C++, Go, and Java, the client libraries make a default choice for the number of threads.</p> <p>This choice might not be optimal for your application. For example, if your subscriber application is not keeping up with the incoming message volume and is not CPU-bound, you must increase the thread count. For CPU-intensive message processing operations, reducing the number of threads might be appropriate.</p> <p>This page explains the concept of concurrency control and how to set up the feature for your subscriber clients. To configure your publisher clients for concurrency control, see <a href="concurrency-control-messages">Concurrency control</a>.</p> <h2 id="concurrency_control_configurations">Concurrency control configurations</h2> <p>The default values for the concurrency control variables and the names of the variables might differ across client libraries. For more information, see the <a href="https://docs.cloud.google.com/pubsub/docs/reference/libraries#additional_resources" track-type="docs" track-name="internalLink" track-metadata-position="08" track-metadata-end-goal="libraryAPI">API Reference documentation</a>. For example, in the Java client library, the methods to configure concurrency control are <code translate="no" dir="ltr">setParallelPullCount()</code>, <code translate="no" dir="ltr">setExecutorProvider()</code>, <code translate="no" dir="ltr">setSystemExecutorProvider()</code>, and <code translate="no" dir="ltr">setChannelProvider()</code>.</p> <ul> <li><p><strong>setParallelPullCount()</strong> lets you decide how many streams to open. You can open more streams if your subscriber client can handle more data than is sent on a single stream, which is 10 MBps.</p></li> <li><p><strong>setExecutorProvider()</strong> lets you customize the executor provider used for processing messages. For example, you can change the executor provider to one that returns a single, shared executor with a limited number of threads across multiple subscriber clients. This configuration helps to limit the number of threads created. The total number of threads used for concurrency control depends on the executor provider passed in the client library and the parallel pull count.</p></li> <li><p><strong>setSystemExecutorProvider()</strong> lets you customize the executor provider used for <a href="lease-management">lease management</a>. Typically, you don't configure this value unless you want to use the same executor provider in <code translate="no" dir="ltr">setExecutorProvider</code> and <code translate="no" dir="ltr">setSystemExecutorProvider</code>. For example, you can use the same executor provider if you have a number of low-throughput subscriptions. Using the same value limits the number of threads in the client.</p></li> <li><p><strong>setChannelProvider()</strong> lets you customize the channel provider used for opening connections to Pub/Sub. Typically, you don't configure this value unless you want to use the same channel across multiple subscriber clients. Reusing a channel across too many clients might result in <code translate="no" dir="ltr">GOAWAY</code> or <code translate="no" dir="ltr">ENHANCE_YOUR_CALM</code> errors. If you see these errors in your application's logs or <a href="https://docs.cloud.google.com/logging/docs/view/logs-explorer-interface">Cloud Logs</a>, create more channels.</p></li> </ul> <h2 id="code_samples_for_concurrency_control">Code samples for concurrency control</h2> <div> <section><p class="_code-tab"><strong>C++</strong></p> <p>Before trying this sample, follow the C++ setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/cpp/google-cloud-pubsub/latest/" class="external">Pub/Sub C++ API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="cpp">namespace pubsub = ::google::cloud::pubsub;
+using ::google::cloud::future;
+using ::google::cloud::GrpcBackgroundThreadPoolSizeOption;
+using ::google::cloud::Options;
+using ::google::cloud::StatusOr;
+auto sample = [](std::string project_id, std::string subscription_id) {
+  // Create a subscriber with 16 threads handling I/O work, by default the
+  // library creates `std::thread::hardware_concurrency()` threads.
+  auto subscriber = pubsub::Subscriber(pubsub::MakeSubscriberConnection(
+      pubsub::Subscription(std::move(project_id), std::move(subscription_id)),
+      Options{}
+          .set&lt;pubsub::MaxConcurrencyOption&gt;(8)
+          .set&lt;GrpcBackgroundThreadPoolSizeOption&gt;(16)));
+
+  // Create a subscription where up to 8 messages are handled concurrently. By
+  // default the library uses `std::thread::hardware_concurrency()` as the
+  // maximum number of concurrent callbacks.
+  auto session = subscriber.Subscribe(
+      [](pubsub::Message const&amp; m, pubsub::AckHandler h) {
+        // This handler executes in the I/O threads, applications could use,
+        // std::async(), a thread-pool, or any other mechanism to transfer the
+        // execution to other threads.
+        std::cout &lt;&lt; "Received message " &lt;&lt; m &lt;&lt; "\n";
+        std::move(h).ack();
+        PleaseIgnoreThisSimplifiesTestingTheSamples();
+      });
+  return std::make_pair(subscriber, std::move(session));
+};</pre> </div> </section> <section><p class="_code-tab"><strong>Go</strong></p>
+
+<p>The following sample uses the major version of the Go Pub/Sub client library (v2). If you are still using the v1 library, see <a href="https://github.com/googleapis/google-cloud-go/blob/main/pubsub/MIGRATING.md">the migration guide to v2</a>. To see a list of v1 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Go setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://pkg.go.dev/cloud.google.com/go/pubsub/v2" class="external">Pub/Sub Go API reference documentation</a>.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"context"
+	"fmt"
+	"io"
+	"sync/atomic"
+	"time"
+
+	"cloud.google.com/go/pubsub/v2"
+)
+
+func pullMsgsConcurrencyControl(w io.Writer, projectID, subID string) error {
+	// projectID := "my-project-id"
+	// subID := "my-sub"
+	ctx := context.Background()
+	client, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("pubsub.NewClient: %w", err)
+	}
+	defer client.Close()
+
+	// client.Subscriber can be passed a subscription ID (e.g. "my-sub") or
+	// a fully qualified name (e.g. "projects/my-project/subscriptions/my-sub").
+	// If a subscription ID is provided, the project ID from the client is used.
+	sub := client.Subscriber(subID)
+	// NumGoroutines determines the number of streams sub.Receive will spawn to pull
+	// messages. It is recommended to set this to 1, unless your throughput
+	// is greater than 10 MB/s, as even having 1 stream can still result in
+	// messages being handled asynchronously.
+	sub.ReceiveSettings.NumGoroutines = 1
+	// MaxOutstandingMessages limits the number of concurrent handlers of messages.
+	// In this case, up to 8 unacked messages can be handled concurrently.
+	sub.ReceiveSettings.MaxOutstandingMessages = 8
+
+	// Receive messages for 10 seconds, which simplifies testing.
+	// Comment this out in production, since `Receive` should
+	// be used as a long running operation.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var received int32
+
+	// Receive blocks until the context is cancelled or an error occurs.
+	err = sub.Receive(ctx, func(_ context.Context, msg *pubsub.Message) {
+		atomic.AddInt32(&amp;received, 1)
+		msg.Ack()
+	})
+	if err != nil {
+		return fmt.Errorf("sub.Receive returned error: %w", err)
+	}
+	fmt.Fprintf(w, "Received %d messages\n", received)
+
+	return nil
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Java</strong></p>
+
+<p>Before trying this sample, follow the Java setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://cloud.google.com/java/docs/reference/google-cloud-pubsub/latest/overview" class="external">Pub/Sub Java API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.gax.core.ExecutorProvider;
+import com.google.api.gax.core.InstantiatingExecutorProvider;
+import com.google.cloud.pubsub.v1.AckReplyConsumer;
+import com.google.cloud.pubsub.v1.MessageReceiver;
+import com.google.cloud.pubsub.v1.Subscriber;
+import com.google.pubsub.v1.ProjectSubscriptionName;
+import com.google.pubsub.v1.PubsubMessage;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+public class SubscribeWithConcurrencyControlExample {
+  public static void main(String... args) throws Exception {
+    // TODO(developer): Replace these variables before running the sample.
+    String projectId = "your-project-id";
+    String subscriptionId = "your-subscription-id";
+
+    subscribeWithConcurrencyControlExample(projectId, subscriptionId);
+  }
+
+  public static void subscribeWithConcurrencyControlExample(
+      String projectId, String subscriptionId) {
+    ProjectSubscriptionName subscriptionName =
+        ProjectSubscriptionName.of(projectId, subscriptionId);
+
+    // Instantiate an asynchronous message receiver.
+    MessageReceiver receiver =
+        (PubsubMessage message, AckReplyConsumer consumer) -&gt; {
+          // Handle incoming message, then ack the received message.
+          System.out.println("Id: " + message.getMessageId());
+          System.out.println("Data: " + message.getData().toStringUtf8());
+          consumer.ack();
+        };
+
+    Subscriber subscriber = null;
+    try {
+      // Provides an executor service for processing messages. The default `executorProvider` used
+      // by the subscriber has a default thread count of 5.
+      ExecutorProvider executorProvider =
+          InstantiatingExecutorProvider.newBuilder().setExecutorThreadCount(4).build();
+
+      // `setParallelPullCount` determines how many StreamingPull streams the subscriber will open
+      // to receive message. It defaults to 1. `setExecutorProvider` configures an executor for the
+      // subscriber to process messages. Here, the subscriber is configured to open 2 streams for
+      // receiving messages, each stream creates a new executor with 4 threads to help process the
+      // message callbacks. In total 2x4=8 threads are used for message processing.
+      subscriber =
+          Subscriber.newBuilder(subscriptionName, receiver)
+              .setParallelPullCount(2)
+              .setExecutorProvider(executorProvider)
+              .build();
+
+      // Start the subscriber.
+      subscriber.startAsync().awaitRunning();
+      System.out.printf("Listening for messages on %s:\n", subscriptionName.toString());
+      // Allow the subscriber to run for 30s unless an unrecoverable error occurs.
+      subscriber.awaitTerminated(30, TimeUnit.SECONDS);
+    } catch (TimeoutException timeoutException) {
+      // Shut down the subscriber after 30s. Stop receiving messages.
+      subscriber.stopAsync();
+    }
+  }
+}</pre> </div> </section> <section><p class="_code-tab"><strong>Ruby</strong></p>
+
+<p>The following sample uses Ruby Pub/Sub client library v3. If you are still using the v2 library, see <a href="https://github.com/googleapis/google-cloud-ruby/blob/main/google-cloud-pubsub/MIGRATION_GUIDE.md"> the migration guide to v3</a>. To see a list of Ruby v2 code samples, see <a href="samples"> the deprecated code samples</a>.</p> <p>Before trying this sample, follow the Ruby setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://googleapis.dev/ruby/google-cloud-pubsub/latest/Google/Cloud/PubSub.html" class="external">Pub/Sub Ruby API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="ruby"># subscription_id = "your-subscription-id"
+
+pubsub = Google::Cloud::PubSub.new
+subscriber = pubsub.subscriber subscription_id
+
+# Use 2 threads for streaming, 4 threads for executing callbacks and 2 threads
+# for sending acknowledgements and/or delays
+listener = subscriber.listen streams: 2, threads: {
+  callback: 4,
+  push:     2
+} do |received_message|
+  puts "Received message: #{received_message.data}"
+  received_message.acknowledge!
+end
+
+listener.start
+# Let the main thread sleep for 60 seconds so the thread for listening
+# messages does not quit
+sleep 60
+listener.stop.wait!</pre> </div> </section> <section><p class="_code-tab"><strong>Rust</strong></p>
+
+<p>Before trying this sample, follow the Rust setup instructions in <a href="create-topic-client-libraries">Quickstart: Using Client Libraries</a>. For more information, see the <a href="https://docs.rs/google-cloud-pubsub" class="external">Pub/Sub Rust API reference documentation</a>. </p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">use google_cloud_pubsub::client::Subscriber;
+use google_cloud_pubsub::subscriber::MessageStream;
+use std::time::Duration;
+
+pub async fn sample(project_id: &amp;str, subscription_id: &amp;str) -&gt; anyhow::Result&lt;()&gt; {
+    // Assume an available concurrency of 2 for this sample.
+    const NCPU: usize = 2;
+
+    let subscription_name = format!("projects/{project_id}/subscriptions/{subscription_id}");
+    let client = Subscriber::builder()
+        // Configure the subscriber to use multiple gRPC channels. This lets the
+        // client multiplex its open streams and its acknowledgement RPCs.
+        .with_grpc_subchannel_count(NCPU)
+        .build()
+        .await?;
+    let tasks: Vec&lt;_&gt; = (0..2 * NCPU)
+        .map(|i| {
+            // Pub/Sub caps the throughput of a single stream to 10 MB/s. To achieve
+            // higher throughput, you should open multiple streams.
+            let stream = client.subscribe(&amp;subscription_name).build();
+            tokio::spawn(subscribe_task(i, stream))
+        })
+        .collect();
+
+    for t in tasks {
+        t.await??;
+    }
+    println!("done listening for messages");
+    Ok(())
+}
+
+async fn subscribe_task(index: usize, mut stream: MessageStream) -&gt; anyhow::Result&lt;()&gt; {
+    // Terminate the example after 10 seconds.
+    let shutdown_token = stream.shutdown_token();
+    let shutdown = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        shutdown_token.shutdown().await;
+    });
+
+    println!("listening for messages on stream {index}...");
+
+    while let Some((m, h)) = stream.next().await.transpose()? {
+        println!("received message: {m:?}");
+        h.ack();
+    }
+    shutdown.await?;
+
+    Ok(())
+}</pre> </div> </section> </div> <h2 id="whats_next">What's next</h2> <p>Read about the other delivery options you can configure for a subscription:</p> <ul> <li><p><a href="flow-control">Handle transient spikes with flow control</a></p></li> <li><p><a href="handling-failures#subscription_retry_policy">Handle message failures with subscription retry policy</a></p></li> <li><p><a href="handling-failures#dead-letter_topic">Forward undelivered messages to a dead letter topic</a></p></li> <li><p><a href="replay-overview">Replay previously-acked messages or purge messages</a></p></li> <li><p><a href="lease-management">Extend ack time with lease management</a></p></li> <li><p><a href="ordering">Receive messages in order</a></p></li> <li><p><a href="subscription-message-filter">Filter messages by their attributes</a></p></li> <li><p><a href="exactly-once-delivery">Receive and acknowledge messages exactly-once</a></p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/pubsub/docs/concurrency-control" class="_attribution-link">https://docs.cloud.google.com/pubsub/docs/concurrency-control</a>
+  </p>
+</div>

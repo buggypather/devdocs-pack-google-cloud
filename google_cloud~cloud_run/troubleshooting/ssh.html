@@ -1,0 +1,269 @@
+<h1>Troubleshoot Cloud Run with SSH</h1> <aside class="beta"> <p> <strong> Preview — SSH support for Cloud Run </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>SSH lets you establish a secure, interactive shell connection to your running container instances. This provides direct access to the container's file system and runtime environment, enabling you to inspect system resources, verify configurations, and troubleshoot.</p> <p>SSH for Cloud Run uses the following services to secure connections:</p> <ul> <li>
+<a href="https://docs.cloud.google.com/iap/docs/tcp-forwarding-overview">Identity-Aware Proxy TCP forwarding</a> proxies SSH connections, so requests must pass authentication and authorization checks before they reach your container. You can extend IAP access policies with <a href="https://docs.cloud.google.com/iap/docs/cloud-iap-context-aware-access-howto">context-aware access</a> to restrict access based on attributes such as IP address and end-user device.</li> <li>
+<a href="https://docs.cloud.google.com/compute/docs/oslogin">OS Login</a> uses <a href="https://docs.cloud.google.com/compute/docs/oslogin/certificates">SSH certificate authentication</a> to authenticate users. When you connect, the gcloud CLI mints a short-lived SSH certificate for you that expires after five minutes. The certificate is validated inside your container. Google checks IAM permissions for every login attempt.</li> </ul> <p>SSH for Cloud Run automatically adds the required Google-managed binaries—including <code translate="no" dir="ltr">sshd</code>, certificate validation binaries, and the MirBSD Korn Shell (<code translate="no" dir="ltr">mksh</code>)—to your container's file system. Auto-provisioning <code translate="no" dir="ltr">mksh</code> ensures that a shell program is available during your session even if your container image doesn't include one (for example, in distroless or minimal images). These binaries are only auto-provisioned and accessible for as long as SSH connections are open, and are removed once the session ends. Existing SSH configurations, including <code translate="no" dir="ltr">/etc/passwd</code> entries, are ignored by Cloud Run SSH in favor of Google-managed configurations.</p> <p>Third-party open source copyright notices for Google-managed SSH dependencies are mounted inside your container when an SSH session is established at the following path: <code translate="no" dir="ltr">/usr/share/licenses/google_ssh/THIRD_PARTY_NOTICES</code>.</p> <h2 id="session-lifecycle">SSH sessions and service instances</h2> <p>When you connect to a service using SSH, note the following:</p> <ul> <li>If no instance of the service is running, Cloud Run starts a new instance for the SSH session.</li> <li>Cloud Run aims to keep the service instance active for the duration of the SSH session. You are billed for the instance as usual while it is active.</li> <li>Required binaries (<code translate="no" dir="ltr">sshd</code>, certificate validation tools, and <code translate="no" dir="ltr">mksh</code>) are auto-provisioned only while SSH connections remain open. When the session ends, these binaries are removed from the container.</li> </ul> <h2 id="limitations">Limitations</h2> <p>The following limitations apply to SSH:</p> <ul> <li>SSH sessions last for a maximum of 24 hours. After 24 hours, the session is disconnected and you must reconnect.</li> <li>IAP disconnects SSH sessions after one hour of inactivity. For more information, see <a href="https://docs.cloud.google.com/iap/docs/using-tcp-forwarding#known_limitations">IAP TCP forwarding known limitations</a>.</li> <li>SSH is only available for services that run on Cloud Run's <a href="../configuring/execution-environments">second generation environment</a> and <a href="../instances/create-and-manage-instances">Cloud Run instances</a>.</li> <li>When using SSH, host keys in the image are overwritten. The keys remain overwritten after the SSH session ends, until the service instance is restarted.</li> <li>PuTTY is not supported on Windows. Use the OpenSSH client.</li> <li>You don't need a shell (such as <code translate="no" dir="ltr">bash</code> or <code translate="no" dir="ltr">sh</code>) or an SSH server in your container image. Cloud Run automatically provisions <code translate="no" dir="ltr">sshd</code> and <code translate="no" dir="ltr">mksh</code> while SSH connections are open. However, other debugging utilities (such as <code translate="no" dir="ltr">curl</code> or package managers) aren't provisioned automatically.</li> <li>Extra care should be taken to secure your container when using SSH. Consider security best practices such as running application code as a non-root user.</li> <li>When an SSH connection cold-starts a multi-container service with <a href="../configuring/services/containers#container-ordering">container startup order</a> (<code translate="no" dir="ltr">container-dependencies</code>), the request is routed before the container environment is ready. Cloud Run returns an HTTP <code translate="no" dir="ltr">500</code> error and immediately stops the new instance. If you connect using the Google Cloud CLI, the command fails. To work around this issue, connect using SSH only when an instance is already running. For example, send a request to the service first to start an instance, or configure <a href="../configuring/min-instances">minimum instances</a>.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> </cloud-free-trial> <li> Enable the Cloud Run Admin API, Cloud Resource Manager API, Identity-Aware Proxy API, and Cloud OS Login APIs: 
+<pre>  gcloud services enable run.googleapis.com \
+      cloudresourcemanager.googleapis.com \
+      iap.googleapis.com \
+      oslogin.googleapis.com
+  </pre> </li> <li> <a href="https://docs.cloud.google.com/sdk/docs">Install and initialize</a> the gcloud CLI. </li> <li> Update components: 
+<pre>gcloud components update</pre> </li> <li> <strong>Windows:</strong> Ensure the OpenSSH client is installed. <p>OpenSSH Client is typically installed by default on Windows 10 and later. If it is not installed, you can install it by running the following command in PowerShell as an Administrator:</p> 
+<pre>Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0</pre> <p>For more information, see <a href="https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse">Install OpenSSH</a>.</p> </li> <li> Review the Cloud Run <a href="https://cloud.google.com/run/pricing">pricing</a> page. To generate a cost estimate based on your projected usage, use the <a href="https://cloud.google.com/products/calculator">pricing calculator</a>. SSH bills for network egress bytes. You are also billed as usual for the instance while it is kept active for an SSH session. </li> <li> If your project uses <a href="../securing/using-vpc-service-controls">VPC Service Controls</a> (VPC-SC), note that the tunneling process checks <code translate="no" dir="ltr">iaptunnel.googleapis.com</code> as the service name, rather than <code translate="no" dir="ltr">run.googleapis.com</code>. </li> </ol> <h3 id="required_roles">Required roles</h3> <p> To get the permissions that you need to complete these steps, ask your administrator to grant you the following IAM roles: </p> <ul> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountUser">Service Account User </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountUser</code>) on the service account</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run#run.sshRoot">Cloud Run SSH Root Access </a> (<code translate="no" dir="ltr">roles/run.sshRoot</code>) on the service</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iap#iap.tunnelResourceAccessor">IAP-secured Tunnel User </a> (<code translate="no" dir="ltr">roles/iap.tunnelResourceAccessor</code>) on the service</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run#run.developer">Cloud Run Developer </a> (<code translate="no" dir="ltr">roles/run.developer</code>) on the service</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/logging#logging.viewAccessor">Logs View Accessor </a> (<code translate="no" dir="ltr">roles/logging.viewAccessor</code>) on the project</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/browser#browser">Browser </a> (<code translate="no" dir="ltr">roles/browser</code>) on the project</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/serviceusage#serviceusage.serviceUsageConsumer">Service Usage Consumer </a> (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code>) on the project</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iap#iap.admin">IAP Policy Admin </a> (<code translate="no" dir="ltr">roles/iap.admin</code>) on the project for IAP management operations</li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>If you aren't a member of the organization that the project is part of, Cloud Run blocks the SSH access. To gain SSH access, add the role, <code translate="no" dir="ltr">roles/compute.osLoginExternalUser</code> or by using a custom role with the <code translate="no" dir="ltr">compute.oslogin.updateExternalUser</code> permission.</p> <p>You can grant the IAP-secured Tunnel User role at the project level, to restrict this role for a specific Cloud Run service or instance, run the following command:</p> <div> <section><p class="_code-tab"><strong>For a specific service</strong></p>
+
+<pre data-language="">gcloud beta iap tcp add-iam-policy-binding \
+    --resource-type=cloud-run \
+    --service=SERVICE \
+    --region=REGION \
+    --member=MEMBER \
+    --role=roles/iap.tunnelResourceAccessor
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MEMBER</var></code>: the identity to grant access to. This should be in the format <code translate="no" dir="ltr">user|group|serviceAccount:email</code> —for example, <code translate="no" dir="ltr">user:test-user@gmail.com</code>.</li> </ul></section> <section><p class="_code-tab"><strong>For a specific instance</strong></p>
+
+<pre data-language="">gcloud beta iap tcp add-iam-policy-binding \
+    --resource-type=cloud-run \
+    --instance=INSTANCE \
+    --region=REGION \
+    --member=MEMBER \
+    --role=roles/iap.tunnelResourceAccessor
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE</var></code>: the name of your instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your instance is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MEMBER</var></code>: the identity to grant access to. This should be in the format <code translate="no" dir="ltr">user|group|serviceAccount:email</code> —for example, <code translate="no" dir="ltr">user:test-user@gmail.com</code>.</li> </ul></section> </div> <p>To grant the <code translate="no" dir="ltr">roles/iap.tunnelResourceAccessor</code> at the project and region level, see <a href="https://docs.cloud.google.com/iap/docs/ssh-cloud-run#configure-policies">Configure IAP access policies</a>.</p> <h2 id="use-ssh-service">Use SSH with Cloud Run services</h2> <p>Configure service-level SSH access and connect to the service using SSH.</p> <h3 id="configure_service-level_ssh_access">Configure service-level SSH access</h3> <p>You can allow SSH access on a specific service using the gcloud CLI or YAML:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To enable access on an existing service, use the following command:</p> 
+<pre data-language="bash">gcloud beta run services update SERVICE --ssh \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> </ul> <p>You can also allow SSH access on a service by using the <code translate="no" dir="ltr">--ssh</code> flag when <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/run/deploy">deploying the service</a>.</p></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>If you are creating a new service, skip this step. If you are updating an existing service, download its <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run services describe SERVICE --format export &gt; service.yaml</pre>
+</li> <li>
+<p>The following example contains the YAML configuration:</p> 
+<pre data-language="">apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: SERVICE
+  labels:
+    cloud.googleapis.com/location: REGION
+  annotations:
+    run.googleapis.com/ssh-enabled: "true"
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    spec:
+      containers:
+      - image: IMAGE_URL
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your Cloud Run service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region—for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_URL</var></code>: a reference to the container image, for example, <code translate="no" dir="ltr">us-docker.pkg.dev/cloudrun/container/hello:latest</code>. If you use Artifact Registry, the <a href="https://docs.cloud.google.com/artifact-registry/docs/repositories/create-repos#docker">repository</a> <var translate="no">REPO_NAME</var> must already be created. The URL follows the format of <code translate="no" dir="ltr"><var translate="no">LOCATION</var>-docker.pkg.dev/<var translate="no">PROJECT_ID</var>/<var translate="no">REPO_NAME</var>/<var translate="no">PATH</var>:<var translate="no">TAG</var></code> </li> </ul>
+</li> <li>
+<p>Create or update the service using the following command:</p> 
+<pre data-language="">gcloud run services replace service.yaml</pre> <p>The <code translate="no" dir="ltr">gcloud run services replace</code> command defaults to using <code translate="no" dir="ltr">service.yaml</code> file if present.</p>
+</li> </ol></section> </div> <p>You can disable SSH access on a per-service basis using the gcloud CLI or YAML:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To disable access on the service, use the following command:</p> 
+<pre data-language="bash">gcloud beta run services update SERVICE --no-ssh \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> </ul></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>If you are creating a new service, skip this step. If you are updating an existing service, download its <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud run services describe SERVICE --format export &gt; service.yaml</pre>
+</li> <li>
+<p>The following example contains the YAML configuration:</p> 
+<pre data-language="">apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: SERVICE
+  labels:
+    cloud.googleapis.com/location: REGION
+  annotations:
+    run.googleapis.com/ssh-enabled: "false"
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    spec:
+      containers:
+      - image: IMAGE_URL
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your Cloud Run service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region—for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_URL</var></code>: a reference to the container image, for example, <code translate="no" dir="ltr">us-docker.pkg.dev/cloudrun/container/hello:latest</code>. If you use Artifact Registry, the <a href="https://docs.cloud.google.com/artifact-registry/docs/repositories/create-repos#docker">repository</a> <var translate="no">REPO_NAME</var> must already be created. The URL follows the format of <code translate="no" dir="ltr"><var translate="no">LOCATION</var>-docker.pkg.dev/<var translate="no">PROJECT_ID</var>/<var translate="no">REPO_NAME</var>/<var translate="no">PATH</var>:<var translate="no">TAG</var></code> </li> </ul>
+</li> <li>
+<p>Create or update the service using the following command:</p> 
+<pre data-language="">gcloud run services replace service.yaml</pre> <p>The <code translate="no" dir="ltr">gcloud run services replace</code> command defaults to using <code translate="no" dir="ltr">service.yaml</code> file if present.</p>
+</li> </ol></section> </div> <h3 id="connect_to_the_service_with_ssh">Connect to the service with SSH</h3> <p>To connect to a service by using SSH, use the gcloud CLI:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the Cloud Run <strong>Services</strong> page:</p> <p><a href="https://console.cloud.google.com/run/services" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>Click a service to open the <strong>Service details</strong> page.</p></li> <li><p>Select <strong>SSH</strong>. This opens Cloud Shell with the gcloud SSH command.</p></li> <li><p>Press <strong>Enter</strong>.</p></li> <li><p>If you are prompted to enter a passphrase for the SSH key, you can leave it empty. However, if you enter a passphrase, make sure you use the same passphrase for any subsequent SSH sessions from the same workspace.</p></li> <li>
+<p>When the SSH session is successfully completed, Cloud Run displays the following message:</p> 
+<pre data-language="bash">Project: PROJECT_ID
+Region: REGION
+Service: SERVICE
+Revision: REVISION
+Instance: INSTANCE_ID
+Container: CONTAINER
+Image: IMAGE
+</pre>
+</li> <li><p>To end your SSH session, type <code translate="no" dir="ltr">exit</code>. When the session ends, the auto-provisioned SSH and <code translate="no" dir="ltr">mksh</code> binaries are removed from the container's file system. Any changes you made on the container persist for as long as the container is kept alive. Exiting the session does not restart or kill the container.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To connect to a service by using SSH, use the following Google Cloud CLI command:</p> 
+<pre data-language="bash">gcloud beta run services ssh SERVICE --region=REGION --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the Google Cloud project ID.</li> </ul> <p>If you are prompted to enter a passphrase for the SSH key, you can leave it empty. However, if you enter a passphrase, make sure you use the same passphrase for any subsequent SSH sessions from the same workspace.</p> <p>When the SSH session is successfully completed, Cloud Run displays the following message:</p> 
+<pre data-language="bash">Project: PROJECT_ID
+Region: REGION
+Service: SERVICE
+Revision: REVISION
+Instance: INSTANCE_ID
+Container: CONTAINER
+Image: IMAGE
+</pre> <p>To end your SSH session, type <code translate="no" dir="ltr">exit</code>. When the session ends, the auto-provisioned SSH and <code translate="no" dir="ltr">mksh</code> binaries are removed from the container's file system. Any changes you made on the container persist for as long as the container is kept alive. Exiting the session does not restart or kill the container.</p></section> </div> <h3 id="specify_a_service_instance">Specify a service instance</h3> <p>To connect to a specific service instance by using SSH, use the Google Cloud CLI.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the Cloud Run <strong>Services</strong> page:</p> <p><a href="https://console.cloud.google.com/run/services" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>Click the service you are interested in to open the <strong>Service details</strong> page.</p></li> <li><p>Select <strong>Logs</strong>.</p></li> <li><p>Click the log entry for your service instance to expand it.</p></li> <li><p>Select <strong>SSH into this instance</strong>. This opens Cloud Shell with the gcloud SSH command.</p></li> <li><p>Press <strong>Enter</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To connect to a Cloud Run service instance by using SSH, use the following Google Cloud CLI command:</p> 
+<pre data-language="bash">gcloud beta run services ssh SERVICE --region=REGION --project=PROJECT_ID \
+  --revision=REVISION \
+  --instance=INSTANCE_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REVISION</var></code>: the name of the revision.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_ID</var></code>: the instance ID. To find the service instance ID, go to the <strong>Logs</strong> page in the <strong>Observability</strong> section. The instance ID is located in the <code translate="no" dir="ltr">labels</code> field for a log entry. You can't find the instance ID if you terminate the specific instance before connecting to it.</li> </ul></section> </div> <h3 id="specify_a_revision">Specify a revision</h3> <p>To connect to a specific revision by using SSH, use the Google Cloud CLI.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the Cloud Run <strong>Services</strong> page:</p> <p><a href="https://console.cloud.google.com/run/services" target="console" track-type="howto" track-name="consoleLink" track-metadata-end-goal="configureCloudRun" class="button button-primary">Go to Cloud Run</a> </p>
+</li> <li><p>Click the service you are interested in to open the <strong>Service details</strong> page.</p></li> <li><p>Select <strong>Revision history</strong>.</p></li> <li><p>Click the ellipsis icon to the right of the revision you want to connect to using SSH.</p></li> <li><p>Select <strong>SSH into revisions</strong>. This opens Cloud Shell with the gcloud SSH command.</p></li> <li><p>Press <strong>Enter</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To connect to a Cloud Run service revision by using SSH, use the following Google Cloud CLI command:</p> 
+<pre data-language="bash">gcloud beta run services ssh SERVICE --region=REGION --project=PROJECT_ID --revision=REVISION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REVISION</var></code>: the name of the revision.</li> </ul></section> </div> <h2 id="use-ssh-instance">Use SSH with Cloud Run instances</h2> <p>Configure instance-level SSH access and connect to the instance using SSH.</p> <h3 id="configure_instance-level_ssh_access">Configure instance-level SSH access</h3> <p>SSH is enabled by default for instances.</p> <p>You can disable SSH access on a per-instance basis using the gcloud CLI or YAML:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To disable access on the instance, use the following command:</p> 
+<pre data-language="bash">gcloud beta run instances update INSTANCE --no-ssh \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE</var></code>: the name of your instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your instance is deployed in.</li> </ul></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>If you are creating a new instance, skip this step. If you are updating an existing instance, download its <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud beta run instances describe INSTANCE --format export &gt; instance.yaml</pre>
+</li> <li>
+<p>The following example contains the YAML configuration:</p> 
+<pre data-language="">apiVersion: run.googleapis.com/v1
+kind: Instance
+metadata:
+  name: INSTANCE
+  labels:
+    cloud.googleapis.com/location: REGION
+  annotations:
+    run.googleapis.com/ssh-enabled: "false"
+    run.googleapis.com/launch-stage: BETA
+spec:
+  containers:
+  - image: IMAGE_URL
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE</var></code>: the name of your Cloud Run instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region—for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_URL</var></code>: a reference to the container image, such as <code translate="no" dir="ltr">us-docker.pkg.dev/cloudrun/container/hello:latest</code>.</li> </ul>
+</li> <li>
+<p>Create or update the instance using the following command:</p> 
+<pre data-language="">gcloud beta run instances replace instance.yaml</pre>
+</li> </ol></section> </div> <p>To re-enable SSH access on an existing instance, use the gcloud CLI or YAML.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To enable access on an existing instance, use the following command:</p> 
+<pre data-language="bash">gcloud beta run instances update INSTANCE --ssh \
+    --region=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE</var></code>: the name of your instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your instance is deployed in.</li> </ul></section> <section><p class="_code-tab"><strong>YAML</strong></p>
+<ol> <li>
+<p>If you are creating a new instance, skip this step. If you are updating an existing instance, download its <a href="https://docs.cloud.google.com/run/docs/reference/yaml/v1">YAML configuration</a>:</p> 
+<pre data-language="">gcloud beta run instances describe INSTANCE --format export &gt; instance.yaml</pre>
+</li> <li>
+<p>The following example contains the YAML configuration:</p> 
+<pre data-language="">apiVersion: run.googleapis.com/v1
+kind: Instance
+metadata:
+  name: INSTANCE
+  labels:
+    cloud.googleapis.com/location: REGION
+  annotations:
+    run.googleapis.com/ssh-enabled: "true"
+    run.googleapis.com/launch-stage: BETA
+spec:
+  containers:
+  - image: IMAGE_URL
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE</var></code>: the name of your Cloud Run instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region—for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_URL</var></code>: a reference to the container image, such as <code translate="no" dir="ltr">us-docker.pkg.dev/cloudrun/container/hello:latest</code>.</li> </ul>
+</li> <li>
+<p>Create or update the instance using the following command:</p> 
+<pre data-language="">gcloud beta run instances replace instance.yaml</pre>
+</li> </ol></section> </div> <h3 id="connect_to_the_instance_with_ssh">Connect to the instance with SSH</h3> <p>To connect to an instance by using SSH, use the following Google Cloud CLI command:</p> 
+<pre>  gcloud beta run instances ssh INSTANCE --region=REGION --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE</var></code>: the name of your instance.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your instance is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the Google Cloud project ID.</li> </ul> <p>If you are prompted to enter a passphrase for the SSH key, you can leave it empty. However, if you enter a passphrase, make sure you use the same passphrase for any subsequent SSH sessions from the same workspace.</p> <p>When the SSH session is successfully completed, Cloud Run displays the following message:</p> 
+<pre>  Project: PROJECT_ID
+  Region: REGION
+  Instance: INSTANCE
+  Revision: REVISION
+  Container: CONTAINER
+  Image: IMAGE
+</pre> <p>To end your SSH session, type <code translate="no" dir="ltr">exit</code>. When the session ends, the auto-provisioned SSH and <code translate="no" dir="ltr">mksh</code> binaries are removed from the container's file system.</p> <h2 id="use-openssh-client">Use the OpenSSH client to connect</h2> <p>To use your OpenSSH client to connect:</p> <ol> <li>Run the <a href="#use-ssh-service"><code translate="no" dir="ltr">gcloud beta run services ssh</code> command</a> on the target service. This initiates the SSH tunnel and generates the certificate.</li> <li>
+<p>Add the following to your SSH configuration:</p> 
+<pre>Host cloud-run-ssh
+    HostName cloud-run-default
+    User root
+    IdentityFile /Users/USER/.ssh/google_compute_engine
+    CertificateFile /Users/USER/.ssh/google_compute_engine_cert/PROJECT_ID_REGION_service_SERVICE-cert.pub
+    CheckHostIP no
+    HashKnownHosts no
+    HostKeyAlias cloud-run-default
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ProxyUseFdpass no
+    ProxyCommand /usr/local/bin/python3 -S /Users/USER/google-cloud-sdk/lib/gcloud.py beta run start-iap-tunnel --project_number=PROJECT_NUMBER --project_id=PROJECT_ID --workload_type=service --deployment_name=SERVICE/revisions/REVISION --region=REGION --iap-tunnel-url-override=wss://REGION.ssh.run.app/v4
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">USER</var></code>: the username on your local machine.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the Google Cloud project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region that your service is deployed in.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE</var></code>: the name of your service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REVISION</var></code>: the name of the revision.</li> </ul> <p>If the gcloud CLI is installed in a different folder, you might need to update the location in the last line.</p>
+</li> <li>
+<p>Run the following command:</p> 
+<pre>ssh cloud-run-ssh
+</pre>
+</li> </ol> <p>Your SSH certificate expires after five minutes. If you try to establish an SSH connection with your service after five minutes, you must rerun <code translate="no" dir="ltr">gcloud beta run services ssh</code> to re-generate the certificate.</p> <h2 id="ssh_access_logs">SSH Access Logs</h2> <p>To capture audit logs for SSH key management, you must enable audit logs for the Cloud OS Login API. See <a href="https://docs.cloud.google.com/compute/docs/oslogin/view-audit-logs">View OS Login audit logs</a>. To access SSH logs of Cloud Run resources, you must have access to Cloud Audit Logs for that project.</p> <p>The following example queries all Cloud Run services for the past day:</p> 
+<pre>gcloud logging read '
+  logName="projects/PROJECT_ID/logs/cloudaudit.googleapis.com%2Fdata_access" AND
+  protoPayload.serviceName="oslogin.googleapis.com" AND
+  protoPayload.request.instance:"run.googleapis.com"
+' --project=PROJECT_ID \
+  --freshness=1d \
+  --format="table(timestamp, protoPayload.authenticationInfo.principalSubject:label=USER, protoPayload.request.instance:label=CLOUD_RUN_SERVICE)"
+</pre> <h2 id="secure_and_control_ssh_access">Secure and control SSH access</h2> <p>You can control who can use SSH and how it is restricted in your environment.</p> <h3 id="disable_ssh_access_with_organization_policies">Disable SSH access with organization policies</h3> <p>To set an organization policy to disable SSH, use the <a href="../securing/custom-constraints#example_constraints">custom constraint</a> that restricts enabling SSH debugging access on Cloud Run services.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="../troubleshooting">troubleshooting Cloud Run issues</a>.</li> <li>Learn more about <a href="../tutorials/local-troubleshooting">troubleshooting Cloud Run services</a>.</li> <li>Read about <a href="../known-issues">known issues in Cloud Run</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/troubleshooting/ssh" class="_attribution-link">https://docs.cloud.google.com/run/docs/troubleshooting/ssh</a>
+  </p>
+</div>

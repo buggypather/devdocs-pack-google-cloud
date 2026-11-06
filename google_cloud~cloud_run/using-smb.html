@@ -1,0 +1,64 @@
+<h1>Using the CIFS/SMB network file system</h1> <p>Cloud Run lets you connect container instances to CIFS and SMB network file shares so that you can read and write shared files. You can mount shares in user space, instead of kernel space, by using <code translate="no" dir="ltr">smbnetfs</code> or transfer files by using <code translate="no" dir="ltr">smbclient</code>.</p> <p>For other storage options on Cloud Run, see how to configure NFS or Filestore volumes for <a href="configuring/services/nfs-volume-mounts">services</a>, <a href="configuring/jobs/nfs-volume-mounts">jobs</a>, <a href="configuring/workerpools/nfs-volume-mounts">worker pools</a>, or <a href="configuring/instances/nfs-volume-mounts">instances</a>. You can also configure Cloud Storage FUSE volumes for <a href="configuring/services/cloud-storage-volume-mounts">services</a>, <a href="configuring/jobs/cloud-storage-volume-mounts">jobs</a>, <a href="configuring/workerpools/cloud-storage-volume-mounts">worker pools</a>, or <a href="configuring/instances/cloud-storage-volume-mounts">instances</a>.</p> <h2 id="limitations">Limitations</h2> <ul> <li><p>You must specify the <a href="configuring/execution-environments">second generation execution environment</a> when using <code translate="no" dir="ltr">smbnetfs</code>.</p></li> <li><p>Due to the Cloud Run execution environment restriction, CIFS/SMB can't be directly mounted inside Cloud Run. However, you can use SMB clients that don't rely on kernel mounting, like <code translate="no" dir="ltr">smbnetfs</code> (FUSE-based) or <code translate="no" dir="ltr">smbclient</code>.</p></li> <li><p>Cloud Run is designed to scale rapidly to a large number of instances. However, most network file systems are not designed for concurrent use by a large number of clients. For Cloud Run services, consider using the <a href="configuring/max-instances">maximum instances</a> feature to limit the number of Cloud Run instances.</p></li> </ul> <h2 id="using_smbnetfs">Using <code translate="no" dir="ltr">smbnetfs</code>
+</h2> <p><code translate="no" dir="ltr">smbnetfs</code> is a FUSE-based file system that lets you mount SMB shares as part of the local file system hierarchy.</p> <p>To use <code translate="no" dir="ltr">smbnetfs</code> with Cloud Run, update your Dockerfile to install <code translate="no" dir="ltr">smbnetfs</code> and its dependencies, and configure credentials.</p> <h3 id="configure_smbnetfs_in_dockerfile">Configure <code translate="no" dir="ltr">smbnetfs</code> in Dockerfile</h3> <p>Add the following instructions to your Dockerfile:</p> <aside class="warning"><strong>Warning:</strong><span> For production environments, we recommended using Secret Manager to handle credentials securely. The following example places credentials directly in the Dockerfile for simplicity. For production use, mount secrets as files or environment variables. Learn more about <a href="configuring/services/secrets">configuring secrets in Cloud Run</a>.</span></aside>
+<pre># Install smbnetfs, fuse and other dependencies
+RUN apt-get update &amp;&amp; apt-get install -y smbnetfs fuse &amp;&amp; rm -rf /var/lib/apt/lists/*
+
+# Setup smbnetfs configuration
+RUN mkdir -p ~/.smb
+# Check if files exist before copying, as strict locations might vary or be missing in minimal images
+RUN [ -f /etc/smbnetfs.conf ] &amp;&amp; cp /etc/smbnetfs.conf ~/.smb/ || echo "smbnetfs.conf not found"
+
+# Create the auth file
+# In production, use mechanisms like [Secret Manager](/run/docs/configuring/services/secrets) to handle credentials
+# securely instead of placing them directly in the Dockerfile.
+RUN echo 'auth "&lt;smb-server-ip&gt;" "&lt;smb-username&gt;" "&lt;smb-password&gt;"' &gt; ~/.smb/smbnetfs.auth
+RUN chmod 600 ~/.smb/smbnetfs.auth
+
+# Create the host file
+RUN echo 'host &lt;smb-server-ip&gt; visible=true' &gt; ~/.smb/smbnetfs.host
+RUN chmod 600 ~/.smb/smbnetfs.host
+
+# Enable the includes in the main config if they exist
+RUN if [ -f ~/.smb/smbnetfs.conf ]; then \
+    sed -i 's/^#include "smbnetfs.auth"/include "smbnetfs.auth"/' ~/.smb/smbnetfs.conf &amp;&amp; \
+    sed -i 's/^#include "smbnetfs.host"/include "smbnetfs.host"/' ~/.smb/smbnetfs.conf; \
+    fi
+</pre> <p>Replace <code translate="no" dir="ltr">&lt;smb-server-ip&gt;</code>, <code translate="no" dir="ltr">&lt;smb-username&gt;</code>, and <code translate="no" dir="ltr">&lt;smb-password&gt;</code> with connection details for your SMB server.</p> <h3 id="mount_the_smb_share_during_container_startup">Mount the SMB share during container startup</h3> <p>Run smbnetfs to mount the share when your container starts and before your application starts. If your container runs as a non-root user, you might need to adjust permissions or FUSE configuration.</p> <ol> <li>
+<p>Create a mount point such as <code translate="no" dir="ltr">/mnt/smb</code> as shown in the following command: </p>
+
+<pre>mkdir /mnt/smb</pre>
+</li> <li>
+<p>Mount the SMB file system by using the <code translate="no" dir="ltr">smbnetfs</code> command: </p>
+
+<pre>smbnetfs /mnt/smb</pre>
+</li> <li>
+<p>Access your share under <code translate="no" dir="ltr">/mnt/smb/&lt;smb-server-ip&gt;/&lt;share-name&gt;</code>, as shown in the following command: </p>
+
+<pre>ls /mnt/smb/smb-server-ip/share-name</pre>
+</li> </ol> <h3 id="troubleshooting">Troubleshooting</h3> <p>You might encounter input/output errors when writing to files using the <code translate="no" dir="ltr">O_APPEND</code> flag with <code translate="no" dir="ltr">smbnetfs</code>. Find more details in the <a href="https://stackoverflow.com/questions/73104395/smbnetfs-how-to-resolve-input-output-error-while-writing-file-to-windows-serve">Stack Overflow discussion</a>.</p> <h2 id="using_smbclient">Using smbclient</h2> <p><code translate="no" dir="ltr">smbclient</code> is a command-line tool that provides an FTP-like interface for accessing SMB shares. You can use it to transfer files or run commands on an SMB server.</p> <ul> <li>
+<p>To avoid providing credentials with each command, you can store them in a file.</p> <aside class="warning"><strong>Warning:</strong><span> In production, ensure that this file is managed securely, for example, by injecting it during container startup using <a href="configuring/services/secrets">Secret Manager</a>.</span></aside> <ol> <li>
+<p>Store your credentials in a file, for example, <code translate="no" dir="ltr">smb-cred.txt</code>:</p> 
+<pre>username = &lt;smb-username&gt;
+password = &lt;smb-password&gt;
+</pre>
+</li> <li><p>As an alternative to a credentials file, you can provide credentials with each command using the <code translate="no" dir="ltr">-U</code> or <code translate="no" dir="ltr">--user</code> option, for example: <code translate="no" dir="ltr">--user=[DOMAIN\]USERNAME[%PASSWORD]</code>.</p></li> <li>
+<p>Use the <code translate="no" dir="ltr">smbclient</code> tool with the <code translate="no" dir="ltr">-A</code> flag to specify the credentials file. For example, to list files in a share, run the following command: </p>
+
+<pre>smbclient //smb-server-ip/share-name -A smb-cred.txt -c 'ls'</pre>
+</li> </ol>
+</li> <li>
+<p>To modify files with the smbclient tool, download the file, modify it locally, and then upload it back to the share as shown in the following steps.</p> <ol> <li>
+<p>Download a file by running the get command: </p>
+
+<pre>smbclient //smb-server-ip/share-name -A smb-cred.txt -c 'get remote local'</pre>
+</li> <li><p>Modify your file locally.</p></li> <li>
+<p>Upload the file after the modification by running the put command: </p>
+
+<pre>smbclient //smb-server-ip/share-name -A smb-cred.txt -c 'put local remote'</pre>
+</li> </ol>
+</li> </ul> <p>When you use the <code translate="no" dir="ltr">smbclient</code> tool, the SMB server identifies you by using the credentials you provide. This lets the server apply the correct file permissions. For a full list of <code translate="no" dir="ltr">smbclient</code> commands, refer to the <a href="https://www.samba.org/samba/docs/current/man-html/smbclient.1.html">official smbclient documentation</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/using-smb" class="_attribution-link">https://docs.cloud.google.com/run/docs/using-smb</a>
+  </p>
+</div>

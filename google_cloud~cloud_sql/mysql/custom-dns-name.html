@@ -1,0 +1,149 @@
+<h1>Set up a custom DNS name for a Cloud SQL instance</h1>  <p>This page describes how to set up a custom domain name system (DNS) name for your Cloud SQL instance.</p> <h2 id="overview">Overview</h2> <p>You can configure a Cloud SQL instance so that your applications can connect using a custom DNS name managed by your organization. If you want to use a custom DNS name to connect to a Cloud SQL instance instead of using an IP address, then configure a custom subject alternative name (SAN). You can configure a custom SAN when you create or update an instance.</p> <p>When you add a custom DNS name as a custom SAN configuration to your instance, Cloud SQL inserts the custom DNS name to the SAN field of the server certificate of the instance. This customization lets you use the custom DNS name with <a href="configure-ssl-instance#server-identity-verification">hostname validation</a> securely. You can add a comma-separated list of up to three custom DNS names to the custom SAN configuration. For security reasons, you can use a custom SAN configuration only for instances that you <a href="customer-managed-ca">configure with <code translate="no" dir="ltr">CUSTOMER_MANAGED_CAS_CA</code></a> as the server CA mode.</p> <p>After you configure the custom DNS name for your instance, you can use that custom DNS name to connect your database clients or applications, including <a href="language-connectors">Cloud SQL Language Connectors</a> and the <a href="sql-proxy">Cloud SQL Auth Proxy</a>.</p> <h3 id="workflow">Workflow</h3> <p>To set up a custom DNS name for an instance, do the following:</p> <ol> <li>Create an instance configured with customer-managed CA.</li> <li>Add custom SAN values to the instance. The custom SAN values are inserted into the SAN field of the server certificate of the instance.</li> <li>Determine the IP address of the instance.</li> <li>Create custom DNS records for your instance.</li> <li>Connect to the instance using the custom DNS name.</li> </ol> <h2 id="before_you_begin">Before you begin</h2> <p>Before you set up a custom DNS name for your instance, make sure you have the <a href="customer-managed-ca#required-roles">required roles and permissions</a>.</p> <p>If you are creating a new Cloud SQL instance, then to use custom SAN, your instance must also use a <a href="customer-managed-ca">customer-managed certificate authority (CA)</a> for its server CA mode.</p> <h2 id="configure-san">Create an instance with custom SAN values</h2> <p>To create an instance with custom SAN values, use the following <code translate="no" dir="ltr"><a href="https://docs.cloud.google.com/sdk/gcloud/reference/sql/instances/create">gcloud sql instances create</a></code> command:</p> <div id="create-instance-custom-san" class="ds-selector-tabs" data-ds-scope="create-instance"> <section> <p class="_code-tab"><strong>gcloud</strong></p> 
+<pre data-language="bash">gcloud sql instances create "INSTANCE_NAME" \
+  --database-version=DATABASE_VERSION \
+  --project=PROJECT_ID \
+  --region=REGION \
+  --server-ca-mode=CUSTOMER_MANAGED_CAS_CA \
+  --server-ca-pool=projects/PROJECT_ID_CAS/locations/REGION/caPools/CA_POOL_ID
+  --custom-subject-alternative-names=CUSTOM_DNS_NAME</pre> <p>Make the following replacements:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code> with the name of the Cloud SQL instance that you want to create.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DATABASE_VERSION</var></code> with the <a href="https://docs.cloud.google.com/sql/docs/mysql/admin-api/rest/v1/SqlDatabaseVersion"><code translate="no" dir="ltr">enum</code> of the version</a> of the Cloud SQL instance that you want to create. The customer-managed CA option is supported only on MySQL 8.0.30 and later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the ID of the project where you plan to create your Cloud SQL instances.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID_CAS</var></code> with the ID of the project where you created your <var translate="no">CA_POOL_ID</var>. This project might be the same or different from where you want to create your Cloud SQL instance. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code> with the region where you created the CA pool. You must create your instance in the same region as the CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_POOL_ID</var></code> with the ID of the CA pool that you created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CUSTOM_DNS_NAME</var></code> with up to three custom DNS names, comma-separated with no spaces in between the values. For example, <code translate="no" dir="ltr">develop.example.com,test.example.com,production.example.com</code>.</li> </ul> </section> <section> <p class="_code-tab"><strong>Terraform</strong></p> <p>To create an instance with custom SAN values, use a <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/sql_database_instance">Terraform resource</a>. The following sample also creates prerequisite resources for the new instance.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="terraform">resource "google_project_service_identity" "default" {
+  provider = google-beta
+  service  = "sqladmin.googleapis.com"
+}
+
+resource "random_string" "default" {
+  length  = 10
+  special = false
+  upper   = false
+}
+
+resource "google_privateca_ca_pool" "default" {
+  name     = "customer-ca-pool-${random_string.default.result}"
+  location = "asia-northeast1"
+  tier     = "DEVOPS"
+  publishing_options {
+    publish_ca_cert = false
+    publish_crl     = false
+  }
+}
+
+# This is required for setting up customer managed CAS (Certificate Authority Service) instances.
+resource "google_privateca_certificate_authority" "default" {
+  pool                                   = google_privateca_ca_pool.default.name
+  certificate_authority_id               = "my-certificate-authority"
+  location                               = "asia-northeast1"
+  lifetime                               = "86400s"
+  type                                   = "SELF_SIGNED"
+  deletion_protection                    = false # set to "true" in production
+  skip_grace_period                      = true
+  ignore_active_certificates_on_deletion = true
+  config {
+    subject_config {
+      subject {
+        organization = "my organization"
+        common_name  = "my certificate authority name"
+      }
+    }
+    x509_config {
+      ca_options {
+        is_ca = true
+      }
+      key_usage {
+        base_key_usage {
+          cert_sign = true
+          crl_sign  = true
+        }
+        extended_key_usage {
+          server_auth = false
+        }
+      }
+    }
+  }
+  key_spec {
+    algorithm = "RSA_PKCS1_4096_SHA256"
+  }
+}
+
+resource "google_privateca_ca_pool_iam_member" "default" {
+  ca_pool = google_privateca_ca_pool.default.id
+  role    = "roles/privateca.certificateRequester"
+
+  member = "serviceAccount:${google_project_service_identity.default.email}"
+}
+
+resource "google_sql_database_instance" "default" {
+  name             = "mysql-instance"
+  region           = "asia-northeast1"
+  database_version = "MYSQL_8_4"
+  settings {
+    edition = "ENTERPRISE"
+    tier    = "db-f1-micro"
+    ip_configuration {
+      # The following server CA mode lets the instance use customer-managed CAS CA to issue server certificates.
+      # https://cloud.google.com/sql/docs/mysql/admin-api/rest/v1beta4/instances#ipconfiguration
+      server_ca_mode                   = "CUSTOMER_MANAGED_CAS_CA"
+      server_ca_pool                   = google_privateca_ca_pool.default.id
+      custom_subject_alternative_names = ["customSan.test.com"]
+    }
+  }
+}</pre> </div> </section> </div> <h2 id="add_or_update_custom_san_values_for_an_instance">Add or update custom SAN values for an instance</h2> <p>To add or update custom SAN values for an existing instance, do the following:</p> <div id="update-instance-custom-san" class="ds-selector-tabs" data-ds-scope="update-instance"> <section> <p class="_code-tab"><strong>gcloud</strong></p> 
+<pre data-language="bash">gcloud sql instances patch INSTANCE_NAME \
+  --custom-subject-alternative-names=CUSTOM_DNS_NAME</pre> <aside class="warning"><b>Caution</b>: If you're updating an instance that already has custom SAN values, then specify the existing custom SAN values or the existing values will be replaced.</aside> <p>Make the following replacements:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code> with the name of the Cloud SQL instance that you want to update.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CUSTOM_DNS_NAME</var></code> with up to three custom DNS names, comma-separated with no spaces in between the values. For example, <code translate="no" dir="ltr">develop.example.com,new-test.example.com,production.example.com</code>. </li> </ul> </section> <section> <p class="_code-tab"><strong>Terraform</strong></p> <p>To update an instance that already has custom SAN values, use a <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/sql_database_instance">Terraform resource</a>.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="terraform">resource "google_sql_database_instance" "default" {
+  name             = "mysql-instance"
+  region           = "asia-northeast1"
+  database_version = "MYSQL_8_4"
+  settings {
+    edition = "ENTERPRISE"
+    tier    = "db-f1-micro"
+    ip_configuration {
+      # The following server CA mode lets the instance use customer-managed CAS CA to issue server certificates.
+      # https://cloud.google.com/sql/docs/mysql/admin-api/rest/v1beta4/instances#ipconfiguration
+      server_ca_mode                   = "CUSTOMER_MANAGED_CAS_CA"
+      server_ca_pool                   = google_privateca_ca_pool.default.id
+      custom_subject_alternative_names = ["customSan.test.com"]
+    }
+  }
+}</pre> </div> <aside class="warning"><b>Caution</b>: If you're updating an instance that already has custom SAN values, then specify the existing custom SAN values or the existing values will be replaced.</aside> </section> </div> <h2 id="clear_all_custom_san_values_from_an_instance">Clear all custom SAN values from an instance</h2> <p>To clear all custom SAN values from an instance, do the following:</p> <div id="clear-instance-custom-san" class="ds-selector-tabs" data-ds-scope="clear-instance"> <section> <p class="_code-tab"><strong>gcloud</strong></p> 
+<pre data-language="bash">gcloud sql instances patch INSTANCE_NAME \
+  --clear-custom-subject-alternative-names</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code> with the name of the Cloud SQL instance that you want to update.</p> </section> </div> <h2 id="create-custom-dns-records">Create custom DNS records</h2> <p>Before you can connect to the instance using the custom DNS name with your clients and applications, set up the mapping between the DNS name and the IP address. This mapping is known as DNS resolution. If you are connecting privately, then <a href="https://docs.cloud.google.com/dns/docs/set-up-dns-records-domain-name">create the DNS record in a private DNS zone</a> in the corresponding Virtual Private Cloud (VPC) network.</p> <p>To create custom DNS records for your instance, do the following:</p> <ol> <li>
+<p>Retrieve the IP address for your instance. Run the following command:</p> 
+<pre>gcloud sql instances describe INSTANCE_NAME \
+ --project=PROJECT_ID</pre> <p>Make the following replacements:</p> <ul> <li>
+<var translate="no">INSTANCE_NAME</var>: the name of the Cloud SQL instance</li> <li>
+<var translate="no">PROJECT_ID</var>: the ID or <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project number</a> of the Google Cloud project that contains the instance</li> </ul>
+</li> <li>
+<p>In the response, look for the <code translate="no" dir="ltr">ipAddresses:</code> field.</p> <p>For example:</p> 
+<pre>ipAddresses:
+- ipAddress: 192.0.2.4
+  type: PRIVATE
+</pre> <p>You can retrieve the private IP address for an instance configured for <a href="configure-private-services-access">private services access</a>, <a href="configure-private-service-connect">Private Service Connect</a>, or <a href="configure-private-services-access-and-private-service-connect">both</a>.</p> <aside class="warning"><b>Warning</b>: For security reasons, we don't recommend setting up custom DNS records for the public IP address of an instance.</aside>
+</li> <li>
+<p>Add two DNS records to a DNS zone used by your application. You can use a DNS server that you manage yourself or the <a href="https://docs.cloud.google.com/dns/docs/zones#create-private-zone">Cloud DNS private zone</a> used by your application.</p> <ul> <li>Create an <code translate="no" dir="ltr">A</code> record for the IP address of the instance</li> <li>Create a <code translate="no" dir="ltr">TXT</code> record containing the instance connection name.</li> </ul> <p>Standard database clients use the <code translate="no" dir="ltr">A</code> record to look up the IP address to make the connection. Cloud SQL Language Connectors and the Cloud SQL Auth Proxy use the <code translate="no" dir="ltr">TXT</code> record to look up the instance connection name.</p> <p>For example, the connection string for your instance is <code translate="no" dir="ltr">my-project:region:my-instance</code>, but you want to connect using the DNS name <code translate="no" dir="ltr">prod-db.mycompany.example.com</code>. If the IP address of the instance on your company network is <code translate="no" dir="ltr">192.0.2.4</code>, then create the following DNS records:</p> 
+<pre>Record type: A
+Name: prod-db.mycompany.example.com
+Value: 192.0.2.4
+TTL: 600
+
+Record type: TXT
+Name: prod-db.mycompany.example.com
+Value: my-project:region:my-instance
+TTL: 600
+</pre>
+</li> </ol> <h2 id="connect-custom-dns">Connect to an instance using a custom DNS name</h2> When you connect to a Cloud SQL for MySQL instance, configure the custom DNS name as the hostname and enable server identity verification in your client. For example, when using the MySQL client, specify the flag <nobr><code translate="no" dir="ltr">--ssl-mode=VERIFY_IDENTITY</code></nobr>. Other MySQL client drivers have similar configuration flags. <p>If you're connecting to a private Cloud SQL instance from an external network, then you must configure your Cloud SQL instance and its Virtual Private Cloud (VPC) network to permit external connections and to let Cloud DNS communicate with on-premises systems. For more information about this configuration, see <a href="configure-private-ip#vpn">Connect from an external source</a> and <a href="https://docs.cloud.google.com/vpc/docs/configure-private-google-access-hybrid#config-dns-onpremises">Configure DNS for on-premises systems</a>.</p> <h2 id="limitations">Limitations</h2> <ul> <li>You can't add more than three DNS names as custom SAN values to the server certificate of a Cloud SQL instance.</li> <li>The maximum length of a DNS name that you can add to the certificate as a custom SAN value for an instance is 253 characters.</li> <li>The DNS names that you add to the certificate for an instance can't have wildcard characters (<code translate="no" dir="ltr">*</code>) or trailing dots. For example, <code translate="no" dir="ltr">test.example.com.</code> isn't allowed.</li> <li>The DNS names must be valid, as specified by <a href="https://datatracker.ietf.org/doc/html/rfc1034">RFC 1034</a>.</li> <li>You can specify custom SAN values for <code translate="no" dir="ltr">CUSTOMER_MANAGED_CAS_CA</code> instances only.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="manage-ssl-instance">Manage</a> SSL/TLS certificates on your Cloud SQL instance.</li> <li>Learn more about <a href="https://docs.cloud.google.com/docs/security/encryption-in-transit">how encryption is handled in Google Cloud</a>.</li> <li>
+<a href="connect-admin-ip#connect-ssl">Connect</a> to your Cloud SQL instance using SSL/TLS certificates.</li> <li>Learn more about <a href="https://dev.mysql.com/doc/refman/8.4/en/encrypted-connections.html">how MySQL uses SSL/TLS</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/mysql/custom-dns-name" class="_attribution-link">https://docs.cloud.google.com/sql/docs/mysql/custom-dns-name</a>
+  </p>
+</div>

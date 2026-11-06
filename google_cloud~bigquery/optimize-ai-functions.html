@@ -1,0 +1,116 @@
+<h1 id="optimize-ai-function-costs-with-model-distillation">Optimize AI function costs with model distillation</h1> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This product or feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA products and features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <aside class="note"><strong>Note:</strong><span> For support during the preview, contact <a href="mailto:bqml-feedback@google.com">bqml-feedback@google.com</a>.</span></aside> <p>This document describes how to use the optimized mode for <a href="generative-ai-overview#managed_ai_functions">managed AI functions</a> in BigQuery. You can use optimized mode to process large-scale datasets containing thousands, or even billions, of rows with significantly reduced large language model (LLM) token consumption and query latency compared to standard per-row LLM inference. This optimization only applies to the <code translate="no" dir="ltr">AI.IF</code> and <code translate="no" dir="ltr">AI.CLASSIFY</code> functions.</p> <p>If you want to set a limit on your total token consumption to prevent budget overruns, rather than optimizing the token efficiency of your queries, see <a href="control-genai-costs">Control costs with token quotas</a> instead.</p> <p>To better understand your token consumption, you can <a href="generative-ai-overview#token_usage">view the number of tokens used by a query</a> in the Google Cloud console. To estimate this usage before you run a query, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-count-tokens"><code translate="no" dir="ltr">AI.COUNT_TOKENS</code> function</a>.</p> <p>The following example demonstrates how to use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-if"><code translate="no" dir="ltr">AI.IF</code> function</a> with the optimized mode to identify news articles about natural disasters, using <code translate="no" dir="ltr">text-embedding-005</code> as the embedding model:</p> 
+<pre>SELECT
+  title,
+  body,
+  AI.IF(
+    ('The following news story is about a natural disaster: ', body),
+    embeddings =&gt; AI.EMBED(body, endpoint =&gt; 'text-embedding-005', task_type =&gt; 'CLASSIFICATION').result,
+    -- Optional, 'MINIMIZE_COST' is the default when embeddings are provided.
+    optimization_mode =&gt; 'MINIMIZE_COST'
+   ) AS is_natural_disaster
+FROM
+  `bigquery-public-data.bbc_news.fulltext`;
+</pre> <p>The <code translate="no" dir="ltr">optimization_mode =&gt; 'MINIMIZE_COST'</code> argument enables the optimized mode. This is the default setting when embeddings are provided, so you can omit this argument.</p> <p>For this example, embeddings are generated on-the-fly. In practice, we recommend that you <a href="#generate-embeddings">materialize embeddings</a> so that they can be reused.</p> <h2 id="how-it-works">How optimized mode works</h2> <p>The managed AI functions, <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-if"><code translate="no" dir="ltr">AI.IF</code></a> and <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-classify"><code translate="no" dir="ltr">AI.CLASSIFY</code></a>, typically call a remote LLM for every row in your dataset. When you use optimized mode, BigQuery automatically trains a lightweight, distilled model during query execution.</p> <p>The process works as follows:</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/ai-optimization-workflow.png" alt="AI function workflow when optimized mode is enabled"></p> <ul> <li>
+<strong>Sampling and labeling</strong>: BigQuery selects a small representative sample of your data and calls Gemini to provide labels.</li> <li>
+<strong>Distilled model training</strong>: a local distilled model is trained just-in-time using the LLM labels and data embeddings as features.</li> <li>
+<strong>Quality check</strong>: BigQuery evaluates the distilled model's accuracy against the LLM's results. By default, if the distilled model fails to meet the required quality threshold, the query fails with an error explaining why the model was discarded. If the model is of acceptable quality, BigQuery might still fall back to the remote LLM for specific rows to maintain consistent quality, or for rows lacking valid embeddings.</li> <li>
+<strong>Inference</strong>: the distilled model processes the majority of the rows, significantly reducing the number of Gemini calls.</li> </ul> <h2 id="limitations">Limitations</h2> <p>The optimized mode has the following limitations:</p> <ul> <li>
+<strong>Minimum row count</strong>: the input to the AI function must contain approximately 3,000 rows to ensure enough data for model training.</li> <li>
+<strong>Function support</strong>: only <code translate="no" dir="ltr">AI.IF</code> and <code translate="no" dir="ltr">AI.CLASSIFY</code> functions support optimized mode; however, when using optimized mode with <code translate="no" dir="ltr">AI.CLASSIFY</code>, queries can fail if distilled model quality is insufficient.</li> <li>
+<strong>Error ratio</strong>: The <code translate="no" dir="ltr">max_error_ratio</code> argument isn't supported in optimized mode.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p>To get the permissions that you need to run managed AI functions in BigQuery, see <a href="permissions-for-ai-functions">Set permissions for generative AI functions that call Gemini Enterprise Agent Platform LLMs</a>.</p> <h2 id="choose-embedding">Choose an embedding model</h2> <p>To use optimized mode, you must compute <a href="vector-search-intro">embeddings</a> for your data and provide them to the AI function. For input columns to have associated embeddings, all rows must have consistent embedding dimensions and be generated by the same embedding model.</p> <p>For best cost-quality and scalability, we recommend computing embeddings for your data using an embedding model, such as <a href="https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api"><code translate="no" dir="ltr">text-embedding-005</code> or the Gemini embeddings</a> for English or multilingual tasks. For multimodal data (text and images), we recommend using a multimodal embedding model such as, <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/embedding-2">Gemini Embedding 2 (<code translate="no" dir="ltr">gemini-embedding-2</code>)</a>.</p> <h2 id="generate-embeddings">Generate embeddings</h2> <p>You can compute embeddings for your data using autonomous generation managed by BigQuery, or by manually creating the embedding columns. The following sections describe how to use both approaches with the <code translate="no" dir="ltr">AI.CLASSIFY</code> and <code translate="no" dir="ltr">AI.IF</code> functions.</p> <h3 id="embedding-generation">Autonomous embedding generation</h3> <p>If you use <a href="autonomous-embedding-generation">autonomous embedding generation</a>, BigQuery automatically uses the embeddings when <code translate="no" dir="ltr">AI.IF</code> or <code translate="no" dir="ltr">AI.CLASSIFY</code> are called. This is the recommended approach, but is limited to one embedding column per table.</p> <p>The following example creates a table with an autonomously generated embedding column, using <code translate="no" dir="ltr">text-embedding-005</code> as the embedding model, then uses the <code translate="no" dir="ltr">AI.CLASSIFY</code> function to categorize the data:</p> 
+<pre>-- Create a table with an autonomously generated embedding column
+CREATE TABLE my_dataset.bbc_news (
+  title STRING,
+  body STRING,
+  body_embedding STRUCT&lt;result ARRAY&lt;FLOAT64&gt;, status STRING&gt;
+    GENERATED ALWAYS AS (
+      AI.EMBED(
+        body,
+        connection_id =&gt; '&lt;my_connection_id&gt;',
+        task_type =&gt; 'CLASSIFICATION',
+        endpoint =&gt; 'text-embedding-005')
+    ) STORED
+    OPTIONS(asynchronous = TRUE)
+);
+
+-- Insert data into the table
+INSERT INTO my_dataset.bbc_news (title, body)
+SELECT title, body FROM `bigquery-public-data.bbc_news.fulltext`;
+
+-- Run the optimized query.
+-- Wait for the background job to finish generating embeddings before running.
+SELECT
+  title,
+  body,
+  AI.CLASSIFY(
+    body,
+    categories =&gt; ['tech', 'sport', 'business', 'other']
+  ) AS category
+FROM
+  my_dataset.bbc_news;
+</pre> <h3 id="manual-columns">Manual column specification</h3> <p>If you have an existing embedding column, specify it in the <code translate="no" dir="ltr">embeddings</code> argument of <code translate="no" dir="ltr">AI.IF</code> or <code translate="no" dir="ltr">AI.CLASSIFY</code>. You can generate this using the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-embed"><code translate="no" dir="ltr">AI.EMBED</code> function</a>.</p> <p>The following example demonstrates how to create a table with an embedding column, using <code translate="no" dir="ltr">text-embedding-005</code> as the embedding model, and then use that column in an <code translate="no" dir="ltr">AI.CLASSIFY</code> query:</p> 
+<pre>-- Create a table with an embedding column
+CREATE TABLE my_dataset.bbc_news AS
+SELECT
+  title,
+  body,
+  AI.EMBED(
+    body,
+    endpoint =&gt; 'text-embedding-005',
+    task_type =&gt; 'CLASSIFICATION'
+  ).result AS body_embedding
+FROM
+  `bigquery-public-data.bbc_news.fulltext`;
+
+-- Run the optimized query
+SELECT
+  title,
+  body,
+  AI.CLASSIFY(
+    body,
+    categories =&gt; ['tech', 'sport', 'business', 'other'],
+    embeddings =&gt; body_embedding,
+  ) AS category
+FROM
+  my_dataset.bbc_news;
+</pre> <p>If your prompt references multiple columns, provide a list of column names and their corresponding embeddings in the <code translate="no" dir="ltr">embeddings</code> argument. For example: <code translate="no" dir="ltr">embeddings =&gt; [('body', body_embedding), ('title', title_embedding)]</code>.</p> <h2 id="monitor-optimization">Monitor query optimization</h2> <p>To verify how many rows were optimized during your query execution, you can view the execution statistics in the Google Cloud console or through the API:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p> To view how many rows were optimized and to see system messages about the optimization status, do the following:</p> <ol> <li>
+<p>In the Google Cloud console, go to the <strong>BigQuery</strong> page.</p> <p><a href="https://console.cloud.google.com/bigquery" target="console" class="button button-primary">Go to BigQuery</a> </p>
+</li> <li><p>In the navigation menu, click <strong>Jobs explorer</strong>.</p></li> <li><p>Click the job ID to view the <strong>Job details</strong> pane.</p></li> <li>
+<p>Click the <strong>Job information</strong> tab and view the metrics and status in the <strong>Gen AI function optimizations</strong> field.</p> <p><img src="https://docs.cloud.google.com/static/bigquery/images/gen-ai-function-optimizations-field.png" alt="Gen AI function optimizations field in the job information tab"></p>
+</li> </ol></section> <section><p class="_code-tab"><strong>API</strong></p>
+<p> Check the <code translate="no" dir="ltr">FunctionGenAiCostOptimizationStats</code> in the <code translate="no" dir="ltr">GenAIFunctionStats</code> object of the job metadata. This object includes the number of rows inferred through the optimized workflow and system-generated messages providing insights into the optimization state.</p></section> </div> <h2 id="troubleshoot">Troubleshoot</h2> <p>The following sections explain how to diagnose and resolve common issues with using optimized mode.</p> <h3 id="data-size-too-small">Data size is too small</h3> <p><strong>Issue</strong>: Insufficient data for model training. You might see an error message: <code translate="no" dir="ltr">Fail to apply cost optimizations because the number of rows to process is too
+small.</code></p> <p><strong>Solution</strong>: Increase the size of your input to at least the number of rows shown in the error message, and verify that valid embeddings have been properly generated for all rows.</p> <h3 id="few-samples-in-classes">Few or no samples in some classes</h3> <p><strong>Issue</strong>: Insufficient number of samples for certain categories or cases during the sampling phase, which prevents model training.</p> <ul> <li>For the <code translate="no" dir="ltr">AI.CLASSIFY</code> function, you might see an error message: <code translate="no" dir="ltr">Failed to
+apply cost optimizations because the random training sample did not contain
+enough examples of all categories.</code>
+</li> <li>For the <code translate="no" dir="ltr">AI.IF</code> function, you might see an error message: <code translate="no" dir="ltr">Failed to apply
+cost optimizations because the random training sample did not include
+enough examples of both true/false cases.</code>
+</li> </ul> <p><strong>Solution</strong>:</p> <ul> <li>For <code translate="no" dir="ltr">AI.CLASSIFY</code>: <ul> <li>Remove rare or empty categories from the <code translate="no" dir="ltr">AI.CLASSIFY</code> function call.</li> <li>Group rare categories into a broader one to increase the sample size. You can use an <code translate="no" dir="ltr">OTHER</code> category to group items not covered by more specific categories. However, don't add <code translate="no" dir="ltr">OTHER</code> if your list of categories is already complete, as this term is ambiguous and might cause confusion.</li> </ul>
+</li> <li>For <code translate="no" dir="ltr">AI.IF</code>: update the prompt's filter condition so that both <code translate="no" dir="ltr">true</code> and <code translate="no" dir="ltr">false</code> cases are well represented in the input rows. A condition that matches almost all rows, or almost no rows, can cause this error.</li> </ul> <h3 id="inconsistent-embedding-dimensions">Embeddings have inconsistent dimensions</h3> <p><strong>Issue</strong>: Inconsistencies between embedding dimensions across rows. You might see an error message: <code translate="no" dir="ltr">Failed to apply cost optimizations because the
+embeddings have inconsistent dimensions.</code></p> <p><strong>Solution</strong>: Verify that all embeddings are generated by the same model and have the same embedding vector length. You can use a SQL query similar to the following to check that the embeddings in a column have the same length:</p> 
+<pre>SELECT ARRAY_LENGTH(body_embedding.result), COUNT(*)
+FROM `PROJECT_ID.DATASET.TABLE_NAME`
+GROUP BY 1;
+</pre> <h3 id="prompt-complexity-too-high">Prompt complexity is too high</h3> <p><strong>Issue</strong>: The distilled model cannot achieve a high accuracy threshold. You might see one of the following error messages:</p> <ul> <li><code translate="no" dir="ltr">Fail to apply cost optimizations because the distilled model does not
+approximate LLM behavior well enough for some categories.</code></li> <li><code translate="no" dir="ltr">Fail to apply cost optimization because the prompt complexity is too
+high.</code></li> </ul> <p><strong>Solution</strong>:</p> <ul> <li><p>If the error message lists categories with low F1 scores, focus on those categories first. Refine their names and descriptions so that they're clearly distinguished from the other categories.</p></li> <li>
+<p>Use a set of categories that form a partition. Ensure that the categories have minimal overlap and cover all possible inputs.</p> <ul> <li>Avoid overlapping categories where an input might belong to multiple categories simultaneously. For example, avoid categories like <code translate="no" dir="ltr">['terrible', 'bad', 'okay', 'good', 'excellent']</code>.</li> <li>Avoid gaps where no categories apply. For example, the list of categories <code translate="no" dir="ltr">['bad', 'average']</code> doesn't cover a review expressing praise.</li> <li>
+<p>Provide category descriptions to guide the LLM to resolve ambiguity between categories. For example:</p> 
+<pre>AI.CLASSIFY(
+  review,
+  categories =&gt; [
+    ('terrible', 'Review where customer was not happy and the message indicates they will never try this product again'),
+    ('bad', 'Review where customer was not happy but suggested improvements to the product'),
+    ('okay', 'Review where customer was neutral about the product. Short reviews qualify for this category'),
+    ('good', 'Review where customers were happy using this product but had minor critiques'),
+    ('excellent', 'Review where customers were very happy using this product and will recommend others to try it too')],
+  embeddings =&gt; review_embeddings)
+</pre>
+</li> </ul>
+</li> <li><p>Try more advanced embedding models like <code translate="no" dir="ltr">text-embedding-005</code> or <code translate="no" dir="ltr">gemini-embedding-2</code>.</p></li> <li><p>Contact <a href="mailto:bqml-feedback@google.com">bqml-feedback@google.com</a> for additional debugging assistance.</p></li> </ul> <h3 id="unexpected-rows-processed-llm">Unexpected number of rows processed by the LLM</h3> <p><strong>Issue</strong>: Query execution statistics show that an unexpectedly high number of rows were processed by the remote LLM instead of the distilled model. This might be due to the following reasons:</p> <ul> <li>The distilled model was trained successfully, but some rows had missing embeddings. These rows are processed by the remote LLM.</li> <li>The distilled model was not able to be applied for each row and had to fall back to the remote LLM to maintain consistent quality.</li> </ul> <p><strong>Solution</strong>: Verify that embeddings are properly generated and valid for all rows in your data. If the issue persists, contact <a href="mailto:bqml-feedback@google.com">bqml-feedback@google.com</a> for debugging.</p> <h3 id="autonomous-embedding-not-detected">Autonomous embedding column not detected</h3> <p><strong>Issue</strong>: BigQuery can't detect an autonomous embedding column. This might occur if your script uses a temporary table, and the reference to the original table is lost.</p> <p><strong>Solution</strong>: Use the <code translate="no" dir="ltr">embeddings</code> parameter to explicitly pass an autonomous embedding column—for example, <code translate="no" dir="ltr">embeddings =&gt; content_embedding.result</code>—which triggers cost optimization.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="generative-ai-overview#managed_ai_functions">generative AI in BigQuery</a>.</li> <li>Learn more about <a href="control-genai-costs">controlling generative AI costs with daily quotas in BigQuery</a>.</li> <li>Refer to the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-if"><code translate="no" dir="ltr">AI.IF</code> function</a> documentation.</li> <li>Refer to the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-classify"><code translate="no" dir="ltr">AI.CLASSIFY</code> function</a> documentation.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/optimize-ai-functions" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/optimize-ai-functions</a>
+  </p>
+</div>

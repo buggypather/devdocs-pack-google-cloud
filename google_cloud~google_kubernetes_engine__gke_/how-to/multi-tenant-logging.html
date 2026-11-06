@@ -1,0 +1,126 @@
+<h1>Set up multi-tenant logging</h1>  <p>This page explains how to configure multi-tenant logging for Google Kubernetes Engine (GKE) clusters.</p> <p>It's common for multiple teams to share a single GKE cluster. Sharing a cluster provides multiple advantages including easier service discovery, simplified security, and it means that cluster administrators have fewer clusters to maintain. Individual application teams often have their own separate <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project</a>, however. This structure, having a main GKE cluster, but separate namespaces for each application team, is called multi-tenancy. The application team's project is called the <em>tenant</em>.</p> <p>With Google Cloud, GKE cluster admins can create a system where logs for the cluster remain in the main GKE project, and tenant logs are distributed to tenant projects. To configure your logs this way, use the <a href="https://docs.cloud.google.com/logging/docs/routing/overview">Log Router</a>. The Log Router gives you control over how logs flow within your Google Cloud project and how logs are routed to supported destinations.</p> <p>To create tenant-specific logs, the cluster admin creates a <a href="https://docs.cloud.google.com/logging/docs/export">sink</a> to route log entries to each tenant's project. In each tenant project, individual teams can control how the logs are stored and used, such as monitoring the logs by configuring log-based metrics and log-based alerts.</p> <p>We recommend that <code translate="no" dir="ltr">_Default</code> sinks in main GKE projects include an <a href="https://docs.cloud.google.com/logging/docs/exclusions">exclusion filter</a>. The exclusion filter prevents tenant logs from being ingested in both the main GKE project and the tenant project.</p> <h2 id="prerequisites">Prerequisites</h2> <ul> <li>Become familiar with the following documents about multi-tenancy and routing: <ul> <li><a href="../best-practices/enterprise-multitenancy">Best practices for enterprise multi-tenancy on GKE</a></li> <li><a href="https://docs.cloud.google.com/logging/docs/routing/overview">Route and storage overview</a></li> <li><a href="https://docs.cloud.google.com/logging/docs/export/configure_export_v2">Route logs to supported destinations</a></li> </ul>
+</li> <li>Ensure that you have an existing tenant project and main project.</li> </ul> <h2 id="configure_multi-tenant_logging">Configure multi-tenant logging</h2> <p>You can configure multi-tenant logging by using the Google Cloud CLI or the Google Cloud console.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To configure multi-tenant logging for GKE clusters, complete the following steps:</p> <ol> <li>
+<p>Set the following environment variables:</p> 
+<pre data-language="bash">export TENANT_NAMESPACE="TENANT_NAMESPACE"
+export MAIN_PROJECT="MAIN_PROJECT_ID"
+export TENANT_PROJECT="TENANT_PROJECT_ID"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TENANT_NAMESPACE</var></code>: the name for the tenant project namespace</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAIN_PROJECT_ID</var></code>: the project ID for your main project</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TENANT_PROJECT_ID</var></code>: the project ID for your tenant project</li> </ul>
+</li> <li>
+<p>Create a namespace in your multi-tenant cluster:</p> 
+<pre data-language="bash">kubectl create namespace $TENANT_NAMESPACE
+</pre>
+</li> <li>
+<p>Create a log sink in the <em>main</em> GKE project:</p> 
+<pre data-language="bash">gcloud logging sinks create gke-$TENANT_NAMESPACE-sink \
+logging.googleapis.com/projects/$TENANT_PROJECT \
+    --project=$MAIN_PROJECT \
+    --log-filter=resource.labels.namespace_name="$TENANT_NAMESPACE" \
+    --description="Log sink to $TENANT_PROJECT for $TENANT_NAMESPACE namespace"
+</pre> <p>This command creates a log sink that sends all logs that are related to the <code translate="no" dir="ltr">$TENANT_NAMESPACE</code> namespace to the tenant project.</p> <p>You might need to use a more restrictive <code translate="no" dir="ltr">--log-filter</code>. For example, if your cluster and tenant have the same namespace, then add a cluster filter.</p> <p>For more information about these fields, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/logging/sinks/create"><code translate="no" dir="ltr">gcloud logging sinks create</code> API documentation</a>.</p>
+</li> <li>
+<p>Get the writer identity from the sink in the main project and assign it to an environment variable.</p> 
+<pre data-language="bash">export SERVICE_ACCOUNT=$(gcloud logging sinks describe gke-$TENANT_NAMESPACE-sink \
+    --project=$MAIN_PROJECT \
+    --format='value(writerIdentity)')
+</pre>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/logging/docs/access-control#logging.logWriter">Logs Writer</a> (<code translate="no" dir="ltr">logging.bucketWriter</code>) role to the service account used by the sink. The following command grants the main project permissions to write logs to the tenant project:</p> 
+<pre data-language="bash"> gcloud projects add-iam-policy-binding $TENANT_PROJECT \
+     --member=$SERVICE_ACCOUNT --role='roles/logging.logWriter' \
+     --condition="expression=resource.name.endsWith(\"projects/$TENANT_PROJECT\"),title=Log writer for $TENANT_NAMESPACE,description=Grants Logs Writer role to service account $SERVICE_ACCOUNT used by gke-$TENANT_NAMESPACE-sink"
+</pre> <p>For more information about these fields, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/projects/add-iam-policy-binding"><code translate="no" dir="ltr">gcloud projects add-iam-policy-binding</code> API documentation</a>.</p>
+</li> <li>
+<p>Optionally, create an exclusion filter for the sink that routes logs to the <code translate="no" dir="ltr">_Default</code> bucket of the main project. If you don't create an exclusion filter on the <code translate="no" dir="ltr">_Default</code> bucket, then the routed logs appear in both the <code translate="no" dir="ltr">_Default</code> bucket of the main project and the tenant log bucket. To create an exclusion filter, do the following:</p> 
+<pre data-language="bash">gcloud logging sinks update _Default --project=$MAIN_PROJECT \
+    --add-exclusion="name=gke-$TENANT_NAMESPACE-default-exclusion,description=\"Exclusion filter on the _Default bucket for $TENANT_NAMESPACE\",filter=resource.labels.namespace_name=\"$TENANT_NAMESPACE\""
+</pre> <p>For more information about these fields, see the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/logging/sinks/update"><code translate="no" dir="ltr">gcloud logging sinks update</code> API documentation</a>.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To implement multi-tenant logging for GKE, complete the following steps:</p> <ol> <li>
+<p>Create the log sink in the main project:</p> <ol> <li>Use the Google Cloud console project picker to select the main GKE project.</li> <li> <p>In the Google Cloud console, go to the <b>Log Router</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/router" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/router">Go to <b>Log Router</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Logging</b>.</p>
+</li> <li>In the <strong>Log Router</strong> page, click <strong>Create sink</strong>.</li> <li>Enter a <strong>Name</strong> and <strong>Description</strong> for your sink and then click <strong>Next</strong>.</li> <li>In the <strong>Select sink service</strong> menu, select <strong>Other project</strong>.</li> <li>
+<p>In the <strong>Sink destination</strong> field, add the following destination:</p> 
+<pre data-language="bash">logging.googleapis.com/projects/TENANT_PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">TENANT_PROJECT_ID</var></code> with the project ID of your tenant project.</p>
+</li> <li><p>Click <strong>Next</strong>.</p></li> <li>
+<p>In the <strong>Build inclusion filter</strong> add the following filter:</p> 
+<pre data-language="bash">resource.labels.namespace_name="TENANT_NAMESPACE"
+</pre> <p>Replace <var translate="no">TENANT_NAMESPACE</var> with the name of your tenant project's namespace.</p> <p>You might want a more restrictive inclusion filter. For example, when your cluster and tenant have the same namespace, consider adding a clause to include only log entries for a specific cluster.</p>
+</li> <li><p>Click <strong>Create sink</strong>. Your new sink appears in the <strong>Log Router Sinks</strong> list.</p></li> </ol>
+</li> <li>
+<p>Copy the sink's writer identity to your clipboard:</p> <ol> <li>In the <strong>Log Router</strong> page, locate the log sink.</li> <li>For that sink, click <span class="material-icons" aria-hidden="true" translate="no">more_vert</span> <strong>More</strong>, and then select <strong>View sink details</strong>.</li> <li>In the <strong>Sink details</strong> pane, locate the <strong>Writer identity</strong> field, and then copy the value into your clipboard. Omit <code translate="no" dir="ltr">serviceAccount:</code> from the copied value.</li> </ol> <aside class="note"><strong>Note:</strong><span> If the <strong>Writer identity</strong> field for your sink lists the value of <strong>None</strong>, then the sink is routing log entries to a log bucket in the current Google Cloud project. That is, you haven't configured the sink to route log entries to a tenant project. For information about how to route log entries to a log bucket in the same Google Cloud project, see <a href="https://docs.cloud.google.com/logging/docs/export/configure_export_v2">Configure and manage sinks</a>.</span></aside>
+</li> <li>
+<p>In the tenant project, grant the <a href="https://docs.cloud.google.com/logging/docs/access-control#logging.logWriter">Logs Writer</a> (<code translate="no" dir="ltr">roles/logging.logWriter</code>) role to the service account used by the main project's sink. The main project needs this permission to write logs to the tenant project.</p> <ol> <li> <p>In the Google Cloud console, go to the <b>IAM</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/iam-admin/iam" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="iam-admin/iam">Go to <b>IAM</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>IAM &amp; Admin</b>.</p>
+</li> <li>Click <strong>Grant access</strong>.</li> <li>In the <strong>New principals</strong> field, add the sink's service account.</li> <li>From the <strong>Select a role</strong> drop-down, select <strong>Logging</strong> and choose <strong>Logs Writer</strong>.</li> <li>Click <strong>Save</strong>.</li> </ol>
+</li> <li>
+<p>Optionally, create an exclusion filter in the <code translate="no" dir="ltr">_Default</code> bucket of the main project to prevent logs that are routed to a tenant project from being written to the <code translate="no" dir="ltr">_Default</code> log bucket in the main project:</p> <ol> <li> <p>In the Google Cloud console, go to the <b>Log Router</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/router" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/router">Go to <b>Log Router</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Logging</b>.</p>
+</li> <li>Next to the <code translate="no" dir="ltr">_Default</code> bucket, click <span class="material-icons" aria-hidden="true" translate="no">more_vert</span> <strong>More</strong> and select <strong>Edit sink</strong>.</li> <li>In the <strong>Choose logs to filter out of sink</strong> section, click <strong>Add exclusion</strong>.</li> <li>Add a filter name.</li> <li>
+<p>In the <strong>Build an exclusion filter</strong> box, add the following:</p> 
+<pre data-language="bash">resource.labels.namespace_name="TENANT_NAMESPACE"
+</pre>
+</li> <li><p>Click <strong>Update sink</strong>.</p></li> </ol>
+</li> </ol></section> </div> <h2 id="verify_tenant_logs">Verify tenant logs</h2> <p>After you have begun using workloads that use <var translate="no">TENANT_NAMESPACE</var>, you can verify that the tenant project is receiving tenant-specific logs:</p> <ol> <li>Select the tenant project by using the Google Cloud console project picker.</li> <li> <p>In the Google Cloud console, go to the <span class="material-symbols-outlined" aria-hidden="true" style="vertical-align: middle;">segment</span> <b>Logs Explorer</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/query" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/query">Go to <b>Logs Explorer</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Logging</b>.</p>
+</li> <li>
+<p>In the query-editor field, run the following query:</p> 
+<pre>resource.labels.namespace_name="TENANT_NAMESPACE"
+</pre> <p>In the <strong>Query results</strong> pane, you should see tenant-specific logs that were routed from the main project.</p>
+</li> </ol> <h2 id="use_tenant_logs">Use tenant logs</h2> <p>In the tenant projects, each team can control how the logs are routed, stored, and analyzed. After the logs are routed to the tenant projects, the individual application teams can choose to route their logs to supported destinations like Logging buckets, or to third-party destinations by using Pub/Sub. For information about routing log entries, see <a href="https://docs.cloud.google.com/logging/docs/export/configure_export_v2">Route logs to supported destinations</a>.</p> <p>Individual application teams can also set up alerts based on the contents of logs, or metrics derived from logs. For more information, see <a href="https://docs.cloud.google.com/logging/docs/alerting/monitoring-logs">Monitor your logs</a>.</p> <h2 id="clean_up">Clean up</h2> <p>You can remove the objects you created for multi-tenant logging by using <code translate="no" dir="ltr">gcloud</code> or the Google Cloud console.</p> <aside class="special"><strong>Important:</strong><span> Make sure there are no Pods running in the tenant namespace before executing these commands.</span></aside><div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To remove the objects you created for multi-tenant logging, complete the following steps:</p> <ol> <li>
+<p>Set variables to simplify the following commands:</p> 
+<pre data-language="bash">export TENANT_NAMESPACE="TENANT_NAMESPACE"
+export MAIN_PROJECT="MAIN_PROJECT_ID"
+export TENANT_PROJECT="TENANT_PROJECT_ID"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TENANT_NAMESPACE</var></code>: the name for the tenant project namespace</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAIN-PROJECT-ID</var></code>: the project ID for your main project</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TENANT-PROJECT-ID</var></code>: the project ID for your tenant project</li> </ul>
+</li> <li>
+<p>Remove the <a href="https://docs.cloud.google.com/logging/docs/access-control#logging.logWriter">Logs Writer</a> (<code translate="no" dir="ltr">roles/logging.logWriter</code>) role from the service account in the tenant project:</p> 
+<pre data-language="bash">export SERVICE_ACCOUNT=$(gcloud logging sinks describe gke-$TENANT_NAMESPACE-sink \
+    --project=$MAIN_PROJECT | \
+    --format='value(writerIdentity)'
+
+gcloud projects remove-iam-policy-binding $TENANT_PROJECT \
+    --member=$SERVICE_ACCOUNT \
+    --role='roles/logging.logWriter' \
+    --all
+</pre>
+</li> <li>
+<p>Delete the log sink:</p> 
+<pre data-language="bash">gcloud logging sinks delete gke-$TENANT_NAMESPACE-sink \
+    --project=$MAIN_PROJECT
+</pre>
+</li> <li>
+<p>Delete the namespace:</p> 
+<pre data-language="bash">kubectl delete namespace $TENANT_NAMESPACE
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the tenant project, remove the <a href="https://docs.cloud.google.com/logging/docs/access-control#logging.logWriter">Logs Writer</a> (<code translate="no" dir="ltr">roles/logging.logWriter</code>) role from the service account:</p> <ol> <li> <p>In the Google Cloud console, go to the <b>IAM</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/iam-admin/iam" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="iam-admin/iam">Go to <b>IAM</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>IAM &amp; Admin</b>.</p>
+</li> <li>For the service account you want to delete, click <i class="material-icons" aria-hidden="true" translate="no">edit</i> <strong>Edit principal</strong>.</li> <li>In the <strong>Edit access</strong> panel, click <span class="material-icons" aria-hidden="true" translate="no">delete</span> <strong>Delete role</strong> next to the Logs Writer role and click <strong>Save</strong>.</li> </ol>
+</li> <li>
+<p>In the main project, delete the log sink:</p> <ol> <li>Use the Google Cloud console project picker to select the tenant GKE project.</li> <li> <p>In the Google Cloud console, go to the <b>Log Router</b> page: </p>
+<p><a class="button button-primary" href="https://console.cloud.google.com/logs/router" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="logs/router">Go to <b>Log Router</b></a> </p> <p>If you use the search bar to find this page, then select the result whose subheading is <b>Logging</b>.</p>
+</li> <li>For the sink you want to delete, click <i class="material-icons" aria-hidden="true" translate="no">more_vert</i> <strong>More</strong>.</li> <li>Select <strong>Delete sink</strong>.</li> <li>In the confirmation panel, click <strong>Delete</strong>.</li> </ol>
+</li> </ol></section> </div> <h2 id="limitations">Limitations</h2> <p>Multi-tenant logging has the following limitations:</p> <ul> <li>The quota for the number of log sinks per project is 200. If you require more than 200 tenants, request a quota increase by opening a <a href="https://docs.cloud.google.com/support/docs/customer-care-procedures">support case</a>.</li> <li>
+<p>There is a limit of 50 exclusion filters per log bucket. If you intend to have more than 50 tenants, the exclusion filter approach for the <code translate="no" dir="ltr">_Default</code> bucket needs to be revised. As an alternative, you might do the following:</p> <ul> <li>
+<p>Create a single exclusion filter that excludes all non-system or non-default namespaces using this command:</p> 
+<pre>gcloud logging sinks update _Default \
+--project=$MAIN_PROJECT \
+--add-exclusion="name=gke-all-tenant-default-exclusion,description=\"Exclusion filter on the _Default bucket for all tenants\",filter=resource.labels.namespace_name !~ \"kube\" AND resource.labels.namespace_name !~ \"system\ AND resource.labels.namespace_name != \"Default\""
+</pre>
+</li> <li><p>Duplicate logs between the tenant project and the main project by not creating the exclusion filter.</p></li> </ul>
+</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="../best-practices/enterprise-multitenancy">Best practices for enterprise multi-tenancy on GKE</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/multi-tenant-logging" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/multi-tenant-logging</a>
+  </p>
+</div>

@@ -1,0 +1,440 @@
+<h1>Authenticating service-to-service</h1> <p>If your architecture is using multiple services, these services likely need to communicate with each other, using either asynchronous or synchronous means. Many of these services may be private and therefore <a href="../securing/managing-access">require credentials for access</a>.</p> <aside class="note"><strong>Note:</strong><span> There are no networking charges for service-to-service traffic between two services in the same region.</span></aside> <p>For <em>asynchronous</em> communication, you can use the following Google Cloud services:</p> <ul> <li>
+<a href="../triggering/using-tasks">Cloud Tasks</a> for one to one asynchronous communication</li> <li>
+<a href="../events/pubsub-push">Pub/Sub</a> for one to many, one to one, and many to one asynchronous communication</li> <li>
+<a href="../triggering/using-scheduler">Cloud Scheduler</a> for regularly scheduled asynchronous communication</li> <li>
+<a href="https://docs.cloud.google.com/eventarc/docs/creating-triggers">Eventarc</a> for event-based communication</li> </ul> <p>In all of these cases, the service used manages the interaction with the receiving service, based on the configuration you set up.</p> <p>But for <em>synchronous</em> communication, your service calls another service directly, over HTTP, using its endpoint URL. For this use case, you should make sure that each service is only able to make requests to specific services. For example, if you have a <code translate="no" dir="ltr">login</code> service, it should be able to access the <code translate="no" dir="ltr">user-profiles</code> service, but not the <code translate="no" dir="ltr">search</code> service.</p> <p>In this situation, Google recommends that you use <a href="https://docs.cloud.google.com/iam/docs/understanding-service-accounts">IAM</a> and a service identity based on a <a href="../securing/service-identity#per-service-identity">per-service user-managed service account</a> that has been granted the <a href="https://docs.cloud.google.com/iam/docs/best-practices-service-accounts#limit-service-account-privileges">minimum set</a> of permissions required to do its work.</p> <p>In addition, the request must present proof of the calling service's identity. To do this, configure your calling service to add a Google-signed <a href="https://openid.net/connect/" class="external">OpenID Connect</a> ID token as part of the request.</p> <h2 id="set-up-sa">Set up the service account</h2> <aside class="note"><strong>Note:</strong><span> If you do not have a service account you want to use, you can <a href="https://docs.cloud.google.com/iam/docs/creating-managing-service-accounts#creating">create a new one</a>.</span></aside> <p>To set up a service account, you configure the receiving service to accept requests from the calling service by making the calling service's service account a <em>principal</em> on the receiving service. Then you grant that service account the Cloud Run Invoker (<code translate="no" dir="ltr">roles/run.invoker</code>) role. To do both of these tasks, follow the instructions in the appropriate tab:</p> <div> <section><p class="_code-tab"><strong>Console UI</strong></p>
+<ol> <li>
+<p>Go to the Google Cloud console: </p>
+<p><a href="https://console.cloud.google.com/run/" class="button button-primary" target="console">Go to Google Cloud console</a></p>
+</li> <li><p>Select the receiving service.</p></li> <li><p>Click <strong>Show Info Panel</strong> in the top right corner to show the <strong>Permissions</strong> tab.</p></li> <li>
+<p>Click <strong>Add principal</strong>.</p> <ol> <li><p>Enter the identity of the calling service. This is usually an email address, by default <code translate="no" dir="ltr">PROJECT_NUMBER-compute@developer.gserviceaccount.com</code>.</p></li> <li><p>Select the <code translate="no" dir="ltr">Cloud Run Invoker</code> role from the <strong>Select a role</strong> drop-down menu.</p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Use the <code translate="no" dir="ltr">gcloud run services add-iam-policy-binding</code> command:</p> 
+<pre data-language="bash">gcloud run services add-iam-policy-binding RECEIVING_SERVICE \
+  --member='serviceAccount:CALLING_SERVICE_IDENTITY' \
+  --role='roles/run.invoker'</pre> <p>where <code translate="no" dir="ltr"><var translate="no">RECEIVING_SERVICE</var></code> is the name of the receiving service, and <code translate="no" dir="ltr"><var translate="no">CALLING_SERVICE_IDENTITY</var></code> is the email address of the service account, by default <code translate="no" dir="ltr">PROJECT_NUMBER-compute@developer.gserviceaccount.com</code>.</p></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<p>To learn how to apply or remove a Terraform configuration, see <a href="https://docs.cloud.google.com/docs/terraform/basic-commands">Basic Terraform commands</a>.</p> Add the following to a <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_service"><code translate="no" dir="ltr">google_cloud_run_v2_service</code></a> resource in your Terraform configuration:<br> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_cloud_run_v2_service" "public" {
+  name     = "public-service"
+  location = "us-central1"
+
+  deletion_protection = false # set to "true" in production
+
+  template {
+    containers {
+      # TODO&lt;developer&gt;: replace this with a public service container
+      # (This service can be invoked by anyone on the internet)
+      image = "us-docker.pkg.dev/cloudrun/container/hello"
+
+      # Include a reference to the private Cloud Run
+      # service's URL as an environment variable.
+      env {
+        name  = "URL"
+        value = google_cloud_run_v2_service.private.uri
+      }
+    }
+    # Give the "public" Cloud Run service
+    # a service account's identity
+    service_account = google_service_account.default.email
+  }
+}</pre> </div> <p>Replace <code translate="no" dir="ltr">us-docker.pkg.dev/cloudrun/container/hello</code> with a reference to your container image.</p> <p>The following Terraform code makes the initial service public.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">data "google_iam_policy" "public" {
+  binding {
+    role = "roles/run.invoker"
+    members = [
+      "allUsers",
+    ]
+  }
+}
+
+resource "google_cloud_run_service_iam_policy" "public" {
+  location = google_cloud_run_v2_service.public.location
+  project  = google_cloud_run_v2_service.public.project
+  service  = google_cloud_run_v2_service.public.name
+
+  policy_data = data.google_iam_policy.public.policy_data
+}</pre> </div> <p>The following Terraform code creates a second Cloud Run service intended to be <em>private</em>.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_cloud_run_v2_service" "private" {
+  name     = "private-service"
+  location = "us-central1"
+
+  deletion_protection = false # set to "true" in production
+
+  template {
+    containers {
+      // TODO&lt;developer&gt;: replace this with a private service container
+      // (This service should only be invocable by the public service)
+      image = "us-docker.pkg.dev/cloudrun/container/hello"
+    }
+  }
+}</pre> </div> <p>Replace <code translate="no" dir="ltr">us-docker.pkg.dev/cloudrun/container/hello</code> with a reference to your container image.</p> <p>The following Terraform code creates a service account.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">resource "google_service_account" "default" {
+  account_id   = "cloud-run-interservice-id"
+  description  = "Identity used by a public Cloud Run service to call private Cloud Run services."
+  display_name = "cloud-run-interservice-id"
+}</pre> </div> <p>The following Terraform code makes the second service private by granting only the calling service account permission to invoke it.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">data "google_iam_policy" "private" {
+  binding {
+    role = "roles/run.invoker"
+    members = [
+      "serviceAccount:${google_service_account.default.email}",
+    ]
+  }
+}
+
+resource "google_cloud_run_service_iam_policy" "private" {
+  location = google_cloud_run_v2_service.private.location
+  project  = google_cloud_run_v2_service.private.project
+  service  = google_cloud_run_v2_service.private.name
+
+  policy_data = data.google_iam_policy.private.policy_data
+}</pre> </div> </section> </div> <h2 id="acquire-token">Acquire and configure the ID token</h2> <p>After you grant the proper role to the calling service account, follow these steps:</p> <ol> <li>
+<p>Fetch a Google-signed <a href="https://docs.cloud.google.com/docs/authentication/token-types#identity-tokens">ID token</a> by using one of the methods described in the following section. Set the audience claim (<code translate="no" dir="ltr">aud</code>) to the URL of the receiving service or a configured <a href="../configuring/custom-audiences">custom audience</a>. If you are not using a custom audience, the <code translate="no" dir="ltr">aud</code> value must remain as the URL of the service, even when making requests to a <a href="../rollouts-rollbacks-traffic-migration#tags">specific traffic tag</a>.</p> <aside class="note"><strong>Note:</strong><span> Custom domains are currently not supported for the <code translate="no" dir="ltr">aud</code> value. </span></aside>
+</li> <li>
+<p>Add the ID token you fetched from the previous step into one of the following headers in the request to the receiving service:</p> <ul> <li>An <code translate="no" dir="ltr">Authorization: Bearer ID_TOKEN</code> header.</li> <li>An <code translate="no" dir="ltr">X-Serverless-Authorization: Bearer ID_TOKEN</code> header. You can use this header if your application already uses the <code translate="no" dir="ltr">Authorization</code> header for custom authorization. This removes the signature before passing the token to the user container.</li> </ul> <aside class="note"><strong>Note:</strong><span> If you provide both headers, only the <code translate="no" dir="ltr">X-Serverless-Authorization</code> header is checked.</span></aside>
+</li> </ol> <p>For other ways to get an ID token that are not described on this page, see <a href="https://docs.cloud.google.com/docs/authentication/get-id-token#methods">Methods for getting an ID token</a>.</p> <h3 id="use_the_authentication_libraries">Use the authentication libraries</h3> <p>One way to acquire and configure the ID token process is to use the authentication libraries. This code works in <strong>any environment</strong>, even outside of Google Cloud, where the libraries can obtain authentication credentials for a service account. To use this method, you <a href="https://docs.cloud.google.com/iam/docs/keys-create-delete#creating">download a service account key file</a>, and set the environment variable <code translate="no" dir="ltr">GOOGLE_APPLICATION_CREDENTIALS</code> to the path of the service account key file. For more information, see <a href="https://docs.cloud.google.com/docs/authentication/set-up-adc-on-premises#wlif-key">service account key</a>.</p> <aside class="note"><strong>Note:</strong><span> Service account keys are a security risk if not managed correctly. You should <a href="https://docs.cloud.google.com/docs/authentication#auth-decision-tree"> choose a more secure alternative to service account keys</a> whenever possible. If you must authenticate with a service account key, you are responsible for the security of the private key and for other operations described by <a href="https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys"> Best practices for managing service account keys</a>. If you are prevented from creating a service account key, service account key creation might be disabled for your organization. For more information, see <a href="https://docs.cloud.google.com/resource-manager/docs/secure-by-default-organizations"> Managing secure-by-default organization resources</a>. <p> If you acquired the service account key from an external source, you must validate it before use. For more information, see <a href="https://docs.cloud.google.com/docs/authentication/external/externally-sourced-credentials"> Security requirements for externally sourced credentials</a>. </p> </span></aside> <p>This code does not accept authentication credentials for a <a href="https://docs.cloud.google.com/docs/authentication#user-accounts">user account</a>.</p> <div id="run-service-to-service-example-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Node.js</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">/**
+ * TODO(developer): Uncomment these variables before running the sample.
+ */
+// Example: https://my-cloud-run-service.run.app/books/delete/12345
+// const url = 'https://TARGET_HOSTNAME/TARGET_URL';
+
+// Example (Cloud Run): https://my-cloud-run-service.run.app/
+// const targetAudience = 'https://TARGET_AUDIENCE/';
+
+const {GoogleAuth} = require('google-auth-library');
+const auth = new GoogleAuth();
+
+async function request() {
+  console.info(`request ${url} with target audience ${targetAudience}`);
+  const client = await auth.getIdTokenClient(targetAudience);
+
+  // Alternatively, one can use `client.idTokenProvider.fetchIdToken`
+  // to return the ID Token.
+  const res = await client.fetch(url);
+  console.info(res.data);
+}
+
+request().catch(err =&gt; {
+  console.error(err.message);
+  process.exitCode = 1;
+});</pre> </div> </section> <section> <p class="_code-tab"><strong>Python</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">import urllib
+
+import google.auth.transport.requests
+import google.oauth2.id_token
+
+
+def make_authorized_get_request(endpoint, audience):
+    """
+    make_authorized_get_request makes a GET request to the specified HTTP endpoint
+    by authenticating with the ID token obtained from the google-auth client library
+    using the specified audience value.
+    """
+
+    # Cloud Run uses your service's hostname as the `audience` value
+    # audience = 'https://my-cloud-run-service.run.app/'
+    # For Cloud Run, `endpoint` is the URL (hostname + path) receiving the request
+    # endpoint = 'https://my-cloud-run-service.run.app/my/awesome/url'
+
+    req = urllib.request.Request(endpoint)
+
+    auth_req = google.auth.transport.requests.Request()
+    id_token = google.oauth2.id_token.fetch_id_token(auth_req, audience)
+
+    req.add_header("Authorization", f"Bearer {id_token}")
+    response = urllib.request.urlopen(req)
+
+    return response.read()
+
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+import (
+	"context"
+	"fmt"
+	"io"
+
+	"google.golang.org/api/idtoken"
+)
+
+// `makeGetRequest` makes a request to the provided `targetURL`
+// with an authenticated client using audience `audience`.
+func makeGetRequest(w io.Writer, targetURL string, audience string) error {
+	// Example `audience` value (Cloud Run): https://my-cloud-run-service.run.app/
+	// (`targetURL` and `audience` will differ for non-root URLs and GET parameters)
+	ctx := context.Background()
+
+	// client is a http.Client that automatically adds an "Authorization" header
+	// to any requests made.
+	client, err := idtoken.NewClient(ctx, audience)
+	if err != nil {
+		return fmt.Errorf("idtoken.NewClient: %w", err)
+	}
+
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		return fmt.Errorf("client.Get: %w", err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("io.Copy: %w", err)
+	}
+
+	return nil
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpRequest;
+import com.google.api.client.http.HttpResponse;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import com.google.auth.http.HttpCredentialsAdapter;
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.IdTokenCredentials;
+import com.google.auth.oauth2.IdTokenProvider;
+import java.io.IOException;
+
+public class Authentication {
+
+  // makeGetRequest makes a GET request to the specified Cloud Run or
+  // Cloud Functions endpoint `serviceUrl` (must be a complete URL), by
+  // authenticating with an ID token retrieved from Application Default
+  // Credentials using the specified `audience`.
+  //
+  // Example `audience` value (Cloud Run): https://my-cloud-run-service.run.app/
+  public static HttpResponse makeGetRequest(String serviceUrl, String audience) throws IOException {
+    GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
+    if (!(credentials instanceof IdTokenProvider)) {
+      throw new IllegalArgumentException("Credentials are not an instance of IdTokenProvider.");
+    }
+    IdTokenCredentials tokenCredential =
+        IdTokenCredentials.newBuilder()
+            .setIdTokenProvider((IdTokenProvider) credentials)
+            .setTargetAudience(audience)
+            .build();
+
+    GenericUrl genericUrl = new GenericUrl(serviceUrl);
+    HttpCredentialsAdapter adapter = new HttpCredentialsAdapter(tokenCredential);
+    HttpTransport transport = new NetHttpTransport();
+    HttpRequest request = transport.createRequestFactory(adapter).buildGetRequest(genericUrl);
+    return request.execute();
+  }
+}</pre> </div> </section> </div> <h3 id="use_the_metadata_server">Use the metadata server</h3> <p>If for some reason you <strong>cannot</strong> use the authentication libraries, you can fetch an ID token from the <a href="../securing/service-identity#identity_tokens">Compute metadata server</a> while your container is running on Cloud Run. Note that this method does not work outside of Google Cloud, including from your local machine.</p> 
+<pre>curl "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=[AUDIENCE]" \
+     -H "Metadata-Flavor: Google"
+</pre> <p>Where AUDIENCE is the URL of the service you are invoking or a configured <a href="../configuring/custom-audiences">custom audience</a>.</p> <p>The following table summarizes the main parts of a metadata query request:</p> <table> <thead> <tr> <th>Components</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td>Root URL</td> <td>
+<p>All metadata values are defined as sub-paths below the following root URL:</p> 
+<pre>http://metadata.google.internal/computeMetadata/v1</pre>
+</td> </tr> <tr> <td>Request header</td> <td>
+<p>The following header must be in each request:</p> 
+<pre>Metadata-Flavor: Google</pre> <p>This header indicates that the request was sent with the intention of retrieving metadata values, rather than unintentionally from an insecure source, and lets the metadata server return the data you requested. If you don't provide this header, the metadata server denies your request. </p> <aside class="note"><strong>Note:</strong> Previously, the <code translate="no" dir="ltr">X-Google-Metadata-Request: True</code> header was required in requests. Both of these headers are still supported, but we recommend that you use the <code translate="no" dir="ltr">Metadata-Flavor</code> header rather than the <code translate="no" dir="ltr">X-Google-Metadata-Request: True</code> header.</aside> </td> </tr> </tbody> </table> <aside class="note"><strong>Note:</strong><span> ID tokens are <a href="https://en.wikipedia.org/wiki/JSON_Web_Token" class="external">JSON Web Tokens (JWTs)</a> that expire approximately an hour after creation. If you fetch tokens from the <a href="../securing/service-identity#identity_tokens">metadata server</a>, you will always get a valid token. If you choose to cache tokens yourself, you can decode the token and check the <code translate="no" dir="ltr">exp</code> time to see if you need to refresh the token.</span></aside> <p>For an end-to-end walkthrough of an application using this service-to-service authentication technique, follow the <a href="../tutorials/secure-services">securing Cloud Run services tutorial</a>.</p> <h3 id="use_workload_identity_federation_from_outside">Use workload identity federation from outside Google Cloud</h3> <p>If your environment uses an identity provider supported by <a href="https://docs.cloud.google.com/iam/docs/workload-identity-federation">workload identity federation</a>, you can use the following method to securely authenticate to your Cloud Run service from outside Google Cloud:</p> <ol> <li><p>Set up your service account as described in <a href="#set-up-sa">Set up the service account</a> on this page.</p></li> <li><p>Configure workload identity federation for your identity provider as described in <a href="https://docs.cloud.google.com/iam/docs/configuring-workload-identity-federation">Configuring workload identity federation</a>.</p></li> <li><p>Follow the instructions in <a href="https://docs.cloud.google.com/iam/docs/using-workload-identity-federation#impersonate">Granting external identities permission to impersonate a service account</a>.</p></li> <li>
+<p><a href="https://docs.cloud.google.com/iam/docs/using-workload-identity-federation#rest">Use the REST API to acquire a short-lived token</a>, but instead of calling <a href="https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken"><code translate="no" dir="ltr">generateAccessToken</code></a> to obtain an access token, call <a href="https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateIdToken"><code translate="no" dir="ltr">generateIdToken</code></a> instead to get an ID token.</p> <p>For example, using cURL:</p> 
+<pre>ID_TOKEN=$(curl -0 -X POST https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/SERVICE_ACCOUNT:generateIdToken \
+  -H "Content-Type: text/json; charset=utf-8" \
+  -H "Authorization: Bearer $STS_TOKEN" \
+  -d @- &lt;&lt;EOF | jq -r .token
+  {
+      "audience": "SERVICE_URL"
+  }
+EOF
+)
+echo $ID_TOKEN</pre> <p>Where <code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT</var></code> is the email address of the service account the workload identity pool is configured to access, and <code translate="no" dir="ltr"><var translate="no">SERVICE_URL</var></code> is the URL of the Cloud Run service you are invoking. This value should remain as the URL of the service, even when making requests to a <a href="../rollouts-rollbacks-traffic-migration#tags">specific traffic tag</a>. <code translate="no" dir="ltr">$STS_TOKEN</code> is the Security Token Service token you received in the previous step in the Workload Identity Federation instructions.</p>
+</li> </ol> <p>You can include the ID token from the previous step in the request to the service by using an <code translate="no" dir="ltr">Authorization: Bearer ID_TOKEN</code> header or an <code translate="no" dir="ltr">X-Serverless-Authorization: Bearer ID_TOKEN</code> header. If both headers are provided, only the <code translate="no" dir="ltr">X-Serverless-Authorization</code> header is checked.</p> <h3 id="sa-key">Use a downloaded service account key from outside Google Cloud</h3> <p>If Workload Identity Federation is not appropriate for your environment, you can use a downloaded service account key to authenticate from outside Google Cloud. Update your client code to use the authentication libraries as <a href="#acquire-token">described previously</a>. For more information, see <a href="https://docs.cloud.google.com/docs/authentication/set-up-adc-on-premises#wlif-key">service account key</a>.</p> <aside class="note"><strong>Note:</strong><span> Service account keys are a security risk if not managed correctly. You should <a href="https://docs.cloud.google.com/docs/authentication#auth-decision-tree"> choose a more secure alternative to service account keys</a> whenever possible. If you must authenticate with a service account key, you are responsible for the security of the private key and for other operations described by <a href="https://docs.cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys"> Best practices for managing service account keys</a>. If you are prevented from creating a service account key, service account key creation might be disabled for your organization. For more information, see <a href="https://docs.cloud.google.com/resource-manager/docs/secure-by-default-organizations"> Managing secure-by-default organization resources</a>. <p> If you acquired the service account key from an external source, you must validate it before use. For more information, see <a href="https://docs.cloud.google.com/docs/authentication/external/externally-sourced-credentials"> Security requirements for externally sourced credentials</a>. </p> </span></aside> <p>You can acquire a Google-signed ID token by using a self-signed JWT, but this is quite complicated and potentially error-prone. The basic steps are as follows:</p> <ol> <li><p>Self-sign a service account JWT with the <code translate="no" dir="ltr">target_audience</code> claim set to the URL of the receiving service or a configured <a href="../configuring/custom-audiences">custom audience</a>. If not using custom domains, the <code translate="no" dir="ltr">target_audience</code> value should remain as the URL of the service, even when making requests to a <a href="../rollouts-rollbacks-traffic-migration#tags">specific traffic tag</a>.</p></li> <li><p>Exchange the self-signed JWT for a Google-signed ID token, which should have the <code translate="no" dir="ltr">aud</code> claim set to the preceding URL.</p></li> <li><p>Include the ID token in the request to the service by using an <code translate="no" dir="ltr">Authorization: Bearer ID_TOKEN</code> header or an <code translate="no" dir="ltr">X-Serverless-Authorization: Bearer ID_TOKEN</code> header. If both headers are provided, only the <code translate="no" dir="ltr">X-Serverless-Authorization</code> header is checked.</p></li> </ol> <h2 id="receive-request">Receive authenticated requests</h2> <p>Within the receiving private service, you can parse the authorization header to receive the information being sent by the Bearer token.</p> <div id="run-service-to-service-receive-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Python</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">from flask import Request
+
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport import requests
+from google.oauth2 import id_token
+
+
+def receive_request_and_parse_auth_header(request: Request) -&gt; str:
+    """Parse the authorization header, validate the Bearer token
+    and decode the token to get its information.
+
+    Args:
+        request: Flask request object.
+
+    Returns:
+        One of the following:
+        a) The email from the request's Authorization header.
+        b) A welcome message for anonymous users.
+        c) An error description.
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        # Split the auth type and value from the header.
+        auth_type, creds = auth_header.split(" ", 1)
+
+        if auth_type.lower() == "bearer":
+            # Find more information about `verify_token` function here:
+            # https://google-auth.readthedocs.io/en/master/reference/google.oauth2.id_token.html#google.oauth2.id_token.verify_token
+            try:
+                decoded_token = id_token.verify_token(creds, requests.Request())
+                return f"Hello, {decoded_token['email']}!\n"
+            except GoogleAuthError as e:
+                return f"Invalid token: {e}\n"
+        else:
+            return f"Unhandled header format ({auth_type}).\n"
+
+    return "Hello, anonymous user.\n"</pre> </div> </section> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">import (
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// Parse the authorization header and decode the information beign
+// sent by the Bearer Token
+func (a *app) receiveAuthorizedRequest(w http.ResponseWriter, r *http.Request) {
+	// Allows requests only for the root path ("/") to prevent duplicate calls.
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Request method should be GET.
+	if r.Method != http.MethodGet {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Attempt to retrieve and validate the Authorization header.
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		w.Write([]byte("Hello, anonymous user\n"))
+		return
+	}
+
+	if len(strings.Split(authHeader, " ")) != 2 {
+		http.Error(w, "Malformed Authorization header", http.StatusBadRequest)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	token := strings.Split(authHeader, " ")[1]
+
+	payload, status, err := a.validateToken(token)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+	}
+
+	w.Write(fmt.Appendf(nil, "Hello, %s!\n", payload.Claims["email"]))
+}
+</pre> </div> </section> <section> <p class="_code-tab"><strong>Java</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken;
+import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
+import com.google.api.client.http.apache.v2.ApacheHttpTransport;
+import com.google.api.client.json.gson.GsonFactory;
+import java.util.Arrays;
+import java.util.Collection;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RestController;
+
+@SpringBootApplication
+public class Authentication {
+  @RestController
+  class AuthenticationController {
+
+    private final AuthenticationService authService = new AuthenticationService();
+
+    @GetMapping("/")
+    public ResponseEntity&lt;String&gt; getEmailFromAuthHeader(
+        @RequestHeader(value = "Authorization", required = false) String authHeader) {
+      String responseBody;
+      if (authHeader == null) {
+        responseBody = "Error verifying ID token: missing Authorization header";
+        return new ResponseEntity&lt;&gt;(responseBody, HttpStatus.UNAUTHORIZED);
+      }
+
+      String email = authService.parseAuthHeader(authHeader);
+      if (email == null) {
+        responseBody = "Unauthorized request. Please supply a valid bearer token.";
+        HttpHeaders headers = new HttpHeaders();
+        headers.add("WWW-Authenticate", "Bearer");
+        return new ResponseEntity&lt;&gt;(responseBody, headers, HttpStatus.UNAUTHORIZED);
+      }
+
+      responseBody = "Hello, " + email;
+      return new ResponseEntity&lt;&gt;(responseBody, HttpStatus.OK);
+    }
+  }
+
+  public class AuthenticationService {
+    /*
+     * Parse the authorization header, validate and decode the Bearer token.
+     *
+     * Args:
+     *    authHeader: String of HTTP header with a Bearer token.
+     *
+     * Returns:
+     *    A string containing the email from the token.
+     *    null if the token is invalid or the email can't be retrieved.
+     */
+    public String parseAuthHeader(String authHeader) {
+      // Split the auth type and value from the header.
+      String[] authHeaderStrings = authHeader.split(" ");
+      if (authHeaderStrings.length != 2) {
+        System.out.println("Malformed Authorization header");
+        return null;
+      }
+      String authType = authHeaderStrings[0];
+      String tokenValue = authHeaderStrings[1];
+      // Validate and decode the ID token in the header.
+      if (!"bearer".equals(authType.toLowerCase())) {
+        System.out.println("Unhandled header format: " + authType);
+        return null;
+      }
+
+      // Get the service URL from the environment variable
+      // set at the time of deployment.
+      String serviceUrl = System.getenv("SERVICE_URL");
+      // Define the expected audience as the Service Base URL.
+      Collection&lt;String&gt; audience = Arrays.asList(serviceUrl);
+
+      try {
+        // Find more information about the verification process in:
+        // https://developers.google.com/identity/sign-in/web/backend-auth#java
+        // https://cloud.google.com/java/docs/reference/google-api-client/latest/com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier
+        GoogleIdTokenVerifier verifier =
+            new GoogleIdTokenVerifier.Builder(new ApacheHttpTransport(), new GsonFactory())
+                .setAudience(audience)
+                .build();
+        GoogleIdToken googleIdToken = verifier.verify(tokenValue);
+
+        // More info about the structure for the decoded ID Token here:
+        // https://cloud.google.com/docs/authentication/token-types#id
+        // https://cloud.google.com/java/docs/reference/google-api-client/latest/com.google.api.client.googleapis.auth.oauth2.GoogleIdToken
+        // https://cloud.google.com/java/docs/reference/google-api-client/latest/com.google.api.client.googleapis.auth.oauth2.GoogleIdToken.Payload
+        GoogleIdToken.Payload payload = googleIdToken.getPayload();
+        if (!payload.getEmailVerified()) {
+          System.out.println("Invalid token. Email wasn't verified.");
+          return null;
+        }
+        System.out.println("Email verified: " + payload.getEmail());
+        return payload.getEmail();
+
+      } catch (Exception exception) {
+        System.out.println("Ivalid token: " + exception);
+      }
+      return null;
+    }
+  }
+
+  public static void main(String[] args) {
+    SpringApplication.run(Authentication.class, args);
+  }
+</pre> </div> </section> </div> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken">ID token validation</a>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/authenticating/service-to-service" class="_attribution-link">https://docs.cloud.google.com/run/docs/authenticating/service-to-service</a>
+  </p>
+</div>

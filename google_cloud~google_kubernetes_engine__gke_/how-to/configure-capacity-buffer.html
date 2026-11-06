@@ -1,0 +1,300 @@
+<h1>Configure capacity buffers</h1>  <p>Capacity buffers improve the responsiveness and reliability of critical workloads by proactively managing spare cluster capacity and suspended states of pre-provisioned, pre-configured capacity by using a Kubernetes CapacityBuffer CustomResourceDefinition (CRD). Using capacity buffers lets you explicitly define a specific amount of unused node capacity within your cluster. This reserved capacity helps to reduce Pod scheduling time.</p> <p>When a high-priority workload needs to scale up quickly, the new workload can use the empty capacity immediately without waiting for node provisioning. This approach minimizes latency and avoids resource contention during sudden spikes in demand.</p> <p>This page shows you how to configure fixed-replica, resource-limit, and percentage-based capacity buffers, dedicate a buffer to a specific workload, customize standby buffer behavior, and preload container images.</p> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Create or have access to a GKE cluster running version 1.37.1-gke.3020000 or later. Standby buffers on Autopilot clusters require <a href="../concepts/about-custom-compute-classes">custom ComputeClasses</a>.</li> <li>Enable <a href="node-auto-provisioning">node pool auto-creation</a> on your Standard clusters. In Autopilot clusters, node pool auto-creation is already enabled. Node pool auto-creation is optional but recommended for active buffers and required for standby buffers.</li> </ul> <h2 id="k8s-prereqs">Create prerequisite Kubernetes objects</h2> <p>To configure a CapacityBuffer, you need a namespace that holds all of the required objects (the CapacityBuffer itself, and additional resources like a PodTemplate or workload). The PodTemplate and CapacityBuffer must be in the same namespace. You can create a namespace or use an existing namespace, including the <code translate="no" dir="ltr">default</code> namespace.</p> <p>Depending on which type of CapacityBuffer you're configuring, you also require one of the following:</p> <ul> <li>
+<strong>PodTemplate</strong>: defines the resource requirements for a single unit of buffer capacity. The configuration specified in the CapacityBuffer object references the Pod template.</li> <li>
+<p><strong>Workload</strong>: an existing workload that you reference in the CapacityBuffer object. This guide uses a Deployment object as an example workload, but capacity buffers support any of the following resource types:</p> <ul> <li>Deployment</li> <li>ReplicaSet</li> <li>StatefulSet</li> <li>ReplicationController</li> <li>Job</li> <li>CustomResourceDefinitions (CRDs) that implement the <code translate="no" dir="ltr">scale</code> subresource.</li> </ul>
+</li> </ul> <p>This section provides examples of these objects. If you already have a workload that you want to configure with a capacity buffer, proceed to <a href="#apply-buffer">Apply a capacity buffer</a>.</p> <p>To create an example Kubernetes workload, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">namespace.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: Namespace
+metadata:
+  name: capacity-buffer-example
+  labels:
+    name: capacity-buffer-example
+</pre> <p>This manifest creates a namespace called <code translate="no" dir="ltr">capacity-buffer-example</code>.</p>
+</li> <li>
+<p>Optional: to use capacity buffers with a custom ComputeClass, save the following manifest as <code translate="no" dir="ltr">custom-compute-class.yaml</code>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: ccc-example
+spec:
+  # Buffers are also created according to these priorities
+  priorities:
+  - machineFamily: n4
+  - machineFamily: n4d
+  - machineFamily: c4
+  - machineFamily: c4d
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <p>This manifest creates a custom <code translate="no" dir="ltr">ComputeClass</code> that defines and controls the compute priorities for the nodes that GKE provisions. To learn more, see <a href="../concepts/about-custom-compute-classes">custom ComputeClasses</a>.</p> <aside class="caution"><strong>Caution:</strong><span> If you use a custom ComputeClass with standby buffers and combine <a href="../concepts/about-custom-compute-classes#optimize-rule-priority">active migration to higher-priority nodes</a> (<code translate="no" dir="ltr">activeMigration.optimizeRulePriority: true</code>) with higher-priority Spot VMs rules, GKE gradually migrates standby nodes to Spot VMs. Because suspended Spot VMs can't convert to on-demand VMs when resuming, this configuration can prevent standby nodes from resuming during capacity constraints. For details, see <a href="#standby-resume-fails">Standby buffer nodes fail to resume</a>.</span></aside>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">buffer-pod-template.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: PodTemplate
+metadata:
+  name: buffer-unit-template
+  namespace: capacity-buffer-example # the namespace must be the same namespace as the CapacityBuffer
+template:
+  spec:
+    terminationGracePeriodSeconds: 0
+    containers:
+    - name: buffer-container
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: "1"
+          memory: "1Gi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+    # Optional: Using buffers with a custom ComputeClass /
+    # controls the properties of the provisioned nodes.
+    nodeSelector:
+      cloud.google.com/compute-class: ccc-example
+</pre> <p>This manifest creates a <code translate="no" dir="ltr">PodTemplate</code> that defines the resource requirements for a single unit of buffer capacity (<code translate="no" dir="ltr">1</code> CPU and <code translate="no" dir="ltr">1Gi</code> Memory). This configuration specifies the size of capacity units that GKE provisions for the buffer. For example, with this PodTemplate, GKE won't consider nodes with less than 1 CPU and 1Gi of available resources as part of the buffer, if the cluster scales up.</p>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">sample-workload-deployment.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-workload-ref
+  namespace: capacity-buffer-example # the namespace must be the same namespace as the CapacityBuffer
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: critical-workload
+  template:
+    metadata:
+      labels:
+        app: critical-workload
+    spec:
+      containers:
+      - name: busybox
+        image: busybox
+        command: ["sleep", "3600"]
+        resources:
+          requests:
+            cpu: 100m
+      # Optional: Using buffers with a custom ComputeClass /
+      # controls the properties of the provisioned nodes.
+      nodeSelector:
+        cloud.google.com/compute-class: ccc-example
+</pre> <p>This manifest creates a sample Deployment with 10 replicas, which is the reference object for the percentage-based buffer example in the next section.</p>
+</li> <li>
+<p>Apply the manifests to your cluster:</p> 
+<pre>kubectl apply -f namespace.yaml -f custom-compute-class.yaml -f buffer-pod-template.yaml -f sample-workload-deployment.yaml
+</pre>
+</li> <li>
+<p>Verify that GKE created the objects:</p> 
+<pre>kubectl get podtemplate -n capacity-buffer-example
+kubectl get deployment critical-workload-ref -n capacity-buffer-example
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                   AGE
+buffer-unit-template   1m
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+critical-workload-ref   10/10   10           10          1m
+</pre>
+</li> </ol> <h2 id="apply-buffer">Apply a capacity buffer</h2> <p>This section provides examples of the different types of capacity buffers that you can apply to your workloads.</p> <aside class="note"><strong>Note:</strong><span> It might take up to 5 minutes for the capacity buffer to react to changes.</span></aside> <h3 id="fixed-replicas-buffer">Configure a fixed replicas buffer</h3> <p>Configuring a CapacityBuffer with fixed replicas specifies the exact number of buffer units that you want based on a PodTemplate.</p> <p>To create a buffer with fixed replicas, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">cb-fixed-replicas.yaml</code>:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: fixed-replica-buffer
+  namespace: NAMESPACE
+spec:
+  podTemplateRef:
+    name: POD_TEMPLATE
+  replicas: 3
+  provisioningStrategy: "STRATEGY"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the name of your namespace, for example <code translate="no" dir="ltr">capacity-buffer-example</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_TEMPLATE</var></code>: the PodTemplate that defines your resource requirements, for example <code translate="no" dir="ltr">buffer-unit-template</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">STRATEGY</var></code>: the provisioning strategy, either <code translate="no" dir="ltr">"buffer.x-k8s.io/active-capacity"</code> (default) or <code translate="no" dir="ltr">"buffer.gke.io/standby-capacity"</code>.</li> </ul> <p>This manifest creates a CapacityBuffer resource that references a PodTemplate to request a specific number of buffer units.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f cb-fixed-replicas.yaml
+</pre>
+</li> <li>
+<p>Confirm that GKE applied the capacity buffer:</p> 
+<pre>kubectl get capacitybuffer fixed-replica-buffer -n NAMESPACE
+</pre> <p>The <code translate="no" dir="ltr">replicas</code> field in the status should show <code translate="no" dir="ltr">3</code>, which reflects the number of replicas that you defined in the manifest. The <code translate="no" dir="ltr">STATUS</code> field should show <code translate="no" dir="ltr">ReadyForProvisioning</code>.</p>
+</li> </ol> <h3 id="config-resource-limits-buffer">Configure a resource limits buffer</h3> <p>You can use the <code translate="no" dir="ltr">limits</code> field to define a maximum amount of resources that the buffer should consume, calculated based on your PodTemplate size.</p> <p>To create a resource limits buffer, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">cb-resource-limits.yaml</code>:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: resource-limit-buffer
+  namespace: NAMESPACE
+spec:
+  podTemplateRef:
+    name: POD_TEMPLATE
+  limits:
+    cpu: "5"
+    memory: "5Gi"
+  provisioningStrategy: "STRATEGY"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the name of your namespace, for example <code translate="no" dir="ltr">capacity-buffer-example</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POD_TEMPLATE</var></code>: the PodTemplate that defines your resource requirements, for example <code translate="no" dir="ltr">buffer-unit-template</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">STRATEGY</var></code>: the provisioning strategy, either <code translate="no" dir="ltr">"buffer.x-k8s.io/active-capacity"</code> (default) or <code translate="no" dir="ltr">"buffer.gke.io/standby-capacity"</code>.</li> </ul> <p>This manifest creates a CapacityBuffer resource with a total limit of 5 CPUs and 5 GiB Memory. If you're using the PodTemplate example from the previous step, you define each unit as <code translate="no" dir="ltr">1</code> CPU and <code translate="no" dir="ltr">1Gi</code> Memory, which should result in 5 buffer units.</p>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f cb-resource-limits.yaml
+</pre>
+</li> <li>
+<p>Confirm that GKE applied the capacity buffer:</p> 
+<pre>kubectl get capacitybuffer resource-limit-buffer -n NAMESPACE
+</pre> <p>Check the CapacityBuffer status. The <code translate="no" dir="ltr">replicas</code> field should show a value derived from the limits that you defined. If you're using the PodTemplate example from the previous section, you should see <code translate="no" dir="ltr">5</code> buffer units because this is the maximum number of units that fit within the defined limits.</p>
+</li> </ol> <h3 id="configure-percentage-buffer">Configure a percentage-based buffer</h3> <p>Configuring a percentage-based buffer dynamically sizes the buffer based on a percentage of an existing scalable workload. Percentage-based capacity buffers are supported only for Kubernetes scalable objects that implement the <a href="https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#scale-subresource">scale subresource</a>, such as Deployments, StatefulSets, ReplicaSets, or Jobs. You can't define a percentage-based buffer for Pod templates because they don't have a <code translate="no" dir="ltr">replicas</code> field.</p> <p>In most cases, start with fixed replicas or resource limit strategies rather than percentage-based buffers. Consider the following when deciding:</p> <ul> <li>Percentage-based buffers are less responsive to sudden scale-ups if the workload scales to low numbers or zero because the safety margin decreases in proportion to active Pods.</li> <li>Standby nodes incur compute charges during their initialization period before suspending. Dynamically scaling standby buffers alongside workload fluctuations wastes compute resources, so use fixed replicas or resource limits for standby buffers instead.</li> <li>Percentage-based buffers are mainly useful for active buffers on large deployments that never scale to low replica counts.</li> </ul> <p>To keep a minimum buffer size when the referenced workload scales down, set the <code translate="no" dir="ltr">replicas</code> field together with the <code translate="no" dir="ltr">percentage</code> field. GKE uses whichever field results in more buffer units. To cap the buffer size, also set the <code translate="no" dir="ltr">limits</code> field.</p> <p>For example, consider a buffer with <code translate="no" dir="ltr">percentage: 20</code> and <code translate="no" dir="ltr">replicas: 3</code> that references a Deployment with 10 replicas. Because 20% of 10 replicas is 2, which is less than the <code translate="no" dir="ltr">replicas</code> value of 3, GKE provisions 3 buffer units. If the Deployment scales to 20 replicas, the buffer grows to 4 units. For more information, see the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/capacitybuffer">CapacityBuffer reference documentation</a>.</p> <p>To create a percentage-based buffer, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">cb-percentage-based.yaml</code>:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: percentage-buffer
+  namespace: NAMESPACE
+spec:
+  scalableRef:
+    apiGroup: apps
+    kind: Deployment
+    name: SCALABLE_RESOURCE_NAME
+  percentage: 20
+  provisioningStrategy: "STRATEGY"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the name of your namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SCALABLE_RESOURCE_NAME</var></code>: the name of your scalable resource, for example <code translate="no" dir="ltr">critical-workload-ref</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">STRATEGY</var></code>: the provisioning strategy, either <code translate="no" dir="ltr">"buffer.x-k8s.io/active-capacity"</code> (default) or <code translate="no" dir="ltr">"buffer.gke.io/standby-capacity"</code>.</li> </ul> <p>This manifest creates a CapacityBuffer resource that requests a buffer size equivalent to 20% of the referenced resource's replicas. If you're using the Deployment example from the previous section, the replica value is set to <code translate="no" dir="ltr">10</code>.</p> <aside class="note"><strong>Note:</strong><span> You can set the <code translate="no" dir="ltr">percentage</code> field to a value greater than <code translate="no" dir="ltr">100</code> to create a buffer larger than the referenced workload. GKE rounds calculated buffer replica counts up to the nearest whole number, with a minimum of <code translate="no" dir="ltr">0</code> when the referenced workload has <code translate="no" dir="ltr">0</code> replicas or <code translate="no" dir="ltr">percentage</code> is <code translate="no" dir="ltr">0</code>.</span></aside>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>kubectl apply -f cb-percentage-based.yaml
+</pre>
+</li> <li>
+<p>Confirm that GKE applied the capacity buffer:</p> 
+<pre>kubectl get capacitybuffer percentage-buffer -n NAMESPACE
+</pre> <p>Check the CapacityBuffer status. The <code translate="no" dir="ltr">replicas</code> field should show a value from the percentage calculation. If you're using the Deployment example from the previous section, you should see <code translate="no" dir="ltr">2</code> buffer units, which is 20% of the 10 replicas defined in the Deployment.</p>
+</li> <li>
+<p>Test the dynamic scaling by manually scaling the Deployment up to 20 replicas:</p> 
+<pre>kubectl scale deployment critical-workload-ref -n NAMESPACE --replicas=20
+</pre> <p>The CapacityBuffer controller reacts and automatically scales the buffer to 4 replicas.</p>
+</li> </ol> <h2 id="dedicated-buffer">Dedicate a capacity buffer to a specific workload</h2> <p>By default, any pending Pod that matches a buffer node's scheduling constraints can claim the buffer capacity. When multiple workloads share a <a href="../concepts/about-custom-compute-classes">custom ComputeClass</a> or node pool, use <a href="workload-separation">workload separation</a> to reserve a capacity buffer for a specific workload. This approach requires node pool auto-creation, or a <a href="isolate-workloads-dedicated-nodes">dedicated node pool</a> for active buffers on Standard clusters.</p> <p>Avoid dedicating separate capacity buffers to many individual workloads. Each dedicated buffer requires its own node pool, which increases the time to provision and refill buffers. For recommended buffer counts, see <a href="../concepts/capacity-buffer#scalability">Scalability</a>.</p> <p>To dedicate a capacity buffer to a specific workload, complete the following steps:</p> <ol> <li>
+<p>In your workload manifest, such as <code translate="no" dir="ltr">sample-workload-deployment.yaml</code> from <a href="#k8s-prereqs">Create prerequisite Kubernetes objects</a>, add a custom toleration and node selector to the Pod specification:</p> 
+<pre>spec:
+  tolerations:
+  - key: KEY
+    operator: Equal
+    value: "VALUE"
+    effect: NoSchedule
+  nodeSelector:
+    KEY: "VALUE"
+    cloud.google.com/compute-class: ccc-example
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY</var></code>: a custom key for the taint and node label, such as <code translate="no" dir="ltr">group</code>. For restricted key prefixes, see <a href="workload-separation#limitations">Limitations of workload separation</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VALUE</var></code>: a custom value that identifies the workload, such as <code translate="no" dir="ltr">critical-workload</code>.</li> </ul> <p>On Autopilot clusters, keep a custom ComputeClass or hardware selector in the <code translate="no" dir="ltr">nodeSelector</code> field so that the buffer uses node-based billing instead of the unsupported <a href="../concepts/about-autopilot-mode-standard-clusters#pricing">Pod-based billing model</a>.</p>
+</li> <li>
+<p>Configure your CapacityBuffer to use the same scheduling constraints:</p> <ul> <li>If your CapacityBuffer uses the <code translate="no" dir="ltr">scalableRef</code> field, reference the workload in the <code translate="no" dir="ltr">spec.scalableRef</code> field. The buffer automatically inherits the workload's <code translate="no" dir="ltr">tolerations</code> and <code translate="no" dir="ltr">nodeSelector</code> fields.</li> <li>If your CapacityBuffer uses the <code translate="no" dir="ltr">podTemplateRef</code> field, add the same <code translate="no" dir="ltr">tolerations</code> and <code translate="no" dir="ltr">nodeSelector</code> fields to your PodTemplate manifest, such as <code translate="no" dir="ltr">buffer-pod-template.yaml</code>.</li> </ul>
+</li> <li>
+<p>Apply your manifests and create the CapacityBuffer. For instructions, see <a href="#apply-buffer">Apply a capacity buffer</a>. If you <a href="#preload-images">preload images on standby buffers</a>, also add the custom toleration to your preloading DaemonSet so that it can schedule on the dedicated buffer nodes. If the buffer uses a custom ComputeClass, the DaemonSet also needs a toleration for the ComputeClass taint:</p> 
+<pre>tolerations:
+- key: "buffer.gke.io/standby-capacity-node-suspended"
+  operator: "Exists"
+- key: KEY
+  operator: Equal
+  value: "VALUE"
+  effect: NoSchedule
+- key: cloud.google.com/compute-class
+  operator: Equal
+  value: ccc-example
+  effect: NoSchedule
+</pre>
+</li> <li>
+<p>After the cluster autoscaler provisions the buffer nodes, verify that the nodes have the dedicated node label and node taint:</p> 
+<pre>kubectl get nodes -l KEY=VALUE \
+    -o custom-columns='NAME:.metadata.name,TAINTS:.spec.taints[*].key'
+</pre> <p>Each node in the output lists the <code translate="no" dir="ltr"><var translate="no">KEY</var></code> taint key. If the buffer uses a custom ComputeClass, the nodes also list the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> taint key. Standby buffer nodes also have taints that GKE manages, such as <code translate="no" dir="ltr">buffer.gke.io/standby-capacity-node-suspended</code> on suspended nodes. When your workload scales up, run <code translate="no" dir="ltr">kubectl get pods -n <var translate="no">NAMESPACE</var> -o wide</code> and confirm that the <code translate="no" dir="ltr">NODE</code> column lists the dedicated node names from this output.</p>
+</li> </ol> <h2 id="customize-standby-behavior">Customize standby buffer behavior</h2> <p>You can use annotations to customize how standby buffers start and refresh. Add these annotations to the <code translate="no" dir="ltr">metadata.annotations</code> field of your CapacityBuffer resource:</p> <ul> <li>
+<code translate="no" dir="ltr">buffer.gke.io/standby-capacity-init-time</code>: the amount of time a node remains active after creation before GKE suspends it. Specify a duration string such as <code translate="no" dir="ltr">5m</code> or <code translate="no" dir="ltr">1h</code>. The default is <code translate="no" dir="ltr">5m</code>.</li> <li>
+<p><code translate="no" dir="ltr">buffer.gke.io/standby-capacity-refresh-frequency</code>: how often GKE refreshes suspended nodes. Specify a duration string such as <code translate="no" dir="ltr">12h</code> or <code translate="no" dir="ltr">24h</code>, up to a maximum of <code translate="no" dir="ltr">120h</code> (5 days). The default is <code translate="no" dir="ltr">24h</code>.</p> <aside class="warning"><strong>Warning:</strong><span> Setting <code translate="no" dir="ltr">buffer.gke.io/standby-capacity-refresh-frequency</code> to a duration greater than <code translate="no" dir="ltr">120h</code> (5 days) isn't supported. In GKE version 1.37.1-gke.2337000 and later, the admission controller rejects values greater than <code translate="no" dir="ltr">120h</code>. In earlier versions, values greater than <code translate="no" dir="ltr">120h</code> cause an admission warning in <code translate="no" dir="ltr">v1alpha1</code> and <code translate="no" dir="ltr">v1beta1</code> and a validation error in <code translate="no" dir="ltr">v1</code>.</span></aside>
+</li> </ul> <p>The following example shows a manifest with these optional fields to customize the behavior of standby buffers:</p> 
+<pre>apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: customized-standby-buffer
+  namespace: my-namespace
+  annotations:
+    buffer.gke.io/standby-capacity-init-time: "15m"
+    buffer.gke.io/standby-capacity-refresh-frequency: "12h"
+spec:
+  podTemplateRef:
+    name: buffer-unit-template
+  replicas: 3
+  provisioningStrategy: "buffer.gke.io/standby-capacity"
+</pre> <h2 id="preload-images">Preload images on standby buffers</h2> <p>To speed up workload startup times when a standby node resumes, you can preload container images by using a DaemonSet. The DaemonSet runs during the start-up period before the node is suspended.</p> <p>To preload images by using the DaemonSet, complete the following steps:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">image-puller-daemonset.yaml</code>:</p> 
+<pre>apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: image-prefetch-daemonset
+  namespace: NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      name: image-prefetch
+  template:
+    metadata:
+      labels:
+        name: image-prefetch
+    spec:
+      tolerations:
+      - key: "buffer.gke.io/standby-capacity-node-suspended"
+        operator: "Exists"
+      initContainers:
+      - name: image-puller
+        image: IMAGE_NAME
+        command: ["sh", "-c", "true"]
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.9
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for the DaemonSet, for example <code translate="no" dir="ltr">capacity-buffer-example</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IMAGE_NAME</var></code>: the name of the image to preload, for example <code translate="no" dir="ltr">your-app-image:latest</code>.</li> </ul> <p>This manifest includes the <code translate="no" dir="ltr">buffer.gke.io/standby-capacity-node-suspended</code> toleration so that the DaemonSet remains scheduled on standby nodes after GKE suspends them.</p>
+</li> <li>
+<p>Apply the DaemonSet manifest to your cluster:</p> 
+<pre>kubectl apply -f image-puller-daemonset.yaml
+</pre>
+</li> <li>
+<p>Verify that the DaemonSet is created:</p> 
+<pre>kubectl get daemonset image-prefetch-daemonset -n NAMESPACE
+</pre>
+</li> <li>
+<p>Verify that your capacity buffer is created and ready for provisioning:</p> 
+<pre>kubectl get capacitybuffer CAPACITY_BUFFER_NAME -n NAMESPACE
+</pre> <p>Check the status. The <code translate="no" dir="ltr">STATUS</code> field should show <code translate="no" dir="ltr">ReadyForProvisioning</code>.</p>
+</li> </ol> <h2 id="monitor-capacity-buffers">Monitor capacity buffer status and performance</h2> <p>You can monitor the status and health of your capacity buffers by using <code translate="no" dir="ltr">kubectl</code> commands and Cloud Monitoring metrics.</p> <h3 id="verify_capacitybuffer_resource_status">Verify CapacityBuffer resource status</h3> <p>To check the health of your capacity buffers and verify that they are ready to receive workloads, complete the following steps:</p> <ol> <li>
+<p>Get the status of all capacity buffers across the cluster:</p> 
+<pre>kubectl get capacitybuffer -A
+</pre>
+</li> <li>
+<p>Inspect the detailed status, conditions, and event logs of a specific buffer:</p> 
+<pre>kubectl describe capacitybuffer CAPACITY_BUFFER_NAME -n NAMESPACE
+</pre>
+</li> </ol> <h3 id="identify_suspended_standby_buffer_nodes">Identify suspended standby buffer nodes</h3> <p>Standby buffer VMs are pre-provisioned, but kept in a suspended state to help reduce costs. You can recognize these suspended nodes because they have a custom condition. To audit suspended node instances, run the following command:</p> 
+<pre>kubectl get nodes -o custom-columns='NAME:.metadata.name,SUSPENDED:.status.conditions[?(@.type=="Suspended")].status'
+</pre> <p>A status of <code translate="no" dir="ltr">True</code> indicates a standby VM is suspended. A status of <code translate="no" dir="ltr">False</code> or <code translate="no" dir="ltr">&lt;none&gt;</code> indicates an active, running node.</p> <h3 id="monitoring">Monitor performance with Cloud Monitoring</h3> <p>To monitor the end-to-end impact of capacity buffers on scale-up times, use the <strong>Startup Latency</strong> dashboards in the Google Cloud console. Use the <strong>Pod Startup Latency Distribution</strong> and <strong>Pod First Ready Latency</strong> charts to track the <code translate="no" dir="ltr">kubernetes.io/pod/latencies/pod_first_ready</code> metric from Pod creation to readiness. You can also query <code translate="no" dir="ltr">Scheduled</code> events in Cloud Logging to measure Pod scheduling latency. For instructions, see <a href="monitor-startup-latency-metrics">Monitor startup latency metrics</a>.</p> <h2 id="remove-capacity-buffers">Remove capacity buffers</h2> <p>If you no longer need a capacity buffer for your workloads, delete the CapacityBuffer object. This removes the placeholder Pods and allows the cluster autoscaler to scale down the nodes.</p> 
+<pre>kubectl delete capacitybuffer CAPACITY_BUFFER_NAME -n NAMESPACE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CAPACITY_BUFFER_NAME</var></code> with the name of the CapacityBuffer that you want to delete.</p> <h2 id="troubleshooting">Troubleshooting</h2> <p>The following section contains information on resolving common issues with capacity buffers.</p> <h3 id="billing-model-error">Capacity buffer not ready due to billing model</h3> <p>If you create a CapacityBuffer for a workload that uses the <a href="../concepts/about-autopilot-mode-standard-clusters#pricing">Pod-based billing model</a> (pay-per-Pod), the capacity buffer won't be ready for provisioning.</p> <p>To identify this issue, check the CapacityBuffer status:</p> 
+<pre>kubectl describe capacitybuffer BUFFER_NAME -n NAMESPACE
+</pre> <p>Look for a condition of the type <code translate="no" dir="ltr">ReadyForProvisioning</code> with a status of <code translate="no" dir="ltr">False</code>.</p> <p>To resolve this issue, ensure that your CapacityBuffer references a workload or PodTemplate that is compatible with node-based billing.</p> <h3 id="custom-compute-class-scheduling">Buffer Pods aren't scheduled on nodes provisioned by custom ComputeClasses</h3> <p>If your CapacityBuffer configuration dependency (for example, a PodTemplate) selects a custom ComputeClass, you might encounter an issue where buffer Pods aren't scheduled on the newly provisioned nodes. This issue causes the cluster autoscaler to repeatedly create redundant node pools and nodes while idle nodes are deleted.</p> <p>This issue occurs if the custom ComputeClass provisions nodes with taints or specific runtime requirements, and your buffer Pods (or the PodTemplate they rely on) don't have matching tolerations or settings.</p> <p>To resolve this issue, update your CapacityBuffer configuration to specify the required tolerations, node selectors, or runtime classes. For example, if your dependency selects a custom ComputeClass configured with GKE Sandbox, update the dependency to do one of the following:</p> <ul> <li>Specify the <code translate="no" dir="ltr">spec.runtimeClassName: gvisor</code> field.</li> <li>Include an explicit toleration for the <code translate="no" dir="ltr">sandbox.gke.io/runtime=gvisor:NoSchedule</code> taint.</li> </ul> <p>For more information, see the <a href="../concepts/about-custom-compute-classes">custom ComputeClass documentation</a>.</p> <h3 id="standby-resume-fails">Standby buffer nodes fail to resume</h3> <p>Suspended standby buffer nodes might fail to resume for one of the following reasons:</p> <ul> <li>Resuming a suspended standby node requires available Compute Engine capacity in the zone for the node's machine type and specific CPU platform generation, such as within the E2 or N2 machine series. If the zone has insufficient compute capacity for that exact configuration, the node fails to resume. For more information, see <a href="https://docs.cloud.google.com/compute/docs/instances/suspend-resume-instance#limitations">Compute Engine suspend and resume limitations</a>.</li> <li>If your custom ComputeClass enables <a href="../concepts/about-custom-compute-classes#optimize-rule-priority">active migration to higher-priority nodes</a> (<code translate="no" dir="ltr">activeMigration.optimizeRulePriority: true</code>) and places Spot VMs at a higher priority than on-demand VMs, GKE migrates on-demand standby nodes to Spot VMs over time. Because Spot VMs are more subject to capacity constraints and suspended Spot VMs can't convert to on-demand VMs when resuming, these constraints can prevent those standby nodes from resuming.</li> <li>Resuming the node exceeds your project's Compute Engine quotas. For more information, see <a href="#quota-exceeded">Capacity buffer fails to provision due to quota limits</a>.</li> </ul> <p>To identify why a standby node failed to resume, query <a href="https://docs.cloud.google.com/compute/docs/logging/audit-logging">Compute Engine audit logs</a> in Logs Explorer for <code translate="no" dir="ltr">ZONE_RESOURCE_POOL_EXHAUSTED</code> or <code translate="no" dir="ltr">QUOTA_EXCEEDED</code> errors on <code translate="no" dir="ltr">compute.instances.resume</code> operations.</p> <p>To resolve or mitigate this issue, do one or more of the following:</p> <ul> <li>Use regional clusters so that the cluster autoscaler can provision or resume nodes across multiple zones.</li> <li>Configure multiple machine families in the <code translate="no" dir="ltr">spec.priorities</code> list of your custom ComputeClass. If suspended nodes can't resume, the cluster autoscaler can fall back to creating new nodes based on a different priority rule. These new nodes take longer to become ready than resumed standby nodes. This configuration doesn't help suspended nodes resume, because a suspended node can resume only with its original machine type.</li> <li>Use a dedicated custom ComputeClass with on-demand VMs, or set the <code translate="no" dir="ltr">activeMigration.optimizeRulePriority</code> field to <code translate="no" dir="ltr">false</code> for the ComputeClass that your standby buffer uses.</li> <li>Pair your standby buffer with a small active buffer to absorb immediate traffic spikes.</li> </ul> <h3 id="quota-exceeded">Capacity buffer fails to provision due to quota limits</h3> <p>A capacity buffer might provision fewer replicas than requested or fail to scale up if it exceeds <a href="https://kubernetes.io/docs/concepts/policy/resource-quotas/">Kubernetes ResourceQuotas</a> or Compute Engine quotas.</p> <p>To identify which quota is limiting the buffer, check one or more of the following quotas:</p> <ul> <li>
+<p>Check whether a Kubernetes ResourceQuota in the namespace is limiting the buffer:</p> 
+<pre>kubectl describe capacitybuffer \
+    CAPACITY_BUFFER_NAME \
+    -n NAMESPACE
+</pre> <p>In the <code translate="no" dir="ltr">status.conditions</code> output, look for a <code translate="no" dir="ltr">LimitedByQuotas</code> condition with a status of <code translate="no" dir="ltr">True</code>. Both active and standby buffer units, including units backed by suspended standby nodes, count toward namespace ResourceQuota limits as if the buffer Pods were running. When a buffer exceeds the namespace quota, GKE caps the <code translate="no" dir="ltr">status.replicas</code> field to fit within the available quota.</p>
+</li> <li>
+<p>Check whether Compute Engine project quotas are blocking node provisioning. In Logs Explorer, search the <code translate="no" dir="ltr">container.googleapis.com/cluster-autoscaler-visibility</code> log for <code translate="no" dir="ltr">no.scale.up.nap.quota.exceeded</code> events, or search Compute Engine audit logs for <code translate="no" dir="ltr">QUOTA_EXCEEDED</code> errors.</p> <p>When checking Compute Engine quotas for standby buffers, verify both of the following quotas in addition to vCPU and memory quotas:</p> <ul> <li>Suspended standby nodes retain their internal and external IP addresses, which consumes the in-use IP address quota.</li> <li>When suspending a standby VM, Compute Engine writes the node's memory to disk, which consumes <code translate="no" dir="ltr">Persistent disk standard (GB)</code> <a href="https://docs.cloud.google.com/compute/resource-usage#disk_quota">disk quota</a> proportional to the node's memory size.</li> </ul>
+</li> </ul> <p>To resolve the quota limit, do one of the following:</p> <ul> <li>Increase the Kubernetes ResourceQuota in the buffer's namespace.</li> <li>
+<a href="https://docs.cloud.google.com/docs/quotas/view-manage#requesting_higher_quota">Request a Compute Engine quota adjustment</a>.</li> <li>Reduce the <code translate="no" dir="ltr">replicas</code>, <code translate="no" dir="ltr">limits</code>, or <code translate="no" dir="ltr">percentage</code> value in your CapacityBuffer manifest.</li> </ul> <h3 id="daemonset-stale-connections">DaemonSet Pods stop receiving data after a standby node resumes</h3> <p>After a suspended standby buffer node resumes, DaemonSet Pods on that node might stop receiving data over long-lived connections that were opened before the node was suspended. The Pods don't log any errors and don't reconnect.</p> <p>This issue occurs when a DaemonSet Pod acts as a receive-only client, such as for a streaming HTTP response, a WebSocket connection, server-sent events, or a gRPC server-streaming call. While the standby node is suspended, the server or an intermediate network device times out and closes the connection. When the node resumes, the Pod's network stack still considers the connection open. Because the Pod doesn't send any data, it never detects that the connection was closed and waits for data indefinitely.</p> <p>To resolve this issue, configure the client application in your DaemonSet Pod to detect closed connections and reconnect by doing one of the following:</p> <ul> <li>Configure client-side TCP keepalive in your Pod's application (enabling keepalive only on the server doesn't notify the Pod). For more information about TCP keepalive parameters, see <a href="https://docs.cloud.google.com/compute/docs/troubleshooting/general-tips#idle-connections">Idle connections</a>. <ol> <li>Enable the <code translate="no" dir="ltr">SO_KEEPALIVE</code> socket option in your client library or language runtime, such as <code translate="no" dir="ltr">socket.setKeepAlive(true, initialDelay)</code> in Node.js or <code translate="no" dir="ltr">net.Dialer.KeepAlive</code> in Go. Some runtimes disable TCP keepalive by default.</li> <li>Configure a short keepalive idle time (<code translate="no" dir="ltr">TCP_KEEPIDLE</code>), such as a few seconds, instead of relying on the operating system default.</li> <li>Update your application to catch the connection error (such as a connection reset or timeout) when a keepalive probe fails and open a new connection.</li> </ol>
+</li> <li>Configure application-level heartbeats or read timeouts in your client, such as WebSocket ping and pong frames or <a href="https://grpc.io/docs/guides/keepalive/">gRPC keepalive</a> pings, and update your application to reconnect when a timeout occurs.</li> </ul> <h2 id="what-next">What's next</h2> <ul> <li>Learn more about <a href="../concepts/capacity-buffer">capacity buffers</a>.</li> <li>Refer to the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/capacitybuffer">CapacityBuffer CRD documentation</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-capacity-buffer" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-capacity-buffer</a>
+  </p>
+</div>

@@ -1,0 +1,747 @@
+<h1>Deploy a stateful MySQL cluster on GKE</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This document is intended for database administrators, cloud architects, and operations professionals interested in deploying a highly available MySQL topology on Google Kubernetes Engine.</p> <p>Follow this tutorial to learn how to deploy a <a href="https://dev.mysql.com/doc/mysql-shell/8.0/en/mysql-innodb-cluster.html" target="_blank" class="external">MySQL InnoDB Cluster</a> and a <a href="https://dev.mysql.com/doc/mysql-shell/8.0/en/innodb-clusterset.html" target="_blank" class="external">MySQL InnoDB ClusterSet</a>, in addition to <a href="https://dev.mysql.com/doc/mysql-router/8.0/en/" target="_blank" class="external">MySQL Router</a> middleware on your GKE cluster, and how to perform upgrades.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> In this tutorial, you will learn how to: <ul> <li>Create and deploy a stateful Kubernetes service.</li> <li>Deploy a MySQL InnoDB Cluster for high availability.</li> <li>Deploy Router middleware for database operation routing.</li> <li>Deploy a MySQL InnoDB ClusterSet for disaster tolerance.</li> <li>Simulate a MySQL cluster failover.</li> <li>Perform a MySQL version upgrade.</li> </ul> <p>The following sections describe the architecture of the solution you will build in this tutorial.</p> <h4 id="mysql-innodb-cluster">MySQL InnoDB Cluster</h4> <p>In your regional GKE cluster, using a StatefulSet, you deploy a MySQL database instance with the necessary naming and configuration to create a MySQL InnoDB Cluster. To provide fault tolerance and high availability, you deploy three database instance Pods. This ensures that the majority of Pods on different zones are available at any given time for a successful primary election using a consensus protocol, and makes your MySQL InnoDB Cluster tolerant of single zonal failures.</p> <figure> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/mysql_innodb_cluster.svg" alt="Architecture diagram showing the relationship between applications, MySQL Router, and MySQL Cluster"> <figcaption><b>Figure 1</b>: Example architecture of a single MySQL InnoDB Cluster</figcaption> </figure> <p>Once deployed, you designate one Pod as the primary instance to serve both read and write operations. The other two Pods are secondary read-only replicas. If the primary instance experiences an infrastructure failure, you can promote one of these two replica Pods to become the primary.</p> <p>In a separate namespace, you deploy three MySQL Router Pods to provide connection routing for improved resilience. Instead of directly connecting to the database service, your applications connect to MySQL Router Pods. Each Router Pod is aware of the status and purpose of each MySQL InnoDB Cluster Pod, and routes application operations to the respective healthy Pod. The routing state is cached in the Router Pods and updated from the cluster metadata stored on each node of the MySQL InnoDB Cluster. In the case of an instance failure, the Router adjusts the connection routing to a live instance.</p> <h4 id="mysql-innodb-clusterset">MySQL InnoDB ClusterSet</h4> <p>You can create a MySQL InnoDB ClusterSet from an initial MySQL InnoDB Cluster. This lets you increase disaster tolerance if the primary cluster is no longer available.</p> <figure> <img src="https://docs.cloud.google.com/static/kubernetes-engine/images/clusterset.svg" alt="Diagram shows how the primary and replica MySQL InnoDB Clusters are kept in sync through asynchronous replication."> <figcaption><b>Figure 2</b>: Example multi-region ClusterSet architecture which contains one primary cluster and one replica cluster</figcaption> </figure> <p>If the MySQL InnoDB Cluster primary instance is no longer available, you can promote a replica cluster in the ClusterSet to primary. When using MySQL Router middleware, your application does not need to track the health of the primary database instance. Routing is adjusted to send connections to the new primary after the election has occurred. However, it is your responsibility to ensure that applications connecting to your MySQL Router middleware follow best practices for resilience, so that connections are retried if an error occurs during cluster failover.</p> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing/">GKE</a></li> <li><a href="https://cloud.google.com/compute/disks-image-pricing">Compute Engine</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <h3 id="projectsetup">Set up your project</h3> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, click <b>Create project</b> to begin creating a new Google Cloud project.</p>  <p class="showalways"><b>Roles required to create a project</b></p> <p> To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, click <b>Create project</b> to begin creating a new Google Cloud project.</p>  <p class="showalways"><b>Roles required to create a project</b></p> <p> To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE API, if it is not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the API</a></p>
+</li> </div> </cloud-free-trial> </ol> <h3 id="roles">Set up roles</h3> <ol> <li> <p> Grant roles to your user account. Run the following command once for each of the following IAM roles: <code translate="no" dir="ltr">role/storage.objectViewer, role/logging.logWriter, role/artifactregistry.Admin, roles/container.clusterAdmin, role/container.serviceAgent,  roles/serviceusage.serviceUsageAdmin, roles/iam.serviceAccountAdmin</code> </p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID --member="user:USER_IDENTIFIER" --role=ROLE</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USER_IDENTIFIER</var></code>: The identifier for your user account. For example, <code translate="no" dir="ltr">myemail@example.com</code>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: The IAM role that you grant to your user account.</li> </ul> </li> </ol> <h3 id="envsetup">Set up your environment</h3> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell">Cloud Shell</a> to manage resources hosted on Google Cloud. Cloud Shell comes preinstalled with Docker and the <code translate="no" dir="ltr">kubectl</code> and gcloud CLI.</p> <p>To use Cloud Shell to set up your environment:</p> <ol> <li>
+<p>Set environment variables.</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export CLUSTER_NAME=gkemulti-west
+export CONTROL_PLANE_LOCATION=CONTROL_PLANE_LOCATION
+</pre> <p>Replace the following values:</p> <ul> <li>
+<var translate="no">PROJECT_ID</var>: your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</li> <li>
+<var translate="no">CONTROL_PLANE_LOCATION</var>: the Compute Engine <a href="https://docs.cloud.google.com/compute/docs/regions-zones#available">region</a> of the control plane of your cluster. For this tutorial, the region is <code translate="no" dir="ltr">us-west1</code>. Typically, you want a region that is close to you.</li> </ul>
+</li> <li>
+<p>Set the default environment variables.</p> 
+<pre> gcloud config set project PROJECT_ID
+ gcloud config set compute/region CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Clone the code repository.</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+</pre>
+</li> <li>
+<p>Change to the working directory.</p> 
+<pre>cd kubernetes-engine-samples/databases/gke-stateful-mysql/kubernetes
+</pre> </li>
+</ol></section> <div id="tutorial-content"> <h2 id="create-gke-cluster">Create a GKE cluster</h2> <p>In this section, you create a <a href="../../concepts/regional-clusters">regional GKE cluster</a>. Unlike a zonal cluster, a regional cluster's control plane is replicated into several zones, so an outage in a single zone doesn't make the control plane unavailable.</p> <p>To create a GKE cluster, follow these steps:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<ol> <li>
+<p>In Cloud Shell, create a GKE Autopilot cluster in the <code translate="no" dir="ltr">us-west1</code> region.</p> 
+<pre data-language="">gcloud container clusters create-auto $CLUSTER_NAME \
+    --location=$CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Get the GKE cluster credentials.</p> 
+<pre data-language="">gcloud container clusters get-credentials $CLUSTER_NAME \
+  --location=$CONTROL_PLANE_LOCATION
+</pre>
+</li> <li>
+<p>Deploy a Service across three zones. This tutorial uses a Kubernetes Deployment. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster..</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prepare-three-zone-ha
+  labels:
+    app: prepare-three-zone-ha
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: prepare-three-zone-ha
+  template:
+    metadata:
+      labels:
+        app: prepare-three-zone-ha
+    spec:
+      affinity:
+        # Tell Kubernetes to avoid scheduling a replica in a zone where there
+        # is already a replica with the label "app: prepare-three-zone-ha"
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - prepare-three-zone-ha
+            topologyKey: "topology.kubernetes.io/zone"
+      containers:
+      - name: prepare-three-zone-ha
+        image: busybox:latest
+        command:
+            - "/bin/sh"
+            - "-c"
+            - "while true; do sleep 3600; done"
+        resources:
+          limits:
+            cpu: "500m"
+            ephemeral-storage: "10Mi"
+            memory: "0.5Gi"
+          requests:
+            cpu: "500m"
+            ephemeral-storage: "10Mi"
+            memory: "0.5Gi"</pre> </div> 
+<pre data-language="">kubectl apply -f prepare-for-ha.yaml
+</pre> <p>By default, Autopilot provisions resources in two zones. The Deployment defined in <code translate="no" dir="ltr">prepare-for-ha.yaml</code> ensures that Autopilot provisions nodes across three zones in your cluster, by setting <code translate="no" dir="ltr">replicas:3</code>, <code translate="no" dir="ltr">podAntiAffinity</code> with <code translate="no" dir="ltr">requiredDuringSchedulingIgnoredDuringExecution</code>, and <code translate="no" dir="ltr">topologyKey: "topology.kubernetes.io/zone"</code>.</p>
+</li> <li>
+<p>Check the status of the Deployment.</p> 
+<pre data-language="">kubectl get deployment prepare-three-zone-ha --watch
+</pre> <p>When you see three Pods in the ready state, cancel this command with <code translate="no" dir="ltr">CTRL+C</code>. The output is similar to the following:</p> 
+<pre data-language="">NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+prepare-three-zone-ha   0/3     3            0           9s
+prepare-three-zone-ha   1/3     3            1           116s
+prepare-three-zone-ha   2/3     3            2           119s
+prepare-three-zone-ha   3/3     3            3           2m16s
+</pre>
+</li> <li>
+<p>Run this script to validate that your Pods have been deployed across three zones.</p> 
+<pre data-language="">bash ../scripts/inspect_pod_node.sh default
+</pre> <p>Each line of the output corresponds to a Pod, and the second column indicates the zone. The output is similar to the following:</p> 
+<pre data-language="">gk3-gkemulti-west1-default-pool-eb354e2d-z6mv us-west1-b prepare-three-zone-ha-7885d77d9c-8f7qb
+gk3-gkemulti-west1-nap-25b73chq-739a9d40-4csr us-west1-c prepare-three-zone-ha-7885d77d9c-98fpn
+gk3-gkemulti-west1-default-pool-160c3578-bmm2 us-west1-a prepare-three-zone-ha-7885d77d9c-phmhj
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<ol> <li>
+<p>In Cloud Shell, create a GKE Standard cluster in the <code translate="no" dir="ltr">us-west1</code> region.</p> 
+<pre data-language="">gcloud container clusters create $CLUSTER_NAME \
+  --location=$CONTROL_PLANE_LOCATION \
+  --machine-type="e2-standard-2" \
+  --disk-type="pd-standard" \
+  --num-nodes="5"
+</pre>
+</li> <li>
+<p>Get the GKE cluster credentials.</p> 
+<pre data-language="">gcloud container clusters get-credentials $CLUSTER_NAME \
+  --location=$CONTROL_PLANE_LOCATION
+</pre>
+</li> </ol></section> </div> <h2 id="deploy-statefulsets">Deploy MySQL StatefulSets</h2> <p>In this section, you deploy one MySQL StatefulSet. A StatefulSet is a Kubernetes controller that maintains a persistent unique identity for each of its Pods.</p> <p>Each StatefulSet consists of three MySQL replicas.</p> <p>To deploy the MySQL StatefulSet, follow these steps:</p> <ol> <li>
+<p>Create a namespace for the StatefulSet.</p> 
+<pre>kubectl create namespace mysql1
+</pre>
+</li> <li>
+<p>Create the MySQL secret.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+type: Opaque
+data:
+  password: UGFzc3dvcmQkMTIzNDU2 # Password$123456
+  admin-password: UGFzc3dvcmQkMTIzNDU2 # Password$123456</pre> </div> 
+<pre>kubectl apply -n mysql1 -f secret.yaml
+</pre> <p>The password is deployed with each Pod, and is used by management scripts and commands for MySQL InnoDB Cluster and ClusterSet deployment in this tutorial.</p>
+</li> <li>
+<p>Create the StorageClass.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-storageclass
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+parameters:
+  type: pd-balanced</pre> </div> 
+<pre>kubectl apply -n mysql1 -f storageclass.yaml
+</pre> <p>This storage class uses the <code translate="no" dir="ltr">pd-balanced</code> Persistent Disk type that balances performance and cost. The <code translate="no" dir="ltr">volumeBindingMode</code> field is set to <code translate="no" dir="ltr">WaitForFirstConsumer</code> meaning that GKE delays provisioning of a PersistentVolume until the Pod is created. This setting ensures that the disk is provisioned in the same zone where the Pod is scheduled.</p>
+</li> <li>
+<p>Deploy the StatefulSet of MySQL instance Pods.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dbc1
+  labels:
+    app: mysql
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  serviceName: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: "topology.kubernetes.io/zone"
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: mysql
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - mysql
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: mysql
+        image: mysql/mysql-server:8.0.28
+        command:
+        - /bin/bash
+        args:
+        - -c
+        - &gt;-
+          /entrypoint.sh
+          --server-id=$((20 +  $(echo $HOSTNAME | grep -o '[^-]*$') + 1))
+          --report-host=${HOSTNAME}.mysql.mysql1.svc.cluster.local
+          --binlog-checksum=NONE
+          --enforce-gtid-consistency=ON
+          --gtid-mode=ON
+          --default-authentication-plugin=mysql_native_password
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: password
+        - name: MYSQL_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: admin-password
+        - name: MYSQL_ROOT_HOST
+          value: '%'
+        ports:
+        - name: mysql
+          containerPort: 3306
+        - name: mysqlx
+          containerPort: 33060
+        - name: xcom
+          containerPort: 33061
+        resources:
+          limits:
+            cpu: "500m"
+            ephemeral-storage: "1Gi"
+            memory: "1Gi"
+          requests:
+            cpu: "500m"
+            ephemeral-storage: "1Gi"
+            memory: "1Gi"
+        volumeMounts:
+        - name: mysql
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        readinessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - |
+              mysql -h127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD -e'SELECT 1'
+          initialDelaySeconds: 30
+          periodSeconds: 2
+          timeoutSeconds: 1
+        livenessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - |
+              mysqladmin -uroot -p$MYSQL_ROOT_PASSWORD ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql
+      labels:
+        app: mysql
+    spec:
+      storageClassName: fast-storageclass
+      volumeMode: Filesystem
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi</pre> </div> 
+<pre>kubectl apply -n mysql1 -f c1-mysql.yaml
+</pre> <p>This command deploys the StatefulSet consisting of three replicas. In this tutorial, the primary MySQL cluster is deployed across three zones in <code translate="no" dir="ltr">us-west1</code>. The output is similar to the following:</p> 
+<pre>service/mysql created
+statefulset.apps/dbc1 created
+</pre> <p>In this tutorial, the resource limits and requests are set to minimal values to save cost. When planning for a production workload, make sure to set these values appropriately for your organization's needs.</p>
+</li> <li>
+<p>Verify the StatefulSet is created successfully.</p> 
+<pre>kubectl get statefulset -n mysql1 --watch
+</pre> <p>It can take about 10 minutes for the StatefulSet to be ready.</p>
+</li> <li>
+<p>When all three pods are in a ready state, exit the command using <code translate="no" dir="ltr">Ctrl+C</code>. If you see <code translate="no" dir="ltr">PodUnscheduleable</code> errors due to insufficient CPU or memory, wait a few minutes for the control plane to resize to accommodate the large workload.</p> <p>The output is similar to the following:</p> 
+<pre>NAME   READY   AGE
+dbc1   1/3     39s
+dbc1   2/3     50s
+dbc1   3/3     73s
+</pre>
+</li> <li>
+<p>To inspect the placement of your Pods on the GKE cluster nodes, run this script:</p> 
+<pre>bash ../scripts/inspect_pod_node.sh mysql1 mysql
+</pre> <p>The output shows the Pod name, the GKE node name, and the zone where the node is provisioned, and looks similar to the following:</p> 
+<pre>gke-gkemulti-west-5-default-pool-4bcaca65-jch0 us-west1-b dbc1-0
+gke-gkemulti-west-5-default-pool-1ac6e8b5-ddjx us-west1-c dbc1-1
+gke-gkemulti-west-5-default-pool-1f5baa66-bf8t us-west1-a dbc1-2
+</pre> <p>The columns in the output represent the hostname, cloud zone, and Pod name, respectively.</p> <p>The <code translate="no" dir="ltr">topologySpreadConstraints</code> policy in the StatefulSet specification (<code translate="no" dir="ltr">c1-mysql.yaml</code>) directs the scheduler to place the Pods evenly across the failure domain (<code translate="no" dir="ltr">topology.kubernetes.io/zone</code>).</p> <p>The <code translate="no" dir="ltr">podAntiAffinity</code> policy enforces the constraint that Pods are required to not be placed on the same GKE cluster node (<code translate="no" dir="ltr">kubernetes.io/hostname</code>). For the MySQL instance Pods, this policy results in the Pods being deployed evenly across the three zones in the Google Cloud region. This placement enables high availability of the MySQL InnoDB Cluster by placing each database instance in a separate failure domain.</p>
+</li> </ol> <h2 id="configure-innodb-cluster">Prepare the primary MySQL InnoDB Cluster</h2> <p>To configure a MySQL InnoDB Cluster, follow these steps:</p> <ol> <li>
+<p>In the <a href="https://docs.cloud.google.com/shell">Cloud Shell</a> terminal, set the group replication configurations for the MySQL instances to be added to your cluster.</p> 
+<pre>bash ../scripts/c1-clustersetup.sh
+</pre> <div class="github-docwidget-gitinclude-code"> 
+<pre>POD_ORDINAL_START=${1:-0}
+POD_ORDINAL_END=${2:-2}
+for i in $(seq ${POD_ORDINAL_START} ${POD_ORDINAL_END}); do
+  echo "Configuring pod mysql1/dbc1-${i}"
+  cat &lt;&lt;'  EOF' | kubectl -n mysql1 exec -i dbc1-${i} -- bash -c 'mysql -uroot -proot --password=${MYSQL_ROOT_PASSWORD}'
+INSTALL PLUGIN group_replication SONAME 'group_replication.so';
+RESET PERSIST IF EXISTS group_replication_ip_allowlist;
+RESET PERSIST IF EXISTS binlog_transaction_dependency_tracking;
+SET @@PERSIST.group_replication_ip_allowlist = 'mysql.mysql1.svc.cluster.local';
+SET @@PERSIST.binlog_transaction_dependency_tracking = 'WRITESET';
+  EOF
+done</pre> </div> <p>The script will remotely connect into each of the three MySQL instances to set and persist the following environment variables:</p> <ul> <li>
+<code translate="no" dir="ltr">group_replication_ip_allowlist</code>: allows the instance within the cluster to connect to any instance in the group.</li> <li>
+<code translate="no" dir="ltr">binlog_transaction_dependency_tracking='WRITESET'</code>: allows parallelized transactions which won't conflict.</li> </ul> <p>In MySQL versions earlier than 8.0.22, use <code translate="no" dir="ltr">group_replication_ip_whitelist</code> instead of <code translate="no" dir="ltr">group_replication_ip_allowlist</code>.</p>
+</li> <li><p>Open a second terminal, so that you do not need to create a shell for each Pod.</p></li> <li>
+<p>Connect to MySQL Shell on the Pod <code translate="no" dir="ltr">dbc1-0</code>.</p> 
+<pre>kubectl -n mysql1 exec -it dbc1-0 -- \
+    /bin/bash \
+    -c 'mysqlsh --uri="root:$MYSQL_ROOT_PASSWORD@dbc1-0.mysql.mysql1.svc.cluster.local"'
+</pre>
+</li> <li>
+<p>Verify the MySQL group replication allowlist for connecting to other instances.</p> 
+<pre>\sql SELECT @@group_replication_ip_allowlist;
+</pre> <p>The output is similar to the following:</p> 
+<pre>+----------------------------------+
+| @@group_replication_ip_allowlist |
++----------------------------------+
+| mysql.mysql1.svc.cluster.local   |
++----------------------------------+
+</pre>
+</li> <li>
+<p>Verify the <code translate="no" dir="ltr">server-id</code> is unique on each of the instances.</p> 
+<pre>\sql SELECT @@server_id;
+</pre> <p>The output is similar to the following:</p> 
+<pre>+-------------+
+| @@server_id |
++-------------+
+|          21 |
++-------------+
+</pre>
+</li> <li>
+<p>Configure each instance for MySQL InnoDB Cluster usage and create an administrator account on each instance.</p> 
+<pre>\js
+dba.configureInstance('root@dbc1-0.mysql.mysql1.svc.cluster.local', {password: os.getenv("MYSQL_ROOT_PASSWORD"),clusterAdmin: 'icadmin', clusterAdminPassword: os.getenv("MYSQL_ADMIN_PASSWORD")});
+dba.configureInstance('root@dbc1-1.mysql.mysql1.svc.cluster.local', {password: os.getenv("MYSQL_ROOT_PASSWORD"),clusterAdmin: 'icadmin', clusterAdminPassword: os.getenv("MYSQL_ADMIN_PASSWORD")});
+dba.configureInstance('root@dbc1-2.mysql.mysql1.svc.cluster.local', {password: os.getenv("MYSQL_ROOT_PASSWORD"),clusterAdmin: 'icadmin', clusterAdminPassword: os.getenv("MYSQL_ADMIN_PASSWORD")});
+</pre> <p>All instances must have the same username and password in order for the MySQL InnoDB Cluster to function properly. Each command produces output similar to the following:</p> 
+<pre>...
+
+The instance 'dbc1-2.mysql:3306' is valid to be used in an InnoDB cluster.
+
+Cluster admin user 'icadmin'@'%' created.
+The instance 'dbc1-2.mysql.mysql1.svc.cluster.local:3306' is already
+ready to be used in an InnoDB cluster.
+
+Successfully enabled parallel appliers.
+</pre>
+</li> <li>
+<p>Verify that the instance is ready to be used in a MySQL InnoDB Cluster.</p> 
+<pre>dba.checkInstanceConfiguration()
+</pre> <p>The output is similar to the following:</p> 
+<pre>...
+
+The instance 'dbc1-0.mysql.mysql1.svc.cluster.local:3306' is valid to be used in an InnoDB cluster.
+
+{
+    "status": "ok"
+}
+</pre> <p>Optionally, you can connect to each MySQL instance and repeat this command. For example, run this command to check the status on the <code translate="no" dir="ltr">dbc1-1</code> instance:</p> 
+<pre>kubectl -n mysql1 exec -it dbc1-0 -- \
+    /bin/bash \
+    -c 'mysqlsh --uri="root:$MYSQL_ROOT_PASSWORD@dbc1-1.mysql.mysql1.svc.cluster.local" \
+    --js --execute "dba.checkInstanceConfiguration()"'
+</pre>
+</li> </ol> <h2 id="primary">Create the primary MySQL InnoDB Cluster</h2> <p>Next, create the MySQL InnoDB Cluster using the MySQL Admin <code translate="no" dir="ltr">createCluster</code> command. Start with the <code translate="no" dir="ltr">dbc1-0</code> instance, which will be the primary instance for the cluster, then add two additional replicas to the cluster.</p> <p>To initialize the MySQL InnoDB Cluster, follow these steps:</p> <ol> <li>
+<p>Create the MySQL InnoDB Cluster.</p> 
+<pre>var cluster=dba.createCluster('mycluster');
+</pre> <p>Running the <code translate="no" dir="ltr">createCluster</code> command triggers these operations:</p> <ul> <li>Deploy the metadata schema.</li> <li>Verify that the configuration is correct for Group Replication.</li> <li>Register it as the seed instance of the new cluster.</li> <li>Create necessary internal accounts, such as the replication user account.</li> <li>Start Group Replication.</li> </ul> <p>This command initializes a MySQL InnoDB Cluster with the host <code translate="no" dir="ltr">dbc1-0</code> as the primary. The cluster reference is stored in the cluster variable.</p> <p>The output looks similar to the following:</p> 
+<pre>A new InnoDB cluster will be created on instance 'dbc1-0.mysql:3306'.
+
+Validating instance configuration at dbc1-0.mysql:3306...
+
+This instance reports its own address as dbc1-0.mysql.mysql1.svc.cluster.local:3306
+
+Instance configuration is suitable.
+NOTE: Group Replication will communicate with other instances using
+'dbc1-0.mysql:33061'. Use the localAddress
+option to override.
+
+Creating InnoDB cluster 'mycluster' on
+'dbc1-0.mysql.mysql1.svc.cluster.local:3306'...
+
+Adding Seed Instance...
+Cluster successfully created. Use Cluster.addInstance() to add MySQL
+instances.
+At least 3 instances are needed for the cluster to be able to withstand
+up to one server failure.
+</pre>
+</li> <li>
+<p>Add the second instance to the cluster.</p> 
+<pre>cluster.addInstance('icadmin@dbc1-1.mysql', {password: os.getenv("MYSQL_ROOT_PASSWORD"), recoveryMethod: 'clone'});
+</pre>
+</li> <li>
+<p>Add the remaining instance to the cluster.</p> 
+<pre>cluster.addInstance('icadmin@dbc1-2.mysql', {password: os.getenv("MYSQL_ROOT_PASSWORD"), recoveryMethod: 'clone'});
+</pre> <p>The output is similar to the following:</p> 
+<pre>...
+The instance 'dbc1-2.mysql:3306' was successfully added to the cluster.
+</pre>
+</li> <li>
+<p>Verify the cluster's status.</p> 
+<pre>cluster.status()
+</pre> <p>This command shows the status of the cluster. The topology consists of three hosts, one primary and two secondary instances. Optionally, you can call <code translate="no" dir="ltr">cluster.status({extended:1})</code>.</p> <p>The output is similar to the following:</p> 
+<pre>{
+    "clusterName": "mysql1",
+    "defaultReplicaSet": {
+        "name": "default",
+        "primary": "dbc1-0.mysql:3306",
+        "ssl": "REQUIRED",
+        "status": "OK",
+        "statusText": "Cluster is ONLINE and can tolerate up to ONE failure.",
+        "topology": {
+            "dbc1-0.mysql:3306": {
+                "address": "dbc1-0.mysql:3306",
+                "memberRole": "PRIMARY",
+                "mode": "R/W",
+                "readReplicas": {},
+                "replicationLag": null,
+                "role": "HA",
+                "status": "ONLINE",
+                "version": "8.0.28"
+            },
+            "dbc1-1.mysql:3306": {
+                "address": "dbc1-1.mysql:3306",
+                "memberRole": "SECONDARY",
+                "mode": "R/O",
+                "readReplicas": {},
+                "replicationLag": null,
+                "role": "HA",
+                "status": "ONLINE",
+                "version": "8.0.28"
+            },
+            "dbc1-2.mysql:3306": {
+                "address": "dbc1-2.mysql:3306",
+                "memberRole": "SECONDARY",
+                "mode": "R/O",
+                "readReplicas": {},
+                "replicationLag": null,
+                "role": "HA",
+                "status": "ONLINE",
+                "version": "8.0.28"
+            }
+        },
+        "topologyMode": "Single-Primary"
+    },
+    "groupInformationSourceMember": "dbc1-0.mysql:3306"
+}
+</pre> <p>Optionally, you can call <code translate="no" dir="ltr">cluster.status({extended:1})</code> to obtain additional status details.</p>
+</li> </ol> <h3 id="sample-db">Create a sample database</h3> <p>To create a sample database, follow these steps:</p> <ol> <li>
+<p>Create a database and load data into the database.</p> 
+<pre>\sql
+create database loanapplication;
+use loanapplication
+CREATE TABLE loan (loan_id INT unsigned AUTO_INCREMENT PRIMARY KEY, firstname VARCHAR(30) NOT NULL, lastname VARCHAR(30) NOT NULL , status VARCHAR(30) );
+</pre>
+</li> <li>
+<p>Insert sample data into the database. To insert data, you must be connected to the primary instance of the cluster.</p> 
+<pre>INSERT INTO loan (firstname, lastname, status) VALUES ( 'Fred','Flintstone','pending');
+INSERT INTO loan (firstname, lastname, status) VALUES ( 'Betty','Rubble','approved');
+</pre>
+</li> <li>
+<p>Verify that the table contains the three rows inserted in the previous step.</p> 
+<pre>SELECT * FROM loan;
+</pre> <p>The output is similar to the following:</p> 
+<pre>+---------+-----------+------------+----------+
+| loan_id | firstname | lastname   | status   |
++---------+-----------+------------+----------+
+|       1 | Fred      | Flintstone | pending  |
+|       2 | Betty     | Rubble     | approved |
++---------+-----------+------------+----------+
+2 rows in set (0.0010 sec)
+</pre>
+</li> </ol> <h2 id="clusterset">Create a MySQL InnoDB ClusterSet</h2> <p>You can create a MySQL InnoDB ClusterSet to manage replication from your primary cluster to replica clusters, using a dedicated ClusterSet replication channel.</p> <p>A MySQL InnoDB ClusterSet provides disaster tolerance for MySQL InnoDB Cluster deployments by linking a primary MySQL InnoDB Cluster with one or more replicas of itself in alternate locations, such as multiple zones and multiple regions.</p> <p>If you closed MySQL Shell, create a new shell by running this command in a new Cloud Shell terminal:</p> 
+<pre>  kubectl -n mysql1 exec -it dbc1-0 -- \
+      /bin/bash -c 'mysqlsh \
+      --uri="root:$MYSQL_ROOT_PASSWORD@dbc1-0.mysql.mysql1.svc.cluster.local"'
+</pre> <p>To create a MySQL InnoDB ClusterSet, follow these steps:</p> <ol> <li>
+<p>In your MySQL Shell terminal, obtain a cluster object.</p> 
+<pre>\js
+cluster=dba.getCluster()
+</pre> <p>The output is similar to the following:</p> 
+<pre>&lt;Cluster:mycluster&gt;
+</pre>
+</li> <li>
+<p>Initialize a MySQL InnoDB ClusterSet with the existing MySQL InnoDB Cluster stored in the cluster object as the primary.</p> 
+<pre>clusterset=cluster.createClusterSet('clusterset')
+</pre> <p>The output is similar to the following:</p> 
+<pre>A new ClusterSet will be created based on the Cluster 'mycluster'.
+
+* Validating Cluster 'mycluster' for ClusterSet compliance.
+
+* Creating InnoDB ClusterSet 'clusterset' on 'mycluster'...
+
+* Updating metadata...
+
+ClusterSet successfully created. Use ClusterSet.createReplicaCluster() to add Replica Clusters to it.
+
+&lt;ClusterSet:clusterset&gt;
+</pre>
+</li> <li>
+<p>Check the status of your MySQL InnoDB ClusterSet.</p> 
+<pre>clusterset.status()
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+    "clusters": {
+        "mycluster": {
+            "clusterRole": "PRIMARY",
+            "globalStatus": "OK",
+            "primary": "dbc1-0.mysql:3306"
+        }
+    },
+    "domainName": "clusterset",
+    "globalPrimaryInstance": "dbc1-0.mysql:3306",
+    "primaryCluster": "mycluster",
+    "status": "HEALTHY",
+    "statusText": "All Clusters available."
+}
+</pre> <p>Optionally, you can call <code translate="no" dir="ltr">clusterset.status({extended:1})</code> to obtain additional status details, including information about the cluster.</p>
+</li> <li>
+<p>Exit MySQL Shell.</p> 
+<pre>\q
+</pre>
+</li> </ol> <h2 id="router">Deploy a MySQL Router</h2> <p>You can deploy a MySQL Router to direct client application traffic to the proper clusters. Routing is based on the connection port of the application issuing a database operation:</p> <ul> <li>
+<em>Writes</em> are routed to the primary Cluster instance in the primary ClusterSet.</li> <li>
+<em>Reads</em> can be routed to any instance in the primary Cluster.</li> </ul> <p>When you start a MySQL Router, it is bootstrapped against the MySQL InnoDB ClusterSet deployment. The MySQL Router instances connected with the MySQL InnoDB ClusterSet are aware of any controlled switchovers or emergency failovers and direct traffic to the new primary cluster.</p> <p>To deploy a MySQL Router, follow these steps:</p> <ol> <li>
+<p>In the Cloud Shell terminal, deploy the MySQL Router.</p> 
+<pre>kubectl apply -n mysql1 -f c1-router.yaml
+</pre> <p>The output is similar to the following:</p> 
+<pre>configmap/mysql-router-config created
+service/mysql-router created
+deployment.apps/mysql-router created
+</pre>
+</li> <li>
+<p>Check the readiness of the MySQL Router deployment.</p> 
+<pre>kubectl -n mysql1 get deployment mysql-router --watch
+</pre> <p>When all three Pods are ready, the output is similar to the following:</p> 
+<pre>NAME           READY   UP-TO-DATE   AVAILABLE   AGE
+mysql-router   3/3     3            0           3m36s
+</pre> <p>If you see a <code translate="no" dir="ltr">PodUnschedulable</code> error in the console, wait a minute or two while GKE provisions more nodes. Refresh, and you should see <code translate="no" dir="ltr">3/3 OK</code>.</p>
+</li> <li>
+<p>Start MySQL Shell on any member of the existing cluster.</p> 
+<pre>kubectl -n mysql1 exec -it dbc1-0 -- \
+    /bin/bash -c 'mysqlsh --uri="root:$MYSQL_ROOT_PASSWORD@dbc1-0.mysql"'
+</pre> <p>This command connects to the <code translate="no" dir="ltr">dbc1-0</code> Pod, then starts a shell connected to the <code translate="no" dir="ltr">dbc1-0</code> MySQL instance.</p>
+</li> <li>
+<p>Verify the router configuration.</p> 
+<pre>clusterset=dba.getClusterSet()
+clusterset.listRouters()
+</pre> <p>The output is similar to the following:</p> 
+<pre>{
+  "domainName": "clusterset",
+  "routers": {
+    "mysql-router-7cd8585fbc-74pkm::": {
+        "hostname": "mysql-router-7cd8585fbc-74pkm",
+        "lastCheckIn": "2022-09-22 23:26:26",
+        "roPort": 6447,
+        "roXPort": 6449,
+        "rwPort": 6446,
+        "rwXPort": 6448,
+        "targetCluster": null,
+        "version": "8.0.27"
+    },
+    "mysql-router-7cd8585fbc-824d4::": {
+      ...
+    },
+    "mysql-router-7cd8585fbc-v2qxz::": {
+      ...
+    }
+  }
+}
+</pre>
+</li> <li>
+<p>Exit MySQL Shell.</p> 
+<pre>\q
+</pre>
+</li> <li>
+<p>Run this script to inspect the placement of the MySQL Router Pods.</p> 
+<pre>bash ../scripts/inspect_pod_node.sh mysql1 | sort
+</pre> <p>The script shows the node and Cloud Zone placement of the all of the Pods in the <code translate="no" dir="ltr">mysql1</code> namespace, where the output is similar to the following:</p> 
+<pre>gke-gkemulti-west-5-default-pool-1ac6e8b5-0h9v us-west1-c mysql-router-6654f985f5-df97q
+gke-gkemulti-west-5-default-pool-1ac6e8b5-ddjx us-west1-c dbc1-1
+gke-gkemulti-west-5-default-pool-1f5baa66-bf8t us-west1-a dbc1-2
+gke-gkemulti-west-5-default-pool-1f5baa66-kt03 us-west1-a mysql-router-6654f985f5-qlfj9
+gke-gkemulti-west-5-default-pool-4bcaca65-2l6s us-west1-b mysql-router-6654f985f5-5967d
+gke-gkemulti-west-5-default-pool-4bcaca65-jch0 us-west1-b dbc1-0
+</pre> <p>You can observe that the MySQL Router Pods are distributed equally across the zones; that is, not placed on the same node as a MySQL Pod, or on the same node as another MySQL Router Pod.</p>
+</li> </ol> <h2 id="manage">Manage GKE and MySQL InnoDB Cluster upgrades</h2> <p>Updates for both MySQL and Kubernetes are released on a regular schedule. Follow operational best practices to update your software environment regularly. By default, GKE manages cluster and node pool upgrades for you. Kubernetes and GKE also provide additional features to facilitate MySQL software upgrades.</p> <h3 id="plan_for_upgrades">Plan for GKE upgrades</h3> <p>You can take proactive steps and set configurations to mitigate risk and facilitate a smoother cluster upgrade when you are running stateful services, including:</p> <ul> <li>
+<p><strong>Standard clusters</strong>: Follow <a href="../../best-practices/upgrading-clusters">GKE best practices for upgrading clusters</a>. Choose an appropriate <a href="../../concepts/node-pool-upgrade-strategies">upgrade strategy</a> to ensure the upgrades happen during the period of the maintenance window:</p> <ul> <li>Choose <a href="../../concepts/node-pool-upgrade-strategies#surge">surge upgrades</a> if cost optimization is important and if your workloads can tolerate a graceful shutdown in less than 60 minutes.</li> <li>Choose <a href="../../concepts/node-pool-upgrade-strategies#blue-green-upgrade-strategy">blue-green upgrades</a> if your workloads are less tolerant of disruptions, and a temporary cost increase due to higher resource usage is acceptable.</li> </ul> <p>To learn more, see <a href="../upgrading-stateful-workload#configure_a_node_pool_upgrade_strategy">Upgrade a cluster running a stateful workload</a>. Autopilot clusters are <a href="../../concepts/cluster-upgrades-autopilot">automatically upgraded</a>, based on the release channel you selected.</p>
+</li> <li><p>Use <a href="../../concepts/maintenance-windows-and-exclusions">maintenance windows</a> to ensure upgrades happen when you intend them. Before the maintenance window, ensure your database backups are successful.</p></li> <li><p>Before allowing traffic to the upgraded MySQL nodes, use Readiness Probes and Liveness Probes to ensure they are ready for traffic.</p></li> <li><p>Create Probes that assess whether replication is in sync before accepting traffic. This can be done through custom scripts, depending on the complexity and scale of your database.</p></li> </ul> <h4 id="pdb">Set a Pod Disruption Budget (PDB) policy</h4> <p>When a MySQL InnoDB Cluster is running on GKE, there must be a sufficient number of instances running at any time to meet the quorum requirement.</p> <p>In this tutorial, given a MySQL cluster of three instances, two instances must be available to form a quorum. A <code translate="no" dir="ltr">PodDisruptionBudget</code> policy allows you to limit the number of Pods that can be terminated at any given time. This is useful for both steady state operations of your stateful services and for cluster upgrades.</p> <p>To ensure that a limited number of Pods are concurrently disrupted, you set the PDB for your workload to <code translate="no" dir="ltr">maxUnavailable: 1</code>. This ensures that at any point in the service operation, no more than one Pod is not running.</p> <aside class="note"><strong>Note:</strong><span> You can also set the <code translate="no" dir="ltr">minAvailable</code> value to ensure that a minimum number of Pods are running. However, if using <code translate="no" dir="ltr">minAvailable</code> alone, to guarantee cluster availability, make sure that the value is increased if the size of the cluster increases. In contrast, the <code translate="no" dir="ltr">maxUnavailable</code> value provides quorum protection for the cluster without any changes; the tradeoff is that only one instance can be disrupted for upgrade at a time.</span></aside> <p>The following <code translate="no" dir="ltr">PodDisruptionBudget</code> policy manifest sets the maximum unavailable Pods to one for your MySQL application.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mysql-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: mysql</pre> </div> <p>To apply the PDB policy to your cluster, follow these steps:</p> <ol> <li>
+<p>Apply the PDB policy using <code translate="no" dir="ltr">kubectl</code>.</p> 
+<pre>kubectl apply -n mysql1 -f mysql-pdb-maxunavailable.yaml
+</pre>
+</li> <li>
+<p>View the status of the PDB.</p> 
+<pre>kubectl get poddisruptionbudgets -n mysql1 mysql-pdb -o yaml
+</pre> <p>In the <code translate="no" dir="ltr">status</code> section of the output, see the <code translate="no" dir="ltr">currentHealthy</code> and <code translate="no" dir="ltr">desiredHealthy</code> Pods counts. The output is similar to the following:</p> 
+<pre>status:
+...
+  currentHealthy: 3
+  desiredHealthy: 2
+  disruptionsAllowed: 1
+  expectedPods: 3
+...
+</pre>
+</li> </ol> <h3 id="mysql-upgrades">Plan for MySQL binary upgrades</h3> <p>Kubernetes and GKE provide features to facilitate upgrades for the MySQL binary. However, you need to perform some operations to prepare for the upgrades.</p> <p>Keep the following considerations in mind before you begin the upgrade process:</p> <ul> <li>Upgrades should first be carried out in a test environment. For production systems, you should perform further testing in a pre-production environment.</li> <li>For some binary releases, you cannot downgrade the version once an upgrade has been performed. Take the time to understand the implications of an upgrade.</li> <li>Replication sources can replicate to a newer version. However, copying from a newer to an older version is typically not supported.</li> <li>Make sure you have a complete database backup before deploying the upgraded version.</li> <li>Keep in mind the ephemeral nature of Kubernetes Pods. Any configuration state stored by the Pod that is not on the persistent volume will be lost when the Pod is redeployed.</li> <li>For MySQL binary upgrades, use the same PDB, node pool update strategy, and Probes as described earlier.</li> </ul> <p>In a production environment, you should follow these best practices:</p> <ul> <li>Create a container image with the new version of MySQL.</li> <li>Persist the image build instructions in a source control repository.</li> <li>Use an automated image build and testing pipeline such as Cloud Build, and store the image binary in an image registry such as Artifact Registry.</li> </ul> <p>To keep this tutorial simple, you will not build and persist a container image; instead, you use the public MySQL images.</p> <h4 id="binary-upgrade">Deploy the upgraded MySQL binary</h4> <p>To perform the MySQL binary upgrade, you issue a declarative command that modifies the image version of the StatefulSet resource. GKE performs the necessary steps to stop the current Pod, deploy a new Pod with the upgraded binary, and attach the persistent disk to the new Pod.</p> <ol> <li>
+<p>Verify that the PDB was created.</p> 
+<pre>kubectl get poddisruptionbudgets -n mysql1
+</pre>
+</li> <li>
+<p>Get the list of stateful sets.</p> 
+<pre>kubectl get statefulsets -n mysql1
+</pre>
+</li> <li>
+<p>Get the list of running Pods using the <code translate="no" dir="ltr">app</code> label.</p> 
+<pre>kubectl get pods --selector=app=mysql -n mysql1
+</pre>
+</li> <li>
+<p>Update the MySQL image in the stateful set.</p> 
+<pre>kubectl  -n mysql1 \
+    set image statefulset/dbc1 \
+    mysql=mysql/mysql-server:8.0.30
+</pre> <p>The output is similar to the following:</p> 
+<pre>statefulset.apps/mysql image updated
+</pre>
+</li> <li>
+<p>Check the status of the terminating Pods and new Pods.</p> 
+<pre>kubectl get pods --selector=app=mysql -n mysql1
+</pre>
+</li> </ol> <h4 id="validate-binary">Validate the MySQL binary upgrade</h4> <p>During the upgrade, you can verify the status of the rollout, the new Pods, and the existing Service.</p> <ol> <li>
+<p>Confirm the upgrade by running the <code translate="no" dir="ltr">rollout status</code> command.</p> 
+<pre>kubectl rollout status statefulset/dbc1 -n mysql1
+</pre> <p>The output is similar to the following:</p> 
+<pre>partitioned roll out complete: 3 new pods have been updated...
+</pre>
+</li> <li>
+<p>Confirm the image version by inspecting the stateful set.</p> 
+<pre>kubectl get statefulsets -o wide -n mysql1
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME   READY   AGE   CONTAINERS   IMAGES
+dbc1   3/3     37m   mysql        mysql/mysql-server:8.0.30
+</pre>
+</li> <li>
+<p>Check the status of the cluster.</p> 
+<pre>kubectl -n mysql1 \
+     exec -it dbc1-0 -- \
+       /bin/bash \
+         -c 'mysqlsh \
+         --uri="root:$MYSQL_ROOT_PASSWORD@dbc1-1.mysql.mysql1.svc.cluster.local" \
+         --js \
+         --execute "print(dba.getClusterSet().status({extended:1})); print(\"\\n\")"'
+</pre> <p>For each cluster instance, look for the status and version values in the output. The output is similar to the following:</p> 
+<pre>...
+  "status": "ONLINE",
+  "version": "8.0.30"
+...
+</pre>
+</li> </ol> <h4 id="rollback">Rollback the last app deployment rollout</h4> <aside class="warning"><strong>Warning:</strong><span> Some binary versions cannot be downgraded. Understand the implications and constraints before performing a binary upgrade.</span></aside> <p>When you revert the deployment of an upgraded binary version, the rollout process is reversed and a new set of Pods is deployed with the previous image version.</p> <p>To revert the deployment to the previous working version, use the <code translate="no" dir="ltr">rollout undo</code> command:</p> 
+<pre>kubectl rollout undo statefulset/dbc1 -n mysql1
+</pre> <p>The output is similar to the following:</p> 
+<pre>statefulset.apps/dbc1 rolled back
+</pre> <h2 id="scale">Scale your database cluster horizontally</h2> <p>To scale your MySQL InnoDB Cluster horizontally, you add additional nodes to the GKE cluster node pool (only required if you are using Standard), deploy additional MySQL instances, then add each instance to the existing MySQL InnoDB Cluster.</p> <h3 id="addnodes">Add nodes to your Standard cluster</h3> <p>This operation is not needed if you are using a Autopilot cluster.</p> <p>To add nodes to your Standard cluster, follow the instructions below for Cloud Shell or the Google Cloud console. For detailed steps, see <a href="../../how-to/node-pools#resizing_a_node_pool">Resize a node pool</a></p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>In Cloud Shell, resize the default node pool to eight instances in each managed instance group.</p> 
+<pre data-language="bash">gcloud container clusters resize ${CLUSTER_NAME} \
+     --node-pool default-pool \
+     --num-nodes=8
+</pre></section> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To add nodes to your Standard cluster:</p> <ol> <li>Open the <code translate="no" dir="ltr">gkemulti-west1</code> Cluster page in the Google Cloud console.</li> <li>Select <strong>Nodes</strong>, and click on <strong>default pool</strong>.</li> <li>Scroll down to <strong>Instances groups</strong>.</li> <li>For each instance group, resize the <code translate="no" dir="ltr">Number of nodes</code> value from 5 to 8 nodes.</li> </ol></section> </div> <h3 id="addpods">Add MySQL Pods to the primary cluster</h3> <p>To deploy additional MySQL Pods to scale your cluster horizontally, follow these steps:</p> <ol> <li>
+<p>In Cloud Shell, update the number of replicas in the MySQL deployment from three replicas to five replicas.</p> 
+<pre>kubectl scale  -n mysql1 --replicas=5 -f c1-mysql.yaml
+</pre>
+</li> <li>
+<p>Verify the progress of the deployment.</p> 
+<pre>kubectl -n mysql1 get pods --selector=app=mysql -o wide
+</pre> <p>To determine whether the Pods are ready, use the <code translate="no" dir="ltr">--watch</code> flag to watch the deployment. If you are using Autopilot clusters and see <code translate="no" dir="ltr">Pod Unschedulable</code> errors, this might indicate GKE is provisioning nodes to accommodate the additional Pods.</p>
+</li> <li>
+<p>Configure the group replication settings for the new MySQL instances to add to the cluster</p> 
+<pre>bash ../scripts/c1-clustersetup.sh 3 4
+</pre> <p>The script submits the commands to the instances running on the Pods with ordinals 3 through 4.</p>
+</li> <li>
+<p>Open MySQL Shell.</p> 
+<pre>kubectl -n mysql1 \
+  exec -it dbc1-0 -- \
+      /bin/bash \
+        -c 'mysqlsh \
+        --uri="root:$MYSQL_ROOT_PASSWORD@dbc1-0.mysql"'
+</pre>
+</li> <li>
+<p>Configure the two new MySQL instances.</p> 
+<pre>dba.configureInstance('root:$MYSQL_ROOT_PASSWORD@dbc1-3.mysql', {password: os.getenv("MYSQL_ROOT_PASSWORD"),clusterAdmin: 'icadmin', clusterAdminPassword: os.getenv("MYSQL_ADMIN_PASSWORD")});
+dba.configureInstance('root:$MYSQL_ROOT_PASSWORD@dbc1-4.mysql', {password: os.getenv("MYSQL_ROOT_PASSWORD"),clusterAdmin: 'icadmin', clusterAdminPassword: os.getenv("MYSQL_ADMIN_PASSWORD")});
+</pre> <p>The commands check if the instance is configured properly for MySQL InnoDB Cluster usage and perform the necessary configuration changes.</p>
+</li> <li>
+<p>Add one of the new instances to the primary cluster.</p> 
+<pre>cluster = dba.getCluster()
+cluster.addInstance('icadmin@dbc1-3.mysql', {password: os.getenv("MYSQL_ROOT_PASSWORD"), recoveryMethod: 'clone'});
+</pre>
+</li> <li>
+<p>Add a second new instance to the primary cluster.</p> 
+<pre>cluster.addInstance('icadmin@dbc1-4.mysql', {password: os.getenv("MYSQL_ROOT_PASSWORD"), recoveryMethod: 'clone'});
+</pre>
+</li> <li>
+<p>Obtain the ClusterSet status, which also includes the Cluster status.</p> 
+<pre>clusterset = dba.getClusterSet()
+clusterset.status({extended: 1})
+</pre> <p>The output is similar to the following:</p> 
+<pre>"domainName": "clusterset",
+"globalPrimaryInstance": "dbc1-0.mysql:3306",
+"metadataServer": "dbc1-0.mysql:3306",
+"primaryCluster": "mycluster",
+"status": "HEALTHY",
+"statusText": "All Clusters available."
+</pre>
+</li> <li>
+<p>Exit MySQL Shell.</p> 
+<pre>\q
+</pre>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <p>The easiest way to avoid billing is to delete the project you created for the tutorial.</p> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn more about how the <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/agents/ops-agent/third-party/mysql">Google Cloud Observability MySQL integration</a> collects performance metrics related to InnoDB.</li> <li>Learn more about <a href="../../add-on/backup-for-gke/concepts/backup-for-gke">backup for GKE</a>, a service for backing up and restoring workloads in GKE.</li> <li>Explore <a href="../../concepts/persistent-volumes">Persistent Volumes</a> in more detail.</li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/stateful-workloads/mysql" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/stateful-workloads/mysql</a>
+  </p>
+</div>

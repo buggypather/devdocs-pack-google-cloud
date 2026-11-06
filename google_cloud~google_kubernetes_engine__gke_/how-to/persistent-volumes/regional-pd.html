@@ -1,0 +1,262 @@
+<h1>Provisioning regional persistent disks and Hyperdisk Balanced High Availability volumes</h1>  <p>This page explains how to enable dynamic provisioning of <a href="../../concepts/hyperdisk">Hyperdisk Balanced High Availability volumes</a> and <a href="../../concepts/persistent-volumes#regional_persistent_disks">regional persistent disks</a> and how to provision them manually in Google Kubernetes Engine (GKE). For machine type compatibilities, see <a href="https://docs.cloud.google.com/compute/docs/disks/persistent-disks#repd_limitations">Limitations for Regional Disk</a> and <a href="https://docs.cloud.google.com/compute/docs/disks/hyperdisks#machine-type-support">Machine series support for Hyperdisk</a>. Generally, you should use Hyperdisk Balanced High Availability volumes for 3rd generation machine series or newer and regional persistent disks in 2nd generation machine series or older. For more information on machine series generation, see <a href="https://docs.cloud.google.com/compute/docs/machine-resource#vm_terminology">Compute Engine terminology</a>.</p> <p>For creating end-to-end solutions for high-availability applications with regional persistent disks, see <a href="../stateful-ha">Increase stateful app availability with Stateful HA Operator</a>. This feature does not support Hyperdisk Balanced High Availability volumes.</p> <aside class="note"><strong>Note:</strong><span> Multi-writer disks can only be consumed in Block volume mode. The application is responsible for managing its own filesystem or other synchronization mechanism on top of the block device. For more information, see <a href="https://docs.cloud.google.com/compute/docs/disks/sharing-disks-between-vms#supported_file_systems_for_multi-writer_mode">Supported file systems for multi-writer mode</a>.</span></aside> <h2 id="balanced_high_availability">Hyperdisk Balanced High Availability</h2> <p>This example shows how Hyperdisk Balanced High Availability volumes can be dynamically provisioned as needed or manually provisioned in advance by the cluster administrator.</p> <aside class="note"><strong>Note:</strong><span> Provisioning Hyperdisk Balanced High Availability volumes is only supported by the <a href="gce-pd-csi-driver">Compute Engine persistent disk CSI driver</a> starting from GKE version 1.33.</span></aside><div> <section><p class="_code-tab"><strong>Dynamic provisioning</strong></p>
+<ol> <li>
+<p>Save the following manifest in a file named <code translate="no" dir="ltr">balanced-ha-storage.yaml</code>.</p> 
+<pre data-language="">apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: balanced-ha-storage
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: WaitForFirstConsumer
+# Allow volume expansion.
+allowVolumeExpansion: true
+parameters:
+  type: hyperdisk-balanced-high-availability
+  # Provisioned throughput in MiB/s.
+  provisioned-throughput-on-create: "250Mi"
+  # Provisioned IOPS (input/output operations per second).
+  provisioned-iops-on-create: "7000"
+allowedTopologies:
+- matchLabelExpressions:
+  - key: topology.gke.io/zone
+    values:
+    - ZONE1
+    - ZONE2
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE1</var></code>, <code translate="no" dir="ltr"><var translate="no">ZONE2</var></code>: the zones within the region where the dynamically provisioned volume will be replicated.</li> </ul>
+</li> <li>
+<p>Create the StorageClass:</p> 
+<pre data-language="">kubectl create -f hdb-ha-example-class.yaml
+</pre>
+</li> <li>
+<p>Save the following PersistentVolumeClaim manifest in a file named <code translate="no" dir="ltr">pvc-example.yaml</code>:</p> 
+<pre data-language="">kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: podpvc
+spec:
+  accessModes:
+  - ACCESS_MODE
+  storageClassName: balanced-ha-storage
+  resources:
+    requests:
+      storage: 20Gi
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCESS_MODE</var></code>: Hyperdisk Balanced High Availability supports <code translate="no" dir="ltr">ReadWriteOnce</code>, <code translate="no" dir="ltr">ReadWriteMany</code> and <code translate="no" dir="ltr">ReadWriteOncePod</code>. For differences and use cases of each access mode, see <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes">Persistent Volume Access Modes</a>.</li> <li>If you choose to use <code translate="no" dir="ltr">ReadWriteMany</code>, you also need to add <code translate="no" dir="ltr">volumeMode: Block</code> to the <code translate="no" dir="ltr">PersistentVolumeClaim</code>. This setting prevents data corruption that can happen from multiple Pods writing to the storage simultaneously. The <code translate="no" dir="ltr">volumeMode: Block</code> setting exposes the disk as a raw block device that bypasses file system management by Kubernetes. The following is an example:</li> </ul> 
+<pre data-language="">  kind: PersistentVolumeClaim
+  apiVersion: v1
+  metadata:
+    name: podpvc
+  spec:
+    accessModes:
+    - ReadWriteMany
+    volumeMode: Block
+    storageClassName: balanced-ha-storage
+    resources:
+      requests:
+        storage: 20Gi
+  ```
+</pre>
+</li> <li>
+<p>Apply the PersistentVolumeClaim that references the StorageClass you created from earlier:</p> 
+<pre data-language="">kubectl apply -f pvc-example.yaml
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Manual Provisioning</strong></p>
+<ol> <li><p>Follow <a href="https://docs.cloud.google.com/compute/docs/disks/regional-persistent-disk#repd_create_disk">Compute Engine documentation</a> to create a Hyperdisk Balanced High Availability volume manually.</p></li> <li>
+<p>Save the following PersistentVolume manifest in a file named <code translate="no" dir="ltr">pv-example.yaml</code>. The manifest references the Hyperdisk Balanced High Availability volume you just created:</p> 
+<pre data-language="">apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-demo
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ACCESS_MODE
+  # ClaimRef links this PersistentVolume to a PersistentVolumeClaim.
+  claimRef:
+    namespace: default
+    name: podpvc
+  csi:
+    driver: pd.csi.storage.gke.io
+    # The unique identifier of the Compute Engine disk resource that backs this volume.
+    volumeHandle: projects/PROJECT_ID/regions/REGION/disks/gce-disk-1
+  # Node affinity to ensure the Pod is scheduled in a zone where the volume is replicated.
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+          - key: topology.gke.io/zone
+            operator: In
+            values:
+            - ZONE1
+            - ZONE2
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the project ID of the volume you created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region of the disk you created. Refer to the <a href="https://docs.cloud.google.com/compute/docs/disks/hyperdisks">Compute Engine documentation</a> for the latest regional availability.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE1</var></code>, <code translate="no" dir="ltr"><var translate="no">ZONE2</var></code>: the zones within the region where the volume you created is replicated.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCESS_MODE</var></code>: Hyperdisk Balanced High Availability supports <code translate="no" dir="ltr">ReadWriteOnce</code>, <code translate="no" dir="ltr">ReadWriteMany</code> and <code translate="no" dir="ltr">ReadWriteOncePod</code>. For differences and use cases of each access mode, see <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes" class="external">Persistent Volume Access Modes</a>.</li> </ul>
+</li> <li>
+<p>Create the Persistent Volume that references the Hyperdisk Balanced High Availability volume you created earlier:</p> 
+<pre data-language="">kubectl apply -f pv-example.yaml
+</pre>
+</li> <li>
+<p>Save the following PersistentVolumeClaim manifest in a file named <code translate="no" dir="ltr">pvc-example.yaml</code>:</p> 
+<pre data-language="">kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: podpvc
+spec:
+  accessModes:
+  - ACCESS_MODE
+  storageClassName: balanced-ha-storage
+  resources:
+    requests:
+      storage: 20Gi
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ACCESS_MODE</var></code>: Hyperdisk Balanced High Availability supports <code translate="no" dir="ltr">ReadWriteOnce</code>, <code translate="no" dir="ltr">ReadWriteMany</code> and <code translate="no" dir="ltr">ReadWriteOncePod</code>. Must be the same access mode as what is specified in the PersistentVolume from the previous step. For differences and use cases of each access mode, see <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes" class="external">Persistent Volume Access Modes</a>.</li> </ul>
+</li> <li>
+<p>Apply the PersistentVolumeClaim that references the PersistentVolume you created from earlier:</p> 
+<pre data-language="">kubectl apply -f pvc-example.yaml
+</pre>
+</li> </ol></section> </div> <h3 id="consuming_a_multi-writer_volume_in_block_mode">Consuming a multi-writer volume in block mode</h3> <p>In order to use a volume in block mode, you must specify <code translate="no" dir="ltr">volumeBlock</code> instead of <code translate="no" dir="ltr">volumeMounts</code> in the consuming Pod. An example Pod that uses the previously introduced <code translate="no" dir="ltr">PersistenVolumeClaim</code> should look like the following:</p> 
+<pre>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        # Use volumeDevices instead of volumeMounts to consume the volume as a raw block device.
+        volumeDevices:
+        # The "mountPath" field specifies the path where the block device is accessible in the container.
+        - mountPath: /dev/my-device
+          name: mypvc
+      volumes:
+      - name: mypvc
+        persistentVolumeClaim:
+          claimName: podpvc
+          readOnly: false
+</pre> <h2 id="regional_persistent_disks">Regional persistent disks</h2> <p>As with zonal persistent disks, regional persistent disks can be dynamically provisioned as needed or manually provisioned in advance by the cluster administrator, although dynamic provisioning is recommended. To utilize regional persistent disks of the <code translate="no" dir="ltr">pd-standard</code> type, set the PersistentVolumeClaim's <code translate="no" dir="ltr">spec.resources.requests.storage</code> attribute to a minimum of 200 GiB. If your use case requires a smaller volume, consider using <code translate="no" dir="ltr">pd-balanced</code> or <code translate="no" dir="ltr">pd-ssd</code> instead.</p> <div> <section><p class="_code-tab"><strong>Dynamic provisioning</strong></p>
+<p>To enable dynamic provisioning of regional persistent disks, create a <code translate="no" dir="ltr">StorageClass</code> with the <code translate="no" dir="ltr">replication-type</code> parameter, and specify zone constraints in <code translate="no" dir="ltr">allowedTopologies</code>.</p> <p>For example, the following manifest describes a <code translate="no" dir="ltr">StorageClass</code> named <code translate="no" dir="ltr">regionalpd-storageclass</code> that uses standard persistent disks and that replicates data to the <code translate="no" dir="ltr">europe-west1-b</code> and <code translate="no" dir="ltr">europe-west1-c</code> zones:</p> 
+<pre data-language="">kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: regionalpd-storageclass
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+  # Specifies that the disk should be a regional persistent disk.
+  replication-type: regional-pd
+volumeBindingMode: WaitForFirstConsumer
+# Constrains which zones the regional persistent disk can be provisioned in.
+allowedTopologies:
+- matchLabelExpressions:
+  - key: topology.gke.io/zone
+    values:
+    - europe-west1-b
+    - europe-west1-c
+</pre> <p>If using a regional cluster, you can leave <code translate="no" dir="ltr">allowedTopologies</code> unspecified. If you do this, when you create a Pod that consumes a <code translate="no" dir="ltr">PersistentVolumeClaim</code> which uses this <code translate="no" dir="ltr">StorageClass</code> a regional persistent disk is provisioned with two zones. One zone is the same as the zone that the Pod is scheduled in. The other zone is randomly picked from the zones available to the cluster.</p> <aside class="note"><strong>Note:</strong><span> You can omit <code translate="no" dir="ltr">allowedTopologies</code> in your StorageClass only if your node pools have active nodes in at least two different zones. This allows GKE to automatically select the correct primary and secondary zones for your regional persistent disks.</span></aside> <p>When using a zonal cluster, <code translate="no" dir="ltr">allowedTopologies</code> must be set.</p> <p>Once the <code translate="no" dir="ltr">StorageClass</code> is created, next create a <code translate="no" dir="ltr">PersistentVolumeClaim</code> object, using the <code translate="no" dir="ltr">storageClassName</code> field to refer to the <code translate="no" dir="ltr">StorageClass</code>. For example, the following manifest creates a <code translate="no" dir="ltr">PersistentVolumeClaim</code> named <code translate="no" dir="ltr">regional-pvc</code> and references the <code translate="no" dir="ltr">regionalpd-storageclass</code>:</p> 
+<pre data-language="">apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: regional-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: regionalpd-storageclass
+</pre> <p>Since the <code translate="no" dir="ltr">StorageClass</code> is configured with <code translate="no" dir="ltr">volumeBindingMode: WaitForFirstConsumer</code>, the <code translate="no" dir="ltr">PersistentVolume</code> is not provisioned until a Pod using the <code translate="no" dir="ltr">PersistentVolumeClaim</code> has been created.</p> <p>The following manifest is an example Pod using the previously created <code translate="no" dir="ltr">PersistentVolumeClaim</code>:</p> 
+<pre data-language="">kind: Pod
+apiVersion: v1
+metadata:
+  name: task-pv-pod
+spec:
+  volumes:
+    - name: task-pv-storage
+      # This Pod uses the PVC that's associated with the
+      # "regionalpd-storageclass" StorageClass.
+      persistentVolumeClaim:
+        claimName: regional-pvc
+  containers:
+    - name: task-pv-container
+      image: nginx
+      ports:
+        - containerPort: 80
+          name: "http-server"
+      # The volume is mounted into the container at the "/usr/share/nginx/html" path.
+      volumeMounts:
+        - mountPath: "/usr/share/nginx/html"
+          name: task-pv-storage
+</pre></section> <section><p class="_code-tab"><strong>Manual provisioning</strong></p>
+<p>First, create a regional persistent disk using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/disks/create"><code translate="no" dir="ltr">gcloud compute disks create</code></a> command. The following example creates a disk named <code translate="no" dir="ltr">gce-disk-1</code> replicated to the <code translate="no" dir="ltr">europe-west1-b</code> and <code translate="no" dir="ltr">europe-west1-c</code> zones:</p> 
+<pre data-language="">gcloud compute disks create gce-disk-1 \
+   --size 500Gi \
+   --region europe-west1 \
+   --replica-zones europe-west1-b,europe-west1-c
+</pre> <p>You can then create a <code translate="no" dir="ltr">PersistentVolume</code> that references the regional persistent disk you just created. In addition to objects in <a href="preexisting-pd">Using preexisting Persistent Disks as PersistentVolumes</a>, the <code translate="no" dir="ltr">PersistentVolume</code> for a regional persistent disk should also specify a <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#node-affinity" class="external"><code translate="no" dir="ltr">node-affinity</code></a>. If you use a <code translate="no" dir="ltr">StorageClass</code>, it should specify the persistent disk CSI driver.</p> <p>Here's an example of a <code translate="no" dir="ltr">StorageClass</code> manifest that uses standard persistent disks and that replicates data to the <code translate="no" dir="ltr">europe-west1-b</code> and <code translate="no" dir="ltr">europe-west1-c</code> zones:</p> 
+<pre data-language="">kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: regionalpd-storageclass
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+  # Specifies that the disk should be a regional persistent disk.
+  replication-type: regional-pd
+volumeBindingMode: WaitForFirstConsumer
+# Constrains which zones the regional persistent disk can be provisioned in.
+allowedTopologies:
+- matchLabelExpressions:
+  - key: topology.gke.io/zone
+    values:
+    - europe-west1-b
+    - europe-west1-c
+</pre> <p>Here's an example manifest that creates a <code translate="no" dir="ltr">PersistentVolume</code> named <code translate="no" dir="ltr">pv-demo</code> and references the <code translate="no" dir="ltr">regionalpd-storageclass</code>:</p> 
+<pre data-language="">apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-demo
+spec:
+  # The StorageClass that specifies regional replication.
+  storageClassName: "regionalpd-storageclass"
+  capacity:
+     storage: 500Gi
+  accessModes:
+     - ReadWriteOnce
+  claimRef:
+    namespace: default
+    name: pv-claim-demo
+  csi:
+    driver: pd.csi.storage.gke.io
+    # The unique identifier for the pre-existing regional disk.
+    volumeHandle: projects/PROJECT_ID/regions/europe-west1/disks/gce-disk-1
+  # Ensures that Pods are scheduled in zones where the disk is replicated.
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+          - key: topology.gke.io/zone
+            operator: In
+            values:
+               - europe-west1-b
+               - europe-west1-c
+</pre> <p>Note the following for the <code translate="no" dir="ltr">PersistentVolume</code> example:</p> <ul> <li>The <code translate="no" dir="ltr">volumeHandle</code> field contains details from the <code translate="no" dir="ltr">gcloud compute disks create</code> call, including your <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>.</li> <li>The <code translate="no" dir="ltr">claimRef.namespace</code> field must be specified even when it is set to <code translate="no" dir="ltr">default</code>.</li> </ul></section> </div> <h2 id="naming_persistent_disks">Naming persistent disks</h2> <p>Kubernetes cannot distinguish between zonal and regional persistent disks with the same name. As a workaround, ensure that persistent disks have unique names. This issue does not occur when using dynamically provisioned persistent disks.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Take a tutorial to learn about <a href="../../tutorials/persistent-disk">Deploying WordPress on GKE with Persistent Disks and Cloud SQL</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/regional-pd" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/regional-pd</a>
+  </p>
+</div>

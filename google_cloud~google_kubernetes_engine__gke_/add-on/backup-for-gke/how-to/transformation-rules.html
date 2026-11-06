@@ -1,0 +1,899 @@
+<h1>Modify resources during restoration</h1>  <p>This page describes how to make modifications to Kubernetes resources during the restoration process using transformation rules. Transformation rules are intended as an improvement over a previous feature called substitution rules. Because they are not backward compatible with substitution rules, the deprecated substitution rules interface is still available.</p> <p>To view the documentation for substitution rules, see <a href="substitution-rules">Modify resources during restoration</a>.</p> <h2 id="overview">Overview</h2> <p>There are several reasons why you might want to modify Kubernetes resources as part of the restore process:</p> <ul> <li><p>You might want to create a PersistentVolumeClaim (PVC) using a different storage provisioner. For example, you want to move from the Kubernetes in-tree driver to the CSI driver.</p></li> <li><p>You might want to restore a namespace under a different name.</p></li> <li><p>You might want to add, change, or delete the value associated with a label or ConfigMap key.</p></li> <li><p>You might want to change a replica count in a Deployment or StatefulSet.</p></li> </ul> <p>Backup for GKE provides a mechanism for making these changes called <em>transformation rules</em>, which you may optionally define as part of a <a href="restore-plan#create_a_restore_plan"><code translate="no" dir="ltr">RestorePlan</code></a>.</p> <p>In the restore process, transformation rules work as follows:</p> <ol> <li><p>Rules are organized into an ordered list.</p></li> <li><p>All the resources—except <code translate="no" dir="ltr">CustomResourceDefinition</code> resources, for which transformations are not available—to be restored move sequentially through this list of rules.</p></li> <li><p>Each rule contains a short description, matching criteria, and resource edits.</p></li> <li><p>If a resource does not match a rule's criteria, then it moves to the next rule in the list without modification.</p></li> <li><p>If a resource matches a rule's criteria, then the rule's edits are applied to the resource before it moves to the next rule on the list.</p></li> <li><p>If multiple rules are defined, then each rule's matching criteria is evaluated against the version of the resource modified by previous rules.</p></li> <li><p>The final version of the resource, after any matching rule's edits are applied, is what is created in the cluster.</p></li> </ol> <h2 id="transformation_rule_parameters">Transformation rule parameters</h2> <p>You create a transformation rule by supplying the following information:</p> <ul> <li><p><code translate="no" dir="ltr">description</code>: This is a short description of the transformation rule.</p></li> <li><p><code translate="no" dir="ltr">resourceFilter</code>: This filter is used to match against resources. If no <code translate="no" dir="ltr">resourceFilter</code> is provided, all resources match this rule.</p></li> <li><p><code translate="no" dir="ltr">fieldActions</code>: This is a list of edits to make to the resources that match the <code translate="no" dir="ltr">resourceFilter</code>. The edits are provided as an ordered list of actions. Order matters here because the outcome of one action can affect the next action in the list. If any action fails, the entire restore will fail.</p></li> </ul> <h3 id="resource_filter_resourcefilter">Resource filter (<code translate="no" dir="ltr">resourceFilter</code>)</h3> <p>To define a resource filter, you provide the following parameters:</p> <table> <thead> <tr> <th><strong>Parameter</strong></th> <th><strong>Required</strong></th> <th><strong>Description</strong></th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">namespaces</code></td> <td>optional</td> <td> This is a list of namespaces. For a resource to match this rule, it must be a namespaced resource and have one of the given namespaces. If nothing is provided for this parameter, then all resources will match (all namespaced and cluster-scoped resources). </td> </tr> <tr> <td><code translate="no" dir="ltr">groupKinds</code></td> <td>optional</td> <td> This is a list of Kubernetes resource <code translate="no" dir="ltr">Group/Kind</code> tuples: <br> <ul> <li> If nothing is provided for this parameter, then all resources will match with no restrictions based on <code translate="no" dir="ltr">Group/Kind</code>. </li> <li> If one or more <code translate="no" dir="ltr">Group/Kind</code> is supplied, then resources must match one of them in order to match the rule. </li> To match against core resources, use an empty ("") group. </ul> </td> </tr> <tr> <td><code translate="no" dir="ltr">jsonPath</code></td> <td>optional</td> <td> This is a <a href="https://github.com/json-path/JsonPath/blob/master/README.md">JSONPath</a> expression that is used to match against resources. </td> </tr> </tbody> </table> <h4 id="jsonpath_jsonpath">JSONPath (<code translate="no" dir="ltr">jsonPath</code>)</h4> <p>A <a href="https://github.com/json-path/JsonPath/blob/master/README.md">JSONPath</a> expression is used to match against resources. If the result of the expression is not empty against a resource, then this resource is considered matched.</p> <p>Given the following resource:</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-cm
+  labels:
+    app: mysql
+    app.kubernetes.io/name: mysql
+data:
+  primary.cnf: |
+    # Apply this config only on the primary.
+    [mysqld]
+    log-bin
+  replica.cnf: |
+    # Apply this config only on replicas.
+    [mysqld]
+    super-read-only
+</pre></section> <section><p class="_code-tab"><strong>JSON</strong></p>
+
+<pre data-language="">{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "mysql-cm",
+    "labels": {
+      "app": "mysql",
+      "app.kubernetes.io/name": "mysql"
+    }
+  },
+  "data": {
+    "primary.cnf": "# Apply this config only on the primary.\n[mysqld]\nlog-bin\n",
+    "replica.cnf": "# Apply this config only on replicas.\n[mysqld]\nsuper-read-only\n"
+  }
+}
+</pre></section> </div> <p>Example of using JSONPath expressions:</p> <table> <thead> <tr> <th><strong>Expression</strong></th> <th><strong>Description</strong></th> <th><strong>Result</strong></th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">.metadata[?(@.name == 'mysql-cm')]</code></td> <td>The <code translate="no" dir="ltr">metadata</code> object contains <code translate="no" dir="ltr">name</code> key and its value is "mysql-cm"</td> <td><code translate="no" dir="ltr">
+    [<br>
+     {<br>
+      "name": "mysql-cm",<br>
+      "labels": {<br>
+       "app": "mysql",<br>
+       "app.kubernetes.io/name": "mysql"<br>
+      }<br>
+     }<br>
+    ]</code></td> </tr> <tr> <td><code translate="no" dir="ltr">.metadata.labels['app.kubernetes.io/name']</code></td> <td>The string value of key "app.kubernetes.io/name" under <code translate="no" dir="ltr">metadata.labels</code>
+</td> <td><code translate="no" dir="ltr">
+    [<br>
+     "mysql"<br>
+    ]</code></td> </tr> <tr> <td><code translate="no" dir="ltr">.data['primary.cnf']</code></td> <td>The object value of key "primary.cnf" under <code translate="no" dir="ltr">data</code>
+</td> <td><code translate="no" dir="ltr">
+    [<br>
+     "# Apply this config only on the primary.\n[mysqld]\nlog-bin\n"<br>
+    ]</code></td> </tr> <tr> <td><code translate="no" dir="ltr">.metadata[?(@.name =~ /^mysql-.*/)]</code></td> <td>The <code translate="no" dir="ltr">metadata</code> object contains <code translate="no" dir="ltr">name</code> key and its value matches the regular expression "/^mysql-.*/i".<br> The forward slashes <code translate="no" dir="ltr">/</code> are used to delimit the regular expression pattern. The <code translate="no" dir="ltr">i</code> at the end of the regular expression is the flag for case-insensitive matching.</td> <td><code translate="no" dir="ltr">
+    [<br>
+     {<br>
+      "name": "mysql-cm",<br>
+      "labels": {<br>
+       "app": "mysql",<br>
+       "app.kubernetes.io/name": "mysql"<br>
+      }<br>
+     }<br>
+    ]</code></td> </tr> </tbody> </table> <p>As long as the output of the JSONPath expression is not empty, the corresponding resource will match this rule. Thus, <code translate="no" dir="ltr">.metadata[?(@.name == 'mysql-cm')]</code> and <code translate="no" dir="ltr">.metadata[?(@.name == 'mysql-cm')].name</code> result in the same matching result, which is matching the resource whose <code translate="no" dir="ltr">.metadata.name</code> is <code translate="no" dir="ltr">"mysql-cm"</code>.</p> <p>If a map key in JSONPath contains a <code translate="no" dir="ltr">.</code> (dot), use the bracket notation with single quotes (for example, <code translate="no" dir="ltr">['app.kubernetes.io/name']</code> or <code translate="no" dir="ltr">['primary.cnf']</code>). The <code translate="no" dir="ltr">.</code> character does not need to be escaped within the single quotes.</p> <p>We recommend using a JSONPath evaluator tool with regular expression support to test the expression before use. You can also use <code translate="no" dir="ltr">kubectl</code> to verify the result of JSONPath expressions. See <a href="https://kubernetes.io/docs/reference/kubectl/jsonpath/">JSONPath Support</a> for more examples.</p> <aside class="note"><strong>Note:</strong><span> <code translate="no" dir="ltr">kubectl</code> does not support regular expression match and filters can be only targeted against an array and slice instead of a object.</span></aside> <h3 id="field_action_fieldactions">Field action (<code translate="no" dir="ltr">fieldActions</code>)</h3> <p>Field actions are modeled based on <a href="https://datatracker.ietf.org/doc/html/rfc6902">JSON Patch</a>, which defines a JSON document structure for expressing an operation to apply to a JSON document. To define a field action, the following parameters are required:</p> <ul> <li>
+<p><code translate="no" dir="ltr">path</code>: This is a <a href="https://datatracker.ietf.org/doc/html/rfc6901">JSON Pointer</a> value that references the location in target resources where the operation is performed. JSON pointers always start with a <code translate="no" dir="ltr">/</code> (slash), and the property names (keys) descend into child elements are also separated by a <code translate="no" dir="ltr">/</code> (slash).</p> <aside class="note"><strong>Note:</strong><span> If a property name contains <code translate="no" dir="ltr">~</code> (tilde), then inside the pointer it must be escaped using <code translate="no" dir="ltr">~0</code>, or if contains <code translate="no" dir="ltr">/</code> (forward slash), then it must be escaped using <code translate="no" dir="ltr">~1</code>.</span></aside>
+</li> <li>
+<p><code translate="no" dir="ltr">op</code>: This is the type of the operation performed against resources, five operations are supported:</p> <ul> <li>
+<code translate="no" dir="ltr">add</code> inserts a new object or value to the specified <code translate="no" dir="ltr">path</code>, depending upon what the <code translate="no" dir="ltr">path</code> references.</li> <li>
+<code translate="no" dir="ltr">remove</code> removes the value from the specified <code translate="no" dir="ltr">path</code>.</li> <li>
+<code translate="no" dir="ltr">replace</code> replaces the value at the specified <code translate="no" dir="ltr">path</code> with a new value.</li> <li>
+<code translate="no" dir="ltr">move</code> removes the value from a location and adds it to the specified <code translate="no" dir="ltr">path</code>.</li> <li>
+<code translate="no" dir="ltr">copy</code> copies the value from a location to the specified <code translate="no" dir="ltr">path</code>.</li> </ul>
+</li> </ul> <p>You can find examples of each operation, using the following Pod definition:</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>JSON</strong></p>
+
+<pre data-language="">{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "nginx",
+    "namespace": "ns",
+    "labels": {
+      "app": "nginx"
+    }
+  },
+  "spec": {
+    "containers": [
+      {
+        "name": "nginx",
+        "image": "nginx:latest",
+        "ports": [
+          {
+            "containerPort": 80
+          }
+        ],
+        "env": [
+          {
+            "name": "PROTOCOL",
+            "value": "https"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "250m",
+            "memory": "64Mi"
+          }
+        }
+      }
+    ],
+    "initContainers": [
+      {
+        "name": "install",
+        "image": "busybox:stable",
+        "command": [
+          "wget",
+          "-O",
+          "/tmp/index.html",
+          "http://info.cern.ch"
+        ]
+      }
+    ]
+  }
+}
+</pre></section> </div> <h4 id="add">Add</h4> <p><code translate="no" dir="ltr">value</code> is always required for <code translate="no" dir="ltr">add</code> operations, and must be a legal JSON element.</p> <p>This following action adds a new environment variable <code translate="no" dir="ltr">"PORT"</code> with value <code translate="no" dir="ltr">"80"</code> to the <code translate="no" dir="ltr">nginx</code> container.</p> 
+<pre>op: add
+path: "/spec/containers/0/env/0"
+value: &gt;
+  {
+    "name": "PORT",
+    "value": "80"
+  }
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    - name: PORT  # newly added
+      value: "80"  # newly added
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> </div> <p>The following action adds value to a new label <code translate="no" dir="ltr">app.kubernetes.io/name: nginx</code> to the Pod.</p> 
+<pre>op: add
+path: "/metadata/labels/app.kubernetes.io~1name"
+value: "nginx"
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+    app.kubernetes.io/name: nginx  # newly added
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> </div> <p>The following action replaces the image of <code translate="no" dir="ltr">nginx</code> container to change it from <code translate="no" dir="ltr">"nginx:latest"</code> to <code translate="no" dir="ltr">"nginx:stable"</code>.</p> 
+<pre>op: add
+path: "/spec/containers/0/image"
+value: nginx:stable
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:stable  # replaced
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> </div>
+<aside class="note"><strong>Note:</strong><span> An <code translate="no" dir="ltr">add</code> operation is equivalent to <code translate="no" dir="ltr">replace</code> operation if the <code translate="no" dir="ltr">path</code> specifies an object member that already exists.</span></aside> <h4 id="remove">Remove</h4> <p>The following action removes the resource requirements for the <code translate="no" dir="ltr">nginx</code> container.</p> 
+<pre>op: remove
+path: "/spec/containers/0/resources"
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    # resource requirements are removed
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> </div> <h4 id="replace">Replace</h4> <p><code translate="no" dir="ltr">value</code> is required for <code translate="no" dir="ltr">replace</code> operation, and it has to be a JSON element.</p> <p>The following action replaces the image of the <code translate="no" dir="ltr">nginx</code> container from <code translate="no" dir="ltr">nginx:latest</code> to <code translate="no" dir="ltr">nginx:stable</code>.</p> 
+<pre>op: replace
+path: "/spec/containers/0/image"
+value: nginx:stable
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:stable  # replaced
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> </div> <h4 id="move">Move</h4> <p><code translate="no" dir="ltr">fromPath</code> is required for <code translate="no" dir="ltr">move</code> operation.</p> <p>The following action removes environment variables from the <code translate="no" dir="ltr">nginx</code> container and adds them to the <code translate="no" dir="ltr">install</code> init container.</p> 
+<pre>op: move
+fromPath: "/spec/containers/0/env"
+path: "/spec/initContainers/0/env"
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    #  "env" is moved to "install" container
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+    env:  # moved "from" nginx container
+    - name: PROTOCOL
+      value: https
+</pre></section> </div> <h4 id="copy">Copy</h4> <p><code translate="no" dir="ltr">fromPath</code> is required for <code translate="no" dir="ltr">copy</code> operation.</p> <p>The following action copies environment variables from the <code translate="no" dir="ltr">nginx</code> container to the <code translate="no" dir="ltr">install</code> init container.</p> 
+<pre>op: copy
+fromPath: "/spec/containers/0/env"
+path: "/spec/initContainers/0/env"
+</pre>
+<div> <section><p class="_code-tab"><strong>Original</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+</pre></section> <section><p class="_code-tab"><strong>Transformed</strong></p>
+
+<pre data-language="">apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: ns
+  labels:
+    app: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    env:
+    - name: PROTOCOL
+      value: "https"
+    resources:
+      limits:
+        cpu: "250m"
+        memory: "64Mi"
+  initContainers:
+  - name: install
+    image: busybox:stable
+    command:
+    - wget
+    - "-O"
+    - "/tmp/index.html"
+    - http://info.cern.ch
+    env:  # copy from "nginx" container
+    - name: PROTOCOL
+      value: https
+</pre></section> </div> <p>To learn more about defining transformation rules in the Google Cloud console, see <a href="restore-plan#create_a_restore_plan">Plan a set of restores</a>.</p> <p>To define transformation rules through gcloud CLI, create a file containing a YAML array of <code translate="no" dir="ltr">transformationRules</code> and include the <code translate="no" dir="ltr">--transformation-rules-file=</code> parameter in the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/container/backup-restore/restore-plans/create"><code translate="no" dir="ltr">gcloud beta container backup-restore restore-plans create</code></a> command.</p> <h2 id="transformation_rule_examples">Transformation rule examples</h2> <p>The following examples are provided in the YAML format used by gcloud CLI or the Terraform Configuration Language.</p> <h3 id="change_storageclass_of_pvcs">Change StorageClass of PVCs</h3> <p>This example changes the StorageClass in all restored PersistentVolumeClaim resources from <code translate="no" dir="ltr">standard</code> to <code translate="no" dir="ltr">premium-rwo</code>:</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">transformationRules:
+- description: Change StorageClass in PVC from standard to premium-rwo
+  resourceFilter:
+    namespaces: []
+    jsonPath: ".spec[?(@.storageClassName == 'standard')]"
+    groupKinds:
+    - resourceGroup: ""
+      resourceKind: PersistentVolumeClaim
+  fieldActions:
+  - op: REPLACE
+    path: "/spec/storageClassName"
+    value: "premium-rwo"
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<pre data-language="">transformation_rules {
+  description = "Change StorageClass in PVC from standard to premium-rwo"
+  resource_filter {
+    json_path = ".spec[?(@.storageClassName == 'standard')]"
+    group_kinds {
+      resource_kind = "PersistentVolumeClaim"
+    }
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/spec/storageClassName"
+    value = "premium-rwo"
+  }
+}
+</pre></section> </div>
+<aside class="note"><strong>Note:</strong><span> To change the StorageClass of PVC templates defined in the StatefulSet, a separate transformation rule has to be configured.</span></aside> <h3 id="clone_a_namespace">Clone a Namespace</h3> <p>This example clones a namespace from alpha to beta—creating a new namespace <code translate="no" dir="ltr">"beta"</code> and restoring all of the resources from <code translate="no" dir="ltr">"alpha"</code> into the new <code translate="no" dir="ltr">"beta"</code> namespace. This example requires two transformation rules—one for the namespace itself, and one for the resources within the namespace.</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">transformationRules:
+- description: Rename namespace name from alpha to beta
+  resourceFilter:
+    namespaces: []
+    jsonPath: ".metadata[?(@.name == 'alpha')]"
+    groupKinds:
+    - resourceGroup: ""
+      resourceKind: Namespace
+  fieldActions:
+  - op: REPLACE
+    path: "/metadata/name"
+    value: "beta"
+- description: Clone all resources from namespace alpha to beta
+  resourceFilter:
+    namespaces: ["alpha"]
+  fieldActions:
+  - op: REPLACE
+    path: "/metadata/namespace"
+    value: "beta"
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<pre data-language="">transformation_rules {
+  description = "Rename namespace name from alpha to beta"
+  resource_filter {
+    json_path = ".metadata[?(@.name == 'alpha')]"
+    group_kinds {
+      resource_kind = "Namespace"
+    }
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/metadata/name"
+    value = "beta"
+  }
+}
+transformation_rules {
+  description = "Clone all resources from namespace alpha to beta"
+  resource_filter {
+    namespaces = ["alpha"]
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/metadata/namespace"
+    value = "beta"
+  }
+}
+</pre></section> </div> <h3 id="change_storageclass_of_pvcs_and_replica_count_in_a_cloned_namespace">Change StorageClass of PVCs and replica count in a cloned namespace</h3> <p>This example clones a namespace, and then applies a set of changes to resources in the new namespace:</p> <ul> <li><p>Change the StorageClass on PVCs from <code translate="no" dir="ltr">standard</code> to <code translate="no" dir="ltr">premium-rwo</code></p></li> <li><p>Change the replica count of the Deployment <code translate="no" dir="ltr">nginx</code> to <code translate="no" dir="ltr">3</code></p></li> </ul> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">transformationRules:
+- description: Rename the namespace from alpha to beta
+  resourceFilter:
+    namespaces: []
+    jsonPath: ".metadata[?(@.name == 'alpha')]"
+    groupKinds:
+    - resourceGroup: ""
+      resourceKind: Namespace
+  fieldActions:
+  - op: REPLACE
+    path: "/metadata/name"
+    value: "beta"
+- description: Change all resources from namespace alpha to beta
+  resourceFilter:
+    namespaces: ["alpha"]
+  fieldActions:
+  - op: REPLACE
+    path: "/metadata/namespace"
+    value: "beta"
+- description: Change the StorageClass on PVCs from standard to premium-rwo
+  resourceFilter:
+    namespaces: ["beta"]
+    jsonPath: ".spec[?(@.storageClassName == 'standard')]"
+    groupKinds:
+    - resourceGroup: ""
+      resourceKind: PersistentVolumeClaim
+  fieldActions:
+  - op: REPLACE
+    path: "/spec/storageClassName"
+    value: "premium-rwo"
+- description: Change the replica count of the Deployment nginx from 7 to 3
+  resourceFilter:
+    namespaces: ["beta"]
+    jsonPath: ".metadata[?(@.name == 'nginx')]"
+    groupKinds:
+    - resourceGroup: apps
+      resourceKind: Deployment
+  fieldActions:
+  - op: REPLACE
+    path: "/spec/replicas"
+    value: "3"
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<pre data-language="">transformation_rules {
+  description = "Rename the namespace from alpha to beta"
+  resource_filter {
+    json_path = ".metadata[?(@.name == 'alpha')]"
+    group_kinds {
+      resource_kind = "Namespace"
+    }
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/metadata/name"
+    value = "beta"
+  }
+}
+transformation_rules {
+  description = "Change all resources from namespace alpha to beta"
+  resource_filter {
+    namespaces = ["alpha"]
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/metadata/namespace"
+    value = "beta"
+  }
+}
+transformation_rules {
+  description = "Change the StorageClass on PVCs from standard to premium-rwo"
+  resource_filter {
+    namespaces = ["beta"]
+    json_path = ".spec[?(@.storageClassName == 'standard')]"
+    group_kinds {
+      resource_kind = "PersistentVolumeClaim"
+    }
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/spec/storageClassName"
+    value = "premium-rwo"
+  }
+}
+transformation_rules {
+  description = "Change the replica count of the Deployment nginx from 7 to 3"
+  resource_filter {
+    namespaces = ["beta"]
+    json_path = ".metadata[?(@.name == 'nginx')]"
+    group_kinds {
+      resource_group = "apps"
+      resource_kind = "Deployment"
+    }
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/spec/replicas"
+    value = "3"
+  }
+}
+</pre></section> </div> <h3 id="change_insert_and_remove_configmap_entries">Change, insert, and remove ConfigMap entries</h3> <p>This example modifies the <code translate="no" dir="ltr">ConfigMap</code> that contains the label key <code translate="no" dir="ltr">"app.kubernetes.io/name"</code> in the namespace <code translate="no" dir="ltr">"mysql"</code> to:</p> <ul> <li><p>Change the value of the entry <code translate="no" dir="ltr">"endpoint"</code> to <code translate="no" dir="ltr">"192.0.2.127"</code>.</p></li> <li><p>Insert a new entry <code translate="no" dir="ltr">"connection-timeout"</code> with value <code translate="no" dir="ltr">"30s"</code>.</p></li> <li><p>Remove the entry with the key <code translate="no" dir="ltr">"read-timeout"</code>.</p></li> </ul> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">transformationRules:
+- description: Change, insert, remove `ConfigMap` entries
+  resourceFilter:
+    namespaces: ["mysql"]
+    jsonPath: ".metadata.labels['app.kubernetes.io/name']"
+    groupKinds:
+    - resourceGroup: ""
+      resourceKind: ConfigMap
+  fieldActions:
+  - op: REPLACE
+    path: "/data/endpoint"
+    value: "192.0.2.127"
+  - op: ADD
+    path: "/data/connection-timeout"
+    value: "30s"
+  - op: REMOVE
+    path: "/data/read-timeout"
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<pre data-language="">transformation_rules {
+  description = "Change, insert, remove `ConfigMap` entries"
+  resource_filter {
+    namespaces = ["mysql"]
+    json_path = ".metadata.labels['app.kubernetes.io/name']"
+    group_kinds {
+      resource_kind = "ConfigMap"
+    }
+  }
+  field_actions {
+    op = "REPLACE"
+    path = "/data/endpoint"
+    value = "192.0.2.127"
+  }
+  field_actions {
+    op = "ADD"
+    path = "/data/connection-timeout"
+    value = "30s"
+  }
+  field_actions {
+    op = "REMOVE"
+    path = "/data/read-timeout"
+  }
+}
+</pre></section> </div> <h3 id="add_a_label_appkubernetesioname_to_resources_whose_name_starts_with_mysql-">Add a label <code translate="no" dir="ltr">app.kubernetes.io/name</code> to resources whose name starts with <em>mysql-</em>;</h3> <p>This example adds a label <code translate="no" dir="ltr">app.kubernetes.io/name</code> with the value <code translate="no" dir="ltr">mysql</code> to all resources whose name starts with <em>mysql-</em>:</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">transformationRules:
+- description: Add a label to resources whose name starts with
+  resourceFilter:
+    namespaces: []
+    jsonPath: ".metadata[?(@.name =~ /^mysql-.*/)]"
+  fieldActions:
+  - op: ADD
+    path: "/metadata/labels/app.kubernetes.io~1name"
+    value: "mysql"
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<pre data-language="">transformation_rules {
+  description = "Add a label to resources whose name starts with"
+  resource_filter {
+    json_path = ".metadata[?(@.name =~ /^mysql-.*/)]"
+  }
+  field_actions {
+    op = "ADD"
+    path = "/metadata/labels/app.kubernetes.io~1name"
+    value = "mysql"
+  }
+}
+</pre></section> </div> <h3 id="assign_a_static_ip_address_for_a_loadbalancer_type_service">Assign a static IP address for a LoadBalancer type Service</h3> <p>This example assigns a static IP address for the Service <code translate="no" dir="ltr">"nginx-svc"</code> in the namespace <code translate="no" dir="ltr">"nginx"</code>:</p> <div> <section><p class="_code-tab"><strong>YAML</strong></p>
+
+<pre data-language="">transformationRules:
+- description: Assign a static IP to Service nginx-svc
+  resourceFilter:
+    namespaces: ["nginx"]
+    jsonPath: ".metadata[?(@.name == 'nginx-svc')]"
+    groupKinds:
+    - resourceGroup: ""
+      resourceKind: Service
+  fieldActions:
+  - op: ADD
+    path: "/spec/loadBalancerIP"
+    value: "192.0.2.127"
+</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+
+<pre data-language="">transformation_rules {
+  description = "Assign a static IP to Service nginx-svc"
+  resource_filter {
+    namespaces = ["nginx"]
+    json_path = ".metadata[?(@.name == 'nginx-svc')]"
+    group_kinds {
+      resource_kind = "Service"
+    }
+  }
+  field_actions {
+    op = "ADD"
+    path = "/spec/loadBalancerIP"
+    value = "192.0.2.127"
+  }
+}
+</pre></section> </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/how-to/transformation-rules" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/add-on/backup-for-gke/how-to/transformation-rules</a>
+  </p>
+</div>

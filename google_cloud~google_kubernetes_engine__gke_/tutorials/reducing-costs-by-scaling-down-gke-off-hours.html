@@ -1,0 +1,242 @@
+<h1>Reducing costs by scaling down GKE clusters during off-peak hours</h1> <div class="last-reviewed">Last reviewed 2022-11-24 UTC</div> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This tutorial explains how you can reduce costs by deploying a scheduled autoscaler on Google Kubernetes Engine (GKE). This kind of autoscaler scales clusters up or down according to a schedule based on time of day or day of the week. A scheduled autoscaler is useful if your traffic has a predictable ebb and flow—for example, if you are a regional retailer, or if your software is for employees whose working hours are limited to a specific part of the day.</p> <p>The tutorial is for developers and operators who want to reliably scale up clusters before spikes arrive, and scale them down again to save money at night, on weekends, or any other time when fewer users are online. The article assumes you are familiar with Docker, Kubernetes, Kubernetes CronJobs, GKE, and Linux.</p> <h2 id="introduction">Introduction</h2> <p>Many applications experience uneven traffic patterns. For example, workers in an organization might engage with an application only during the day. As a result, data center servers for that application are idle at night.</p> <p>Beyond other benefits, Google Cloud can help you save money by dynamically allocating infrastructure according to traffic load. In some cases, a simple autoscale configuration can manage the allocation challenge of uneven traffic. If that's your case, stick with it. However, in other cases, sharp changes in traffic patterns require more finely tuned autoscale configurations to avoid system instability during scale-ups and to avoid overprovisioning the cluster.</p> <p>This tutorial focuses on scenarios where sharp changes in traffic patterns are well understood, and you want to give hints to the autoscaler that your infrastructure is about to experience spikes. This document shows how to scale GKE clusters up in the morning and down at night, but you can use a similar approach to increase and decrease capacity for any known events, such as peak scale events, ad campaigns, or weekend traffic.</p> <h3 id="scaling_down_a_cluster_if_you_have_committed_use_discounts">Scaling down a cluster if you have committed use discounts</h3> <p>This tutorial explains how to reduce costs by scaling down your GKE clusters to the minimum during off-peak hours. However, if you've purchased a <a href="https://docs.cloud.google.com/compute/docs/instances/signing-up-committed-use-discounts" track-type="tutorial" track-name="internalLink" track-metadata-position="body">committed use discount</a>, it's important to understand how these discounts work in conjunction with autoscaling.</p> <aside class="note"><strong>Note:</strong><span> If you don't have any committed use contracts and you don't plan to purchase any, you can skip this section.</span></aside> <p>Committed use contracts give you deeply discounted prices when you commit to paying for a set quantity of resources (vCPUs, memory, and others). However, to determine the quantity of resources to commit, you need to know in advance how many resources your workloads use over time. To help you to reduce your costs, the following diagram illustrates which resources you should and should not include in your planning.</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/gke-reduce-costs-scaling-down-off-hours-cud-allocation.svg" alt="Distribution of resources, showing a base of committed resources that are always allocated and resources that are autoscaled in response to demand (spikes)."></p> <p>As the diagram shows, allocation of resources under a committed use contract is flat. Resources covered by the contract must be in use most of the time to be worth the commitment you've made. Therefore, you should not include resources that are used during spikes in calculating your committed resources. For spiky resources, we recommend that you use GKE autoscaler options. These options include the scheduled autoscaler discussed in this paper or other managed options that are discussed in <a href="https://docs.cloud.google.com/architecture/best-practices-for-running-cost-effective-kubernetes-applications-on-gke#fine-tune_gke_autoscaling" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Best practices for running cost-optimized Kubernetes applications on GKE</a>.</p> <p>If you already have a committed use contract for a given amount of resources, you don't reduce your costs by scaling down your cluster below that minimum. In such scenarios, we recommend that you try to schedule some jobs to fill the gaps during periods of low computing demand.</p> <h2 id="architecture">Architecture</h2> <p>The following diagram shows the architecture for the infrastructure and scheduled autoscaler that you deploy in this tutorial. The scheduled autoscaler consists of a set of components that work together to manage scaling based on a schedule.</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/reducing-costs-by-scaling-down-gke-off-hours-architecture-1.svg" alt="Architecture showing the components that together make up the scheduled autoscaler." class="add-background"> </p> <p>In this architecture, a set of Kubernetes <a href="https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">CronJobs</a> export known information about traffic patterns to a <a href="https://docs.cloud.google.com/monitoring/custom-metrics" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Monitoring custom metric</a>. This data is then read by a Kubernetes <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">Horizontal Pod Autoscaler (HPA)</a> as input into when the HPA should scale your workload. Along with other load metrics, such as target CPU utilization, the HPA decides how to scale the replicas for a given deployment.</p> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li>Create a GKE cluster.</li> <li>Deploy an example application that uses a Kubernetes HPA.</li> <li>Set up the components for the scheduled autoscaler and update your HPA to read from a scheduled custom metric.</li> <li>Set up an alert to trigger when your scheduled austoscaler is not working properly.</li> <li>Generate load to the application.</li> <li>Examine how the HPA responds to normal increases in traffic and to the scheduled custom metrics that you configure.</li> </ul> <p>The code for this tutorial is in a GitHub repository.</p> </section> <section id="costs"> <h2 id="costs">Costs</h2> 
+<p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://docs.cloud.google.com/monitoring/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Cloud Monitoring</a></li> <li><a href="https://docs.cloud.google.com/artifact-registry/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Artifact Registry</a></li> <li><a href="https://docs.cloud.google.com/kubernetes-engine/pricing" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Google Kubernetes Engine</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE, Artifact Registry and the Cloud Monitoring APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the GKE, Artifact Registry and the Cloud Monitoring APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> </cloud-free-trial> </ol> </section> <div id="tutorial-content"> <h2 id="prepare_your_environment">Prepare your environment</h2> <ol> <li>
+
+<p>In the Google Cloud console, activate Cloud Shell.</p> <p><a href="https://console.cloud.google.com/" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="launchCloudShell" class="button button-primary">Activate Cloud Shell</a></p> <p> At the bottom of the Google Cloud console, a <a href="https://docs.cloud.google.com/shell/docs/how-cloud-shell-works">Cloud Shell</a> session starts and displays a command-line prompt. Cloud Shell is a shell environment with the Google Cloud CLI already installed and with values already set for your current project. It can take a few seconds for the session to initialize. </p> </li> <li>
+<p>In Cloud Shell, configure your Google Cloud project ID, your email address, and your computing zone and region:</p> 
+<pre>PROJECT_ID=YOUR_PROJECT_ID
+ALERT_EMAIL=YOUR_EMAIL_ADDRESS
+gcloud config set project $PROJECT_ID
+gcloud config set compute/region us-central1
+gcloud config set compute/zone us-central1-f
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_PROJECT_ID</var></code>: the Google Cloud project name for the project you're using.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">YOUR_EMAIL_ADDRESS</var></code>: an email address for being notified when the scheduled autoscaler is not working as properly.</li> </ul> <p>You can <a href="https://docs.cloud.google.com/compute/docs/regions-zones" track-type="tutorial" track-name="internalLink" track-metadata-position="body">choose a different region and zone</a> for this tutorial if you want.</p>
+</li> <li>
+<p>Clone the <code translate="no" dir="ltr">kubernetes-engine-samples</code> GitHub repository:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/
+cd kubernetes-engine-samples/cost-optimization/gke-scheduled-autoscaler
+</pre> <p>The code in this example is structured into the following folders:</p> <ul> <li>Root: Contains the code that's used by the CronJobs to export custom metrics to Cloud Monitoring.</li> <li>
+<code translate="no" dir="ltr">k8s/</code>: Contains a deployment example that has a Kubernetes HPA.</li> <li>
+<code translate="no" dir="ltr">k8s/scheduled-autoscaler/</code>: Contains the CronJobs that export a custom metric and an updated version of the HPA to read from a custom metric.</li> <li>
+<code translate="no" dir="ltr">k8s/load-generator/</code>: Contains a Kubernetes Deployment that has an application to simulate hourly usage. A <i>Deployment</i> is a Kubernetes API object that lets you run multiple replicas of Pods that are distributed among the nodes in a cluster..</li> <li>
+<code translate="no" dir="ltr">monitoring/</code>: Contains the Cloud Monitoring components that you configure in this tutorial.</li> </ul>
+</li> </ol> <h2 id="creating_the_gke_cluster">Create the GKE cluster</h2> <ol> <li>
+<p>In Cloud Shell, create a GKE cluster for running the scheduled autoscaler:</p> 
+<pre>gcloud container clusters create scheduled-autoscaler \
+    --enable-ip-alias \
+    --release-channel=stable \
+    --machine-type=e2-standard-2 \
+    --enable-autoscaling --min-nodes=1 --max-nodes=10 \
+    --num-nodes=1 \
+    --autoscaling-profile=optimize-utilization
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                   LOCATION       MASTER_VERSION   MASTER_IP      MACHINE_TYPE   NODE_VERSION     NUM_NODES  STATUS
+scheduled-autoscaler   us-central1-f  1.22.15-gke.100  34.69.187.253  e2-standard-2  1.22.15-gke.100  1          RUNNING
+</pre> <p>This is not a production configuration, but it's a configuration that's suitable for this tutorial. In this setup, you configure the <a href="../concepts/cluster-autoscaler" track-type="tutorial" track-name="internalLink" track-metadata-position="body">cluster autoscaler</a> with a minimum of 1 node and a maximum of 10 nodes. You also enable the <a href="../concepts/cluster-autoscaler#autoscaling_profiles" track-type="tutorial" track-name="internalLink" track-metadata-position="body"><code translate="no" dir="ltr">optimize-utilization</code></a> profile to speed up the process of scaling down.</p>
+</li> </ol> <h2 id="deploy_the_example_application">Deploy the example application</h2> <ol> <li>
+<p>Deploy the example application without the scheduled autoscaler:</p> 
+<pre>kubectl apply -f ./k8s
+</pre>
+</li> <li>
+<p>Open the <code translate="no" dir="ltr">k8s/hpa-example.yaml</code> file.</p> <p>The following listing shows the content of the file.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>spec:
+  maxReplicas: 20
+  minReplicas: 10
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: php-apache
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60</pre> </div> <p>Notice that the minimum number of replicas (<code translate="no" dir="ltr">minReplicas</code>) is set to 10. This configuration also sets the cluster to scale based on CPU utilization (the <code translate="no" dir="ltr">name: cpu</code> and <code translate="no" dir="ltr">type: Utilization</code> settings).</p>
+</li> <li>
+<p>Wait for the application to become available:</p> 
+<pre>kubectl wait --for=condition=available --timeout=600s deployment/php-apache
+EXTERNAL_IP=''
+while [ -z $EXTERNAL_IP ]
+do
+    EXTERNAL_IP=$(kubectl get svc php-apache -o jsonpath={.status.loadBalancer.ingress[0].ip})
+    [ -z $EXTERNAL_IP ] &amp;&amp; sleep 10
+done
+curl -w '\n' http://$EXTERNAL_IP
+</pre> <p>When the application is available, the output is as follows:</p> 
+<pre>OK!
+</pre>
+</li> <li>
+<p>Verify the settings:</p> 
+<pre>kubectl get hpa php-apache
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME         REFERENCE               TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+php-apache   Deployment/php-apache   9%/60%    10        20        10         6d19h
+</pre> <p>The <code translate="no" dir="ltr">REPLICAS</code> column displays <code translate="no" dir="ltr">10</code>, which matches the value of the <code translate="no" dir="ltr">minReplicas</code> field in the <code translate="no" dir="ltr">hpa-example.yaml</code> file.</p>
+</li> <li>
+<p>Check whether the number of nodes has increased to 4:</p> 
+<pre>kubectl get nodes
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                                                  STATUS   ROLES    AGE   VERSION
+gke-scheduled-autoscaler-default-pool-64c02c0b-9kbt   Ready    &amp;lt;none&gt;   21S   v1.17.9-gke.1504
+gke-scheduled-autoscaler-default-pool-64c02c0b-ghfr   Ready    &amp;lt;none&gt;   21s   v1.17.9-gke.1504
+gke-scheduled-autoscaler-default-pool-64c02c0b-gvl9   Ready    &amp;lt;none&gt;   21s   v1.17.9-gke.1504
+gke-scheduled-autoscaler-default-pool-64c02c0b-t9sr   Ready    &amp;lt;none&gt;   21s   v1.17.9-gke.1504
+</pre> <p>When you created the cluster, you set a minimum configuration using the <code translate="no" dir="ltr">min-nodes=1</code> flag. However, the application that you deployed at the beginning of this procedure is requesting more infrastructure because <code translate="no" dir="ltr">minReplicas</code> in the <code translate="no" dir="ltr">hpa-example.yaml</code> file is set to 10.</p> <p>Setting <code translate="no" dir="ltr">minReplicas</code> to a value like 10 is a common strategy used by companies such as retailers, which expect a sudden increase in traffic in the first few hours of the business day. However, setting high values for HPA <code translate="no" dir="ltr">minReplicas</code> can increase your costs because the cluster can't shrink, not even at night when application traffic is low.</p>
+</li> </ol> <h2 id="set_up_a_scheduled_autoscaler">Set up a scheduled autoscaler</h2> <ol> <li>
+<p>In Cloud Shell, install the <a href="https://github.com/GoogleCloudPlatform/k8s-stackdriver/tree/master/custom-metrics-stackdriver-adapter" target="github" track-type="tutorial" track-name="gitHubLink" track-metadata-position="body" class="external">Custom Metrics - Cloud Monitoring adapter</a> in your GKE cluster:</p> 
+<pre>kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+kubectl wait --for=condition=available --timeout=600s deployment/custom-metrics-stackdriver-adapter -n custom-metrics
+</pre> <p>This adapter enables Pod autoscaling based on Cloud Monitoring custom metrics.</p>
+</li> <li>
+<p>Create a repository in Artifact Registry and give read permissions:</p> 
+<pre>gcloud artifacts repositories create gke-scheduled-autoscaler \
+  --repository-format=docker --location=us-central1
+gcloud auth configure-docker us-central1-docker.pkg.dev
+gcloud artifacts repositories add-iam-policy-binding gke-scheduled-autoscaler \
+   --location=us-central1 --member=allUsers --role=roles/artifactregistry.reader
+</pre>
+</li> <li>
+<p>Build and push the custom metric exporter code:</p> 
+<pre>docker build -t us-central1-docker.pkg.dev/$PROJECT_ID/gke-scheduled-autoscaler/custom-metric-exporter .
+docker push us-central1-docker.pkg.dev/$PROJECT_ID/gke-scheduled-autoscaler/custom-metric-exporter
+</pre>
+</li> <li>
+<p>Deploy the CronJobs that export custom metrics and deploy the updated version of the HPA that reads from these custom metrics:</p> 
+<pre>sed -i.bak s/PROJECT_ID/$PROJECT_ID/g ./k8s/scheduled-autoscaler/scheduled-autoscale-example.yaml
+kubectl apply -f ./k8s/scheduled-autoscaler
+</pre>
+</li> <li>
+<p>Open and examine the <code translate="no" dir="ltr">k8s/scheduled-autoscaler/scheduled-autoscale-example.yaml</code> file.</p> <p>The following listing shows the content of the file.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-up
+spec:
+  schedule: "50-59/1 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: custom-metric-extporter
+            image: us-central1-docker.pkg.dev/PROJECT_ID/gke-scheduled-autoscaler/custom-metric-exporter
+            command:
+              - /export
+              - --name=scheduled_autoscaler_example
+              - --value=10
+          restartPolicy: OnFailure
+      backoffLimit: 1
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-down
+spec:
+  schedule: "1-49/1 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: custom-metric-extporter
+            image: us-central1-docker.pkg.dev/PROJECT_ID/gke-scheduled-autoscaler/custom-metric-exporter
+            command:
+              - /export
+              - --name=scheduled_autoscaler_example
+              - --value=1
+          restartPolicy: OnFailure
+      backoffLimit: 1</pre> </div> <p>This configuration specifies that the CronJobs should export the suggested Pod replicas count to a custom metric called <code translate="no" dir="ltr">custom.googleapis.com/scheduled_autoscaler_example</code> based on the time of day. To facilitate the monitoring section of this tutorial, the schedule field configuration defines hourly scale-ups and scale-downs. For production, you can customize this schedule to match your business needs.</p>
+</li> <li>
+<p>Open and examine the <code translate="no" dir="ltr">k8s/scheduled-autoscaler/hpa-example.yaml</code> file.</p> <p>The following listing shows the contents of the file.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>spec:
+  maxReplicas: 20
+  minReplicas: 1
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: php-apache
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: External
+    external:
+      metric:
+        name: custom.googleapis.com|scheduled_autoscaler_example
+      target:
+          type: AverageValue
+          averageValue: 1</pre> </div> <p>This configuration specifies that the HPA object should replace the HPA that was deployed earlier. Notice that the configuration reduces the value in <code translate="no" dir="ltr">minReplicas</code> to 1. This means that the workload can be scaled down to its minimum. The configuration also adds an <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale-walkthrough/#autoscaling-on-metrics-not-related-to-kubernetes-objects" target="external" track-type="tutorial" track-name="externalLink" track-metadata-position="body" class="external">external metric</a> (<code translate="no" dir="ltr">type: External</code>). This addition means that autoscaling is now triggered by two factors.</p> <p>In this multiple-metrics scenario, the HPA calculates a proposed replica count for each metric and then chooses the metric that returns the highest value. It's important to understand this—your scheduled autoscaler can propose that at a given moment the Pod count should be 1. But if the actual CPU utilization is higher than expected for one Pod, the HPA creates more replicas.</p>
+</li> <li>
+<p>Check the number of nodes and HPA replicas again by running each of these commands again:</p> 
+<pre>kubectl get nodes
+kubectl get hpa php-apache
+</pre> <p>The output you see depends on what the scheduled autoscaler has done recently—in particular, the values of <code translate="no" dir="ltr">minReplicas</code> and <code translate="no" dir="ltr">nodes</code> will be different at different points in the scaling cycle.</p> <p>For example, at approximately minutes 51 to 60 of each hour (which represents a period of peak traffic), the HPA value for <code translate="no" dir="ltr">minReplicas</code> will be 10 and the value of <code translate="no" dir="ltr">nodes</code> will be 4.</p>  <p>In contrast, for minutes 1 to 50 (which represents a period of lower traffic), the HPA <code translate="no" dir="ltr">minReplicas</code> value will be 1 and the <code translate="no" dir="ltr">nodes</code> value will be either 1 or 2, depending on how many Pods have been allocated and removed. For the lower values (minutes 1 to 50), it might take up to 10 minutes for the cluster to finish scaling down.</p>
+</li> </ol> <h2 id="configure_alerts_for_when_the_scheduled_autoscaler_is_not_working_properly">Configure alerts for when the scheduled autoscaler is not working properly</h2> <p>In a production environment, you typically want to know when CronJobs are not populating the custom metric. For this purpose, you can create an alert that triggers when any <code translate="no" dir="ltr">custom.googleapis.com/scheduled_autoscaler_example</code> stream is absent for a five-minute period.</p> <ol> <li>
+<p>In Cloud Shell, create a notification channel:</p> 
+<pre>gcloud beta monitoring channels create \
+    --display-name="Scheduled Autoscaler team (Primary)" \
+    --description="Primary contact method for the Scheduled Autoscaler team lead"  \
+    --type=email \
+    --channel-labels=email_address=${ALERT_EMAIL}
+</pre> <p>The output is similar to the following:</p> 
+<pre>Created notification channel NOTIFICATION_CHANNEL_ID.
+</pre> <p>This command creates a <a href="https://docs.cloud.google.com/monitoring/alerts/using-channels-api#ncd" track-type="tutorial" track-name="internalLink" track-metadata-position="body">notification channel</a> of type <code translate="no" dir="ltr">email</code> to simplify the tutorial steps. In production environments, we recommend that you use a less asynchronous strategy by setting the notification channel to <code translate="no" dir="ltr">sms</code> or <code translate="no" dir="ltr">pagerduty</code>.</p>
+</li> <li>
+<p>Set a variable that has the value that was displayed in the <code translate="no" dir="ltr"><var translate="no">NOTIFICATION_CHANNEL_ID</var></code> placeholder:</p> 
+<pre>NOTIFICATION_CHANNEL_ID=NOTIFICATION_CHANNEL_ID
+</pre>
+</li> <li>
+<p>Deploy the alert policy:</p> 
+<pre>gcloud monitoring policies create \
+    --policy-from-file=./monitoring/alert-policy.yaml \
+    --notification-channels=$NOTIFICATION_CHANNEL_ID
+</pre> <p>The <code translate="no" dir="ltr">alert-policy.yaml</code> file contains the specification to send an alert if the metric is absent after five minutes.</p>
+</li> <li>
+<p>Go to the Cloud Monitoring <strong>Alerting</strong> page to view the alert policy.</p> <p><a href="https://console.cloud.google.com/monitoring/alerting" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Alerting</a> </p>
+</li> <li><p>Click <strong>Scheduled Autoscaler Policy</strong> and verify the details of the alert policy.</p></li> </ol> <h2 id="generate_load_to_the_example_application">Generate load to the example application</h2> <ul> <li>
+<p>In Cloud Shell, deploy the load generator:</p> 
+<pre>kubectl apply -f ./k8s/load-generator
+</pre> <p>The following listing shows the <code translate="no" dir="ltr">load-generator</code> script:</p> 
+<pre>command: ["/bin/sh", "-c"]
+args:
+&amp;#45; while true; do
+    RESP=$(wget -q -O- http://php-apache.default.svc.cluster.local);
+    echo "$(date +%H)=$RESP";
+    sleep $(date +%H | awk '{ print "s("$0"/3*a(1))*0.5+0.5" }' | bc -l);
+  done;
+</pre> <p>This script runs in your cluster until you delete the <code translate="no" dir="ltr">load-generator</code> deployment. It makes requests to your <code translate="no" dir="ltr">php-apache</code> service every few milliseconds. The <code translate="no" dir="ltr">sleep</code> command simulates load-distribution changes during the day. By using a script that generates traffic in this way, you can understand what happens when you combine CPU utilization and custom metrics in your HPA configuration.</p>
+</li> </ul> <h2 id="visualize_scaling_in_response_to_traffic_or_scheduled_metrics">Visualize scaling in response to traffic or scheduled metrics</h2> <p>In this section, you review visualizations that show you the effects of scaling up and scaling down.</p> <ol> <li>
+<p>In Cloud Shell, create a new dashboard:</p> 
+<pre>gcloud monitoring dashboards create \
+    --config-from-file=./monitoring/dashboard.yaml
+</pre>
+</li> <li>
+<p>Go to the Cloud Monitoring <strong>Dashboards</strong> page:</p> <p><a href="https://console.cloud.google.com/monitoring/dashboards" target="console" track-type="tutorial" track-name="consoleLink" track-metadata-position="body" class="button button-primary">Go to Dashboards</a> </p>
+</li> <li>
+<p>Click <strong>Scheduled Autoscaler Dashboard</strong>.</p> <p>The dashboard displays three graphs. You need to wait at least 2 hours (ideally, 24 hours or more) to see the dynamics of scale-ups and scale-downs, and to see how different load distribution during the day affects autoscaling.</p> <aside class="note"><strong>Note:</strong><span> Be aware that you will be billed for the resources that are running while you test.</span></aside> <p>To give you an idea of what the graphs show, you can study the following graphs, which present a full-day view:</p> <ul> <li>
+<p><strong>Scheduled Metric (desired # of Pods)</strong> shows a time series of the custom metric that's being exported to Cloud Monitoring through CronJobs that you configured in <a href="#setting-up-a-scheduled-autoscaler" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Setting up a scheduled autoscaler</a>.</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/reducing-costs-by-scaling-down-gke-off-hours-graph-scheduled-metric.png" alt="Graph of demand for Pods, showing a spike every hour." class="screenshot"> </p>
+</li> <li>
+<p><strong>CPU Utilization (requested vs used)</strong> shows a time series of requested CPU (red) and actual CPU utilization (blue). When the load is low, the HPA honors the utilization decision by the scheduled autoscaler. However, when traffic increases, the HPA increases the number of Pods as needed, as you can see for the data points between 12 PM and 6 PM.</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/reducing-costs-by-scaling-down-gke-off-hours-graph-cpu-utilization.png" alt="Graph of CPU utilization, showing demand growing during the day till 4:00 PM, then falling off.." class="screenshot"> </p>
+</li> <li>
+<p><strong>Number of Pods (scheduled vs actual) + Mean CPU Utilization</strong> shows a view similar to the previous ones. The Pod count (red) increases to 10 every hour as scheduled (blue). Pod count naturally increases and decreases over time in response to load (12 PM and 6 PM). Average CPU utilization (orange) remains below the target that you set (60%).</p> <p><img src="https://docs.cloud.google.com/static/architecture/images/reducing-costs-by-scaling-down-gke-off-hours-graph-pods-vs-mean-cpu.png" alt="2 graphs. One shows demand for Pods with demand spiking every hour. The other shows that CPU utilization goes up and down, but tops off at the configured high value." class="screenshot"> </p>
+</li> </ul>
+</li> </ol> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Learn more about GKE cost optimization in <a href="https://docs.cloud.google.com/architecture/best-practices-for-running-cost-effective-kubernetes-applications-on-gke" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Best practices for running cost-optimized Kubernetes applications on GKE</a>.</li> <li>Find design recommendations and best practices to optimize the cost of Google Cloud workloads in <a href="https://docs.cloud.google.com/architecture/cost-efficiency-on-google-cloud" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Google Cloud Well-Architected Framework: Cost optimization</a>.</li> <li> Explore reference architectures, diagrams, and best practices about Google Cloud. Take a look at our <a href="https://docs.cloud.google.com/architecture" track-type="tutorial" track-name="textLink" track-metadata-position="nextSteps">Cloud Architecture Center</a>. </li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/reducing-costs-by-scaling-down-gke-off-hours" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/reducing-costs-by-scaling-down-gke-off-hours</a>
+  </p>
+</div>

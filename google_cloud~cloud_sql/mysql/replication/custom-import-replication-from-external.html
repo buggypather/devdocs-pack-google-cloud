@@ -1,0 +1,240 @@
+<h1>Use a custom import to set up replication from large external databases</h1>   <p>This page describes the process for setting up external server replication using a custom import. These steps are the best option when you need to replicate from a large external database.</p> <p>You must complete all the steps on this page. When finished, you can administer and monitor the replica the same way as you would any other Cloud SQL instance.</p> <p>This process is supported only for external servers that are configured to use global transaction identifier (GTID)-based replication. Before replication can be initiated, you need to load data from the external server into the Cloud SQL replica. If you don't use GTID-based replication, then Cloud SQL can't identify the exact binary log position from which to begin replication. If you can't use GITD-based replication, then you need to configure your dump tool to institute a global read-only lock during the dump process.</p> <aside class="note">GTID replication isn't supported for <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/mysql-replication-gtid.html" target="_blank">certain versions of Amazon RDS</a>, Amazon Aurora 5.6, and early releases of <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/mysql-replication-gtid.html" target="_blank">Amazon Aurora 5.7</a>.</aside> <h2 id="before_you_begin">Before you begin</h2> <p>Before you start, you should have <a href="configure-replication-from-external#setting_up_the_external_server_for_replication">configured the external server</a>, created the <a href="configure-replication-from-external#setup-source-instance">source representation instance</a>, and set up the <a href="configure-replication-from-external#setup-replica-instance">Cloud SQL replica</a>.</p> <h2 id="update-replica-user">Update permissions for the replication user</h2> <p>The replication user on the external server is configured to accept connections from any host (<code translate="no" dir="ltr">%</code>). You should update this user account so that it can only be used with the Cloud SQL replica. Open a terminal on the source database server and enter these commands:</p> <div> <section><p class="_code-tab"><strong>mysql Client</strong></p>
+
+<pre data-language="">    UPDATE mysql.user
+    SET Host='NEW_HOST' WHERE Host='OLD_HOST' AND User='USERNAME';
+    GRANT REPLICATION SLAVE, EXECUTE ON *.*
+    TO 'GCP_USERNAME'@'HOST';
+    FLUSH PRIVILEGES;</pre></section> <section><p class="_code-tab"><strong>example</strong></p>
+
+<pre data-language="">UPDATE mysql.user
+SET Host='192.0.2.0' WHERE Host='%' AND User='replicationUser';
+GRANT REPLICATION SLAVE, EXECUTE ON *.*
+TO 'gcp_user'@'gmail.com';
+FLUSH PRIVILEGES;
+</pre></section> </div> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td>
+<var translate="no">NEW_HOST</var> </td> <td>Specify the <a href="#outgoing-ip">outgoing IP</a> of the Cloud SQL replica.</td> </tr> <tr> <td>
+<var translate="no">OLD_HOST</var> </td> <td>The current value assigned to <code translate="no" dir="ltr">Host</code> that you want to change.</td> </tr> <tr> <td><var translate="no">USERNAME</var></td> <td>The replication user account on the external server.</td> </tr> <tr> <td><var translate="no">GCP_USERNAME</var></td> <td>The username for the GCP user account.</td> </tr> <tr> <td><var translate="no">HOST</var></td> <td>The hostname for the GCP user account.</td> </tr> </tbody> </table> <h2 id="setup-source-instance">Set up the Cloud SQL replica as a primary instance</h2> <p>Because Cloud SQL replica instances are read-only, in order to perform a custom import, you need to <a href="manage-replicas#promote-replica">promote the Cloud SQL replica</a> to a standalone instance. Once the initial data import is complete, you demote the instance back to a replica.</p> <h2 id="perform_a_custom_dump_and_import">Perform a custom dump and import</h2> <p>In this section, we show you how to create the dump file and import it into the eventual Cloud SQL replica using <a href="https://github.com/maxbube/mydumper"><code translate="no" dir="ltr">mydumper</code></a> or the <a href="https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html"><code translate="no" dir="ltr">mysqldump</code></a> client utilities.</p> <p>When you dump the data, you might need to exclude MySQL generic databases, including <code translate="no" dir="ltr">mysql</code>, and <code translate="no" dir="ltr">sys</code>, if they exist on the source instance. Otherwise, the data import fails. See <a href="https://github.com/maxbube/mydumper#how-to-exclude-or-include-databases">How to exclude (or include) databases?</a>.</p> <h3 id="use_mydumper_and_myloader">Use <code translate="no" dir="ltr">mydumper</code> and <code translate="no" dir="ltr">myloader</code>
+</h3> <p>To create a dump file and import it to Cloud SQL:</p> <ol> <li>
+<p>Create a dump file of the external server database using <code translate="no" dir="ltr">mydumper</code>.</p> 
+<pre>   $ mydumper -u USERNAME -p PASSWORD \
+              --threads=16 -o ./backup \
+              -h HOST \
+              --no-locks \
+              --regex '^(?!(mysql\.|sys\.))'</pre> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td>
+<var translate="no">USERNAME</var> </td> <td>The name of the replication user account or user account on the external server that has database read permissions.</td> </tr> <tr> <td><var translate="no">PASSWORD</var></td> <td>Replication user password.</td> </tr> <tr> <td><var translate="no">HOST</var></td> <td>The IPv4 or DNS address for the external server.</td> </tr> </tbody> </table>
+</li> <li>
+<p>Import the data into the Cloud SQL instance using <code translate="no" dir="ltr">myloader</code>.</p> 
+<pre> $ myloader -u REPLICA_USERNAME -p REPLICA_PASSWORD \
+            --threads=16 \
+            -d ./backup -h HOST -o</pre> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var translate="no">REPLICA_USERNAME</var></td> <td>The user account on the Cloud SQL instance.</td> </tr> <tr> <td><var translate="no">REPLICA_PASSWORD</var></td> <td>Cloud SQL instance user password.</td> </tr> <tr> <td><var translate="no">HOST</var></td> <td>The IPv4 for the Cloud SQL instance.</td> </tr> </tbody> </table>
+</li> <li>
+<p>Write down the GTID or binlog information of the data dump. You need this information when configuring the replication with the stored procedures.</p> <p>To get the GTID or binlog information of the data dump, run the following command:</p> 
+<pre>  sudo cat ./backup/metadata</pre>
+</li> </ol> <h3 id="use_mysqldump">Use <code translate="no" dir="ltr">mysqldump</code>
+</h3> <ol> <li>
+<p>Create a dump using <code translate="no" dir="ltr">mysqldump</code>:</p> <div> <section><p class="_code-tab"><strong>mysqldump</strong></p>
+
+<pre data-language="">mysqldump \
+    --host=EXTERNAL_HOST \
+    --port=EXTERNAL_PORT \
+    --user=USERNAME\
+    --password=PASSWORD \
+    --databases=DATABASE_LIST  \
+    --hex-blob \
+    --master-data=EXTERNAL_DATA  \
+    --no-autocommit \
+    --default-character-set=utf8mb4 \
+    --single-transaction \
+    GTID_PURGED \
+    ADD_DROP_TABLE \
+    ROUTINES \
+    COMPRESS \
+    GZIP</pre> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var translate="no">EXTERNAL_HOST</var></td> <td>The IPv4 or DNS address for the external server.</td> </tr> <tr> <td>
+<var translate="no">EXTERNAL_PORT</var> </td> <td>The port for the external server. If the external server is hosted on Cloud SQL, this is <code translate="no" dir="ltr">3306</code>.</td> </tr> <tr> <td>
+<var translate="no">USERNAME</var> </td> <td>The name of the replication user account or user account on the external server that has database read permissions.</td> </tr> <tr> <td><var translate="no">USER_PASSWORD</var></td> <td>Replication user password.</td> </tr> <tr> <td>
+<var translate="no">DATABASE_LIST</var> </td> <td>Space-separated list of all databases on the external server, except for the system databases (<code translate="no" dir="ltr">sys</code>,<code translate="no" dir="ltr">mysql</code>, <code translate="no" dir="ltr">performance_schema</code>, and <code translate="no" dir="ltr">information_schema</code>). Use the <code translate="no" dir="ltr">SHOW DATABASES</code> MySQL command to list your databases.</td> </tr> <tr> <td>
+<var translate="no">EXTERNAL_DATA</var> </td> <td>If your external server does not support GTID, and you have permission to access the global read lock on it, use <code translate="no" dir="ltr">--master-data=1</code>. Otherwise, don't use this property.</td> </tr> <tr> <td>
+<var translate="no">GTID_PURGED</var> </td> <td>If your external server supports GTID, use <code translate="no" dir="ltr">--set-gtid-purged=on</code>; otherwise, don't use this property.</td> </tr> <tr> <td>
+<var translate="no">ADD_DROP_TABLE</var> </td> <td>If you want to add a <code translate="no" dir="ltr">DROP TABLE</code> statement before each <code translate="no" dir="ltr">CREATE TABLE</code> statement, include <code translate="no" dir="ltr">--add-drop-table</code>.</td> </tr> <tr> <td>
+<var translate="no">ROUTINES</var> </td> <td>If you want to show stored routines, such as procedures and functions, in the output for dumped databases, include <code translate="no" dir="ltr">--routines</code>.</td> </tr> <tr> <td>
+<var translate="no">COMPRESS</var> </td> <td>If you want to compress all information sent between the Cloud SQL replica and the external server, use <code translate="no" dir="ltr">--compress</code>.</td> </tr> <tr> <td>
+<var translate="no">GZIP</var> </td> <td>If you want to compress the dump file even more, use <code translate="no" dir="ltr">| gzip</code>. If your database contains data that does not compress well, such as binary incompressible data or JPG images, don't use this.</td> </tr> </tbody> </table></section> <section><p class="_code-tab"><strong>example</strong></p>
+
+<pre data-language="">mysqldump \
+    --host=192.0.2.1 \
+    --port=3306 \
+    --user=replicationUser \
+    --password \
+    --databases guestbook journal \
+    --hex-blob \
+    --master-data=1 \
+    --no-autocommit \
+    --default-character-set=utf8mb4 \
+    --single-transaction \
+    --compress \
+    | gzip</pre></section> </div>
+</li> <li>
+<p>Write down the GTID or binlog information of the data dump. You need this information to configure the replication with the Cloud SQL stored procedures.</p> <p>For the GTID, look for a line similar to the following:</p> 
+<pre>   SET @@GLOBAL.GTID_PURGED='32eb1e6a-17b6-11ea-a39e-06d94ac3ec98:1-33496';</pre> <p>For the binlog, look for a line similar to the following:</p> 
+<pre>   CHANGE MASTER TO MASTER_LOG_FILE='mysql-bin-changelog.033877', MASTER_LOG_POS=360;</pre>
+</li> <li>
+<p>Remove the following lines in the dump file that require super privileges. Since Cloud SQL users don't have super privileges, these lines cause the import to fail.</p> <p>For GTID-based replication: Remove the SET GTID_PURGED statement along with the session variable setting statement in the dump. For example:</p> 
+<pre>   ...
+   SET @MYSQLDUMP_TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;
+   SET @@SESSION.SQL_LOG_BIN= 0;
+   ...
+   SET @@GLOBAL.GTID_PURGED='32eb1e6a-17b6-11ea-a39e-06d94ac3ec98:1-33496';
+   ...
+   SET @@SESSION.SQL_LOG_BIN=@MYSQLDUMP_TEMP_LOG_BIN;</pre> <p>For binlog-based replication, remove the CHANGE MASTER statement. For example:</p> 
+<pre>   ...
+   CHANGE MASTER TO MASTER_LOG_FILE='mysql-bin-changelog.033877', MASTER_LOG_POS=360;
+    ...</pre>
+</li> <li>
+<p>Import the data into the Cloud SQL replica, using the <code translate="no" dir="ltr">mysql</code> CLI:</p> <div> <section><p class="_code-tab"><strong>mysql</strong></p>
+
+<pre data-language="">mysql -h REPLICA_HOST -u REPLICA_USER \
+-p REPLICA_DATABASE_NAME RESULT_FILE</pre> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var translate="no">REPLICA_HOST</var></td> <td>Host on which MySQL server is located.</td> </tr> <tr> <td>
+<var translate="no">REPLICA_USER</var> </td> <td>MySQL user name to use when connecting to the server.</td> </tr> <tr> <td>
+<var translate="no">REPLICA_DATABASE_NAME</var> </td> <td>Name of the database where the data is located.</td> </tr> <tr> <td><var translate="no">RESULT_FILE</var></td> <td>Name of the dump file to import.</td> </tr> </tbody> </table></section> <section><p class="_code-tab"><strong>example</strong></p>
+
+<pre data-language="">  mysql -h 255.255.255.255 -u replica_username -p replica_db &lt; result.sql
+</pre></section> </div>
+</li> </ol> <p>You can also import the dump file using a Google Cloud bucket. See <a href="../import-export/importing#mysqldump">Importing data from a SQL dump file into Cloud SQL</a>.</p> <h2 id="demote_the_instance">Demote the Cloud SQL instance</h2> <p>To demote the Cloud SQL instance to a Cloud SQL replica, use the <a href="https://docs.cloud.google.com/sql/docs/mysql/admin-api/rest/v1beta4/instances/demoteMaster">demoteMaster</a> method on the instance.</p> <ol> <li>
+<p>Prepare a request JSON file with the name of the instance you want to demote.</p> <div> <section><p class="_code-tab"><strong>Source JSON</strong></p>
+
+<pre data-language=""> {
+    "demoteMasterContext": {
+      "masterInstanceName": SOURCE_REPRESENTATION_INSTANCE_NAME,
+      "skipReplicationSetup": true
+      }
+ }</pre></section> </div> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td>
+<var translate="no">SOURCE_REPRESENTATION_INSTANCE_NAME</var> </td> <td>The name of the source representation instance.</td> </tr> </tbody> </table> <div> <section><p class="_code-tab"><strong>example</strong></p>
+
+<pre data-language="">   {
+     "demoteMasterContext": {
+       "masterInstanceName": "cloudsql-source-instance",
+       "skipReplicationSetup": true
+     }
+   }</pre></section> </div>
+</li> <li>
+<p>Open a terminal and use the following commands to invoke <code translate="no" dir="ltr">demoteMaster</code>:</p> <div> <section><p class="_code-tab"><strong>curl</strong></p>
+
+<pre data-language="bash">  gcloud auth login
+  ACCESS_TOKEN="$(gcloud auth print-access-token)"
+  curl --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+    --header 'Content-Type: application/json' \
+    --data @JSON_PATH \
+    -X POST \
+  https://sqladmin.googleapis.com/sql/v1beta4/projects/PROJECT-ID/instances/INSTANCE-NAME/demoteMaster</pre> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var translate="no">JSON_PATH</var></td> <td>The path to the <code translate="no" dir="ltr">JSON</code> file.</td> </tr> <tr> <td><var translate="no">PROJECT_ID</var></td> <td>The ID of your project in Google Cloud.</td> </tr> <tr> <td><var translate="no">INSTANCE-NAME</var></td> <td>The name of the instance to demote.</td> </tr> </tbody> </table></section> <section><p class="_code-tab"><strong>example</strong></p>
+
+<pre data-language="">   gcloud auth login
+   ACCESS_TOKEN="$(gcloud auth print-access-token)"
+   curl --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+     --header 'Content-Type: application/json' \
+     --data @./source.json \
+     -X POST \
+   https://sqladmin.googleapis.com/sql/v1beta4/projects/MyProject/instances/cloudsql-replica-instance/demoteMaster</pre></section> </div>
+</li> </ol> <h3 id="what_you_should_see_when_you_finish">What you should see when you finish</h3> <p>To ensure your instances were set up correctly, go to the <a href="https://console.cloud.google.com/sql/instances" target="console">Cloud SQL Instances page</a>.</p> <p>You should see your source representation instance and Cloud SQL replica. They look similar to the following:</p> <table> <thead> <tr> <th>Instance ID</th> <th>Type</th> <th>Public IP</th> </tr> </thead> <tbody> <tr> <td>(-) source-representation-instance</td> <td>MySQL external primary</td> <td>10.68.48.3:3306</td> </tr> <tr> <td> replica-instance</td> <td>MySQL read replica</td> <td>34.66.48.59</td> </tr> </tbody> </table> <h2 id="start_replication_on_the_instance">Start replication on the Cloud SQL instance</h2> <aside class="note"><strong>Note:</strong><span> IP addresses should be preserved in the Promote or Demote steps. If another operation comes in between the steps, then the IP address of the Cloud SQL instance may change. If replication is broken because of a connectivity issue, check the outgoing IP addresses and make sure that the appropriate IP addresses are allowlisted on the external source.</span></aside> <p>This step uses Cloud SQL stored procedures. The Cloud SQL stored procedures are installed after calling the <code translate="no" dir="ltr">demoteMaster</code> request. They are removed after calling <code translate="no" dir="ltr">promoteReplica</code>. For more information, see <a href="../stored-procedures#stored_procedures_for_replication_management">Stored procedures for replication management</a>.</p> <ol> <li>Log on to the replica instance. For more information, see <a href="../connect-admin-ip">Connecting using a database client from a local machine</a>.</li> <li>
+<p>Use the <code translate="no" dir="ltr">mysql.resetMaster</code> stored procedure to reset replication settings.</p> 
+<pre> mysql&gt; call mysql.resetMaster();</pre>
+</li> <li>
+<p>Configure the replication. This step requires the GTID or binlog information that you previously wrote down.</p> <div> <section><p class="_code-tab"><strong>GTID</strong></p>
+<ol> <li>Configure the <code translate="no" dir="ltr">gtid_purged</code> field with the <code translate="no" dir="ltr">mysql.skipTransactionWithGtid(<var translate="no">GTID_TO_SKIP</var>)</code> stored procedure.</li> </ol> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td>
+<var translate="no">GTID_TO_SKIP</var> </td> <td>The <a href="https://dev.mysql.com/doc/refman/5.7/en/replication-gtids-concepts.html#replication-gtids-concepts-gtid-sets">GTID set</a> value to configure.</td> </tr> </tbody> </table> <p>For example: </p>
+
+<pre data-language="">    mysql&gt; call mysql.skipTransactionWithGtid('32eb1e6a-17b6-11ea-a39e-06d94ac3ec98:1-33496');</pre> <ol> <li>Run the <code translate="no" dir="ltr">mysql.setupExternalSourceAutoPosition(<var translate="no">HOST</var>,
+<var translate="no">PORT</var>, <var translate="no">USER_NAME</var>, <var translate="no">USER_PASSWORD</var>,
+<var translate="no">MASTER_AUTO_POSITION</var>, <var translate="no">USE_SSL</var>,
+<var translate="no">USE_SSL_CLIENT_AUTH</var>)</code> stored procedure.</li> </ol> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var translate="no">HOST</var></td> <td>Source endpoint.</td> </tr> <tr> <td><var translate="no">PORT</var></td> <td>Source port.</td> </tr> <tr> <td><var translate="no">USER_NAME</var></td> <td>Source user.</td> </tr> <tr> <td><var translate="no">USER_PASSWORD</var></td> <td>Source user password.</td> </tr> <tr> <td>
+<var translate="no">MASTER_AUTO_POSITION</var> </td> <td>Value of the <code translate="no" dir="ltr">master_auto_position</code> parameter. Possible values are <code translate="no" dir="ltr">0</code>, <code translate="no" dir="ltr">1</code>.</td> </tr> <tr> <td>
+<var translate="no">USE_SSL</var> </td> <td>Whether to use SSL-based replication. Possible values are <code translate="no" dir="ltr">true</code>, <code translate="no" dir="ltr">false</code>. If <code translate="no" dir="ltr">true</code>, you need to set the <code translate="no" dir="ltr">caCertificate</code> field in the <code translate="no" dir="ltr">DemoteMaster</code> request.</td> </tr> <tr> <td>
+<var translate="no">USE_SSL_CLIENT_AUTH</var> </td> <td>Whether to use SSL client authentication. Possible values are <code translate="no" dir="ltr">true</code>, <code translate="no" dir="ltr">false</code>. If <code translate="no" dir="ltr">true</code>, you need to set the <a href="https://docs.cloud.google.com/sql/docs/mysql/admin-api/rest/v1beta4/instances/demoteMaster#demotemastermysqlreplicaconfiguration"><code translate="no" dir="ltr">clientKey</code> and <code translate="no" dir="ltr">clientCertificates</code></a> fields in the <code translate="no" dir="ltr">demoteMaster</code> request.</td> </tr> </tbody> </table> 
+<pre data-language="">    mysql&gt; call mysql.setupExternalSourceAutoPosition('1.1.1.1', 3306, \
+    'USERNAME', 'PASSWORD', \
+    /* master_auto_position= */ 1,false, false); \</pre></section> <section><p class="_code-tab"><strong>binlog</strong></p>
+<p>Run the <code translate="no" dir="ltr">mysql.setupExternalSource(<var translate="no">HOST</var>, <var translate="no">PORT</var>,
+<var translate="no">USER_NAME</var>, <var translate="no">USER_PASSWORD</var>, <var translate="no">SOURCE_LOG_NAME</var>,
+<var translate="no">SOURCE_LOG_POS</var>, <var translate="no">USE_SSL</var>,
+<var translate="no">USE_SSL_CLIENT_AUTH</var>)</code> stored procedure.</p> <table> <thead> <tr> <th>Property</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var translate="no">HOST</var></td> <td>Source endpoint.</td> </tr> <tr> <td><var translate="no">PORT</var></td> <td>Source port.</td> </tr> <tr> <td><var translate="no">USER_NAME</var></td> <td>Source user.</td> </tr> <tr> <td><var translate="no">USER_PASSWORD</var></td> <td>Source user password.</td> </tr> <tr> <td>
+<var translate="no">SOURCE_LOG_NAME</var> </td> <td>The name of the binary log on the source database instance that contains the replication information.</td> </tr> <tr> <td>
+<var translate="no">SOURCE_LOG_POS</var> </td> <td>The location in the <code translate="no" dir="ltr">mysql_binary_log_file_name</code> binary log at which replication starts reading the replication information.</td> </tr> <tr> <td>
+<var translate="no">USE_SSL</var> </td> <td>Whether to use SSL-based replication. Possible values are <code translate="no" dir="ltr">true</code>, <code translate="no" dir="ltr">false</code>. If <code translate="no" dir="ltr">true</code>, you need to set the <code translate="no" dir="ltr">caCertificate</code> field in the <code translate="no" dir="ltr">DemoteMaster</code> request.</td> </tr> <tr> <td>
+<var translate="no">USE_SSL_CLIENT_AUTH</var> </td> <td>Whether to use SSL client authentication. Possible values are <code translate="no" dir="ltr">true</code>, <code translate="no" dir="ltr">false</code>. If <code translate="no" dir="ltr">true</code>, you need to set the <a href="https://docs.cloud.google.com/sql/docs/mysql/admin-api/rest/v1beta4/instances/demoteMaster#demotemastermysqlreplicaconfiguration"><code translate="no" dir="ltr">clientKey</code> and <code translate="no" dir="ltr">clientCertificates</code></a> fields in the <code translate="no" dir="ltr">demoteMaster</code> request.</td> </tr> </tbody> </table> 
+<pre data-language="">    mysql&gt; call mysql.setupExternalSource('1.1.1.1', 3306, \
+    'user_name', 'password', 'mysql-bin-changelog.033877', 360, \
+    false, false);</pre></section> </div>
+</li> <li>
+<p>Use the <code translate="no" dir="ltr">mysql.startReplication()</code> stored procedure to start replication from the external database.</p> 
+<pre>   mysql&gt; call mysql.startReplication();</pre>
+</li> <li>
+<p>Verify the replication status. Make sure that both the <code translate="no" dir="ltr">Slave_IO_Running</code> and <code translate="no" dir="ltr">Slave_SQL_Running</code> fields say <code translate="no" dir="ltr">YES</code>.</p> 
+<pre>   mysql&gt; show slave status\G</pre> <p>The output from this command looks similar to the following:</p> 
+<pre>   *************************** 1. row ***************************
+                   Slave_IO_State: Waiting for master to send event
+                      Master_Host: 1.1.1.1
+                      Master_User: user_name
+                      Master_Port: 3306
+                    Connect_Retry: 60
+                  Master_Log_File: mysql-bin-changelog.000001
+              Read_Master_Log_Pos: 1
+                   Relay_Log_File: relay-log.000002
+                    Relay_Log_Pos: 1
+            Relay_Master_Log_File: mysql-bin-changelog.000001
+                 Slave_IO_Running: Yes
+                Slave_SQL_Running: Yes
+                  Replicate_Do_DB:
+              Replicate_Ignore_DB:
+               Replicate_Do_Table:
+           Replicate_Ignore_Table:
+          Replicate_Wild_Do_Table:
+      Replicate_Wild_Ignore_Table: mysql.%
+                       Last_Errno: 0
+                       Last_Error:
+                     Skip_Counter: 0
+              Exec_Master_Log_Pos: 412
+                  Relay_Log_Space: 752
+                  Until_Condition: None
+                   Until_Log_File:
+                    Until_Log_Pos: 0
+               Master_SSL_Allowed: No
+               Master_SSL_CA_File:
+               Master_SSL_CA_Path:
+                  Master_SSL_Cert:
+                Master_SSL_Cipher:
+                   Master_SSL_Key:
+            Seconds_Behind_Master: 0
+    Master_SSL_Verify_Server_Cert: No
+                    Last_IO_Errno: 0
+                    Last_IO_Error:
+                   Last_SQL_Errno: 0
+                   Last_SQL_Error:
+      Replicate_Ignore_Server_Ids:
+                 Master_Server_Id: 1509941531
+                      Master_UUID: 1cb2c80e-90f0-11eb-9ea3-02389b1c2e6f
+             Master_Info_File: mysql.slave_master_info
+                    SQL_Delay: 0
+          SQL_Remaining_Delay: NULL
+      Slave_SQL_Running_State: Slave has read all r
+           Master_Retry_Count: 86400
+                  Master_Bind:
+      Last_IO_Error_Timestamp:
+     Last_SQL_Error_Timestamp:
+               Master_SSL_Crl:
+           Master_SSL_Crlpath:
+           Retrieved_Gtid_Set:
+            Executed_Gtid_Set: 478af53c-bd24-11eb-be72-42010a80002a:1-226
+                Auto_Position: 0
+   1 row in set (0.00 sec)</pre>
+</li> </ol> <h2 id="proceed_with_replication">Proceed with replication</h2> <p>Once you start replication from the external server, you need to monitor replication and then complete your migration. To learn more, see <a href="configure-replication-from-external#monitoring_replication">Monitoring replication</a>.</p> <h2 id="troubleshoot">Troubleshoot</h2> <table> <thead> <th width="30%">Issue</th> <th width="70%">Troubleshooting</th> </thead> <tbody> <tr> <td>
+<code translate="no" dir="ltr">Lost connection to MySQL server during query when dumping table</code>.</td> <td>The source may have become unavailable, or the dump contained packets too large. <p>Make sure the external primary is available to connect. You can also modify the values of the <a href="https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_net_read_timeout" target="_blank">net_read_timeout</a> and <a href="https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_net_write_timeout" target="_blank">net_write_timeout</a> flags on the source instance to stop the error. For more information on the allowable values for these flags, see <a href="../flags">Configure database flags</a>.</p> <p>To learn more about using <code translate="no" dir="ltr">mysqldump</code> flags for managed import migration, see <a href="managed-import-replication-from-external#sync-flags"> Allowed and default initial sync flags</a></p> </td> </tr> <tr> <td>Initial dump fails with timeout or lost connection errors (for example, <code translate="no" dir="ltr">Dump timeout</code> or <code translate="no" dir="ltr">Lost connection to MySQL server</code>).</td> <td>This error can occur if one or more DDL statements interact with the parallel dump process, causing the process to wait indefinitely. <p><b>Resolution:</b> Don't execute DDL statements on the source database during the initial dump phase. Before you execute any DDL statements, restart the migration and wait for the initial dump phase to complete.</p> </td> </tr> <tr> <td>The initial data migration was successful, but no data is being replicated.</td> <td>
+<p>One possible root cause could be your source database has defined replication flags which result in some or all database changes not being replicated over.</p> <p>Make sure the replication flags such as <code translate="no" dir="ltr">binlog-do-db</code>, <code translate="no" dir="ltr">binlog-ignore-db</code>, <code translate="no" dir="ltr">replicate-do-db</code> or <code translate="no" dir="ltr">replicate-ignore-db</code> are not set in a conflicting way.</p> <p>Run the command <code translate="no" dir="ltr">show master status</code> on the primary instance to see the current settings.</p> </td> </tr> <tr> <td>The initial data migration was successful but data replication stops working after a while.</td> <td>
+<p>Things to try:</p> <ul> <li>Check the <a href="https://console.cloud.google.com/monitoring/dashboards/resourceList/cloudsql_database"> replication metrics</a> for your replica instance in the Cloud Monitoring section of the Google Cloud console.</li> <li>The errors from the MySQL IO thread or SQL thread can be found in <a href="https://console.cloud.google.com/logs">Cloud Logging</a> in the <code translate="no" dir="ltr">mysql.err</code> log files.</li> <li>The error can also be found when connecting to the replica instance. Run the command <code translate="no" dir="ltr">SHOW REPLICA STATUS</code>, and check for the following fields in the output: <ul> <li><code translate="no" dir="ltr">Replica_IO_Running</code></li> <li><code translate="no" dir="ltr">Replica_SQL_Running</code></li> <li><code translate="no" dir="ltr">Last_IO_Error</code></li> <li><code translate="no" dir="ltr">Last_SQL_Error</code></li> </ul> </li> </ul> <p>If you find the error <code translate="no" dir="ltr">Unknown database <var translate="no">DATABASE_NAME</var>
+ on query. Error_code: MY-001049</code>, then replication has failed due to a replicated SQL statement attempting to reference a database that wasn't selected for the migration. To recover replication, determine whether the error based on the message is due to DDL on one of the following objects:</p> <ul> <li>An event or routine. You can run <a href="../stored-procedures#skipReplicationError"><code translate="no" dir="ltr">CALL mysql.skipReplicationError()</code></a> on the replica, which will prevent the event or routine from being replicated and resume replication.</li> <li>A foreign key constraint or view. After you determine on which database the object modified by the statement resides, you have two options for recovery. You can either remove the database from the selected databases that are being migrated, or you can run <a href="../stored-procedures#skipReplicationError"><code translate="no" dir="ltr">CALL mysql.skipReplicationError()</code></a> on the replica to resume replication while skipping the constraint or propagation of the view to the replica.</li> </ul> </td> </tr> <tr> <td>
+<code translate="no" dir="ltr">mysqld check failed: data disk is full</code>.</td> <td>The data disk of the replica instance is full. <p>Increase the disk size of the replica instance. You can either manually increase the disk size or enable auto storage increase.</p> </td> </tr> </tbody> </table> <h3 id="confirm-network">Review your replication logs</h3> <p>When you <a href="#verify-replication">verify your replication settings</a>, logs are produced.</p> <p>You can view these logs by following these steps:</p> <ol> <li>
+<p> Go to the Logs Viewer in the Google Cloud console. </p> <p><a href="https://console.cloud.google.com/logs" target="console" class="button button-primary">Go to the Logs Viewer</a> </p>
+</li> <li>Select the Cloud SQL replica from the <b>Instance</b> dropdown.</li> <li>Select the <code translate="no" dir="ltr">replication-setup.log</code> log file.</li> </ol> <p>If the Cloud SQL replica is unable to connect to the external server, confirm the following:</p> <ul> <li>Any firewall on the external server is configured to allow connections from the Cloud SQL replica's <a href="#outgoing-ip">outgoing IP address</a>.</li> <li>Your SSL/TLS configuration is correct.</li> <li>Your replication user, host, and password are correct.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>Learn about <a href="../edit-instance">updating an instance</a>.</li> <li>Learn about <a href="manage-replicas">managing replicas</a>.</li> <li>Learn about <a href="../monitor-instance">monitoring instances</a>.</li> <li>Learn about <a href="manage-replicas#promote-replica">promoting your Cloud SQL replica</a> to <a href="../migrate-data#migrating-to-sql">promote the replica to a standalone instance and stop replicating from the external server</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/mysql/replication/custom-import-replication-from-external" class="_attribution-link">https://docs.cloud.google.com/sql/docs/mysql/replication/custom-import-replication-from-external</a>
+  </p>
+</div>

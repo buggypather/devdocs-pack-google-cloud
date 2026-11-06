@@ -1,0 +1,412 @@
+<h1>Deploy a Qdrant vector database on GKE</h1> <div class="tutorial tutorial-lesson">  <section id="overview"> <p>This guide shows you how to deploy a <a href="https://qdrant.tech/documentation/">Qdrant</a> vector database cluster on Google Kubernetes Engine (GKE).</p> <p><a href="https://cloud.google.com/discover/what-is-a-vector-database">Vector databases</a> are data stores specifically designed to manage and search through large collections of high-dimensional vectors. These vectors represent data like text, images, audio, video or any data that can be numerically encoded. Unlike traditional databases that rely on exact matches, vector databases specialize in finding similar items or identifying patterns within massive datasets. These characteristics make Qdrant a suitable choice for a variety of applications, including neural network or semantic-based matching, faceted search, and more. Qdrant not only functions as a vector database but also as a vector similarity search engine.</p> <p>This tutorial is intended for cloud platform <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks#admins">administrators and architects</a>, <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks#data-ai-ml-engineer">ML engineers</a>, and MLOps (DevOps) professionals interested in deploying Qdrant database clusters on GKE.</p> <h2 id="benefits">Benefits</h2> <p>Qdrant offers the following benefits:</p> <ul> <li>Wide range of libraries for various programming languages and open API to integrate with other services.</li> <li>Horizontal scaling, and support for sharding and replication that simplifies scaling and high availability.</li> <li>Container and Kubernetes support that enables deployment and management in modern cloud-native environments.</li> <li>Flexible payloads with <a href="https://qdrant.tech/documentation/concepts/filtering/">advanced filtering</a> to tailor search criteria precisely.</li> <li>
+<a href="https://qdrant.tech/documentation/guides/quantization/">Different quantization options</a> and other optimizations to reduce infrastructure costs and improve performance.</li> </ul> <h2 id="objectives">Objectives</h2> <p>In this tutorial, you learn how to:</p> <ul> <li>Plan and deploy GKE infrastructure for Qdrant.</li> <li>Deploy the <a href="../how-to/stateful-ha">StatefulHA</a> operator to ensure Qdrant high availability.</li> <li>Deploy and configure the Qdrant cluster.</li> <li>Upload a demo dataset and run a simple search query.</li> <li>Collect metrics and run a dashboard.</li> </ul> <h2 id="architecture">Deployment architecture</h2> <p>This architecture sets up a fault-tolerant, scalable GKE cluster for Qdrant across multiple availability zones, ensuring uptime and availability with rolling updates and minimal disruption. It includes using the <a href="https://docs.cloud.google.com/kubernetes-engine/docs/reference/crds/highavailabilityapplication">StatefulHA operator</a> for efficient failover management. For more information, see <a href="../concepts/regional-clusters">Regional clusters</a>.</p> <h3 id="architecture-diagram">Architecture diagram</h3> <p>The following diagram shows a Qdrant cluster running on multiple nodes and zones in a GKE cluster:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/qdrant-architecture.svg" alt="Qdrant deployment architecture" title="Qdrant deployment architecture"></p> <p>In this architecture, the Qdrant <code translate="no" dir="ltr">StatefulSet</code> is deployed across three nodes in three different zones.</p> <ul> <li>You can control how GKE distributes Pods across nodes by configuring the required Pod <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity">affinity rules</a> and <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/">topology spread constraints</a> in the Helm chart values file.</li> <li>If one zone fails, GKE reschedules Pods on new nodes based on the recommended configuration.</li> </ul> <p>For data persistence, the architecture in this tutorial has the following characteristics:</p> <ul> <li>It uses <a href="https://docs.cloud.google.com/compute/docs/disks/about-regional-persistent-disk">regional</a> SSD disks (custom<code translate="no" dir="ltr">regional-pd</code> <a href="../how-to/persistent-volumes/gce-pd-csi-driver#create_a_storageclass">StorageClass</a>) for persisting data. We <a href="https://docs.cloud.google.com/compute/docs/disks/performance">recommend</a> regional SSD disks for databases due to their low latency and high IOPS.</li> <li>All disk data is replicated between primary and secondary zones in the region, increasing tolerance to potential zone failures.</li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/kubernetes-engine/pricing">GKE</a></li> <li><a href="https://cloud.google.com/stackdriver/pricing#mgd-prometheus-pricing-summary">Google Cloud Managed Service for Prometheus</a></li> <li><a href="https://cloud.google.com/backup-disaster-recovery/pricing">Backup for GKE</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> <p>When you finish the tasks that are described in this document, you can avoid continued billing by deleting the resources that you created. For more information, see <a href="#clean-up" track-type="tutorial" track-name="internalLink" track-metadata-position="body">Clean up</a>.</p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <p>In this tutorial, you use <a href="https://docs.cloud.google.com/shell/docs" track-type="quickstart" track-name="cloudShell" track-metadata-position="body" track-metadata-end-goal="cloudShellLanding">Cloud Shell</a> to run commands. Cloud Shell is a shell environment for managing resources hosted on Google Cloud. It comes preinstalled with the <a href="https://docs.cloud.google.com/sdk/gcloud" track-type="quickstart" track-name="gcloudOverview" track-metadata-position="body" track-metadata-end-goal="useGcloud">Google Cloud CLI</a>, <a href="https://kubernetes.io/docs/reference/kubectl/">kubectl</a>, <a href="https://helm.sh/">Helm</a> and<a href="https://docs.cloud.google.com/docs/terraform"> Terraform</a> command-line tools. If you don't use Cloud Shell, you must install the Google Cloud CLI.</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Resource Manager, Compute Engine, GKE, IAM Service Account Credentials, and Backup for GKE APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable cloudresourcemanager.googleapis.com compute.googleapis.com container.googleapis.com iamcredentials.googleapis.com gkebackup.googleapis.com</pre>
+</li> </div> <div class="ineligible"> <li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li> <li> <p>If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> </li> <li> <p> To <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the gcloud CLI, run the following command: </p> 
+<pre>gcloud init</pre> </li> <li> <p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Resource Manager, Compute Engine, GKE, IAM Service Account Credentials, and Backup for GKE APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable cloudresourcemanager.googleapis.com compute.googleapis.com container.googleapis.com iamcredentials.googleapis.com gkebackup.googleapis.com</pre>
+</li> </div> </cloud-free-trial> <li> <p> Grant roles to your user account. Run the following command once for each of the following IAM roles: <code translate="no" dir="ltr">roles/storage.objectViewer, roles/container.admin,
+roles/iam.serviceAccountAdmin, roles/compute.admin, roles/gkebackup.admin,
+roles/monitoring.viewer</code> </p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID --member="user:USER_IDENTIFIER" --role=ROLE</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">USER_IDENTIFIER</var></code>: The identifier for your user account. For example, <code translate="no" dir="ltr">myemail@example.com</code>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: The IAM role that you grant to your user account.</li> </ul> </li> </ol> </section> <div id="tutorial-content"> <h2 id="environment">Set up your environment</h2> <p>To set up your environment with Cloud Shell, follow these steps:</p> <ol> <li>
+<p>Set environment variables for your project, region, and a Kubernetes cluster resource prefix:</p> <p>For the purpose of this tutorial, use <code translate="no" dir="ltr">us-central1</code> region to create your deployment resources.</p> 
+<pre>export PROJECT_ID=PROJECT_ID
+export KUBERNETES_CLUSTER_PREFIX=qdrant
+export REGION=us-central1
+</pre> <ul> <li>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project ID.</li> </ul>
+</li> <li>
+<p>Check the version of Helm:</p> 
+<pre>helm version
+</pre> <p>Update the version if it's older than 3.13:</p> 
+<pre>curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+</pre>
+</li> <li>
+<p>Clone the sample code repository from GitHub:</p> 
+<pre>git clone https://github.com/GoogleCloudPlatform/kubernetes-engine-samples
+</pre>
+</li> <li>
+<p>Navigate to the <code translate="no" dir="ltr">qdrant</code> directory to start creating deployment resources:</p> 
+<pre>cd kubernetes-engine-samples/databases/qdrant
+</pre>
+</li> </ol> <h2 id="create-cluster">Create your cluster infrastructure</h2> <p>This section involves running a Terraform script to create a private, highly-available, regional GKE cluster to deploy your Qdrant database.</p> <p>You can choose to deploy Qdrant using a <a href="../concepts/choose-cluster-mode">Standard or Autopilot cluster</a>. Each has its own advantages and different pricing models.</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>The following diagram shows an Autopilot regional GKE cluster deployed across three different zones.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-autopilot-qdrant.svg" alt="GKE Autopilot cluster" title="GKE Autopilot cluster"></p> <p>To deploy the cluster infrastructure, run the following commands in the Cloud Shell:</p> 
+<pre data-language="">export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=terraform/gke-autopilot init
+terraform -chdir=terraform/gke-autopilot apply \
+-var project_id=${PROJECT_ID} \
+-var region=${REGION} \
+-var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>The following variables are replaced at runtime:</p> <ul> <li>
+<code translate="no" dir="ltr">GOOGLE_OAUTH_ACCESS_TOKEN</code>: Replaced by an access token retrieved by <code translate="no" dir="ltr">gcloud auth print-access-token</code> command to authenticate interactions with various Google Cloud APIs</li> <li>
+<code translate="no" dir="ltr">PROJECT_ID</code>, <code translate="no" dir="ltr">REGION</code>, and <code translate="no" dir="ltr">KUBERNETES_CLUSTER_PREFIX</code> are the environment variables defined in <a href="#environment">Set up your environment</a> section and assigned to the new relevant variables for the Autopilot cluster you are creating.</li> </ul> <p>When prompted, type <code translate="no" dir="ltr">yes</code>.</p> <p>The output is similar to the following:</p> 
+<pre data-language="">...
+Apply complete! Resources: 9 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+kubectl_connection_command = "gcloud container clusters get-credentials qdrant-cluster --region us-central1"
+</pre> <p>Terraform creates the following resources:</p> <ul> <li>A custom VPC network and private subnet for the Kubernetes nodes.</li> <li>A Cloud Router to access the internet through Network Address Translation (NAT).</li> <li>A private GKE cluster in the <code translate="no" dir="ltr">us-central1</code> region.</li> <li>A <code translate="no" dir="ltr">ServiceAccount</code> with logging and monitoring permissions for the cluster.</li> <li>Google Cloud Managed Service for Prometheus configuration for cluster monitoring and alerting.</li> </ul></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>The following diagram shows a Standard private regional GKE cluster deployed across three different zones.</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/gke-standard-qdrant.svg" alt="GKE Standard cluster" title="GKE Standard cluster"></p> <p>To deploy the cluster infrastructure, run the following commands in the Cloud Shell:</p> 
+<pre data-language="">export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform -chdir=terraform/gke-standard init
+terraform -chdir=terraform/gke-standard apply \
+-var project_id=${PROJECT_ID} \
+-var region=${REGION} \
+-var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>The following variables are replaced at runtime:</p> <ul> <li>
+<code translate="no" dir="ltr">GOOGLE_OAUTH_ACCESS_TOKEN</code> is replaced by an access token retrieved by <code translate="no" dir="ltr">gcloud auth print-access-token</code> command to authenticate interactions with various Google Cloud APIs.</li> <li>
+<code translate="no" dir="ltr">PROJECT_ID</code>, <code translate="no" dir="ltr">REGION</code>, and <code translate="no" dir="ltr">KUBERNETES_CLUSTER_PREFIX</code> are the environment variables defined in <a href="#environment">Set up your environment</a> section and assigned to the new relevant variables for the Standard cluster that you are creating.</li> </ul> <p>When prompted, type <code translate="no" dir="ltr">yes</code>. It might take several minutes for these commands to complete and for the cluster to show a ready status.</p> <p>The output is similar to the following:</p> 
+<pre data-language="">...
+Apply complete! Resources: 10 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+kubectl_connection_command = "gcloud container clusters get-credentials qdrant-cluster --region us-central1"
+</pre> <p>Terraform creates the following resources:</p> <ul> <li>A custom VPC network and private subnet for the Kubernetes nodes.</li> <li>A Cloud Router to access the internet through Network Address Translation (NAT).</li> <li>A private GKE cluster in the <code translate="no" dir="ltr">us-central1</code> region with autoscaling enabled (one to two nodes per zone).</li> <li>A <code translate="no" dir="ltr">ServiceAccount</code> with logging and monitoring permissions for the cluster.</li> <li>Google Cloud Managed Service for Prometheus configuration for cluster monitoring and alerting.</li> </ul></section> </div> <h3 id="connect_to_the_cluster">Connect to the cluster</h3> <p>Configure <code translate="no" dir="ltr">kubectl</code> to fetch credentials and communicate with your new GKE cluster:</p> 
+<pre>gcloud container clusters get-credentials \
+    ${KUBERNETES_CLUSTER_PREFIX}-cluster --location ${REGION}
+</pre> <h2 id="deploy-qdrant">Deploy the Qdrant database to your cluster</h2> <p>In this tutorial, you deploy the Qdrant database (in <a href="https://qdrant.tech/documentation/guides/distributed_deployment/">distributed mode</a>) and the Stateful HA operator to your GKE cluster cluster using the <a href="https://github.com/qdrant/qdrant-helm">Helm chart</a>.</p> <p>The deployment creates a GKE cluster with the following configuration:</p> <ul> <li>Three replicas of the Qdrant nodes.</li> <li>Tolerations, node affinities, and topology spread constraints are configured to ensure proper distribution across Kubernetes nodes. This leverages the node pools and different availability zones.</li> <li>A RePD volume with the SSD disk type is provisioned for data storage.</li> <li>A Stateful HA operator is used to manage failover processes and ensure high availability. A StatefulSet is a Kubernetes controller that maintains a persistent unique identity for each of its Pods.</li> <li>For authentication, the database creates a Kubernetes secret containing the API key.</li> </ul> <p>To use the Helm chart to deploy Qdrant database, follow these steps:</p> <ol> <li>
+<p>Enable the <a href="../how-to/stateful-ha#enable">StatefulHA add-on</a>:</p> <div> <section><p class="_code-tab"><strong>Autopilot</strong></p>
+<p>GKE automatically enables the <code translate="no" dir="ltr">StatefulHA</code> add-on at cluster creation.</p></section> <section><p class="_code-tab"><strong>Standard</strong></p>
+<p>Run the following command:</p> 
+<pre data-language="">gcloud container clusters update ${KUBERNETES_CLUSTER_PREFIX}-cluster \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --update-addons=StatefulHA=ENABLED
+</pre> <p>It might take 15 minutes for this command to complete and for the cluster to show a ready status.</p></section> </div>
+</li> <li>
+<p>Add the Qdrant database Helm Chart repository before you can deploy it on your GKE cluster:</p> 
+<pre>helm repo add qdrant https://qdrant.github.io/qdrant-helm
+</pre>
+</li> <li>
+<p>Create namespace <code translate="no" dir="ltr">qdrant</code> for the database:</p> 
+<pre>kubectl create ns qdrant
+</pre>
+</li> <li>
+<p>Apply the manifest to create a regional persistent SSD disk <code translate="no" dir="ltr">StorageClass</code>:</p> 
+<pre>kubectl apply -n qdrant -f manifests/01-regional-pd/regional-pd.yaml
+</pre> <p>The <code translate="no" dir="ltr">regional-pd.yaml</code> manifest describes the persistent SSD disk <code translate="no" dir="ltr">StorageClass</code>:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: storage.k8s.io/v1
+kind: StorageClass
+allowVolumeExpansion: true
+metadata:
+  name: ha-regional
+parameters:
+  replication-type: regional-pd
+  type: pd-ssd
+  availability-class: regional-hard-failover
+provisioner: pd.csi.storage.gke.io
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer</pre> </div> </li> <li>
+<p>Deploy a Kubernetes configmap with a <code translate="no" dir="ltr">metrics</code> sidecar configuration and a Qdrant cluster by using Helm:</p> 
+<pre>kubectl apply -n qdrant -f manifests/03-prometheus-metrics/metrics-cm.yaml
+helm install qdrant-database qdrant/qdrant -n qdrant \
+-f manifests/02-values-file/values.yaml
+</pre> <p>The <code translate="no" dir="ltr">metrics-cm.yaml</code> manifest describes the <code translate="no" dir="ltr">metrics</code> sidecar <code translate="no" dir="ltr">ConfigMap</code>:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-conf
+data:
+  default.conf.template: |
+    server {
+      listen 80;
+      location / {
+        proxy_pass http://localhost:6333/metrics;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header api-key ${QDRANT_APIKEY};
+        proxy_set_header X-Forwarded-For $remote_addr;
+      }
+    }</pre> </div> <p>The <code translate="no" dir="ltr">values.yaml</code> manifest describes the Qdrant cluster configuration :</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>replicaCount: 3
+
+config:
+  service:
+    enable_tls: false
+  cluster:
+    enabled: true
+  storage:
+    optimizers:
+      deleted_threshold: 0.5
+      vacuum_min_vector_number: 1500
+      default_segment_number: 2
+      max_segment_size_kb: null
+      memmap_threshold_kb: null
+      indexing_threshold_kb: 25000
+      flush_interval_sec: 5
+      max_optimization_threads: 1
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 60
+
+resources:
+  limits:
+    cpu: "2"
+    memory: 4Gi
+  requests:
+    cpu: "1"
+    memory: 4Gi
+
+tolerations:
+  - key: "app.stateful/component"
+    operator: "Equal"
+    value: "qdrant"
+    effect: NoSchedule
+
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 1
+      preference:
+        matchExpressions:
+        - key: "app.stateful/component"
+          operator: In
+          values:
+          - "qdrant"
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: qdrant
+        app.kubernetes.io/instance: qdrant
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+persistence:
+  accessModes: ["ReadWriteOnce"]
+  size: 10Gi
+  storageClassName: ha-regional
+
+apiKey: true
+
+sidecarContainers:
+  - name: metrics
+    image: nginx:1.29
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "250m"
+      limits:
+        memory: "128Mi"
+        cpu: "500m"
+    ports:
+    - containerPort: 80
+    env:
+    - name: QDRANT_APIKEY 
+      valueFrom:
+        secretKeyRef:
+          name: qdrant-database-apikey          
+          key: api-key
+    volumeMounts:
+        - name: nginx-conf
+          mountPath: /etc/nginx/templates/default.conf.template
+          subPath: default.conf.template
+          readOnly: true
+additionalVolumes:
+  - name: nginx-conf
+    configMap:
+      name: nginx-conf
+      items:
+        - key: default.conf.template
+          path: default.conf.template </pre> </div> <p>This configuration enables the cluster mode, allowing you to setup a highly available and distributed Qdrant cluster.</p>
+</li> <li>
+<p>Add a label to Qdrant statefulset:</p> 
+<pre>kubectl label statefulset qdrant-database examples.ai.gke.io/source=qdrant-guide -n qdrant
+</pre>
+</li> <li>
+<p>Deploy an internal load balancer to access your Qdrant database that's running in the same VPC as your GKE cluster:</p> 
+<pre>kubectl apply -n qdrant -f manifests/02-values-file/ilb.yaml
+</pre> <p>The <code translate="no" dir="ltr">ilb.yaml</code> manifest describes the <code translate="no" dir="ltr">LoadBalancer</code> Service:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    #cloud.google.com/neg: '{"ingress": true}'
+    networking.gke.io/load-balancer-type: "Internal"
+  labels:
+    app.kubernetes.io/name: qdrant
+  name: qdrant-ilb
+spec:
+  ports:
+  - name: http
+    port: 6333
+    protocol: TCP
+    targetPort: 6333
+  - name: grpc
+    port: 6334
+    protocol: TCP
+    targetPort: 6334
+  selector:
+    app: qdrant
+    app.kubernetes.io/instance: qdrant-database
+  type: LoadBalancer</pre> </div> </li> <li>
+<p>Check the deployment status:</p> 
+<pre>helm ls -n qdrant
+</pre> <p>The output is similar to the following, if the <code translate="no" dir="ltr">qdrant</code> database is successfully deployed:</p> 
+<pre>NAME    NAMESPACE       REVISION        UPDATED                                 STATUS          CHART           APP VERSION
+qdrant-database  qdrant          1               2024-02-06 20:21:15.737307567 +0000 UTC deployed        qdrant-0.7.6    v1.7.4
+</pre>
+</li> <li>
+<p>Wait for GKE to start the required workloads:</p> 
+<pre>kubectl wait pods -l app.kubernetes.io/instance=qdrant-database --for condition=Ready --timeout=300s -n qdrant
+</pre> <p>This command might take a few minutes to complete successfully.</p>
+</li> <li>
+<p>Once GKE starts the workloads, verify that GKE has created the Qdrant workloads:</p> 
+<pre>kubectl get pod,svc,statefulset,pdb,secret -n qdrant
+</pre>
+</li> <li>
+<p>Start the <code translate="no" dir="ltr">HighAvailabilityApplication</code> (HAA) resource for Qdrant:</p> 
+<pre>kubectl apply -n qdrant -f manifests/01-regional-pd/ha-app.yaml
+</pre> <p>The <code translate="no" dir="ltr">ha-app.yaml</code> manifest describes the <code translate="no" dir="ltr">HighAvailabilityApplication</code> resource:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>kind: HighAvailabilityApplication
+apiVersion: ha.gke.io/v1
+metadata:
+  name: qdrant-database
+  namespace: qdrant
+spec:
+  resourceSelection:
+    resourceKind: StatefulSet
+  policy:
+    storageSettings:
+      requireRegionalStorage: true
+    failoverSettings:
+      forceDeleteStrategy: AfterNodeUnreachable
+      afterNodeUnreachable:
+        afterNodeUnreachableSeconds: 20 # 60 seconds total</pre> </div> <p>The following GKE resources are created for the Qdrant cluster:</p> <ul> <li>The Qdrant <code translate="no" dir="ltr">StatefulSet</code> that controls three Pod replicas.</li> <li>
+<code translate="no" dir="ltr">A PodDisruptionBudget</code>, ensuring a maximum of one unavailable replica.</li> <li>The <code translate="no" dir="ltr">qdrant-database</code> Service, exposing the Qdrant port for inbound connections and replication between nodes.</li> <li>The <code translate="no" dir="ltr">qdrant-database-headless</code> Service, providing the list of running Qdrant Pods.</li> <li>The <code translate="no" dir="ltr">qdrant-database-apikey</code> Secret, facilitating secure database connection.</li> <li>Stateful HA operator Pod and <code translate="no" dir="ltr">HighlyAvailableApplication</code> resource, actively monitoring the Qdrant application. The <code translate="no" dir="ltr">HighlyAvailableApplication</code> resource defines failover rules to apply against Qdrant.</li> </ul>
+</li> <li>
+<p>To check if the failover rules are applied, describe the resource and confirm <code translate="no" dir="ltr">Status: Message: Application is protected</code>.</p> 
+<pre>kubectl describe highavailabilityapplication qdrant-database -n qdrant
+</pre> <p>The output is similar to the following:</p> 
+<pre>Status:
+Conditions:
+    Last Transition Time:  2023-11-30T09:54:52Z
+    Message:               Application is protected
+    Observed Generation:   1
+    Reason:                ApplicationProtected
+    Status:                True
+    Type:                  Protected
+</pre>
+</li> </ol> <h2 id="run-queries">Run queries with Vertex AI Colab Enterprise notebook</h2> <p>Qdrant organizes vectors and payloads in collections. Vector embedding is a technique that represents words or entities as numerical vectors while maintaining their semantic relationships. This is important for similarity searches as it enables finding similarities based on meaning rather than exact matches, making tasks like search and recommendation systems more effective and nuanced.</p> <p>This section shows you how to <a href="https://qdrant.tech/articles/fastembed/">upload Vectors</a> into a new Qdrant <a href="https://qdrant.tech/documentation/concepts/collections/">Collection</a> and run a search queries.</p> <p>In this example, you use a dataset from a CSV file that contains a list of books in different genres. You create a Colab Enterprise notebook to perform a search query on the Qdrant database.</p> <p>For more information about Vertex AI Colab Enterprise, see <a href="https://docs.cloud.google.com/colab/docs/introduction">Colab Enterprise documentation</a>.</p> <h3 id="create_a_runtime_template">Create a runtime template</h3>   <p>To create a Colab Enterprise runtime template:</p> <ol> <li>
+<p>In the Google Cloud console, go to the Colab Enterprise <strong>Runtime Templates</strong> page and make sure your project is selected:</p> <p><a href="https://console.cloud.google.com/vertex-ai/colab/runtime-templates" target="console" track-type="quickstart" track-name="consoleLink" track-metadata-end-goal="createService" class="button button-primary">Go to Runtime Templates</a> </p>
+</li> <li><p>Click <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>New Template</strong>. The <strong>Create new runtime template</strong> page appears.</p></li> <li>
+<p>In the <strong>Runtime basics</strong> section: </p> <ul> <li>In the <strong>Display name</strong> field, enter <code translate="no" dir="ltr">qdrant-connect</code>.</li> <li>In the <strong>Region</strong> drop-down list, select <code translate="no" dir="ltr">us-central1</code>. It's the same region as your GKE cluster.</li> </ul> </li> <li>
+<p>In the <strong>Configure compute</strong> section: </p> <ul> <li>In the <strong>Machine type</strong> drop-down list, select <code translate="no" dir="ltr">e2-standard-2</code>.</li> <li>In the <strong>Disk size</strong> field, enter <code translate="no" dir="ltr">30</code>.</li> </ul> </li> <li>
+<p>In the <strong>Networking and security</strong> section:</p> <ul> <li>In the <strong>Network</strong> drop-down list, select the network where your GKE cluster resides.</li> <li>In the <strong>Subnetwork</strong> drop-down list, select a corresponding subnetwork.</li> <li>Clear the <strong>Enable public internet access</strong> checkbox.</li> </ul>
+</li> <li><p>To finish creating the runtime template, click <strong>Create</strong>. Your runtime template appears in the list on the <strong>Runtime templates</strong> tab.</p></li> </ol> <h3 id="create_a_runtime">Create a runtime</h3>   <p>To create a Colab Enterprise runtime:</p> <ol> <li><p>In the runtime templates list for the template you just created, in the <strong>Actions</strong> column, click <i class="material-icons" aria-hidden="true" translate="no">more_vert</i> and then click <strong>Create runtime</strong>. The <strong>Create Vertex AI Runtime</strong> pane appears.</p></li> <li><p>To create a runtime based on your template, click <strong>Create</strong>.</p></li> <li><p>On the <strong>Runtimes</strong> tab that opens, wait for the status to transition to <strong>Healthy</strong>.</p></li> </ol> <h3 id="import_the_notebook">Import the notebook</h3>   <p>To import the notebook in Colab Enterprise:</p> <ol> <li><p>Go to the <strong>My Notebooks</strong> tab and click <strong>Import</strong>. The <strong>Import notebooks</strong> pane appears.</p></li> <li><p>In <strong>Import source</strong>, select <strong>URL</strong>.</p></li> <li>
+<p>Under <strong>Notebook URLs</strong>, enter the following link:</p> 
+<pre>https://raw.githubusercontent.com/GoogleCloudPlatform/kubernetes-engine-samples/refs/heads/main/databases/qdrant/manifests/04-notebook/vector-database.ipynb
+</pre>
+</li> <li><p>Click <strong>Import</strong>.</p></li> </ol> <h3 id="connect_to_the_runtime_and_run_queries">Connect to the runtime and run queries</h3>   <p>To connect to the runtime and run queries:</p> <ol> <li><p>In the notebook, next to the <strong>Connect</strong> button, click <i class="material-icons" aria-hidden="true" translate="no">arrow_drop_down</i> <strong>Additional connection options</strong>. The <strong>Connect to Vertex AI Runtime</strong> pane appears.</p></li> <li><p>Select <strong>Connect to a runtime</strong> and then select <strong>Connect to an existing Runtime</strong>.</p></li> <li><p>Select the runtime that you launched and click <strong>Connect</strong>.</p></li> <li><p>To run the notebook cells, click the <img src="https://docs.cloud.google.com/static/colab/images/icon-run-cell.png" class="material-icons" alt aria-hidden="true" translate="no"> <strong>Run cell</strong> button next to each code cell.</p></li> </ol> <p>The notebook contains both code cells and text that describes each code block. Running a code cell executes its commands and displays an output. You can run the cells in order, or run individual cells as needed.</p> <h2 id="view-metrics">View Prometheus metrics for your cluster</h2> <p>The GKE cluster is configured with <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a>, which enables collection of metrics in the Prometheus format. This service provides a fully managed solution for monitoring and alerting, allowing for collection, storage, and analysis of metrics from the cluster and its applications.</p> <p>The following diagram shows how Prometheus collects metrics for your cluster:</p> <p><img src="https://docs.cloud.google.com/static/kubernetes-engine/images/qdrant-prometheus-metrics.svg" alt="Prometheus metrics collection" title="Prometheus metrics collection"></p> <p>The GKE private cluster in the diagram contains the following components:</p> <ul> <li>Qdrant Pods that expose metrics on the path <code translate="no" dir="ltr">/</code> and port <code translate="no" dir="ltr">80</code>. These metrics are provided by the sidecar container named <code translate="no" dir="ltr">metrics</code>.</li> <li>Prometheus-based collectors that process the metrics from the Qdrant Pods.</li> <li>A PodMonitoring resource that sends the metrics to Cloud Monitoring.</li> </ul> <p>To export and view the metrics, follow these steps:</p> <ol> <li>
+<p>Create the <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring"><code translate="no" dir="ltr">PodMonitoring</code></a> resource to scrape metrics by <code translate="no" dir="ltr">labelSelector</code>:</p> 
+<pre>kubectl apply -n qdrant -f manifests/03-prometheus-metrics/pod-monitoring.yaml
+</pre> <p>The <code translate="no" dir="ltr">pod-monitoring.yaml</code> manifest describes the <code translate="no" dir="ltr">PodMonitoring</code> resource:</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: qdrant
+spec:
+  selector:
+    matchLabels:
+      app: qdrant
+      app.kubernetes.io/instance: qdrant-database
+  endpoints:
+  - port: 80
+    interval: 30s
+    path: / </pre> </div> </li> <li>
+<p><a href="https://docs.cloud.google.com/sdk/gcloud/reference/monitoring/dashboards/create">Create a Cloud Monitoring dashboard</a> with the configurations defined in <code translate="no" dir="ltr">dashboard.json</code> :</p> 
+<pre>gcloud --project "${PROJECT_ID}" monitoring dashboards create --config-from-file monitoring/dashboard.json
+</pre>
+</li> <li>
+<p>After the command runs successfully, go to the Cloud Monitoring <a href="https://docs.cloud.google.com/monitoring/dashboards">Dashboards</a>:</p> <p><a class="button button-primary" href="https://console.cloud.google.com/monitoring/dashboards" target="console" track-name="tasks" track-type="consoleLink">Go to Dashboards overview</a></p>
+</li> <li>
+<p>From the list of dashboards, open the <code translate="no" dir="ltr">Qdrant Overview</code> dashboard. It might take 1-2 minutes to collect and display metrics.</p> <p>The dashboard shows a count of key metrics:</p> <ul> <li>Collections</li> <li>Embedded vectors</li> <li>Pending operations</li> <li>Running nodes</li> </ul>
+</li> </ol> <h2 id="backup">Back up your cluster configuration</h2> <p>The <a href="../add-on/backup-for-gke/concepts/backup-for-gke">Backup for GKE</a> feature lets you schedule regular backups of your entire GKE cluster configuration, including the deployed workloads and their data.</p> <p>In this tutorial, you configure a backup plan for your GKE cluster to perform backups of all workloads, including Secrets and Volumes, every day at 3 AM. To ensure efficient storage management, backups older than three days would be automatically deleted.</p> <p>To configure <a href="../add-on/backup-for-gke/how-to/backup-plan#gcloud">Backup plans</a>, follow these steps:</p> <ol> <li>
+<p>Enable the Backup for GKE feature for your cluster:</p> 
+<pre>gcloud container clusters update ${KUBERNETES_CLUSTER_PREFIX}-cluster \
+--project=${PROJECT_ID} \
+--location=${REGION} \
+--update-addons=BackupRestore=ENABLED
+</pre>
+</li> <li>
+<p>Create a backup plan with a daily schedule for all namespaces within the cluster:</p> 
+<pre>gcloud beta container backup-restore backup-plans create ${KUBERNETES_CLUSTER_PREFIX}-cluster-backup \
+--project=${PROJECT_ID} \
+--location=${REGION} \
+--cluster="projects/${PROJECT_ID}/locations/${REGION}/clusters/${KUBERNETES_CLUSTER_PREFIX}-cluster" \
+--all-namespaces \
+--include-secrets \
+--include-volume-data \
+--cron-schedule="0 3 * * *" \
+--backup-retain-days=3
+</pre> <p>The command uses the relevant environment variables at runtime.</p> <p>The cluster name's format is relative to your project and region as follows:</p> 
+<pre>projects/PROJECT_ID/locations/REGION/clusters/CLUSTER_NAME
+</pre> <p>When prompted, type <code translate="no" dir="ltr">y.</code>The output is similar to the following:</p> 
+<pre>Create request issued for: [qdrant-cluster-backup]
+Waiting for operation [projects/PROJECT_ID/locations/us-central1/operations/operation-1706528750815-610142ffdc9ac-71be4a05-f61c99fc] to complete...⠹
+</pre> <p>This operation might take a few minutes to complete successfully. After the execution is complete, the output is similar to the following:</p> 
+<pre>Created backup plan [qdrant-cluster-backup].
+</pre>
+</li> <li>
+<p>You can see your newly created backup plan <code translate="no" dir="ltr">qdrant-cluster-backup</code> listed on the Backup for GKE console.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/kubernetes/backups/backupPlans" target="console" track-name="tasks" track-type="consoleLink">Go to Backup for GKE</a></p>
+</li> </ol> <p>If you want to restore the saved backup configurations, see <a href="../add-on/backup-for-gke/how-to/restore">Restore a backup</a>.</p> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p> To avoid incurring charges to your Google Cloud account for the resources used in this tutorial, either delete the project that contains the resources, or keep the project and delete the individual resources. </p> <h3 id="delete_the_project">Delete the project</h3> <p>The easiest way to avoid billing is to delete the project you created for this tutorial.</p> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <p>Delete a Google Cloud project:</p> 
+<pre>gcloud projects delete PROJECT_ID</pre> <p>If you deleted the project, your clean up is complete. If you didn't delete the project, proceed to delete the individual resources.</p> <h3 id="delete_individual_resources">Delete individual resources</h3> <ol> <li>
+<p>Set environment variables.</p> 
+<pre>export PROJECT_ID=${PROJECT_ID}
+export KUBERNETES_CLUSTER_PREFIX=qdrant
+export REGION=us-central1
+</pre>
+</li> <li>
+<p>Run the <code translate="no" dir="ltr">terraform destroy</code> command:</p> 
+<pre>export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+terraform  -chdir=terraform/FOLDER destroy \
+-var project_id=${PROJECT_ID} \
+-var region=${REGION} \
+-var cluster_prefix=${KUBERNETES_CLUSTER_PREFIX}
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FOLDER</var></code> with either <code translate="no" dir="ltr">gke-autopilot</code> or <code translate="no" dir="ltr">gke-standard</code>, depending on the <a href="#create-cluster">type of GKE cluster you created</a>.</p> <p>When prompted, type <code translate="no" dir="ltr">yes</code>.</p>
+</li> <li>
+<p>Find all unattached disks:</p> 
+<pre>export disk_list=$(gcloud compute disks list --filter="-users:* AND labels.name=${KUBERNETES_CLUSTER_PREFIX}-cluster" --format "value[separator=|](name,region)")
+</pre>
+</li> <li>
+<p>Delete the disks:</p> 
+<pre>for i in $disk_list; do
+ disk_name=$(echo $i| cut -d'|' -f1)
+ disk_region=$(echo $i| cut -d'|' -f2|sed 's|.*/||')
+ echo "Deleting $disk_name"
+ gcloud compute disks delete $disk_name --region $disk_region --quiet
+done
+</pre>
+</li> <li>
+<p>Delete the GitHub repository:</p> 
+<pre>rm -r ~/kubernetes-engine-samples/
+</pre>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li>Explore <a href="https://console.cloud.google.com/marketplace/product/qdrant-public/qdrant">Qdrant on GKE marketplace</a>.</li> <li>Explore <a href="https://github.com/qdrant/qdrant">Qdrant open source</a> software.</li> <li>Try out the <a href="https://github.com/ganochenkodg/qdrant-operator">Qdrant operator</a> that offers <a href="https://github.com/ganochenkodg/qdrant-operator/blob/main/docs/authentication.md">API keys management</a>, TLS support with <a href="https://github.com/ganochenkodg/qdrant-operator/blob/main/docs/tls.md">certificate management</a>, and <a href="https://github.com/ganochenkodg/qdrant-operator/blob/main/docs/backup-restore.md">backup scheduling</a>.</li> <li>Learn about the <a href="../concepts/database-options">best practices for deploying databases on GKE</a>.</li> <li>Discover solutions for running <a href="../integrations/data">data-intensive workloads with GKE</a>. </li>
+</ul></section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/deploy-qdrant" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/deploy-qdrant</a>
+  </p>
+</div>

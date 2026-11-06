@@ -1,0 +1,219 @@
+<h1>Deploy GPU workloads in Autopilot</h1>  <p>You can request GPUs to accelerate tasks in your Google Kubernetes Engine (GKE) Autopilot workloads. This document describes how to run GPUs in Autopilot, set Pod resource requests and limits, and monitor GPU workloads.</p> <p>This document is for Platform admins and operators and for Data and AI specialists who want to request GPUs for workloads that run tasks like machine learning (ML) training or inference. To learn more about the common roles, responsibilities, and example tasks that we reference in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <p>Before you proceed, ensure that you're familiar with the following concepts:</p> <ul> <li><a href="../concepts/gpus">About GPUs in GKE</a></li> <li><a href="https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector">Kubernetes node selectors</a></li> </ul> <p>You request GPUs by using ComputeClasses or by using node selectors in your Pod specification. GKE places those Pods on nodes that have those GPUs. You can also use GPU sharing capabilities, like time-sharing.</p> <h2 id="pricing">Pricing</h2> <p>The <a href="https://cloud.google.com/kubernetes-engine/pricing#autopilot-workloads-that-select-specific-hardware">Autopilot <em>node-based billing model</em></a> applies to GPU Pods. Both the Autopilot management premium for the nodes and the actual GPU hardware in Compute Engine are eligible for <a href="https://docs.cloud.google.com/kubernetes-engine/cud#flexible-cuds">compute flexible committed-use discounts (CUDs)</a>.</p> <p>Note the following pricing considerations for Autopilot GPUs:</p> <ul> <li>All A100 (80GB) GPU nodes use local SSDs for node boot disks at fixed sizes based on the number of GPUs. You're billed separately for the attached Local SSDs. This pricing doesn't apply to A100 (40GB) GPUs.</li> <li>GKE Sandbox pricing is the same as default Autopilot pricing. To learn more about sandboxing your accelerator workloads, see <a href="../concepts/sandbox-pods">GKE Sandbox</a> and <a href="sandbox-pods">getting started with GKE Sandbox</a>.</li> <li>If you're using the NVIDIA RTX PRO 6000 GPUs (G4 machine series) with Autopilot mode, starting on October 1, 2026, GKE bills for the Autopilot node management premium, in addition to existing applicable charges for the underlying hardware. These existing charges continue to apply both before and after this date. For more information about how billing works when requesting specific hardware with Autopilot workloads, see <a href="https://docs.cloud.google.com/kubernetes-engine/pricing#autopilot-workloads-that-select-specific-hardware">Autopilot workloads that select specific hardware</a>.</li> </ul> <h2 id="before_you_begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>
+<p><a href="creating-an-autopilot-cluster">Ensure that you have a GKE Autopilot cluster</a> running one of the following versions to use the following GPUs or features:</p> <ul> <li>NVIDIA B200 (180 GB) GPUs: 1.32.2-gke.1422000 or later</li> <li>NVIDIA RTX PRO 6000 GPUs: <ul> <li>Machine types that have one or more GPUs: 1.34.1-gke.1829001 or later</li> <li>Machine types that have less than one GPU: 1.35.2-gke.1485000 or later</li> </ul>
+</li> </ul> <p>All other GPU types are supported in all available GKE versions.</p>
+</li> </ul> <aside class="note"><strong>Note:</strong><span> For GKE Sandbox GPU clusters, see <a href="../concepts/sandbox-pods#gpu_model_support">GPU model support</a> for gVisor compatibility.</span></aside> <ul> <li>
+<a href="https://docs.cloud.google.com/docs/quotas/view-manage">Ensure that you have enough GPU quotas</a> available in your project. You must have enough <a href="https://docs.cloud.google.com/compute/quotas#gpu_quota">Compute Engine GPU quota</a> for the GPU models that you want to create in each region. If you require additional GPU quota, <a href="https://docs.cloud.google.com/docs/quotas/help/request_increase">request a quota adjustment</a>.</li> <li>
+<p>If you want to use G4 machine types that have less than one NVIDIA RTX PRO 6000 GPU, you must do the following, in addition to adhering to the mentioned version requirements:</p> <ul> <li>Explicitly <a href="#request-g4-less-than-one">request G4 machine types that have less than one GPU</a>.</li> <li>If your cluster is running GKE versions earlier than 1.36, <a href="gpus#prepare-workloads-g4-less-than-one-gpu">prepare your workloads</a>.</li> </ul>
+</li> </ul> <h3 id="limitations">Limitations</h3> <ul> <li>GPU availability depends on the Google Cloud region of your Autopilot cluster, and your GPU quota. To find a GPU model by region or zone, see <a href="https://docs.cloud.google.com/compute/docs/gpus/gpu-regions-zones">GPU regions and zones availability</a>.</li> <li>For NVIDIA A100 (80GB) GPUs, you're charged a fixed price for the Local SSDs attached to the nodes, <strong>regardless of whether your Pods use that capacity</strong>.</li> <li>If you want multiple GPU pods to fit into a single node, the sum of GPU requests for those pods must be <em>less than or equal to</em> the number of GPU resources attached to that node. For example, a node with a <code translate="no" dir="ltr">gke-accelerator-count</code> of 4 could accommodate up to four Pods that request one GPU each.</li> </ul> <p>Placing multiple Pods on a single GPU node is useful in situations like the following:</p> <ul> <li>You have capacity reservations for large Accelerator machine types and you run single-GPU workloads, so deploying one Pod per node would waste the other GPUs on that machine</li> <li>You have GPU workloads that must run on the same host</li> </ul> <p>In these situations, we recommend that you use all of the GPUs on the node by ensuring that the sum of Pod GPU resource requests on the node is equal to the number of GPUs attached to the node.</p> <h2 id="request-gpus">Request GPUs in your containers</h2> <p>To request GPU resources for your containers, add the following fields to your Pod specification. Depending on your workload requirements, you can optionally omit the <code translate="no" dir="ltr">cloud.google.com/gke-accelerator-count</code> selector.</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: my-gpu-pod
+spec:
+  # Optional: Use GKE Sandbox
+  # runtimeClassName: gvisor
+  nodeSelector:
+    cloud.google.com/gke-accelerator: GPU_TYPE
+    cloud.google.com/gke-accelerator-count: "GPU_COUNT"
+  containers:
+  - name: my-gpu-container
+    image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+    command: ["/bin/bash", "-c", "--"]
+    args: ["while true; do sleep 600; done;"]
+    resources:
+      limits:
+        nvidia.com/gpu: GPU_QUANTITY
+</pre> <p>Replace the following:</p> <ul> <li>
+<p><code translate="no" dir="ltr"><var translate="no">GPU_TYPE</var></code>: the type of GPU hardware. Allowed values are the following:  </p>
+<ul> <li>
+<code translate="no" dir="ltr">nvidia-gb200</code>: NVIDIA GB200 (Preview)</li> <li>
+<code translate="no" dir="ltr">nvidia-b200</code>: NVIDIA B200 (180GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h200-141gb</code>: NVIDIA H200 (141GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-mega-80gb</code>: NVIDIA H100 Mega (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-80gb</code>: NVIDIA H100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-a100-80gb</code>: NVIDIA A100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-a100</code>: NVIDIA A100 (40GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-rtx-pro-6000</code>: NVIDIA RTX PRO 6000</li> <li>
+<code translate="no" dir="ltr">nvidia-l4</code>: NVIDIA L4</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-t4</code>: NVIDIA T4</li> </ul>  or if you use GKE Sandbox, one of the following:  <ul> <li>
+<code translate="no" dir="ltr">nvidia-gb200</code>: NVIDIA GB200 (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>)</li> <li>
+<code translate="no" dir="ltr">nvidia-b200</code>: NVIDIA B200 (180GB) (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>)</li> <li>
+<code translate="no" dir="ltr">nvidia-h200-141gb</code>: NVIDIA H200 (141GB) (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-mega-80gb</code>: NVIDIA H100 Mega (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-80gb</code>: NVIDIA H100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-a100-80gb</code>: NVIDIA A100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-a100</code>: NVIDIA A100 (40GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-rtx-pro-6000</code>: NVIDIA RTX PRO 6000 (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>) (except for G4 machine types that have less than one GPU)</li> <li>
+<code translate="no" dir="ltr">nvidia-l4</code>: NVIDIA L4</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-t4</code>: NVIDIA T4</li> </ul> For more information, see <a href="../concepts/sandbox-pods#gpu_model_support">GPU model support</a>. </li> <li><p><code translate="no" dir="ltr"><var translate="no">GPU_COUNT</var></code>: the total number of GPUs available to attach to the node. Must be greater than or equal to <code translate="no" dir="ltr">GPU_QUANTITY</code> and a <a href="#supported-quantities">supported GPU quantity</a> for the GPU type you selected. If you omit this nodeSelector, Autopilot places one Pod on each GPU node.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">GPU_QUANTITY</var></code>: the number of GPUs to allocate to the container. Must be less than or equal to <code translate="no" dir="ltr">GPU_COUNT</code> and a <a href="#supported-quantities">supported GPU quantity</a> for the GPU type you selected.</p></li> <li><p><strong>Optional <code translate="no" dir="ltr">runtimeClassname: gvisor</code></strong>: the setting that lets your run this Pod in GKE Sandbox. To use, uncomment this line. To learn more, see <a href="../concepts/sandbox-pods">GKE Sandbox</a>.</p></li> </ul> <p>You must specify both the GPU type and the GPU quantity in your Pod specification. If you omit either of these values, Autopilot rejects your Pod.</p> <p>When you deploy this manifest, Autopilot automatically installs the default NVIDIA drivers for the node GKE version. You can optionally choose to install the latest driver version for that GKE version by adding the following node selector to your manifest:</p> 
+<pre>spec:
+  nodeSelector:
+    cloud.google.com/gke-gpu-driver-version: "DRIVER_VERSION"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">DRIVER_VERSION</var></code> with one of the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">default</code> - the default, stable driver for your node GKE version. If you omit the nodeSelector in your manifest, this is the default option.</li> <li>
+<code translate="no" dir="ltr">latest</code> - the latest available driver version for your node GKE version.</li> </ul> <h3 id="resource-requests">Request CPU and memory for Autopilot GPU Pods</h3> <p>When defining your GPU Pods, you should also request CPU and memory resources so that your containers perform as expected. Autopilot enforces specific CPU and memory minimums, maximums, and defaults based on the GPU type and quantity. If you run multiple GPU Pods on a single node, specify the CPU and memory, otherwise it defaults to the node's entire capacity. For details, refer to <a href="../concepts/autopilot-resource-requests">Resource requests in Autopilot</a>.</p> <p>Your Pod specification should look similar to the following example, which requests four T4 GPUs:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: t4-pod
+spec:
+  # Optional: Use GKE Sandbox
+  # runtimeClassName: gvisor
+  nodeSelector:
+    cloud.google.com/gke-accelerator: "nvidia-tesla-t4"
+  containers:
+  - name: t4-container-1
+    image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+    command: ["/bin/bash", "-c", "--"]
+    args: ["while true; do sleep 600; done;"]
+    resources:
+      limits:
+        nvidia.com/gpu: 3
+        cpu: "54"
+        memory: "54Gi"
+      requests:
+        cpu: "54"
+        memory: "54Gi"
+  - name: t4-container-2
+    image: nvidia/cuda:11.0.3-runtime-ubuntu20.04
+    command: ["/bin/bash", "-c", "--"]
+    args: ["while true; do sleep 600; done;"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        cpu: "18"
+        memory: "18Gi"
+      requests:
+        cpu: "18"
+        memory: "18Gi"
+</pre> <ul> <li>
+<strong>Optional <code translate="no" dir="ltr">runtimeClassname: gvisor</code></strong>: the setting that lets your run this Pod in GKE Sandbox. To use, uncomment this line. To learn more, see <a href="../concepts/sandbox-pods">GKE Sandbox</a>.</li> </ul> <p>This manifest specifies <code translate="no" dir="ltr">limits</code> for CPU and memory resources. If you omit the <code translate="no" dir="ltr">limits</code> for CPU or memory, GKE gives your Pods the <code translate="no" dir="ltr">Burstable</code> QoS class and lets your Pods burst into unused resources from the sum of resource requests on the node. For more information, see <a href="pod-bursting-gke">Configure Pod bursting in GKE</a>.</p> <h3 id="ephemeral-request">Request ephemeral storage for Autopilot GPU Pods</h3> <p>You can also request ephemeral storage in Pods that need short-lived storage. The maximum available ephemeral storage and the type of storage hardware used depends on the type and quantity of GPUs the Pod requests. You can use Local SSD for ephemeral storage with the following configurations:</p> <ul> <li>Use NVIDIA RTX PRO 6000 GPUs and run a GKE patch version that meets the version requirements listed in the <a href="#before_you_begin">Before you begin</a> section. The one-eighth GPU fractional configuration doesn't support ephemeral storage.</li> <li>Use NVIDIA L4 GPUs.</li> </ul> <p>To use Local SSD for ephemeral storage, add the <code translate="no" dir="ltr">cloud.google.com/gke-ephemeral-storage-local-ssd: "true"</code> nodeSelector to your workload manifest. See the example manifest in <a href="persistent-volumes/local-ssd#local-ssd-autopilot">Use Local SSD-backed ephemeral storage with Autopilot clusters</a>. The NVIDIA H100 (80GB) GPUs and NVIDIA A100 (80GB) GPUs always use Local SSDs for ephemeral storage, and you can't specify this node selector for those GPUs.</p> <h3 id="request-machine-custom">Request specific machine types using custom ComputeClasses</h3> <p>In some cases, you might need to run your GPU workload on a specific machine type, for example if the machine type that you want is not a default machine type for Autopilot clusters. You can explicitly request a specific machine by using custom ComputeClasses, which let you define a node configuration profile that specifies the machine type and GPU. To use the <a href="https://docs.cloud.google.com/compute/docs/gpus#rtx-6000-gpus">G4 machine types</a> that have less than one GPU, you must follow the instructions in the next section to explicitly request a machine type.</p> <p>For general information about ComputeClasses, see <a href="../concepts/about-custom-compute-classes">About custom ComputeClasses</a>.</p> <p>To request a specific machine type for your GPU workload, complete the following steps:</p> <ol> <li>
+<p>Create a manifest for a custom ComputeClass. For this example, save the following as <code translate="no" dir="ltr">a3-computeclass.yaml</code>:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: a3-edge-gpu
+spec:
+  priorities:
+  - machineType: a3-edgegpu-8g-nolssd
+    gpu:
+     count: 8
+     type: nvidia-h100-80gb
+  nodePoolAutoCreation:
+    enabled: true
+</pre> <p>In this manifest:</p> <ul> <li>The <code translate="no" dir="ltr">metadata.name</code> is the name of your custom ComputeClass, which you will reference in your Pod specification.</li> <li>The <code translate="no" dir="ltr">machineType</code> is the specific machine to provision.</li> <li>The <code translate="no" dir="ltr">gpu</code> fields specify the type and number of GPUs attached to that machine. The values of these fields must match the capabilities of the specified <code translate="no" dir="ltr">machineType</code>.</li> </ul>
+</li> <li>
+<p>Apply the manifest by running the following command:</p> 
+<pre>kubectl apply -f a3-computeclass.yaml
+</pre>
+</li> <li>
+<p>In your Pod manifest, request the ComputeClass by using the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> node selector:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-cc-pod
+spec:
+  nodeSelector:
+    cloud.google.com/compute-class: a3-edge-gpu
+  containers:
+  - name: my-gpu-container
+    image: nvidia/cuda:latest
+    command: ["/bin/bash", "-c", "--"]
+    args: ["while true; do sleep 600; done;"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+</pre> <p>GKE provisions a new node that matches the definition in the <code translate="no" dir="ltr">a3-edge-gpu</code> ComputeClass to run your Pod.</p>
+</li> </ol> <h4 id="request-g4-less-than-one">Request G4 machine types that have less than one GPU</h4> <p>The G4 machine types use the NVIDIA RTX PRO 6000 GPU. To request any G4 machine types that have less than one GPU, you must follow the instructions in the previous section, setting the following fields:</p> <ul> <li>
+<p><code translate="no" dir="ltr">machineType</code> to one of the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">g4-standard-6</code> (one-eighth of a GPU)</li> <li>
+<code translate="no" dir="ltr">g4-standard-12</code> (one-quarter of a GPU)</li> <li>
+<code translate="no" dir="ltr">g4-standard-24</code> (one-half of a GPU)</li> </ul>
+</li> <li><p><code translate="no" dir="ltr">gpu.count</code>: <code translate="no" dir="ltr">1</code></p></li> <li><p><code translate="no" dir="ltr">gpu.type</code>: <code translate="no" dir="ltr">nvidia-rtx-pro-6000</code></p></li> </ul> <h2 id="verify">Verify the allocation of deployed GPUs</h2> <p>To check that a deployed GPU workload has the requested GPUs, run the following command:</p> 
+<pre>kubectl describe node NODE_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NODE_NAME</var></code> with the name of the node on which the Pod was scheduled.</p> <p>The output is similar to the following:</p> 
+<pre>
+apiVersion: v1
+kind: Node
+metadata:
+...
+  labels:
+    ...
+    cloud.google.com/gke-accelerator: nvidia-tesla-t4
+    cloud.google.com/gke-accelerator-count: "1"
+    cloud.google.com/machine-family: custom-48
+    ...
+...
+</pre> <h2 id="check-driver-version">Check GPU driver version</h2> <p>In Autopilot clusters, GKE automatically installs NVIDIA device drivers on all GPU nodes. To find the driver version that GKE installed in your cluster, run the following command:</p> 
+<pre>kubectl logs --selector=k8s-app=nvidia-gpu-device-plugin \
+    --container="nvidia-gpu-device-plugin" \
+    --tail=-1 \
+    --namespace=kube-system | grep Driver
+</pre> <p>The output is similar to the following:</p> 
+<pre>I1206 18:37:08.251742    5851 metrics.go:144] nvml initialized successfully. Driver version: 535.104.12
+</pre> <h2 id="how-it-works">How GPU allocation works in Autopilot</h2> <p>After you request a GPU type and a quantity for the containers in a Pod and deploy the Pod, the following happens:</p> <ol> <li>If no allocatable GPU node exists, Autopilot provisions a new GPU node to schedule the Pod. Autopilot automatically installs NVIDIA's drivers to facilitate the hardware.</li> <li>Autopilot adds <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/" target="k8sLink" track-name="k8sLink" track-type="concepts">node taints</a> to the GPU node and adds the corresponding tolerations to the Pod. This prevents GKE from scheduling other Pods on the GPU node.</li> </ol> <p>Autopilot places exactly one GPU Pod on each GPU node, as well as any GKE-managed workloads that run on all nodes, and any DaemonSets that you configure to tolerate all node taints.</p> <h3 id="workloads-every-node">Run DaemonSets on every node</h3> <p>You might want to run DaemonSets on every node, even nodes with applied taints. For example, some logging and monitoring agents must run on every node in the cluster. You can configure those DaemonSets to ignore node taints so that GKE places those workloads on every node.</p> <p>To run DaemonSets on every node in your cluster, including your GPU nodes, add the following toleration to your specification:</p> 
+<pre>apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logging-agent
+spec:
+  tolerations:
+  - key: ""
+    operator: "Exists"
+    effect: ""
+  containers:
+  - name: logging-agent-v1
+    image: IMAGE_PATH
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">IMAGE_PATH</var></code> with the path to the container image.</p> <p>To run DaemonSets on specific GPU nodes in your cluster, add the following to your specification:</p> 
+<pre>apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logging-agent
+spec:
+  nodeSelector:
+    cloud.google.com/gke-accelerator: "GPU_TYPE"
+  tolerations:
+  - key: ""
+    operator: "Exists"
+    effect: ""
+  containers:
+  - name: logging-agent-v1
+    image: IMAGE_PATH
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GPU_TYPE</var></code> with the type of GPU in your target nodes. This can be one of the following:</p>  <ul> <li>
+<code translate="no" dir="ltr">nvidia-gb200</code>: NVIDIA GB200 (Preview)</li> <li>
+<code translate="no" dir="ltr">nvidia-b200</code>: NVIDIA B200 (180GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h200-141gb</code>: NVIDIA H200 (141GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-mega-80gb</code>: NVIDIA H100 Mega (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-80gb</code>: NVIDIA H100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-a100-80gb</code>: NVIDIA A100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-a100</code>: NVIDIA A100 (40GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-rtx-pro-6000</code>: NVIDIA RTX PRO 6000</li> <li>
+<code translate="no" dir="ltr">nvidia-l4</code>: NVIDIA L4</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-t4</code>: NVIDIA T4</li> </ul>  or if you use GKE Sandbox, one of the following:  <ul> <li>
+<code translate="no" dir="ltr">nvidia-gb200</code>: NVIDIA GB200 (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>)</li> <li>
+<code translate="no" dir="ltr">nvidia-b200</code>: NVIDIA B200 (180GB) (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>)</li> <li>
+<code translate="no" dir="ltr">nvidia-h200-141gb</code>: NVIDIA H200 (141GB) (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-mega-80gb</code>: NVIDIA H100 Mega (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-h100-80gb</code>: NVIDIA H100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-a100-80gb</code>: NVIDIA A100 (80GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-a100</code>: NVIDIA A100 (40GB)</li> <li>
+<code translate="no" dir="ltr">nvidia-rtx-pro-6000</code>: NVIDIA RTX PRO 6000 (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>) (except for G4 machine types that have less than one GPU)</li> <li>
+<code translate="no" dir="ltr">nvidia-l4</code>: NVIDIA L4</li> <li>
+<code translate="no" dir="ltr">nvidia-tesla-t4</code>: NVIDIA T4</li> </ul> For more information, see <a href="../concepts/sandbox-pods#gpu_model_support">GPU model support</a>.  <h3 id="use-cases">GPU use cases in Autopilot</h3> <p>You can allocate GPUs to containers in Autopilot Pods to facilitate workloads such as the following:</p> <ul> <li>Machine learning (ML) inference</li> <li>ML training</li> <li>Rendering</li> </ul> <h3 id="supported-quantities">Supported GPU quantities</h3> <p>When you request GPUs in your Pod specification, you must use the following quantities based on the GPU type. If you request a GPU quantity that isn't supported for that type, Autopilot rejects your Pod.</p> <table class="responsive"> <tbody> <tr> <th colspan="2">GPU quantities</th> </tr> <tr> <td>NVIDIA B200 (180GB)<br><code translate="no" dir="ltr">nvidia-b200</code>
+</td> <td>8</td> </tr> <tr> <td>NVIDIA H200 (141GB)<br><code translate="no" dir="ltr">nvidia-h200-141gb</code>
+</td> <td>8</td> </tr> <tr> <td>NVIDIA H100 Mega (80GB)<br><code translate="no" dir="ltr">nvidia-h100-mega-80gb</code>
+</td> <td>8</td> </tr> <tr> <td>NVIDIA H100 (80GB)<br><code translate="no" dir="ltr">nvidia-h100-80gb</code>
+</td> <td>1, 2, 4, 8</td> </tr> <tr> <td>NVIDIA A100 (80GB)<br><code translate="no" dir="ltr">nvidia-a100-80gb</code>
+</td> <td>1, 2, 4, 8</td> </tr> <tr> <td>NVIDIA A100 (40GB)<br><code translate="no" dir="ltr">nvidia-tesla-a100</code>
+</td> <td>1, 2, 4, 8, 16</td> </tr> <tr> <td>NVIDIA RTX PRO 6000<br><code translate="no" dir="ltr">nvidia-rtx-pro-6000</code>
+</td> <td>1/8, 1/4, 1/2, 1, 2, 4, 8</td> </tr> <tr> <td>NVIDIA L4<br><code translate="no" dir="ltr">nvidia-l4</code>
+</td> <td>1, 2, 4, 8</td> </tr> <tr> <td>NVIDIA T4<br><code translate="no" dir="ltr">nvidia-tesla-t4</code>
+</td> <td>1, 2, 4</td> </tr> </tbody> </table> <h2 id="monitoring">Monitor your GPU node workload performance</h2> <p> If your GKE cluster has <a href="https://docs.cloud.google.com/stackdriver/docs/solutions/gke/managing-metrics#system-metrics">system metrics</a> enabled, then the following metrics are available in <a href="https://docs.cloud.google.com/monitoring/docs">Cloud Monitoring</a> to monitor your GPU workload performance: </p> <ul> <li> <strong>Duty Cycle (<code translate="no" dir="ltr">container/accelerator/duty_cycle</code>): </strong> Percentage of time over the past sample period (10 seconds) during which the accelerator was actively processing. Between 1 and 100. </li> <li> <strong>Memory Usage (<code translate="no" dir="ltr">container/accelerator/memory_used</code>): </strong> Amount of accelerator memory allocated in bytes. </li> <li> <strong>Memory Capacity (<code translate="no" dir="ltr">container/accelerator/memory_total</code>): </strong> Total accelerator memory in bytes. </li> </ul> <p> These metrics apply at the container level (<code translate="no" dir="ltr">container/accelerator</code>) and are not collected for containers scheduled on a GPU that uses GPU time-sharing or NVIDIA MPS. </p> <p> You can use predefined dashboards to monitor your clusters with GPU nodes. For more information, see <a href="view-observability-metrics"> View observability metrics</a>. For general information about monitoring your clusters and their resources, refer to <a href="../concepts/observability">Observability for GKE</a>. </p> <h3 id="view_metrics">View usage metrics for workloads</h3> <p> You view your workload GPU usage metrics from the <strong>Workloads</strong> dashboard in the Google Cloud console. </p> <p>To view your workload GPU usage, perform the following steps:</p> <ol> <li> <p>Go to the <strong>Workloads</strong> page in the Google Cloud console.</p> <a class="button button-primary" href="https://console.cloud.google.com/kubernetes/workload/overview" target="console" track-name="consoleLink" track-type="tasks">Go to Workloads</a> </li> <li>Select a workload.</li> </ol> <p> The Workloads dashboard displays charts for GPU memory usage and capacity, and GPU duty cycle. </p> <h3 id="view_dcgm_metrics">View NVIDIA Data Center GPU Manager (DCGM) metrics</h3> <p> You can collect and visualize NVIDIA DCGM metrics by using <a href="https://docs.cloud.google.com/stackdriver/docs/managed-prometheus">Google Cloud Managed Service for Prometheus</a>. For Autopilot clusters, GKE installs the drivers. For Standard clusters, you must install the NVIDIA drivers. </p> <p> For instructions on how to deploy the GKE-managed DCGM package, see <a href="dcgm-metrics">Collect and view NVIDIA Data Center GPU Manager (DCGM) metrics</a>. </p> <h3 id="jobset_and_node_health_metrics">JobSet and node health metrics for GPU workloads</h3> <p> In addition to DCGM metrics, you can use the following metrics to monitor the health and performance of your GPU workloads, especially when running them as JobSets. </p> <h4 id="jobset-metrics">JobSet metrics</h4> <p> The following metrics apply to both GPU and TPU JobSets that have a single replicated Job: </p> <ul> <li><code translate="no" dir="ltr">kubernetes.io/jobset/times_between_interruptions</code></li> <li><code translate="no" dir="ltr">kubernetes.io/jobset/times_to_recover</code></li> <li><code translate="no" dir="ltr">kubernetes.io/jobset/uptime</code></li> </ul> <p> For more information about these system metrics, see <a href="https://docs.cloud.google.com/monitoring/api/metrics_kubernetes">Kubernetes metrics</a>. </p> <p> You can also use the <strong>JobSet dashboard</strong> in the Google Cloud console to visualize and monitor your GPU workloads:</p> <p> <a class="button button-primary" href="https://console.cloud.google.com//kubernetes/aiml/deployments/jobs" target="console" track-name="consoleLink" track-type="tasks">Go to Deployments</a> </p> <h4 id="node-health-metrics">Node health metrics</h4> <p>The following node-level metrics apply to all nodes, including those with GPUs:</p> <ul> <li> <code translate="no" dir="ltr">kubernetes.io/node/status_condition</code>: This metric requires GKE version 1.32.1-gke.1357001 or later. </li> </ul> <p>Node interruption and node pool interruption metrics also apply to non-TPU nodes.</p> <h4 id="kube-state-metrics-for-jobsets">Kube-state-metrics for JobSets</h4> <p> The kube-state-metrics for JobSets can be used with GPUs. Collection of these metrics requires GKE version 1.32.1-gke.1357001 or later. For more information, see the <a href="kube-state-metrics#ksm-jobset-metrics">JobSet metrics documentation</a>. </p> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="../concepts/gpus">Learn more about GPU support in GKE</a>.</li> <li>
+<a href="../concepts/autopilot-compute-classes">Read about how Autopilot ComputeClasses are optimized for specialized use cases</a>.</li> <li>
+<a href="provisioningrequest">Read about deploying GPUs for batch workloads with Dynamic Workload Scheduler</a>.</li> <li><a href="../concepts/sandbox-pods">Learn about sandboxing GPU workloads with GKE Sandbox</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/autopilot-gpus" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/autopilot-gpus</a>
+  </p>
+</div>

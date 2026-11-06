@@ -1,0 +1,100 @@
+<h1>Configure external replicas</h1>  This page describes how to configure a Cloud SQL instance that replicates to one or more replicas external to Cloud SQL, and how to demote the primary instance in an external replica configuration to reverse the configuration. <p>For more information about replication, see <a href="../replication">About replication in Cloud SQL</a>.</p> <h2 id="set_up_the_external_replica_configuration">Set up the external replica configuration</h2> <h3 id="before_you_begin">Before you begin</h3> <p>Before you start this task, you must have a Cloud SQL instance and an external MySQL instance that meets the <a href="../replication#external-read-replicas">requirements for external replicas</a>.</p> <h3 id="source-instance-requirements">Source instance requirements</h3> <p>The source instance for an external read replica must be a primary or standalone instance. You can't use a Cloud SQL read replica as the source instance for an external read replica. Read replicas are sometimes recreated from the disk clone of their primary instance and their replication state to an external read replica can't be maintained by the read replica.</p> <h3 id="configure_the_primary_instance">Configure the primary instance</h3> <ol> <li>Go to the <a href="https://console.cloud.google.com/sql/instances" target="console">Cloud SQL Instances page</a> in the Google Cloud console.</li> <li>Enable access on the primary instance for the IP address of the external replica. <p>For information about enabling IP access, see <a href="../configure-ip">Configuring access for IP connections</a>.</p>
+</li> <li>Record the public IP address and the public outgoing IP address of the primary instance for later use. You can find these values on the instance's <b>Overview</b> page.</li> <li>Click the Cloud Shell icon <img src="https://docs.cloud.google.com/static/sql/images/cloud-shell-icon.png"> in the upper right corner.</li> <li>At the Cloud Shell prompt, use the built-in MySQL client to connect to your primary instance: 
+<pre>   
+gcloud sql connect PRIMARY_INSTANCE_NAME \
+--user=root
+   
+   </pre> </li> <li>Enter your root password. You should then see the mysql prompt.</li> <li>Create a special user for replication and grant replication privileges: 
+<pre>CREATE USER 'REPLICATION_USER'@'%' IDENTIFIED BY 'REPLICATION_USER_PASSWORD';
+GRANT REPLICATION SLAVE ON *.* TO 'REPLICATION_USER'@'%';
+   </pre> </li> <li>If you are starting with a new database, create the same database and tables on both the primary and replica instances. For example: 
+<pre>CREATE DATABASE test;
+
+USE test;
+
+CREATE TABLE replica_test (id SERIAL PRIMARY KEY, data text);
+INSERT INTO replica_test (data) VALUES ('apple'), ('banana'), ('cherry');</pre> </li> <li>If you already have a database on the primary instance, you must create the same on the replica. To do this, export the database from the primary instance to a Cloud Storage bucket and import it into the replica. Learn more about <a href="../import-export/exporting#cloud-sql"> Exporting data from Cloud SQL to a SQL dump file in Cloud Storage</a>. </li> </ol> <h3 id="configure_the_external_replica">Configure the external replica</h3> Warning: This procedure overwrites any data hosted in a MySQL database on the replica, including users and passwords, with the settings and data from the primary instance. <ol> <li> On the machine hosting the replica, seed your new external MySQL instance with the export file you created from the primary instance. <p>For example, the following command loads an exported file named <code translate="no" dir="ltr">mydump.sql</code>:</p> 
+<pre>
+mysql --user=root --password &lt; mydump.sql
+</pre> </li> <li>Determine the server ID for this replica-primary pair. <p>The server ID is a numeric value (for example, "3") that must be unique across the external replica configuration (each replica must have a unique server ID).</p>
+</li> <li>Add the following options to the replica's <code translate="no" dir="ltr">my.cnf</code> option file: 
+<pre>
+    [mysqld]
+    server-id=[SERVER_ID]
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    log_slave_updates=ON
+    replicate-ignore-db=mysql
+    binlog-format=ROW
+    log_bin=mysql-bin
+    expire_logs_days=1
+    read_only=ON
+  </pre> <aside class="note"><b>Note: </b>You must set <code translate="no" dir="ltr">gtid_mode=ON</code> for all external replicas in a configuration that includes a Cloud SQL primary instance. Changing the default to <code translate="no" dir="ltr">gtid_mode=OFF</code> causes replication with the external server to fail. </aside> <p>For more information about MySQL replication options, see <a href="https://dev.mysql.com/doc/refman/8.4/en/replication-options.html" target="_blank">Replication and Binary Logging Options</a>.</p> </li> <li>Restart the <code translate="no" dir="ltr">mysqld</code> process to cause the configuration file to be read.</li> <li>In a <code translate="no" dir="ltr">mysql</code> client on the replica, enter the following command: 
+<pre>
+CHANGE MASTER TO MASTER_HOST='MASTER_IP_ADDRESS', MASTER_USER='REPLICATION_USER',
+MASTER_PASSWORD='REPLICATION_PASSWORD', MASTER_AUTO_POSITION=1;
+</pre>
+</li> <li>Start replication on the replica: 
+<pre>
+START SLAVE;
+</pre>
+</li> <li>
+<p>Confirm replication status:</p> 
+<pre>
+SHOW SLAVE STATUS\G;
+</pre> <p>If you see "Waiting for master to send event", replication is working.</p> </li> </ol> <h2 id="demote">Demote the primary instance of an external replica</h2> <p>When you have a Cloud SQL instance with an external replica, you can reverse the configuration, which causes these changes to happen:</p> <ul> <li>The external replica becomes the new primary instance.</li> <li>The Cloud SQL instance becomes a read replica, replicating from the server that was previously the external replica (now called the source database server).</li> </ul> <p>To reverse the external replica configuration:</p> <ol> <li> <p>Create a <a href="external-server#config-description">source representation instance</a>.</p> <p>This instance will represent the source database server to the Cloud SQL replica after the demotion operation completes.</p> 
+<pre>
+gcloud auth login
+ACCESS_TOKEN="$(gcloud auth print-access-token)"
+curl --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+     --header 'Content-Type: application/json' \
+     --data '{
+         "name": "SOURCE_REPRESENTATION_NAME",
+         "region": "REGION",
+         "databaseVersion": "EXTERNAL_SERVER_DATABASE_VERSION",
+         "onPremisesConfiguration": {
+             "hostPort": "EXTERNAL_SERVER_IP:EXTERNAL_SERVER_PORT"
+         }
+     }' \
+     -X POST \
+     https://sqladmin.googleapis.com/sql/v1beta4/projects/PROJECT-ID/instances
+</pre> <p>Use the region where you want your Cloud SQL replica to reside.</p> </li> <li>
+<p> Start the demotion process. </p> <p> Because this API call requires you to provide sensitive information, you should <a href="../admin-api#json-file">use a JSON file</a> to provide your data to cURL, rather than providing it on the command line. </p> <p>Create the data file:</p> 
+<pre>
+{
+    "demoteMasterContext": {
+        "replicaConfiguration": {
+            "mysqlReplicaConfiguration": {
+                "username": "REPLICATION_USERNAME",
+                "password": "PASSWORD",
+                "caCertificate": "EXTERNAL_SERVER_CA",
+                "clientCertificate": "CLIENT_CERT",
+                "clientKey": "PRIVATE_KEY"
+            }
+        },
+        "masterInstanceName": "SOURCE_REPRESENTATION_NAME",
+    },
+}
+</pre> <p>Then, call the API.</p> 
+<pre>
+curl --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+     --header 'Content-Type: application/json' \
+     --data @PATH_TO_DATA_FILE \
+     https://sqladmin.googleapis.com/sql/v1beta4/projects/PROJECT-ID/instances/INSTANCE_NAME/demoteMaster
+</pre> <p>For more information about your options for SSL/TLS, see <a href="external-server#ssl-options">SSL/TLS options</a>. For more information about the properties used by the <code translate="no" dir="ltr">replicaConfiguration</code> object, see <a href="replication-from-external#setup"> Replicating from an External Server</a>.</p> </li> <li> <p>Wait for the external replica to complete all pending transactions from the primary instance.</p> <p>When the replica is caught up, the <code translate="no" dir="ltr">SHOW SLAVE STATUS</code> command will show <code translate="no" dir="ltr">Seconds Behind Master</code> as 0, and the <code translate="no" dir="ltr">Executed_Gtid_Set</code> value will be identical between the external replica and the Cloud SQL primary.</p> </li> <li>
+<p> Use the <code translate="no" dir="ltr">mysql</code> client to stop replication on the external replica: </p> 
+<pre>
+STOP SLAVE
+RESET SLAVE ALL
+</pre> </li> <li>
+<p> Wait for the Cloud SQL instance to start replicating from the external server, which is now the source database server. </p> <p>Running the <code translate="no" dir="ltr">SHOW SLAVE STATUS</code> command on the Cloud SQL instance provides replication status.</p> </li> <li> When the Cloud SQL instance is successfully replicating from the source database server, set the <code translate="no" dir="ltr">read_only</code> flag on the source database server to <code translate="no" dir="ltr">off</code> and update your applications to point to the source database server. </li> </ol> <aside class="special"><strong>Important:</strong><span> If the Cloud SQL instance being demoted has existing read replicas and <code translate="no" dir="ltr">gtid_mode</code> is set to <code translate="no" dir="ltr">OFF</code> in the external primary, these replicas are not supported after the demotion. You can delete such replicas before you demote your instance or change <code translate="no" dir="ltr">gtid_mode</code> to <code translate="no" dir="ltr">ON</code> in your external primary before you demote.</span></aside> <h2 id="troubleshooting-external-replica">Troubleshoot</h2> <table> <thead> <th width="30%">Issue</th> <th width="70%">Troubleshooting</th> </thead> <tbody> <tr> <td>Error message: <code translate="no" dir="ltr">The slave is connecting ... master has purged
+      binary logs containing GTIDs that the slave requires</code>.</td> <td>The primary Cloud SQL instance has automatic backups and binary logs and point-in-time recovery is enabled, so it should have enough logs for the replica to be able to catch up. However, in this case although the binary logs exist, the replica doesn't know which row to start reading from. <p>Create a new dump file using the correct flag settings, and configure the external replica using that file </p>
+<ol> <li>Connect to your mysql client <a href="../connect-compute-engine">through a Compute Engine instance</a>.</li> <li>
+<a href="https://dev.mysql.com/doc/refman/5.7/en/mysqldump.html">Run mysqldump</a> and use the <code translate="no" dir="ltr">--master-data=1</code> and <code translate="no" dir="ltr">--flush-privileges</code> flags. <p><b>Important: Do not include the <code translate="no" dir="ltr">--set-gtid-purged=OFF</code> flag</b>.</p> <p><a href="../import-export/exporting#export-mysqldump">Learn more</a>.</p>
+</li> <li>Ensure that the dump file just created contains the <code translate="no" dir="ltr">SET @@GLOBAL.GTID_PURGED='...'</code> line.</li> <li>Upload the dump file to a Cloud Storage bucket and <a href="configure-external-replica#configuring_the_external_replica"> configure the replica using the dump file</a>.</li> </ol> </td> </tr> </tbody>
+</table> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="manage-replicas">manage replicas</a>.</li> <li>Learn more about <a href="../../postgres/replication">replication in Cloud SQL</a>. </li> <li>Learn more about <a href="https://dev.mysql.com/doc/refman/8.4/en/replication.html" target="_blank">MySQL replication</a>.</li> <li>Learn more about <a href="https://dev.mysql.com/doc/refman/8.4/en/replication-options.html" target="_blank">replication options</a>.</li> <li>Learn more about <a href="https://dev.mysql.com/doc/refman/8.4/en/replication-administration-status.html" target="_blank">checking replication status</a>. </li> <li>Learn more about <a href="replication-from-external">replicating from an external server</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/sql/docs/mysql/replication/configure-external-replica" class="_attribution-link">https://docs.cloud.google.com/sql/docs/mysql/replication/configure-external-replica</a>
+  </p>
+</div>

@@ -1,0 +1,75 @@
+<h1 id="best-practices-for-functions">Best practices for functions</h1> <p>This document describes how to optimize queries that use SQL functions.</p> <h2 id="optimize_string_comparison">Optimize string comparison</h2> <p><strong>Best practice:</strong> When possible, use <code translate="no" dir="ltr">LIKE</code> instead of <code translate="no" dir="ltr">REGEXP_CONTAINS</code>.</p> <p>In BigQuery, you can use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/string_functions#regexp_contains"><code translate="no" dir="ltr">REGEXP_CONTAINS</code></a> function or the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/operators#comparison_operators"><code translate="no" dir="ltr">LIKE</code></a> operator to compare strings. <code translate="no" dir="ltr">REGEXP_CONTAINS</code> provides more functionality, but also has a slower execution time. Using <code translate="no" dir="ltr">LIKE</code> instead of <code translate="no" dir="ltr">REGEXP_CONTAINS</code> is faster, particularly if you don't need the full power of regular expressions that <code translate="no" dir="ltr">REGEXP_CONTAINS</code> provides, for example wildcard matching.</p> <p>Consider the following use of the <code translate="no" dir="ltr">REGEXP_CONTAINS</code> function:</p> 
+<pre>SELECT
+  dim1
+FROM
+  `dataset.table1`
+WHERE
+  REGEXP_CONTAINS(dim1, '.*test.*');</pre> <p>You can optimize this query as follows:</p> 
+<pre>SELECT
+  dim1
+FROM
+  `dataset.table`
+WHERE
+  dim1 LIKE '%test%';</pre> <h2 id="optimize_aggregation_functions">Optimize aggregation functions</h2> <p><strong>Best practice:</strong> If your use case supports it, use an approximate aggregation function.</p> <p>If the SQL aggregation function you're using has an equivalent approximation function, the approximation function yields faster query performance. For example, instead of using <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aggregate_functions#count"><code translate="no" dir="ltr">COUNT(DISTINCT)</code></a>, use <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions#approx_count_distinct"><code translate="no" dir="ltr">APPROX_COUNT_DISTINCT</code></a>. For more information, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions">approximate aggregation functions</a>.</p> <p>You can also use <code translate="no" dir="ltr">HyperLogLog++</code> functions to do approximations (including custom approximate aggregations). For more information, see <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hll_functions">HyperLogLog++ functions</a> in the GoogleSQL reference.</p> <p>Consider the following use of the <code translate="no" dir="ltr">COUNT</code> function:</p> 
+<pre>SELECT
+  dim1,
+  COUNT(DISTINCT dim2)
+FROM
+  `dataset.table`
+GROUP BY 1;</pre> <p>You can optimize this query as follows:</p> 
+<pre>SELECT
+  dim1,
+  APPROX_COUNT_DISTINCT(dim2)
+FROM
+  `dataset.table`
+GROUP BY 1;</pre> <h3 id="optimize_quantile_functions">Optimize quantile functions</h3> <p><strong>Best practice:</strong> When possible, use <code translate="no" dir="ltr">APPROX_QUANTILE</code> instead of <code translate="no" dir="ltr">NTILE</code>.</p> <p>Running a query that contains the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/numbering_functions#ntile"><code translate="no" dir="ltr">NTILE</code></a> function can fail with a <a href="https://docs.cloud.google.com/bigquery/troubleshooting-errors#resourcesExceeded"><code translate="no" dir="ltr">Resources exceeded</code></a> error if there are too many elements to <code translate="no" dir="ltr">ORDER BY</code> in a single partition, which causes data volume to grow. The analytic window isn't partitioned, so the <code translate="no" dir="ltr">NTILE</code> computation requires a global <code translate="no" dir="ltr">ORDER BY</code> for all rows in the table to be processed by a single worker/slot.</p> <p>Try using <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions#approx_quantiles"><code translate="no" dir="ltr">APPROX_QUANTILES</code></a> instead. This function allows the query to run more efficiently because it doesn't require a global <code translate="no" dir="ltr">ORDER BY</code> for all rows in the table.</p> <p>Consider the following use of the <code translate="no" dir="ltr">NTILE</code> function:</p> 
+<pre>SELECT
+  individual_id,
+  NTILE(nbuckets) OVER (ORDER BY sales desc) AS sales_third
+FROM
+  `dataset.table`;</pre> <p>You can optimize this query as follows:</p> 
+<pre>WITH QuantInfo AS (
+  SELECT
+    o, qval
+  FROM UNNEST((
+     SELECT APPROX_QUANTILES(sales, nbuckets)
+     FROM `dataset.table`
+    )) AS qval
+  WITH offset o
+  WHERE o &gt; 0
+)
+SELECT
+  individual_id,
+  (SELECT
+     (nbuckets + 1) - MIN(o)
+   FROM QuantInfo
+   WHERE sales &lt;= QuantInfo.qval
+  ) AS sales_third
+FROM `dataset.table`;</pre> <p>The optimized version gives similar but not identical results to the original query, because <code translate="no" dir="ltr">APPROX_QUANTILES</code>:</p> <ol> <li>Provides an approximate aggregation.</li> <li>Places the remainder values (the remainder of the number of rows divided by buckets) in a different way.</li> </ol> <h2 id="optimize_udfs">Optimize UDFs</h2> <p><strong>Best practice:</strong> Use SQL UDFs for simple calculations because the query optimizer can apply optimizations to SQL UDF definitions. Use JavaScript UDFs for complex calculations that are not supported by SQL UDFs.</p> <p>Calling a JavaScript UDF requires the instantiation of a subprocess. Spinning up this process and running the UDF directly impacts query performance. If possible, use a <a href="user-defined-functions#sql-udf-structure">native (SQL) UDF</a> instead.</p> <h3 id="persistent_udfs">Persistent UDFs</h3> <p>It is better to create persistent user-defined SQL and JavaScript functions in a centralized BigQuery dataset that can be invoked across queries and in logical views, as opposed to creating and calling a UDF in code each time. Creating org-wide libraries of business logic within shared datasets helps optimize performance and use fewer resources.</p> <p>The following example shows how a temporary UDF is invoked in a query:</p> 
+<pre>CREATE TEMP FUNCTION addFourAndDivide(x INT64, y INT64) AS ((x + 4) / y);
+
+WITH numbers AS
+  (SELECT 1 as val
+  UNION ALL
+  SELECT 3 as val
+  UNION ALL
+  SELECT 4 as val
+  UNION ALL
+  SELECT 5 as val)
+SELECT val, addFourAndDivide(val, 2) AS result
+FROM numbers;</pre> <p>You can optimize this query by replacing the temporary UDF with a persistent one:</p> 
+<pre>WITH numbers AS
+  (SELECT 1 as val
+  UNION ALL
+  SELECT 3 as val
+  UNION ALL
+  SELECT 4 as val
+  UNION ALL
+  SELECT 5 as val)
+SELECT val, `your_project.your_dataset.addFourAndDivide`(val, 2) AS result
+FROM numbers;</pre> <h2 id="optimize_ai_costs">Optimize AI costs</h2> <p><strong>Best practice:</strong> If your use case supports it, use the optimized mode when running <code translate="no" dir="ltr">AI.IF</code> or <code translate="no" dir="ltr">AI.CLASSIFY</code> on large datasets.</p> <p>If you are processing more than a few thousand rows using managed AI functions, you can enable the optimized mode to automatically train a lightweight, distilled model. This significantly reduces LLM token consumption and query latency. For more information, see <a href="optimize-ai-functions">Optimize AI functions for large-scale data</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/best-practices-performance-functions" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/best-practices-performance-functions</a>
+  </p>
+</div>

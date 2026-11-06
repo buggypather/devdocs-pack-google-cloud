@@ -1,0 +1,284 @@
+<h1 id="work-with-measures">Work with measures </h1> <aside class="note"><strong>Note:</strong><span> This feature may not be available when using reservations that are created with certain BigQuery editions. For more information about which features are enabled in each edition, see <a href="editions-intro">Introduction to BigQuery editions</a>.</span></aside> <p>This document shows you how to define and query measures on your graphs. You can use measures to ensure that aggregations are performed correctly across joins.</p> <h2 id="overview">Overview</h2> <p>A <em>measure</em> is an aggregate property defined within the <code translate="no" dir="ltr">PROPERTIES</code> clause of a node or edge table. Measures are defined by a <em>measure expression</em>, which is created by using the <code translate="no" dir="ltr">MEASURE</code> keyword around one of the following:</p> <ul> <li>an aggregate expression</li> <li>an expression that combines aggregate functions with scalar operations</li> <li>a <em>derived measure</em>, which is a combination of measures wrapped in the <code translate="no" dir="ltr">AGG</code> function that are defined on the same element table</li> </ul> <p>Measures support the following aggregate functions:</p> <ul> <li><code translate="no" dir="ltr">SUM</code></li> <li><code translate="no" dir="ltr">AVG</code></li> <li><code translate="no" dir="ltr">COUNT</code></li> <li><code translate="no" dir="ltr">MIN</code></li> <li><code translate="no" dir="ltr">MAX</code></li> <li>
+<code translate="no" dir="ltr">AGG</code> (for derived measures)</li> </ul> <p>All aggregate functions except <code translate="no" dir="ltr">AGG</code> support the <code translate="no" dir="ltr">DISTINCT</code> keyword. For more information about supported measure expression, read about the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#measure_type">measure type</a>.</p> <p>Measures define their aggregation in reference to the <code translate="no" dir="ltr">KEY</code> of the node or edge table on which they're defined. This means that when you query a measure, the aggregation is performed correctly even if the underlying table is joined in a way that causes rows to be duplicated.</p> <p>You can't reference a property defined by a measure in a GQL query. Instead, you access measures by calling the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-sql-queries#graph_expand"><code translate="no" dir="ltr">GRAPH_EXPAND</code> TVF</a> to query a relational representation of your graph. By default, <code translate="no" dir="ltr">GRAPH_EXPAND</code> returns a flattened table representation of your graph with one column per property. You can also specify <code translate="no" dir="ltr">flatten_results =&gt; FALSE</code> to return a hierarchical table with nested <code translate="no" dir="ltr">STRUCT</code> columns. If your graph contains multiple root node tables, you can specify the <code translate="no" dir="ltr">start_node</code> argument to choose which root table to traverse.</p> <p>This function doesn't accept all types of graphs. For more information about which graphs form valid input, see the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-sql-queries#input_limitations">input limitations</a>. To run GQL queries, you must have a <a href="reservations-workload-management">reservation</a> that uses the <a href="editions-intro">Enterprise or Enterprise Plus edition</a>. If you use on-demand pricing, you can call the <code translate="no" dir="ltr">GRAPH_EXPAND</code> function to run SQL queries on your graph.</p> <p>You can call the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aggregate_functions#agg"><code translate="no" dir="ltr">AGG</code> function</a> on output from the <code translate="no" dir="ltr">GRAPH_EXPAND</code> TVF to aggregate the properties according to the aggregation defined in the measure.</p> <h2 id="define_measures">Define measures</h2> <p>You define measures within the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-schema-statements#element_table_property_definition"><code translate="no" dir="ltr">PROPERTIES</code> clause</a> of a node or edge table definition by using the <code translate="no" dir="ltr">MEASURE()</code> keyword around a measure expression.</p> <p>The following example creates a dataset called <code translate="no" dir="ltr">university</code> and tables for colleges, departments, and courses:</p> 
+<pre>CREATE SCHEMA IF NOT EXISTS university;
+
+CREATE OR REPLACE TABLE university.College (
+  college_id INT64 PRIMARY KEY NOT ENFORCED,
+  college_name STRING
+);
+
+CREATE OR REPLACE TABLE university.Department (
+  dept_id INT64 PRIMARY KEY NOT ENFORCED,
+  dept_name STRING,
+  college_id INT64,
+  budget FLOAT64,
+  FOREIGN KEY (college_id) REFERENCES university.College(college_id) NOT ENFORCED
+);
+
+CREATE OR REPLACE TABLE university.Course (
+  course_id INT64 PRIMARY KEY NOT ENFORCED,
+  course_name STRING,
+  dept_id INT64,
+  credits INT64,
+  FOREIGN KEY (dept_id) REFERENCES university.Department(dept_id) NOT ENFORCED
+);
+
+INSERT INTO university.College (college_id, college_name)
+VALUES (101, 'College of Engineering'),
+       (102, 'College of Arts');
+
+INSERT INTO university.Department (dept_id, dept_name, college_id, budget)
+VALUES (1001, 'Computer Science', 101, 500000),
+       (1002, 'Mechanical Engineering', 101, 400000),
+       (1003, 'Fine Arts', 102, 200000),
+       (1004, 'Research', 101, 50000);
+
+INSERT INTO university.Course (course_id, course_name, dept_id, credits)
+VALUES (1, 'Intro to CS', 1001, 3),
+       (2, 'Data Structures', 1001, 4),
+       (3, 'Thermodynamics', 1002, 3),
+       (4, 'Oil Painting', 1003, 2);
+</pre> <p>The following statement creates a graph called <code translate="no" dir="ltr">SchoolGraph</code> that defines measures on properties in the <code translate="no" dir="ltr">Department</code> and <code translate="no" dir="ltr">Course</code> nodes. You must provide an alias for properties defined by a measure.</p> 
+<pre>CREATE OR REPLACE PROPERTY GRAPH university.SchoolGraph
+  NODE TABLES (
+    university.College
+      KEY(college_id)
+      PROPERTIES(college_id, college_name),
+    university.Department
+      KEY(dept_id)
+      PROPERTIES(dept_id, dept_name, college_id,
+        budget OPTIONS(description="Department budget in USD"),
+        MEASURE(SUM(budget)) AS total_budget,
+        MEASURE(SUM(budget) * 1.10) AS budget_with_overhead OPTIONS(
+          description="Total department budget including 10% overhead",
+          extensions=[("unit", "USD"), ("tier", "planning")]
+        )),
+    university.Course
+      KEY(course_id)
+      PROPERTIES(
+        course_id,
+        course_name,
+        credits,
+        dept_id,
+        MEASURE(AVG(credits)) AS avg_credits,
+        MEASURE(SUM(credits)) AS total_credits,
+        MEASURE(COUNT(course_id)) AS course_count,
+        MEASURE(COUNT(DISTINCT CASE WHEN credits &gt;= 3 THEN course_id ELSE NULL END)) AS major_course_count,
+        MEASURE(SAFE_DIVIDE(AGG(total_credits), NULLIF(AGG(course_count), 0))) AS computed_avg_credits)
+  )
+  EDGE TABLES (
+    university.Department AS CollegeDept
+      SOURCE KEY (college_id) REFERENCES College (college_id)
+      DESTINATION KEY (dept_id) REFERENCES Department (dept_id),
+    university.Course AS DeptCourse
+      SOURCE KEY (dept_id) REFERENCES Department (dept_id)
+      DESTINATION KEY (course_id) REFERENCES Course (course_id)
+  );
+</pre> <p><img src="https://docs.cloud.google.com/static/bigquery/images/graph-university-example.png" alt="A visualization of the SchoolGraph graph."></p> <p>The <code translate="no" dir="ltr">total_budget</code> measure is defined as <code translate="no" dir="ltr">MEASURE(SUM(budget))</code>. The measure locks the aggregation to the <code translate="no" dir="ltr">KEY</code>, which is <code translate="no" dir="ltr">dept_id</code>.</p> <h3 id="derived_measures">Derived measures</h3> <p>A <em>derived measure</em> is a measure that references other measures defined on the same element table by using the <code translate="no" dir="ltr">AGG()</code> function. This functionality lets you build reusable measure hierarchies.</p> <p>For example, in <code translate="no" dir="ltr">university.Course</code>, the <code translate="no" dir="ltr">computed_avg_credits</code> measure calculates the ratio between the measures <code translate="no" dir="ltr">total_credits</code> and <code translate="no" dir="ltr">course_count</code>:</p> 
+<pre>MEASURE(SAFE_DIVIDE(AGG(total_credits), NULLIF(AGG(course_count), 0))) AS computed_avg_credits
+</pre> <p>Derived measures retain the grain-locking property of the underlying element table key. Measure dependencies are resolved at graph compilation time. Circular references between measures return an error.</p> <h2 id="understanding_overcounting">Understanding overcounting</h2> <p>When you join tables, data is repeated every time there is a one-to-many relationship in your data. For example, if you join the <code translate="no" dir="ltr">Course</code>, <code translate="no" dir="ltr">Department</code>, and <code translate="no" dir="ltr">College</code> tables, a department with multiple courses appears in multiple rows in the output:</p> 
+<pre>SELECT
+  college_name,
+  dept_name,
+  course_name,
+  budget
+FROM university.Course
+LEFT JOIN university.Department
+  ON Course.dept_id = Department.dept_id
+LEFT JOIN university.College
+  ON Department.college_id = College.college_id;
+
+/*------------------------+------------------------+-----------------+----------+
+ | college_name           | dept_name              | course_name     | budget   |
+ +------------------------+------------------------+-----------------+----------+
+ | College of Engineering | Computer Science       | Intro to CS     | 500000.0 |
+ | College of Engineering | Computer Science       | Data Structures | 500000.0 |
+ | College of Engineering | Mechanical Engineering | Thermodynamics  | 400000.0 |
+ | College of Arts        | Fine Arts              | Oil Painting    | 200000.0 |
+ +------------------------+------------------------+-----------------+----------*/
+</pre> <p>If you try to compute the total budget per college using <code translate="no" dir="ltr">SUM(budget)</code>, the Computer Science department's budget is counted twice. You can avoid this problem by querying the <code translate="no" dir="ltr">Department</code> table directly, but this approach doesn't work if you want to compute multiple aggregations from different tables that contribute to your joined data. The following section shows how measures solve this problem.</p> <h2 id="query_a_graph_with_measures">Query a graph with measures</h2> <p>You can query a graph with measures using GQL, but your query can't directly reference any property defined by a measure. For example, the following query references nodes that have measure properties defined, but doesn't use or return any of the measure fields:</p> 
+<pre>GRAPH university.SchoolGraph
+MATCH (c:College)-&gt;(d:Department)-&gt;(course:Course)
+RETURN c.college_name, d.dept_name, course.course_name;
+
+/*------------------------+------------------------+-----------------+
+ | college_name           | dept_name              | course_name     |
+ +------------------------+------------------------+-----------------+
+ | College of Engineering | Computer Science       | Intro to CS     |
+ | College of Engineering | Computer Science       | Data Structures |
+ | College of Engineering | Mechanical Engineering | Thermodynamics  |
+ | College of Arts        | Fine Arts              | Oil Painting    |
+ +------------------------+------------------------+-----------------*/
+</pre> <p>To work with measures, you use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-sql-queries#graph_expand"><code translate="no" dir="ltr">GRAPH_EXPAND</code></a> table-valued function (TVF) to query your graph as a relational table:</p> 
+<pre>GRAPH_EXPAND(
+  graph_name [, start_node =&gt; 'NodeName'] [, flatten_results =&gt; TRUE|FALSE]
+)
+</pre> <p>The function accepts the following arguments:</p> <ul> <li>
+<code translate="no" dir="ltr">graph_name</code>: A <code translate="no" dir="ltr">STRING</code> containing the name of the graph.</li> <li>
+<code translate="no" dir="ltr">start_node</code>: An optional <code translate="no" dir="ltr">STRING</code> specifying the starting node table for traversal. This argument is required if the graph has multiple root node tables.</li> <li>
+<code translate="no" dir="ltr">flatten_results</code>: An optional <code translate="no" dir="ltr">BOOL</code> (defaults to <code translate="no" dir="ltr">TRUE</code>): <ul> <li>
+<code translate="no" dir="ltr">TRUE</code>: Flattens all node and edge properties into top-level columns with <code translate="no" dir="ltr">&lt;element&gt;_&lt;property&gt;</code> prefixes.</li> <li>
+<code translate="no" dir="ltr">FALSE</code>: Returns the root node properties as un-prefixed top-level columns and joined neighbor tables as <code translate="no" dir="ltr">STRUCT</code> columns.</li> </ul>
+</li> </ul> <h3 id="use_flattened_output">Use flattened output</h3> <p>When <code translate="no" dir="ltr">flatten_results</code> is set to <code translate="no" dir="ltr">TRUE</code> (the default mode), columns in the output table are named by concatenating the node or edge table label and the property name—for example, <code translate="no" dir="ltr">Course_course_name</code> or <code translate="no" dir="ltr">Department_total_budget</code>. The following query shows sample output from the <code translate="no" dir="ltr">GRAPH_EXPAND</code> TVF:</p> 
+<pre>SELECT
+  College_college_name,
+  Department_dept_name,
+  Department_budget,
+  Course_course_name
+FROM
+  GRAPH_EXPAND("university.SchoolGraph");
+
+/*------------------------+------------------------+-------------------+--------------------+
+ | College_college_name   | Department_dept_name   | Department_budget | Course_course_name |
+ +------------------------+------------------------+-------------------+--------------------+
+ | College of Engineering | Computer Science       | 500000.0          | Intro to CS        |
+ | College of Engineering | Computer Science       | 500000.0          | Data Structures    |
+ | College of Engineering | Mechanical Engineering | 400000.0          | Thermodynamics     |
+ | College of Arts        | Fine Arts              | 200000.0          | Oil Painting       |
+ +------------------------+------------------------+-------------------+--------------------*/
+</pre> <p>The <code translate="no" dir="ltr">GRAPH_EXPAND</code> function produces the flattened table by applying a series of <code translate="no" dir="ltr">LEFT JOIN</code> operations to node and edge tables. If you don't specify a starting node, then the input graph must have a single <em>root node table</em> in the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-sql-queries#input_limitations">schema relationship graph</a>. Equivalently, the root node table must have a many-to-one relationship with every other node table that it shares an edge with. Data that isn't reachable from the root node table through a series of joins doesn't appear in the output. In the previous example, <code translate="no" dir="ltr">Course</code> is the root node table. The <code translate="no" dir="ltr">Research</code> department is omitted from the output because it doesn't have any courses.</p> <p>You can't directly select a column for a property defined by a measure. Instead, you must wrap them in the <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/aggregate_functions#agg"><code translate="no" dir="ltr">AGG()</code> function</a>. This function ensures that the aggregation defined on the measures is performed exactly once per key.</p> <p>The following query simultaneously calculates the total budget and total number of courses for each college:</p> 
+<pre>SELECT
+  College_college_name,
+  AGG(Department_total_budget) AS college_budget,
+  AGG(Course_course_count) AS total_courses
+FROM
+  GRAPH_EXPAND("university.SchoolGraph")
+GROUP BY
+  College_college_name;
+
+/*------------------------+----------------+---------------+
+ | College_college_name   | college_budget | total_courses |
+ +------------------------+----------------+---------------+
+ | College of Engineering | 900000.0       | 3             |
+ | College of Arts        | 200000.0       | 1             |
+ +------------------------+----------------+---------------*/
+</pre> <h3 id="use_hierarchical_output">Use hierarchical output</h3> <p>When you specify <code translate="no" dir="ltr">flatten_results =&gt; FALSE</code>, <code translate="no" dir="ltr">GRAPH_EXPAND</code> returns a hierarchical relation instead of prefixed columns:</p> <ul> <li>Properties of the starting root node appear as un-prefixed top-level columns (for example, <code translate="no" dir="ltr">course_name</code> or <code translate="no" dir="ltr">credits</code>).</li> <li>Properties of joined neighbor tables, which might be node or edge tables, appear as nested <code translate="no" dir="ltr">STRUCT</code> fields named after the element table. For example, if the starting node is <code translate="no" dir="ltr">Course</code>, then you would use DeptCourse.Department.CollegeDept.College.college_name<code translate="no" dir="ltr">to
+access the</code>college_name` property.</li> <li>Measures inside nested structs are queried using dot notation inside <code translate="no" dir="ltr">AGG()</code>—for example, <code translate="no" dir="ltr">AGG(DeptCourse.Department.total_budget)</code>.</li> <li>If an element table has a property with the same name as an adjacent element table, then you can't query the graph using <code translate="no" dir="ltr">flatten_results =&gt; FALSE</code>. You must flatten the results instead.</li> </ul> 
+<pre>SELECT
+  DeptCourse.Department.dept_name AS department_name,
+  DeptCourse.Department.CollegeDept.College.college_name,
+  AGG(DeptCourse.Department.total_budget) AS total_budget,
+  AGG(course_count) AS total_courses
+FROM GRAPH_EXPAND(
+       "university.SchoolGraph",
+       start_node =&gt; "Course",
+       flatten_results =&gt; FALSE)
+GROUP BY department_name, college_name;
+</pre> <h3 id="work_with_multiple_root_node_tables">Work with multiple root node tables</h3> <p>Graphs often contain multiple root node tables, also called fact tables, that share dimension tables. To query a graph with multiple root node tables, use the <code translate="no" dir="ltr">start_node</code> argument in <code translate="no" dir="ltr">GRAPH_EXPAND</code>. The function traverses the subgraph reachable from the starting node.</p> <p>For example, you can add an <code translate="no" dir="ltr">Instructor</code> table to the <code translate="no" dir="ltr">university</code> dataset that also links to <code translate="no" dir="ltr">Department</code>:</p> 
+<pre>CREATE OR REPLACE TABLE university.Instructor (
+  instructor_id INT64 PRIMARY KEY NOT ENFORCED,
+  instructor_name STRING,
+  dept_id INT64,
+  salary FLOAT64,
+  FOREIGN KEY (dept_id) REFERENCES university.Department(dept_id) NOT ENFORCED
+);
+
+INSERT INTO university.Instructor (instructor_id, instructor_name, dept_id, salary)
+VALUES (501, 'Dr. Dana', 1001, 120000),
+       (502, 'Dr. Lee', 1001, 110000),
+       (503, 'Dr. Taylor', 1002, 115000),
+       (504, 'Prof. Izumi', 1003, 90000);
+</pre> <p>You can create a new graph called <code translate="no" dir="ltr">university.SchoolGraphMultiRoot</code> that includes the <code translate="no" dir="ltr">Instructor</code> node table and an edge from <code translate="no" dir="ltr">Instructor</code> to <code translate="no" dir="ltr">Department</code>:</p> 
+<pre>CREATE OR REPLACE PROPERTY GRAPH university.SchoolGraphMultiRoot
+  NODE TABLES (
+    university.College
+      KEY(college_id)
+      PROPERTIES(college_id, college_name),
+    university.Department
+      KEY(dept_id)
+      PROPERTIES(dept_id, dept_name, college_id, budget,
+        MEASURE(SUM(budget)) AS total_budget),
+    university.Course
+      KEY(course_id)
+      PROPERTIES(
+        course_id, course_name, credits, dept_id,
+        MEASURE(COUNT(course_id)) AS course_count),
+    university.Instructor
+      KEY(instructor_id)
+      PROPERTIES(
+        instructor_id, instructor_name, dept_id, salary,
+        MEASURE(COUNT(instructor_id)) AS instructor_count,
+        MEASURE(SUM(salary)) AS total_salary)
+  )
+  EDGE TABLES (
+    university.Department AS CollegeDept
+      SOURCE KEY (college_id) REFERENCES College (college_id)
+      DESTINATION KEY (dept_id) REFERENCES Department (dept_id),
+    university.Course AS DeptCourse
+      SOURCE KEY (dept_id) REFERENCES Department (dept_id)
+      DESTINATION KEY (course_id) REFERENCES Course (course_id),
+    university.Instructor AS DeptInstructor
+      SOURCE KEY (dept_id) REFERENCES Department (dept_id)
+      DESTINATION KEY (instructor_id) REFERENCES Instructor (instructor_id)
+  );
+</pre> <p>In this graph, both <code translate="no" dir="ltr">Course</code> and <code translate="no" dir="ltr">Instructor</code> serve as root node tables that link to <code translate="no" dir="ltr">Department</code> and <code translate="no" dir="ltr">College</code>. You can target either subgraph by passing <code translate="no" dir="ltr">start_node</code>:</p> 
+<pre>-- Expand the Course subgraph (Course -&gt; Department -&gt; College)
+SELECT
+  College_college_name,
+  AGG(Course_course_count) AS total_courses
+FROM GRAPH_EXPAND("university.SchoolGraphMultiRoot", start_node =&gt; "Course")
+GROUP BY College_college_name;
+
+-- Expand the Instructor subgraph (Instructor -&gt; Department -&gt; College)
+SELECT
+  College_college_name,
+  AGG(Instructor_total_salary) AS total_faculty_salary
+FROM GRAPH_EXPAND("university.SchoolGraphMultiRoot", start_node =&gt; "Instructor")
+GROUP BY College_college_name;
+</pre> <p>To analyze metrics across multiple fact tables, query each subgraph by using <code translate="no" dir="ltr">GRAPH_EXPAND</code> and join them on their shared dimensions in standard SQL:</p> 
+<pre>SELECT
+  C.College_college_name,
+  AGG(C.Course_course_count) AS total_courses,
+  AGG(I.Instructor_total_salary) AS total_faculty_salary
+FROM GRAPH_EXPAND("university.SchoolGraphMultiRoot", start_node =&gt; "Course") AS C
+INNER JOIN GRAPH_EXPAND("university.SchoolGraphMultiRoot", start_node =&gt; "Instructor") AS I
+  ON C.Department_dept_id = I.Department_dept_id
+GROUP BY C.College_college_name;
+</pre> <p>Both <code translate="no" dir="ltr">AGG(C.Course_course_count)</code> and <code translate="no" dir="ltr">AGG(I.Instructor_total_salary)</code> calculate their aggregations accurately at their respective grains without interference from the join.</p> <aside class="caution"><strong>Caution:</strong><span> Changes to the underlying graph don't invalidate <a href="cached-results">cached results</a> for queries that call the <code translate="no" dir="ltr">GRAPH_EXPAND</code> function. To ensure correct output, disable the retrieval of cached results when you call this function.</span></aside> <h2 id="best_practices">Best practices</h2> <p>When you design a graph with measures, follow these best practices:</p> <h3 id="define_nodes_and_edges_within_a_single_table">Define nodes and edges within a single table</h3> <p>We recommend that you use the same table for a node table definition and its connecting edge table definitions. Reusing the table ensures a one-to-one (1:1) relationship between the node table and the edge table, which prevents fan-out and ensures that the <code translate="no" dir="ltr">GRAPH_EXPAND</code> function doesn't ignore the edge as ambiguous.</p> <p>For example, if you have an input table <code translate="no" dir="ltr">Enrollment</code> that contains foreign keys pointing to <code translate="no" dir="ltr">Student</code> and <code translate="no" dir="ltr">Course</code> tables, define the <code translate="no" dir="ltr">Enrollment</code> node and its outgoing edges using the <code translate="no" dir="ltr">Enrollment</code> input table.</p> <h3 id="avoid_defining_unnecessary_properties_on_edge_tables">Avoid defining unnecessary properties on edge tables</h3> <p>When you define a node table and an edge table using the same physical table, don't use the <code translate="no" dir="ltr">PROPERTIES</code> clause on the edge table unless there's new information to capture on the edge. Because the node table and edge table use the same physical table, all of these properties are already part of the node table.</p> <p>Defining redundant properties on the edge table can cause the <code translate="no" dir="ltr">GRAPH_EXPAND</code> function to treat the edge table as a separate entity from the shared node table. To optimize performance, specify <code translate="no" dir="ltr">NO PROPERTIES</code> on the edge table definition when there are no new properties to capture on the edge.</p> <h3 id="model_many-to-many_relationships_as_node_tables">Model many-to-many relationships as node tables</h3> <p>A <em>many-to-many</em> (M:N) relationship occurs when a row in table <code translate="no" dir="ltr">A</code> can correspond to multiple rows in table <code translate="no" dir="ltr">B</code>, and a row in table <code translate="no" dir="ltr">B</code> can correspond to multiple rows in table <code translate="no" dir="ltr">A</code>. For example, one student can enroll in multiple courses and one course can have many students. You can separate a many-to-many relationship into two one-to-many relationships by using an <em>intermediate junction table</em>. For example, you can define an <code translate="no" dir="ltr">Enrollment</code> table that contains foreign keys pointing to <code translate="no" dir="ltr">Student</code> and <code translate="no" dir="ltr">Course</code> tables. If you model an intermediate junction table as an edge table that connects two dimension node tables in your <code translate="no" dir="ltr">CREATE PROPERTY GRAPH</code> statement, such as in the following example, then the <code translate="no" dir="ltr">GRAPH_EXPAND</code> function ignores these edges because their relationship is ambiguous: not clearly many-to-one or one-to-one.</p> 
+<pre>CREATE PROPERTY GRAPH university.SchoolGraph
+  NODE TABLES (
+    university.Student,
+    university.Course
+  )
+  EDGE TABLES (
+    -- Modeling the junction table as a standalone edge causes ambiguity
+    university.Enrollment AS StudentEnrollment
+      SOURCE KEY (student_id) REFERENCES Student (student_id)
+      DESTINATION KEY (course_id) REFERENCES Course (course_id)
+  );
+</pre> <p>If all edges in a graph are ignored, calls to <code translate="no" dir="ltr">GRAPH_EXPAND</code> or <code translate="no" dir="ltr">BQ.SHOW_GRAPH_EXPAND_SCHEMA</code> fail with an error.</p> <p>To correctly model an M:N relationship for measures, promote the intermediate junction table to a node table. In this structure, the junction node table serves as the single root node table (a node table with an in-degree of zero). Then, define two many-to-one (N:1) edge tables that share the junction table to connect N:1 to each of the dimension node tables:</p> 
+<pre>CREATE PROPERTY GRAPH university.SchoolGraph
+  NODE TABLES (
+    university.Student KEY (student_id),
+    university.Course KEY (course_id),
+    -- Promote the junction table to a node table (acting as the single root node)
+    university.Enrollment KEY (enrollment_id)
+  )
+  EDGE TABLES (
+    -- Share (reuse) the Enrollment table to define N:1 edges to each dimension
+    university.Enrollment AS EnrollmentToStudent
+      SOURCE KEY (enrollment_id) REFERENCES Enrollment (enrollment_id)
+      DESTINATION KEY (student_id) REFERENCES Student (student_id),
+    university.Enrollment AS EnrollmentToCourse
+      SOURCE KEY (enrollment_id) REFERENCES Enrollment (enrollment_id)
+      DESTINATION KEY (course_id) REFERENCES Course (course_id)
+  );
+</pre> <p>In this structure, <code translate="no" dir="ltr">Enrollment</code> serves as the single root node table (in-degree of zero) connecting N:1 to the <code translate="no" dir="ltr">Student</code> and <code translate="no" dir="ltr">Course</code> dimension tables (in-degree of one). The <code translate="no" dir="ltr">GRAPH_EXPAND</code> function can flatten this graph by traversing outwards from <code translate="no" dir="ltr">Enrollment</code> to <code translate="no" dir="ltr">Student</code> and <code translate="no" dir="ltr">Course</code>. If you define measures on any of these tables, you can call the <code translate="no" dir="ltr">AGG</code> function on the measure columns to correctly compute the aggregations without overcounting.</p> <h3 id="choose_how_measures_handle_unmatched_rows">Choose how measures handle unmatched rows</h3> <p>When a row has no match in a connected element table, the columns of that table are <code translate="no" dir="ltr">NULL</code> in the <code translate="no" dir="ltr">GRAPH_EXPAND</code> output. For example, if a course has no <code translate="no" dir="ltr">dept_id</code> value, then the <code translate="no" dir="ltr">Department</code> columns of that row are <code translate="no" dir="ltr">NULL</code>. Whether a measure on the <code translate="no" dir="ltr">Department</code> node includes these rows depends on where you write the scalar expression that the measure aggregates.</p> <p>If you write the expression inside the aggregate function, then the expression is evaluated for every row of the expanded output, including rows with no match. When the expression returns a value rather than <code translate="no" dir="ltr">NULL</code> for one of these rows, that value contributes to the result.</p> <p>If you define the expression as a <a href="https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-schema-statements#element_table_property_definition">property</a> and reference that property from the measure, then the expression is evaluated on the rows of the node table, and rows with no match don't contribute to the result.</p> <p>The following example defines the same expression both ways on <code translate="no" dir="ltr">university.Department</code>:</p> 
+<pre>university.Department
+  KEY(dept_id)
+  PROPERTIES(dept_id, dept_name, college_id, budget,
+    COALESCE(budget, 0) AS budget_or_zero,
+    -- Includes courses that have no department, as a budget of 0.
+    MEASURE(AVG(COALESCE(budget, 0))) AS avg_budget_inline,
+    -- Averages only departments that exist.
+    MEASURE(AVG(budget_or_zero)) AS avg_budget_property)
+</pre> <p>Both measures replace a <code translate="no" dir="ltr">NULL</code> budget with <code translate="no" dir="ltr">0</code>. The inline form also replaces the <code translate="no" dir="ltr">NULL</code> values produced for a course that has no department, so that course is averaged in as a department with a budget of <code translate="no" dir="ltr">0</code>. Choose the form that matches what you want to measure.</p> <h2 id="view-schema">View <code translate="no" dir="ltr">GRAPH_EXPAND</code> schema</h2> <p>To view the schema of the table returned by the <code translate="no" dir="ltr">GRAPH_EXPAND</code> function without calling the function, use the <a href="https://docs.cloud.google.com/bigquery/docs/reference/system-procedures#bqshow_graph_expand_schema"><code translate="no" dir="ltr">BQ.SHOW_GRAPH_EXPAND_SCHEMA</code> system procedure</a>:</p> 
+<pre>DECLARE schema STRING DEFAULT '';
+CALL BQ.SHOW_GRAPH_EXPAND_SCHEMA('university.SchoolGraph', schema);
+SELECT schema;
+</pre> <p>This procedure populates the <code translate="no" dir="ltr">schema</code> variable with the name, type, and mode of each column. It also indicates whether the property referenced by the column is a measure, and lists any description or synonyms that you defined on it.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn how to <a href="graph-create">create and query a graph</a>.</li> <li>Learn about <a href="graph-schema-overview">graph schemas</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/bigquery/docs/graph-measures" class="_attribution-link">https://docs.cloud.google.com/bigquery/docs/graph-measures</a>
+  </p>
+</div>

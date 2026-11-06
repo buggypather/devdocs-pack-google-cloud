@@ -1,0 +1,139 @@
+<h1>Create custom Windows BYOL images</h1>  <p>To create a Windows VM on Google Cloud, you must use a VM image that has Windows or Windows Server preinstalled. Google Cloud provides <a href="os-details#windows_server">public images</a> for commonly used versions of Windows Server, but these images are only suitable for <a href="../instances/windows/ms-licensing#on-demand">on-demand licensing</a>. To bring your own Windows license (BYOL), you must either <a href="../import">import an existing image</a>, or you must build a custom image.</p> <p>This guide describes how you can create a custom image by using the same tools and processes that Google Cloud uses to create the public images.</p> <p>To complete this guide, you need:</p> <ul> <li>An ISO file containing the Windows or Windows Server installation media.</li> <li>Optionally, one or more Windows update packages (in <code translate="no" dir="ltr">.msu</code> format) to apply to the image.</li> </ul> <aside class="note"><strong>Note:</strong><span> To test the image building process, you can use the <a href="https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2019" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body">Windows Server Evaluation</a> media.</span></aside> <h2 id="byb">Before you begin</h2> <ul> <li> If you haven't already, set up <a href="../authentication">authentication</a>. Authentication verifies your identity for access to Google Cloud services and APIs. To run code or samples from a local development environment, you can authenticate to Compute Engine by selecting one of the following options: <p>Select the tab for how you plan to use the samples on this page:</p> <div class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Console</strong></p> <p> When you use the Google Cloud console to access Google Cloud services and APIs, you don't need to set up authentication. </p> </section> <section> <p class="_code-tab"><strong>gcloud</strong></p> <ol>
+<li> <p> <a href="https://docs.cloud.google.com/sdk/docs/install" track-type="commonIncludes" track-name="sdkLink" target="_blank">Install</a> the Google Cloud CLI. After installation, <a href="https://docs.cloud.google.com/sdk/docs/initializing" track-type="commonIncludes" track-name="sdkLink" target="_blank">initialize</a> the Google Cloud CLI by running the following command: </p> 
+<pre data-language="bash">gcloud init</pre> <p> If you're using an external identity provider (IdP), you must first <a href="https://docs.cloud.google.com/iam/docs/workforce-log-in-gcloud"> sign in to the gcloud CLI with your federated identity</a>. </p> <aside class="note"> <strong>Note:</strong> If you installed the gcloud CLI previously, make sure you have the latest version by running <code translate="no" dir="ltr">gcloud components update</code>. </aside> </li>
+<li>
+<a href="../gcloud-compute#set_default_zone_and_region_in_your_local_client"> Set a default region and zone</a>.</li>
+</ol> </section> </div> </li> </ul> <h2 id="process">Understand the build process</h2> <p>To install Windows from scratch, a common approach is to boot a computer from a DVD or ISO file that contains the Windows installation files. Unlike some on-premises hypervisors, Compute Engine does not let you boot from an ISO file.</p> <p>To install Windows from scratch, you must therefore follow a different approach that entails the following steps:</p> <ol> <li>Creating a new disk.</li> <li>Extracting the Windows image (<code translate="no" dir="ltr">install.wim</code> from the installation media) to the disk.</li> <li>Adding necessary drivers, configuring Windows Setup so that it runs unattended, and making the disk bootable.</li> <li>Booting from the new disk to run Windows Setup.</li> <li>Installing additional software including the Guest OS agent.</li> <li>Creating an image from the disk.</li> </ol> <p>Instead of performing these steps manually, this guide describes how you can use <a href="https://docs.cloud.google.com/build/docs/overview">Cloud Build</a>, the <code translate="no" dir="ltr">daisy</code> tool, and the reference workflows which are <a href="https://github.com/GoogleCloudPlatform/compute-image-tools/tree/master/daisy_workflows/image_build/windows">available on GitHub</a> to automate the process.</p> <p><code translate="no" dir="ltr">daisy</code> is an <a href="https://github.com/GoogleCloudPlatform/compute-image-tools/blob/master/daisy/README.md">open source command-line tool</a> that lets you execute workflows. Workflows are authored as JSON files and contain a sequence of steps. Each such step describes a Compute Engine operation – for example, creating a disk, or shutting down a VM instance. Daisy workflows are therefore suitable to automate the steps required to build a Windows image from scratch.</p> <p>The daisy workflows for building custom Windows images create two temporary VM instances. The first VM instance (prefixed <code translate="no" dir="ltr">bootstrap</code>) performs the necessary steps to create a bootable disk. The second VM instance (prefixed <code translate="no" dir="ltr">install</code>) runs Windows Setup and performs all the remaining steps.</p> <h2 id="preparing_the_project">Prepare the project for building images</h2> <p>To prevent the daisy tool from interfering with your existing VM instances or infrastructure, create a dedicated project for building images:</p> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Compute Engine API, Cloud Build API, and Cloud Storage API APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <li>
+<p> Enable the Compute Engine API, Cloud Build API, and Cloud Storage API APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> </div> </cloud-free-trial> </ol> <aside class="note"><strong>Note:</strong><span> The build process assumes that your project contains a <a href="https://docs.cloud.google.com/vpc/docs/vpc#default-network">default network</a>. If you've <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints">disabled the creation of default networks</a> in your organization, you must manually create an auto-mode VPC network named <code translate="no" dir="ltr">default</code>.</span></aside> <p>The next steps differ depending on whether you use Windows or Linux on your local computer:</p> <div> <section><p class="_code-tab"><strong>Windows</strong></p>
+<ol> <li>On your local computer, open a Windows PowerShell window.</li> <li>
+<p>Initialize a variable:</p> 
+<pre data-language="">
+$PROJECT_ID = "PROJECT_ID"
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> is the project ID of the Google Cloud project that you created in the previous section.</p>
+</li> <li>
+<p>Initialize another variable so that it contains the project number of the project:</p> 
+<pre data-language="">
+$PROJECT_NUMBER = gcloud projects describe $PROJECT_ID --format=value`(projectNumber`)
+</pre>
+</li> </ol></section> <section><p class="_code-tab"><strong>Linux</strong></p>
+<ol> <li>On your local computer, open a terminal window.</li> <li>
+<p>Initialize a variable:</p> 
+<pre data-language="">
+PROJECT_ID=PROJECT_ID
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> is the project ID of the Google Cloud project that you created in the previous section.</p>
+</li> <li>
+<p>Initialize another variable so that it contains the project number of the project:</p> 
+<pre data-language="">
+PROJECT_NUMBER=`gcloud projects describe $PROJECT_ID --format=value\(projectNumber\)`
+</pre>
+</li> </ol></section> </div> <h2 id="uploading_files">Upload installation files</h2> <p>You now collect all the installation files required for the custom image and upload them to a Cloud Storage bucket. By storing the files in a Cloud Storage bucket, you ensure that the files are accessible by <code translate="no" dir="ltr">daisy</code> and by the temporary VM instances that <code translate="no" dir="ltr">daisy</code> uses to build the image.</p> <p>In the following steps, replace <code translate="no" dir="ltr"><var translate="no">UNIQUE_SUFFIX</var></code> with a short sequence of random characters to create a unique bucket name. For example, use <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var>-media-a7g19</code>. Appending a random suffix to the bucket name helps prevent <a href="https://owasp.org/www-community/attacks/Bucket_Name_Squatting">bucket squatting</a>, a vulnerability where an attacker might gain control over your build process by pre-claiming a bucket with a predictable name.</p> <ol> <li>
+<p>On your local computer, download required installation packages:</p> <ul> <li><a href="https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe">gcloud CLI</a></li> <li>
+<a href="https://support.microsoft.com/en-us/help/4503548/microsoft-net-framework-4-8-offline-installer-for-windows" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body">Microsoft .NET Framework 4.8 offline installer for Windows</a> </li> <li>
+<a href="https://learn.microsoft.com/en-au/powershell/scripting/install/installing-powershell-on-windows#installing-the-msi-package" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body">PowerShell 7.0 (or later)</a> (<code translate="no" dir="ltr">.msi</code>)</li> </ul>
+</li> <li>
+<p>Create a new Cloud Storage bucket to store the installation files:</p> 
+<pre>
+gcloud storage buckets create gs://$PROJECT_ID-media-UNIQUE_SUFFIX --project=$PROJECT_ID
+</pre>
+</li> <li>
+<p>Grant the <a href="https://docs.cloud.google.com/storage/docs/access-control/iam-roles">Storage Object Viewer</a> role to Cloud Build so that it can read the installation files:</p> 
+<pre>
+gcloud storage buckets add-iam-policy-binding gs://$PROJECT_ID-media-UNIQUE_SUFFIX --member=serviceAccount:$PROJECT_NUMBER@cloudbuild.gserviceaccount.com --role=roles/storage.objectViewer
+</pre>
+</li> <li>
+<p>Upload the PowerShell installation package:</p> 
+<pre>
+gcloud storage cp POWERSHELL_PACKAGE gs://$PROJECT_ID-media-UNIQUE_SUFFIX/PowerShell.msi
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">POWERSHELL_PACKAGE</var></code> is the path to the PowerShell installation package.</p>
+</li> <li>
+<p>Upload the .NET Framework installation package:</p> 
+<pre>
+gcloud storage cp DOTNET_PACKAGE gs://$PROJECT_ID-media-UNIQUE_SUFFIX/dotnet-sdk.exe
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">DOTNET_PACKAGE</var></code> is the path to the NET Framework installation package.</p>
+</li> <li>
+<p>Upload the gcloud CLI installation package:</p> 
+<pre>
+gcloud storage cp CLOUDSDK_PACKAGE gs://$PROJECT_ID-media-UNIQUE_SUFFIX/GoogleCloudSDKInstaller.exe
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">CLOUDSDK_PACKAGE</var></code> is the path to the gcloud CLI installation package.</p>
+</li> <li>
+<p>Upload the ISO file containing your Windows installation media:</p> 
+<pre>
+gcloud storage cp ISO gs://$PROJECT_ID-media-UNIQUE_SUFFIX/
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">ISO</var></code> is the name of the ISO file.</p>
+</li> <li>
+<p>Optionally, upload additional update packages:</p> 
+<pre>
+gcloud storage cp UPDATE_DIR/*.msu gs://$PROJECT_ID-media-UNIQUE_SUFFIX/updates/
+</pre> <p>where <code translate="no" dir="ltr"><var translate="no">UPDATE_DIR</var></code> is the directory containing the update packages.</p>
+</li> </ol> <p>You are now ready to build the custom image.</p> <h2 id="building">Build the image</h2> <p>Executing the <code translate="no" dir="ltr">daisy</code> workflow to build a custom image takes up to four hours. Instead of running <code translate="no" dir="ltr">daisy</code> locally, you now create a Cloud Build configuration so that you can let Cloud Build execute the workflow in the background.</p> <ol> <li>
+<p>On your local computer, clone the Git repository containing the <code translate="no" dir="ltr">daisy</code> workflows for building Windows images:</p> 
+<pre>
+git clone https://github.com/GoogleCloudPlatform/compute-image-tools.git
+</pre>
+</li> <li>
+<p>Switch to <code translate="no" dir="ltr">windows</code> directory:</p> 
+<pre>
+cd compute-image-tools/daisy_workflows/image_build/windows/
+</pre>
+</li> <li>
+<p>In the <code translate="no" dir="ltr">windows</code> directory, you find a selection of files with the suffix <code translate="no" dir="ltr">.wf.json</code>. These files contain Daisy workflow definitions for commonly used Windows versions:</p> <table> <tr> <th>Windows version</th> <th>Workflow file</th> </tr> <tr> <td>Windows Server Core 2022 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-server-2022-dc-core-uefi-byol.wf.json</code> </td> </tr> <tr> <td>Windows Server 2019 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-server-2019-dc-uefi-byol.wf.json</code> </td> </tr> <tr> <td>Windows Server Core 2019 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-server-2019-dc-core-uefi-byol.wf.json</code> </td> </tr> <tr> <td>Windows Server 2016 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-server-2016-dc-uefi-byol.wf.json</code> </td> </tr> <tr> <td>Windows Server Core 2016 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-server-2016-dc-core-uefi-byol.wf.json</code> </td> </tr> <tr> <td>Windows 11 21H2 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-11-21h2-ent-x64-uefi.wf.json</code> </td> </tr> <tr> <td>Windows 11 22H2 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-11-22h2-ent-x64-uefi.wf.json</code> </td> </tr> <tr> <td>Windows 11 23H2 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-11-23h2-ent-x64-uefi.wf.json</code> </td> </tr> <tr> <td>Windows 10 21H2 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-10-21h2-ent-x64-uefi.wf.json</code> </td> </tr> <tr> <td>Windows 10 22H2 (64-bit) </td> <td>
+<code translate="no" dir="ltr">windows-10-22h2-ent-x64-uefi.wf.json</code> </td> </tr> </table> <p>Open the workflow file that most closely matches the Windows version that you want to install. If necessary, change the Windows edition (<code translate="no" dir="ltr">edition</code>) and license key (<code translate="no" dir="ltr">product_key</code>) settings in the workflow files so that they match your installation media.</p> <p>If you are unsure about the correct edition name, open an elevated PowerShell prompt and run the following commands to list all editions supported by your installation media:</p> 
+<pre>
+$IsoFile = "ISO"
+
+$Mount = Mount-DiskImage -ImagePath (Resolve-Path $IsoFile)
+
+$DriveLetter = ($Mount | Get-Volume).DriveLetter
+Get-WindowsImage -ImagePath "$($DriveLetter):\sources\install.wim" | select ImageName
+
+Dismount-DiskImage -InputObject $Mount | Out-Null
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ISO</var></code> with the local path to the ISO image.</p>
+</li> <li>
+<p>In the <code translate="no" dir="ltr">windows</code> directory, create a new file named <code translate="no" dir="ltr">cloudbuild.yaml</code> and paste the following code:</p> 
+<pre>
+timeout: 14400s  # 4 hour timeout for entire build
+steps:
+- name: 'gcr.io/compute-image-tools/daisy'
+  timeout: 14400s  # 4 hour timeout for build step
+  waitFor: ['-']
+  args:
+    - -project=$PROJECT_ID
+    - -zone=us-central1-a
+    - -var:updates=gs://$PROJECT_ID-media-UNIQUE_SUFFIX/updates/
+    - -var:pwsh=gs://$PROJECT_ID-media-UNIQUE_SUFFIX/PowerShell.msi
+    - -var:dotnet48=gs://$PROJECT_ID-media-UNIQUE_SUFFIX/dotnet-sdk.exe
+    - -var:cloudsdk=gs://$PROJECT_ID-media-UNIQUE_SUFFIX/GoogleCloudSDKInstaller.exe
+    - -var:media=gs://$PROJECT_ID-media-UNIQUE_SUFFIX/ISO
+    - WORKFLOW
+</pre> <p>Replace:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ISO</var></code>: name of the ISO file on Cloud Storage.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKFLOW</var></code>: name of the workflow file that corresponds to the Windows version that you're using.</li> </ul> <aside class="note"><strong>Note:</strong><span> Some workflows support additional, optional parameters to customize the build process. You can find the complete list of parameters in the <code translate="no" dir="ltr">Vars</code> section of the workflow file.</span></aside>
+</li> <li>
+<p>Submit the build to Cloud Build:</p> 
+<pre>
+gcloud builds submit --project $PROJECT_ID --async
+</pre> <p>The build takes around up to four hours to complete. You can track the status of the build in the Google Cloud console under <strong>Cloud Build &gt; History</strong>.</p> <p><a href="https://console.cloud.google.com/cloud-build/builds" target="console" class="button button-primary" track-type="tasks"> Cloud Build History</a></p>
+</li> </ol> <h2 id="use_the_custom_image">Use the custom image</h2> <p>After the build has completed, you can find the custom BYOL image in the Google Cloud console under <strong>Compute Engine &gt; Images</strong>.</p> <p>To help differentiate between multiple versions of the same image, the build process embeds a timestamp into the image name, for example <code translate="no" dir="ltr">windows-server-2019-dc-v1613488342</code>. In addition, the process associates the image with a custom <a href="image-families-best-practices#custom-families">image family</a>, for example <code translate="no" dir="ltr">windows-server-2019</code>.</p> <p>To create a VM instance that uses the custom BYOL image, you must <a href="../nodes/provisioning-sole-tenant-vms">provision the VM instance on a sole-tenant node</a>.</p> <aside class="note"><strong>Note:</strong><span> The image build process does not configure a KMS server. If you're using a volume licensed copy of Windows Server, you must <a href="https://docs.microsoft.com/en-us/windows-server/get-started/activation-slmgr-vbs-options#kms-client-options" target="external" track-type="solution" track-name="externalLink" track-metadata-position="body">configure a KMS server</a> before you can activate Windows Server.</span></aside> <h2 id="troubleshooting">Troubleshooting</h2> <p>If you suspect that the build process failed or is not progressing, use the following approaches to diagnose the situation:</p> <ul> <li>Verify that you've uploaded the right installation packages and ISO file.</li> <li>Verify that you selected a workflow that matches the Windows version of the ISO file.</li> <li>Review the <a href="https://docs.cloud.google.com/build/docs/view-build-results#console">build log in Cloud Build </a> and check whether there are any error messages.</li> <li>If the build seems stuck, review the <a href="../instances/viewing-serial-port-output">serial port output</a> of the VM instance created by the build and check for error messages.</li> </ul> <h2 id="whats_next">What's next</h2> <ul> <li>Find out more <a href="https://github.com/GoogleCloudPlatform/compute-daisy">about the daisy tool</a>.</li> <li>Learn more about <a href="https://github.com/GoogleCloudPlatform/compute-image-tools/tree/master/daisy_workflows/image_build">daisy workflows for building images</a>.</li> <li>Learn how to <a href="../instances/windows/bring-your-own-license">bring existing licenses to Compute Engine</a>.</li> <li>Read about <a href="image-families-best-practices">best practices for working with image families</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/compute/docs/images/creating-custom-windows-byol-images" class="_attribution-link">https://docs.cloud.google.com/compute/docs/images/creating-custom-windows-byol-images</a>
+  </p>
+</div>

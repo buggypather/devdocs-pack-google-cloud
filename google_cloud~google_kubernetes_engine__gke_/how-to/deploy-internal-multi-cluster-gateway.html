@@ -1,0 +1,321 @@
+<h1>Deploy an internal multi-cluster Gateway</h1>  <p>This document guides you through a practical example to deploy an internal multi-cluster Gateway to route traffic within your VPC network to an application that runs in two different GKE clusters.</p> Multi-cluster Gateways provide a powerful way to manage traffic for services deployed across multiple GKE clusters. By using Google's global load-balancing infrastructure, you can create a single entry point for your applications, which simplifies management and improves reliability. <p>In this tutorial, you use a sample <code translate="no" dir="ltr">store</code> application to simulate a real-world scenario where an online shopping service is owned and operated by separate teams and deployed across a <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs">fleet</a> of shared GKE clusters.</p> This example shows you how to set up path-based routing to direct traffic to different clusters. <h2 id="before_you_begin">Before you begin</h2> <p>Multi-cluster Gateways require some environmental preparation before they can be deployed. Before you proceed, follow the steps in <a href="prepare-environment-multi-cluster-gateways">Prepare your environment for multi-cluster Gateways</a>:</p> <ol> <li><p><a href="prepare-environment-multi-cluster-gateways#deploy-clusters">Deploy</a> GKE clusters.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/register/gke#register_your_cluster_on">Register</a> your clusters to a fleet (if they aren't already).</p></li> <li><p><a href="prepare-environment-multi-cluster-gateways#enable_multi-cluster_services_in_the_fleet">Enable</a> the multi-cluster Service and multi-cluster Gateway controllers.</p></li> </ol> <p>Finally, review the GKE Gateway controller <a href="deploying-gateways#limitations">limitations and known issues</a> before you use the controller in your environment.</p> <h2 id="cross-region-ilb">Deploy an internal multi-cluster Gateway across regions</h2> <p>You can deploy multi-cluster Gateways that provide internal Layer 7 load balancing across GKE clusters in multiple regions. These Gateways use the <code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code> GatewayClass. This GatewayClass provisions a cross-region internal Application Load Balancer that's managed by Google Cloud and that enables internal VIPs that clients within your VPC network can access. These Gateways can be exposed by frontends in the regions of your choice, simply by using the Gateway to request addresses in those regions. The internal VIP can be a single IP address, or they can be IP addresses in multiple regions, with one IP address per region that's specified in the Gateway. Traffic is directed to the closest healthy backend GKE cluster that can serve the request.</p> <h3 id="prerequisites">Prerequisites</h3> <ol> <li>
+<p>Set up your project and shell by configuring your <code translate="no" dir="ltr">gcloud</code> environment with your project ID:</p> 
+<pre>export PROJECT_ID="YOUR_PROJECT_ID"
+gcloud config set project ${PROJECT_ID}
+</pre>
+</li> <li>
+<p>Create GKE clusters in different regions.</p> <p>This example uses two clusters, <code translate="no" dir="ltr">gke-west-1</code> in <code translate="no" dir="ltr">us-west1</code> and <code translate="no" dir="ltr">gke-east-1</code> in <code translate="no" dir="ltr">us-east1</code>. Ensure the Gateway API is enabled (<code translate="no" dir="ltr">--gateway-api=standard</code>) and clusters are registered to a fleet.</p> 
+<pre>gcloud container clusters create gke-west-1 \
+    --location=us-west1-a \
+    --workload-pool=${PROJECT_ID}.svc.id.goog \
+    --project=${PROJECT_ID} \
+    --enable-fleet \
+    --gateway-api=standard
+
+gcloud container clusters create gke-east-1 \
+    --location=us-east1-c \
+    --workload-pool=${PROJECT_ID}.svc.id.goog \
+    --project=${PROJECT_ID} \
+    --enable-fleet \
+    --gateway-api=standard
+</pre> <p>Rename contexts for easier access:</p> 
+<pre>gcloud container clusters get-credentials gke-west-1 \
+  --location=us-west1-a \
+  --project=${PROJECT_ID}
+
+gcloud container clusters get-credentials gke-east-1 \
+  --location=us-east1-c \
+  --project=${PROJECT_ID}
+kubectl config rename-context gke_${PROJECT_ID}_us-west1-a_gke-west-1 gke-west1
+kubectl config rename-context gke_${PROJECT_ID}_us-east1-c_gke-east-1 gke-east1
+</pre>
+</li> <li>
+<p>Enable Multi-Cluster Services (MCS) and Multi-Cluster Ingress (MCI/Gateway):</p> 
+<pre>gcloud container fleet multi-cluster-services enable --project=${PROJECT_ID}
+
+# Set the config membership to one of your clusters (e.g., gke-west-1)
+# This cluster will be the source of truth for multi-cluster Gateway and Route resources.
+gcloud container fleet ingress enable \
+    --config-membership=projects/${PROJECT_ID}/locations/us-west1/memberships/gke-west-1 \
+    --project=${PROJECT_ID}
+</pre>
+</li> <li>
+<p>Configure proxy-only subnets. A proxy-only subnet is required in each region where your GKE clusters are located and where the load balancer will operate. Cross-region internal Application Load Balancers require the purpose of this subnet to be set to <code translate="no" dir="ltr">GLOBAL_MANAGED_PROXY</code>.</p> 
+<pre># Proxy-only subnet for us-west1
+gcloud compute networks subnets create us-west1-proxy-only-subnet \
+    --purpose=GLOBAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=us-west1 \
+    --network=default \
+    --range=10.129.0.0/23 # Choose an appropriate unused CIDR range
+
+# Proxy-only subnet for us-east1
+gcloud compute networks subnets create us-east1-proxy-only-subnet \
+    --purpose=GLOBAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=us-east1 \
+    --network=default \
+    --range=10.130.0.0/23 # Choose an appropriate unused CIDR range
+</pre> <p>If you're not using the default network, replace <code translate="no" dir="ltr">default</code> with the name of your VPC network. Ensure that the CIDR ranges are unique and don't overlap.</p>
+</li> <li>
+<p>Deploy your demo applications, such as <code translate="no" dir="ltr">store</code>, to both clusters. The example <code translate="no" dir="ltr">store.yaml</code> file from <code translate="no" dir="ltr">gke-networking-recipes</code> creates a <code translate="no" dir="ltr">store</code> namespace and a deployment.</p> 
+<pre>kubectl apply --context gke-west1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store.yaml
+kubectl apply --context gke-east1 -f https://raw.githubusercontent.com/GoogleCloudPlatform/gke-networking-recipes/main/gateway/gke-gateway-controller/multi-cluster-gateway/store.yaml
+</pre>
+</li> <li>
+<p>Export Services from each cluster by creating Kubernetes Service resources and ServiceExport resources in each cluster, which makes the services discoverable across the fleet. The following example exports a generic <code translate="no" dir="ltr">store</code> service and region-specific services (<code translate="no" dir="ltr">store-west-1</code>, <code translate="no" dir="ltr">store-east-1</code>) from each cluster, all within the <code translate="no" dir="ltr">store</code> namespace.</p> <p>Apply to <code translate="no" dir="ltr">gke-west1</code>:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-west1 -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-west-1 # Specific to this cluster
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store-west-1 # Exporting the region-specific service
+  namespace: store
+EOF
+</pre> <p>Apply to <code translate="no" dir="ltr">gke-east1</code>:</p> 
+<pre>cat &lt;&lt; EOF | kubectl apply --context gke-east1 -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-east-1 # Specific to this cluster
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store-east-1 # Exporting the region-specific service
+  namespace: store
+EOF
+</pre>
+</li> <li><p>Check ServiceImports: Verify that ServiceImport resources are created in each cluster within the <code translate="no" dir="ltr">store</code> namespace. It might take a few minutes for them to be created. <code translate="no" dir="ltr">bash
+kubectl get serviceimports --context gke-west1 -n store
+kubectl get serviceimports --context gke-east1 -n store</code> You should see <code translate="no" dir="ltr">store</code>, <code translate="no" dir="ltr">store-west-1</code>, and <code translate="no" dir="ltr">store-east-1</code> listed (or relevant entries based on propagation).</p></li> </ol> <h3 id="configure_an_internal_multi-region_gateway">Configure an internal multi-region Gateway</h3> <p>Define a <code translate="no" dir="ltr">Gateway</code> resource that references the <code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code> GatewayClass. You apply this manifest to your designated config cluster, such as <code translate="no" dir="ltr">gke-west-1</code>.</p> <p>The <code translate="no" dir="ltr">spec.addresses</code> field lets you request ephemeral IP addresses in specific regions or use pre-allocated static IP addresses.</p> <ol> <li>
+<p>To use ephemeral IP addresses, save the following <code translate="no" dir="ltr">Gateway</code> manifest as <code translate="no" dir="ltr">cross-regional-gateway.yaml</code>:</p> 
+<pre># cross-regional-gateway.yaml
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-cross-region-gateway
+  namespace: store # Namespace for the Gateway resource
+spec:
+  gatewayClassName: gke-l7-cross-regional-internal-managed-mc
+  addresses:
+  # Addresses across regions. Address value is allowed to be empty or matching
+  # the region name.
+  - type: networking.gke.io/ephemeral-ipv4-address/us-west1
+    value: "us-west1"
+  - type: networking.gke.io/ephemeral-ipv4-address/us-east1
+    value: "us-east1"
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      kinds:
+      - kind: HTTPRoute # Only allow HTTPRoute to attach
+</pre> <p>The following list defines some of the fields in the previous YAML file:</p> <ul> <li>
+<strong><code translate="no" dir="ltr">metadata.namespace</code></strong>: the namespace where the Gateway resource is created, for example, <code translate="no" dir="ltr">store</code>.</li> <li>
+<strong><code translate="no" dir="ltr">spec.gatewayClassName</code></strong>: the name of the GatewayClass. Must be <code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code>.</li> <li>
+<strong><code translate="no" dir="ltr">spec.listeners.allowedRoutes.kinds</code></strong>: the kinds of Route objects that can be attached, for example, <code translate="no" dir="ltr">HTTPRoute</code>.</li> <li>
+<strong><code translate="no" dir="ltr">spec.addresses</code></strong>: <ul> <li>
+<strong><code translate="no" dir="ltr">type: networking.gke.io/ephemeral-ipv4-address/<var translate="no">REGION</var></code></strong>: requests an ephemeral IP address.</li> <li>
+<strong><code translate="no" dir="ltr">value</code></strong>: specifies the region for the address, for example, <code translate="no" dir="ltr">"us-west1"</code> or <code translate="no" dir="ltr">"us-east1"</code>.</li> </ul>
+</li> </ul>
+</li> <li>
+<p>Apply the manifest to your config cluster, for example, <code translate="no" dir="ltr">gke-west1</code>:</p> 
+<pre>kubectl apply --context gke-west1 -f cross-regional-gateway.yaml
+</pre>
+</li> </ol> <h3 id="attach_httproutes_to_the_gateway">Attach HTTPRoutes to the Gateway</h3> <p>Define <code translate="no" dir="ltr">HTTPRoute</code> resources to manage traffic routing and apply them to your config cluster.</p> <ol> <li>
+<p>Save the following <code translate="no" dir="ltr">HTTPRoute</code> manifest as <code translate="no" dir="ltr">store-route.yaml</code>:</p> 
+<pre># store-route.yaml
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-route
+  namespace: store
+  labels:
+    gateway: cross-regional-internal
+spec:
+  parentRefs:
+  - name: internal-cross-region-gateway
+    namespace: store # Namespace where the Gateway is deployed
+  hostnames:
+  - "store.example.internal" # Hostname clients will use
+  rules:
+  - matches: # Rule for traffic to /west
+    - path:
+        type: PathPrefix
+        value: /west
+    backendRefs:
+    - group: net.gke.io # Indicates a multi-cluster ServiceImport
+      kind: ServiceImport
+      name: store-west-1 # Targets the ServiceImport for the west cluster
+      port: 8080
+  - matches: # Rule for traffic to /east
+    - path:
+        type: PathPrefix
+        value: /east
+    backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store-east-1 # Targets the ServiceImport for the east cluster
+      port: 8080
+  - backendRefs: # Default rule for other paths (e.g., /)
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store # Targets the generic 'store' ServiceImport (any region)
+      port: 8080
+</pre> <p>The following list defines some of the fields in the previous YAML file:</p> <ul> <li>
+<strong><code translate="no" dir="ltr">spec.parentRefs</code></strong>: attaches this route to <code translate="no" dir="ltr">internal-cross-region-gateway</code> in the <code translate="no" dir="ltr">store</code> namespace.</li> <li>
+<strong><code translate="no" dir="ltr">spec.hostnames</code></strong>: represents the hostname that clients use to access the service.</li> <li>
+<strong><code translate="no" dir="ltr">spec.rules</code></strong>: defines routing logic. This example uses path-based routing: <ul> <li>
+<code translate="no" dir="ltr">/west</code> traffic goes to <code translate="no" dir="ltr">store-west-1</code> ServiceImport.</li> <li>
+<code translate="no" dir="ltr">/east</code> traffic goes to <code translate="no" dir="ltr">store-east-1</code> ServiceImport.</li> <li>All other traffic, such as <code translate="no" dir="ltr">/</code>, goes to the generic <code translate="no" dir="ltr">store</code> ServiceImport.</li> </ul>
+</li> <li>
+<strong><code translate="no" dir="ltr">backendRefs</code></strong>: <ul> <li>
+<code translate="no" dir="ltr">group: net.gke.io</code> and <code translate="no" dir="ltr">kind: ServiceImport</code> target multi-cluster services.</li> </ul>
+</li> </ul>
+</li> <li>
+<p>Apply the <code translate="no" dir="ltr">HTTPRoute</code> manifest to your config cluster:</p> 
+<pre>kubectl apply --context gke-west1 -f store-route.yaml
+</pre>
+</li> </ol> <h3 id="verify_the_status_of_the_gateway_and_route">Verify the status of the Gateway and Route</h3> <ol> <li>
+<p>Check the Gateway status:</p> 
+<pre>kubectl get gateway internal-cross-region-gateway -n store -o yaml --context gke-west1
+</pre> <p>Look for a condition with <code translate="no" dir="ltr">type:</code>Programmed<code translate="no" dir="ltr">and</code>status: "True"<code translate="no" dir="ltr">. You should see IP addresses assigned in the</code>status.addresses<code translate="no" dir="ltr">field, corresponding to the regions you specified (e.g., one for</code>us-west1<code translate="no" dir="ltr">and one for</code>us-east1`).</p>
+</li> <li>
+<p>Check the HTTPRoute status:</p> 
+<pre>kubectl get httproute store-route -n store -o yaml --context gke-west1
+</pre> <p>Look for a condition in <code translate="no" dir="ltr">status.parents[].conditions</code> with <code translate="no" dir="ltr">type: Accepted</code> (or <code translate="no" dir="ltr">ResolvedRefs</code>) and <code translate="no" dir="ltr">status: "True"</code>.</p>
+</li> </ol> <h3 id="confirm_traffic">Confirm traffic</h3> <p>After you assign the IP addresses to the Gateway, you can test traffic from a client VM that's within your VPC network and in one of the regions, or in a region that can connect to the Gateway IP address.</p> <ol> <li>
+<p>Retrieve the Gateway IP addresses.</p> <p>The following command attempts to parse the JSON output. You might need to adjust the <code translate="no" dir="ltr">jsonpath</code> based on the exact structure.</p> 
+<pre>kubectl get gateway cross-region-gateway -n store --context gke-west1 -o=jsonpath="{.status.addresses[*].value}".
+</pre> <p>The output of this command should include the VIPs, such as <code translate="no" dir="ltr">VIP1_WEST</code>, or <code translate="no" dir="ltr">VIP2_EAST</code>.</p>
+</li> <li>
+<p>Send test requests: From a client VM in your VPC:</p> 
+<pre># Assuming VIP_WEST is an IP in us-west1 and VIP_EAST is an IP in us-east1
+# Traffic to /west should ideally be served by gke-west-1
+curl -H "host: store.example.internal" http://VIP_WEST/west
+curl -H "host: store.example.internal" http://VIP_EAST/west # Still targets store-west-1 due to path
+
+# Traffic to /east should ideally be served by gke-east-1
+curl -H "host: store.example.internal" http://VIP_WEST/east # Still targets store-east-1 due to path
+curl -H "host: store.example.internal" http://VIP_EAST/east
+
+# Traffic to / (default) could be served by either cluster
+curl -H "host: store.example.internal" http://VIP_WEST/
+curl -H "host: store.example.internal" http://VIP_EAST/
+</pre> <p>The response should include details from the <code translate="no" dir="ltr">store</code> application that indicate which backend pod served the request, such as <code translate="no" dir="ltr">cluster_name</code> or <code translate="no" dir="ltr">zone</code>.</p>
+</li> </ol> <h3 id="use_static_ip_addresses">Use static IP Addresses</h3> <p>Instead of ephemeral IP addresses, you can use pre-allocated static internal IP addresses.</p> <ol> <li>
+<p>Create static IP addresses in the regions that you want to use:</p> 
+<pre>gcloud compute addresses create cross-region-gw-ip-west --region us-west1 --subnet default --project=${PROJECT_ID}
+gcloud compute addresses create cross-region-gw-ip-east --region us-east1 --subnet default --project=${PROJECT_ID}
+</pre> <p>If you're not using the default subnet, replace <code translate="no" dir="ltr">default</code> with the name of the subnet that has the IP address you want to allocate. These subnets are regular subnets, <em>not</em> the proxy-only subnets.</p>
+</li> <li>
+<p>Update the Gateway manifest by modifying the <code translate="no" dir="ltr">spec.addresses</code> section in your <code translate="no" dir="ltr">cross-regional-gateway.yaml</code> file:</p> 
+<pre># cross-regional-gateway-static-ip.yaml
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-cross-region-gateway # Or a new name if deploying alongside
+  namespace: store
+spec:
+  gatewayClassName: gke-l7-cross-regional-internal-managed-mc
+  addresses:
+  - type: networking.gke.io/named-address-with-region # Use for named static IP
+    value: "regions/us-west1/addresses/cross-region-gw-ip-west"
+  - type: networking.gke.io/named-address-with-region
+    value: "regions/us-east1/addresses/cross-region-gw-ip-east"
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      kinds:
+      - kind: HTTPRoute
+</pre>
+</li> <li>
+<p>Apply the updated Gateway manifest.</p> 
+<pre>kubectl apply --context gke-west1 -f cross-regional-gateway.yaml
+</pre>
+</li> </ol> <h3 id="special_considerations_for_non-default_subnets">Special considerations for non-default subnets</h3> <p>Be aware of the following considerations when you use non-default subnets:</p> <ul> <li><p><strong>Same VPC network:</strong> all user-created resources—such as static IP addresses, proxy-only subnets, and GKE clusters—must reside within the same VPC network.</p></li> <li><p><strong>Address subnet:</strong> when you create static IP addresses for the Gateway, they are allocated from regular subnets in the specified regions.</p></li> <li>
+<p><strong>Cluster subnet naming:</strong> Each region must have a subnet that has the same name as the subnet that the MCG config cluster resides in.</p> <ul> <li>For example, if your <code translate="no" dir="ltr">gke-west-1</code> config cluster is in <code translate="no" dir="ltr">projects/YOUR_PROJECT/regions/us-west1/subnetworks/my-custom-subnet</code>, then the regions you are requesting addresses for must also have the <code translate="no" dir="ltr">my-custom-subnet</code> subnet. If you request addresses in the <code translate="no" dir="ltr">us-east1</code> and <code translate="no" dir="ltr">us-centra1</code> regions, then a subnet named <code translate="no" dir="ltr">my-custom-subnet</code> must also exist in those regions.</li> </ul>
+</li> </ul> <h2 id="clean_up">Clean up</h2> <p>After completing the exercises on this document, follow these steps to remove resources and prevent unwanted charges incurring on your account:</p> <ol> <li><p><a href="deleting-a-cluster">Delete the clusters</a>.</p></li> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/unregister">Unregister the clusters</a> from the fleet if they don't need to be registered for another purpose.</p></li> <li>
+<p>Disable the <code translate="no" dir="ltr">multiclusterservicediscovery</code> feature:</p> 
+<pre>gcloud container fleet multi-cluster-services disable
+</pre>
+</li> <li>
+<p>Disable Multi Cluster Ingress:</p> 
+<pre>gcloud container fleet ingress disable
+</pre>
+</li> <li>
+<p>Disable the APIs:</p> 
+<pre>gcloud services disable \
+    multiclusterservicediscovery.googleapis.com \
+    multiclusteringress.googleapis.com \
+    trafficdirector.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+</li> </ol> <h2 id="troubleshooting">Troubleshooting</h2> <h3 id="proxy-only_subnet_for_internal_gateway_does_not_exist">Proxy-only subnet for internal Gateway does not exist</h3> <p>If the following event appears on your internal Gateway, a proxy-only subnet does not exist for that region. To resolve this issue, deploy a proxy-only subnet.</p> 
+<pre>generic::invalid_argument: error ensuring load balancer: Insert: Invalid value for field 'resource.target': 'regions/us-west1/targetHttpProxies/gkegw-x5vt-default-internal-http-2jzr7e3xclhj'. A reserved and active subnetwork is required in the same region and VPC as the forwarding rule.
+</pre> <h3 id="no-healthy-upstream">No healthy upstream</h3> <p><strong>Symptom:</strong></p> <p>The following issue might occur when you create a Gateway but cannot access the backend services (503 response code):</p> 
+<pre>no healthy upstream
+</pre> <p><strong>Reason:</strong></p> <p>This error message indicates that the health check prober cannot find healthy backend services. It is possible that your backend services are healthy but you might need to customize the health checks.</p> <p><strong>Workaround:</strong></p> <p>To resolve this issue, <a href="configure-gateway-resources#configure_health_check">customize your health check</a> based on your application's requirements (for example, <code translate="no" dir="ltr">/health</code>) using a <code translate="no" dir="ltr">HealthCheckPolicy</code>.</p> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about the <a href="../concepts/gateway-api">Gateway controller</a>.</li> <li>To configure backend authenticated TLS for your multi-cluster Gateway, see <a href="secure-gateway#configure-backend-tls">Configure backend TLS</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-internal-multi-cluster-gateway" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-internal-multi-cluster-gateway</a>
+  </p>
+</div>

@@ -1,0 +1,351 @@
+<h1>Troubleshoot custom ComputeClass issues</h1>  <p>This document helps you troubleshoot issues where GKE workloads fail to schedule on nodes defined by a <a href="../concepts/about-custom-compute-classes">custom ComputeClass</a>, or when the cluster autoscaler does not provision the expected machine types.</p> <p>This document is for Application developers and Platform admins and operators who use custom ComputeClasses to manage workload scheduling and node pool auto-creation in GKE. For more information about the common roles and example tasks referenced in Google Cloud content, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <aside class="note"><strong>Note:</strong><span> This document applies to both Standard and Autopilot clusters. Because direct node access such as SSH is not supported in Autopilot clusters, you must adjust your troubleshooting steps for those environments.</span></aside> <h2 id="key-concepts">Key concepts</h2> <p>To help you troubleshoot, make sure you're familiar with the following GKE components and mechanisms:</p> <ul> <li><p><strong>Custom ComputeClass</strong>: a GKE-specific resource that lets you define a prioritized list of node configurations for autoscaling. For more information, see <a href="../concepts/about-custom-compute-classes">About custom ComputeClasses</a>.</p></li> <li><p><strong>Cluster autoscaler</strong>: the component that automatically adds or removes nodes in your cluster based on workload demand. For more information, see <a href="../concepts/cluster-autoscaler"> About GKE Cluster autoscaling</a>.</p></li> <li><p><strong>Node pool auto-creation</strong>: GKE cluster autoscaler automatically creates and manages node pools based on workload requirements. For more information, see <a href="../concepts/node-auto-provisioning">About node poo- auto-creation</a>.</p></li> <li><p><strong>Fallback logic</strong>: the mechanism where the cluster autoscaler attempts to provision nodes matching your highest priority rule first. For more information, see <a href="../concepts/about-custom-compute-classes#choose-priorities">Choose your fallback compute priorities</a>.</p></li> </ul> <h2 id="symptom-navigation">Troubleshoot by symptoms</h2> <p>This document organizes troubleshooting steps in sequence, from fundamental checks to more advanced configurations. For a more comprehensive diagnosis, we recommend performing these steps in order. Alternatively, if you are experiencing specific issues, refer to the relevant links in the following table:</p> <table class="troubleshooting-custom-ComputeClass-issues"> <thead> <tr> <th>Symptom</th> <th>Troubleshooting steps</th> </tr> </thead> <tbody> <tr> <td>Pod requesting a custom ComputeClass is stuck in the <code translate="no" dir="ltr">Pending</code> state</td> <td> <ul> <li><a href="#perform-basic-checks">Perform basic diagnostic checks</a></li> <li><a href="#scheduling-configuration">Check Pod scheduling constraints</a></li> <li>
+<a href="#node-pool-config">Node pool configuration</a> (for Standard clusters)</li> <li><a href="#analyze-ca-metric">Analyze cluster autoscaler pending Pods metric</a></li> </ul> </td> </tr> <tr> <td>Cluster autoscaler is not creating new nodes that match the custom ComputeClass</td> <td> <ul> <li><a href="#computeclass-validation">Verify custom ComputeClass configurations</a></li> <li><a href="#nap-integration">Verify node pool auto-creation configuration</a></li> <li><a href="#analyze-ca-metric">Analyze cluster autoscaler pending Pods metric</a></li> <li><a href="#analyze-provisioning-failures">Analyze node provisioning failures</a></li> </ul> </td> </tr> <tr> <td>Cluster autoscaler creates default machine types instead of specialized types</td> <td> <a href="#fallback-analysis">Analyze autoscaler fallback behavior</a> </td> </tr> <tr> <td>Output from the <code translate="no" dir="ltr">kubectl describe computeclass</code> command shows an unhealthy status</td> <td> <a href="#computeclass-validation">Verify custom ComputeClass configurations</a> </td> </tr> <tr> <td>Workloads are not migrating to higher-priority nodes</td> <td> <a href="#general-autoscaler-health">Verify general cluster autoscaler health</a> </td> </tr> <tr> <td>GPU or Spot VMs workloads have scheduling issues</td> <td> <ul> <li><a href="#scheduling-configuration">Check Pod scheduling constraints</a></li> <li><a href="#advanced-config">Verify GPU or Spot VMs configuration</a></li> <li><a href="#fallback-analysis">Analyze autoscaler fallback behavior</a></li> </ul> </td> </tr> </tbody> </table> <h2 id="out-of-scope">Out-of-scope issues</h2> <p>This document doesn't address the following issues:</p> <ul> <li>General GKE networking issues, such as Pod-to-Pod connectivity or service load balancing.</li> <li>Issues related to Horizontal Pod Autoscaler (HPA) or Vertical Pod Autoscaler (VPA).</li> <li>Issues unrelated to the custom ComputeClass mechanism, such as application-level errors or PersistentVolume problems that aren't related to scheduling constraints.</li> <li>Quota or <a href="https://docs.cloud.google.com/compute/docs/troubleshooting/troubleshooting-resource-availability">resource unavailability</a> issues that aren't directly related to the ComputeClass fallback logic.</li> </ul> <h2 id="identify-placeholder-variables">Identify placeholder variables</h2> <p>To customize the commands in this document, enter your specific values into the <code translate="no" dir="ltr">Variable</code> column. Edited values are automatically synchronized across all code blocks and commands.</p> <table> <thead> <tr> <th>Variable</th> <th>Description</th> </tr> </thead> <tbody> <tr> <td><var class="edit" scope="PROJECT_ID" translate="no">PROJECT_ID</var></td> <td>Your Google Cloud project ID.</td> </tr> <tr> <td><var class="edit" scope="LOCATION" translate="no">LOCATION</var></td> <td>The Compute Engine region or zone where the cluster is located.</td> </tr> <tr> <td><var class="edit" scope="CLUSTER_NAME" translate="no">CLUSTER_NAME</var></td> <td>The name of your cluster.</td> </tr> <tr> <td><var class="edit" scope="NODE_POOL_NAME" translate="no">NODE_POOL_NAME</var></td> <td>The name of the node pool to inspect (if applicable for Standard clusters).</td> </tr> <tr> <td><var class="edit" scope="CUSTOM_COMPUTECLASS_NAME" translate="no">CUSTOM_COMPUTECLASS_NAME</var></td> <td>The name of the custom ComputeClass requested by the Pod.</td> </tr> <tr> <td><var class="edit" scope="NAMESPACE" translate="no">NAMESPACE</var></td> <td>The namespace of the Pod that is failing to schedule.</td> </tr> <tr> <td><var class="edit" scope="POD_NAME" translate="no">POD_NAME</var></td> <td>The name of the Pod that is failing to schedule.</td> </tr> </tbody> </table> <h2 id="before-you-begin">Before you begin</h2> <p> To get the permissions that you need to perform the tasks in this document, ask your administrator to grant you the following IAM roles on your Google Cloud project: </p> <ul> <li> To access GKE clusters: Kubernetes Engine Cluster Viewer (<code translate="no" dir="ltr">roles/container.viewer</code>). </li> <li> To view logs: Logs Viewer (<code translate="no" dir="ltr">roles/logging.viewer</code>). </li> <li> To manage GKE clusters: Kubernetes Engine Admin (<code translate="no" dir="ltr">roles/container.admin</code>). </li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>To configure <code translate="no" dir="ltr">kubectl</code> to communicate with the cluster, run the following command:</p> 
+<pre>  gcloud container clusters get-credentials CLUSTER_NAME
+      --location LOCATION
+      --project PROJECT_ID
+</pre> <h2 id="perform-basic-checks">Perform basic diagnostic checks</h2> <p>Verify that the core components are correctly configured and that the cluster supports custom ComputeClasses.</p> <h3 id="verify-pod-selector">Verify Pod status and selector</h3> <p>Confirm that the Pod is in the <code translate="no" dir="ltr">Pending</code> state and correctly requests the custom ComputeClass.</p> <ol> <li>
+<p>List Pods in the <code translate="no" dir="ltr">Pending</code> state:</p> 
+<pre>kubectl get pods --all-namespaces -o wide | grep Pending
+</pre>
+</li> <li>
+<p>Inspect the Pod's specification for the <code translate="no" dir="ltr">nodeSelector</code> field:</p> 
+<pre>kubectl get pod POD_NAME
+    -n NAMESPACE
+    -o jsonpath='{.spec.nodeSelector}'
+</pre>
+</li> </ol> <h4 id="evaluate_the_result">Evaluate the result</h4> <ul> <li>
+<strong>Output shows the label:</strong> the <code translate="no" dir="ltr">nodeSelector</code> field is correctly configured with the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> label.</li> <li>
+<strong>Output doesn't show the label:</strong> <ul> <li>
+<strong>Interpretation:</strong> there might be an incorrect or missing <code translate="no" dir="ltr">nodeSelector</code> field for the <code translate="no" dir="ltr">cloud.google.com/compute-class</code> label in your workload's deployment configuration.</li> <li>
+<strong>Resolution:</strong> modify your workload's YAML file, such as a Deployment or Job, to include the <code translate="no" dir="ltr">nodeSelector</code> field in the <code translate="no" dir="ltr">spec.template.spec</code> section.</li> </ul>
+</li> </ul> <h3 id="verify-version">Verify cluster version compatibility</h3> <p>Custom ComputeClasses require GKE version 1.30.3-gke.1451000 or later. Verify that your cluster is running a version that supports custom ComputeClasses.</p> <p>Check your cluster version:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME
+    --location LOCATION
+    --format="value(currentMasterVersion)"
+</pre> <h4 id="evaluate_the_result_2">Evaluate the result</h4> <ul> <li>
+<strong>Version <code translate="no" dir="ltr">1.30.3-gke.1451000</code> or later:</strong> your cluster version supports custom ComputeClasses.</li> <li>
+<strong>Version earlier than <code translate="no" dir="ltr">1.30.3-gke.1451000</code>:</strong> <ul> <li>
+<strong>Interpretation:</strong> your cluster has not been upgraded to a version that supports custom ComputeClasses.</li> <li>
+<strong>Resolution:</strong> you must <a href="../how-to/upgrading-a-cluster">upgrade your cluster</a> to use custom ComputeClasses.</li> </ul>
+</li> </ul> <h3 id="verify-provisioned-nodes">Verify provisioned nodes for the custom ComputeClass</h3> <p>To check whether there are nodes in the cluster that are associated with your ComputeClass, list the nodes matching the ComputeClass label:</p> 
+<pre>kubectl get nodes -l cloud.google.com/compute-class=CUSTOM_COMPUTECLASS_NAME
+</pre> <p>If the output is <code translate="no" dir="ltr">No resources found</code>, then there are no nodes that are associated with the ComputeClass. Verify that your workloads actually selected that ComputeClass and check your autoscaling events for scale-up errors.</p> <h2 id="computeclass-validation">Verify custom ComputeClass configurations</h2> <p>Misconfigurations in the custom <code translate="no" dir="ltr">ComputeClass</code> resource can prevent Pods from scheduling or prevent GKE from provisioning nodes correctly.</p> <h3 id="check-ccc-health">Check ComputeClass health and status</h3> <p>Verify that GKE reports the custom ComputeClass as healthy.</p> <ol> <li>
+<p>List all <code translate="no" dir="ltr">ComputeClass</code> resources:</p> 
+<pre>kubectl get computeclass
+</pre>
+</li> <li>
+<p>Describe the specific <code translate="no" dir="ltr">ComputeClass</code> resource:</p> 
+<pre>kubectl describe computeclass CUSTOM_COMPUTECLASS_NAME
+</pre>
+</li> </ol> <h4 id="evaluate_the_result_3">Evaluate the result</h4> <ul> <li>
+<p><strong>Health status shows <code translate="no" dir="ltr">True</code>:</strong> the custom ComputeClass is healthy. The following is an example of a healthy custom ComputeClass:</p> 
+<pre>Status:
+  Conditions:
+    Last Transition Time:  2024-01-19T17:18:48Z
+    Message:               CCC is healthy.
+    Reason:                Health
+    Status:                True
+    Type:                  Health
+</pre>
+</li> <li>
+<p><strong>Health status shows <code translate="no" dir="ltr">False</code>:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> the custom ComputeClass is unhealthy. Review the <code translate="no" dir="ltr">Message</code> and <code translate="no" dir="ltr">Reason</code> fields in the output to identify the issue.</li> <li>
+<strong>Resolution:</strong> perform the action that corresponds to the <code translate="no" dir="ltr">Reason</code> field in the output: <ul> <li>
+<code translate="no" dir="ltr">NodePoolNotExist</code>: ensure the referenced node pool exists or update the ComputeClass to reference an existing node pool.</li> <li>
+<code translate="no" dir="ltr">ReservationUnusable</code>: check the configuration and usage of the referenced reservation.</li> <li>
+<code translate="no" dir="ltr">Invalid machine type</code>: update the ComputeClass to use a machine type that is supported in the cluster's region or zone.</li> </ul>
+</li> </ul>
+</li> </ul> <h3 id="validate-unsatisfiable-policy">Validate the <code translate="no" dir="ltr">unsatisfiable</code> policy</h3> <p>The <code translate="no" dir="ltr">whenUnsatisfiable</code> field determines behavior when no priority rules can be met.</p> <p>Check the policy:</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME -o yaml
+</pre> <p>Inspect the <code translate="no" dir="ltr">spec.whenUnsatisfiable</code> field in the output. This field can have one of the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">DoNotScaleUp</code>: Pods remain in the <code translate="no" dir="ltr">Pending</code> state if no preferred nodes can be created.</li> <li>
+<code translate="no" dir="ltr">ScaleUpAnyway</code>: Pods might run on default node types (like E2-series) if preferred nodes are unavailable.</li> </ul> <h4 id="evaluate_the_result_4">Evaluate the result</h4> <p>The effect of the <code translate="no" dir="ltr">whenUnsatisfiable</code> policy depends on its value:</p> <ul> <li>
+<strong>If the value is <code translate="no" dir="ltr">DoNotScaleUp</code>:</strong> <ul> <li>
+<strong>Interpretation:</strong> this is expected behavior when no priority rules can be satisfied, possibly due to <a href="#check-unavailability">resource unavailability</a> or <a href="#validate-quotas">quota limits</a>. If Pods must wait for specific hardware, this value is correct.</li> <li>
+<strong>Resolution:</strong> if running the workload is more critical than running on specific hardware, change the policy to <code translate="no" dir="ltr">ScaleUpAnyway</code>.</li> </ul>
+</li> <li>
+<strong>If the value is <code translate="no" dir="ltr">ScaleUpAnyway</code>:</strong> <ul> <li>
+<strong>Interpretation:</strong> this is expected behavior. GKE is falling back to default node types because preferred nodes are unavailable.</li> <li>
+<strong>Resolution:</strong> if Pods must not run on default node types, change the policy to <code translate="no" dir="ltr">DoNotScaleUp</code>.</li> </ul>
+</li> <li>
+<strong>Default behavior:</strong> if you haven't specified a value for the <code translate="no" dir="ltr">whenUnsatisfiable</code> field and are using a GKE version earlier than 1.33, the policy defaults to <code translate="no" dir="ltr">ScaleUpAnyway</code>.</li> </ul> <p>The following example shows how to update the policy by editing the <code translate="no" dir="ltr">whenUnsatisfiable</code> field in your ComputeClass manifest:</p> 
+<pre>apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: CUSTOM_COMPUTECLASS_NAME
+spec:
+  # ... other fields
+  whenUnsatisfiable: DoNotScaleUp # or ScaleUpAnyway
+</pre> <h2 id="scheduling-configuration">Check Pod scheduling constraints</h2> <p>Ensure that your Pod specification is compatible with the attributes of nodes provisioned by the custom ComputeClass.</p> <h3 id="verify-pod-resource-requests">Verify Pod resource requests</h3> <p>Check if the Pod's CPU, memory, and GPU requests can be satisfied by at least one of the machine types defined in the custom ComputeClass's <code translate="no" dir="ltr">priorities</code> field.</p> <ol> <li>
+<p>Get Pod resource requests:</p> 
+<pre>kubectl get pod POD_NAME
+    -n NAMESPACE
+    -o jsonpath='{.spec.containers[*].resources.requests}'
+</pre> <p>Inspect the output for <code translate="no" dir="ltr">cpu</code>, <code translate="no" dir="ltr">memory</code>, and GPU requests, such as <code translate="no" dir="ltr">nvidia.com/gpu</code>.</p>
+</li> <li>
+<p>Compare these requests with the machine types defined in the <code translate="no" dir="ltr">priorities</code> field of the custom ComputeClass:</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME
+    -o jsonpath='{.spec.priorities}'
+</pre> <p>Inspect the output for the <code translate="no" dir="ltr">machineType</code> or <code translate="no" dir="ltr">machineFamily</code> fields. For each machine type in the custom ComputeClass, check its specifications in the <a href="https://docs.cloud.google.com/compute/docs/machine-types">machine types documentation</a> and verify if its allocatable resources are greater than the Pod's requests.</p>
+</li> </ol> <h4 id="evaluate_the_result_5">Evaluate the result</h4> <ul> <li>
+<strong>Resources compatible:</strong> Pod's resource requests are less than or equal to the allocatable resources of at least one machine type in the ComputeClass.</li> <li>
+<p><strong>Resources exceed capacity:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> the Pod cannot be scheduled because no machine type in the ComputeClass provides sufficient CPU, memory, or GPU. This can also happen if <code translate="no" dir="ltr">nodePoolAutoCreation</code> field is set to <code translate="no" dir="ltr">true</code> and the Pod's memory request exceeds the limits of auto-created node pools.</li> <li>
+<strong>Resolution:</strong> adjust either the Pod's resource requests or the custom ComputeClass's machine types: <ul> <li>Reduce Pod resource requests: if the resource requests are high, lower the <code translate="no" dir="ltr">cpu</code>, <code translate="no" dir="ltr">memory</code>, or <code translate="no" dir="ltr">gpu</code> values in the workload's YAML file.</li> <li>Change to larger machine types: if the Pod's requests are justified, modify the <code translate="no" dir="ltr">spec.priorities</code> field in your custom ComputeClass manifest to include larger <code translate="no" dir="ltr">machineType</code> or <code translate="no" dir="ltr">machineFamily</code> options that can fulfill the Pod demands. For example:</li> </ul>
+</li> </ul> 
+<pre>spec:
+  priorities:
+  - machineType: n2d-highmem-96 # A larger machine type
+    spot: true
+  # ... other priorities
+</pre>
+</li> </ul> <h3 id="check-taints">Check for conflicting taints and tolerations</h3> <p>Nodes created for a custom ComputeClass have the <code translate="no" dir="ltr">cloud.google.com/compute-class=<var translate="no">CUSTOM_COMPUTECLASS_NAME</var>:NoSchedule</code> taint. GKE adds this toleration to Pods automatically.</p> <p>However, specialized hardware like GPUs have additional taints such as the <code translate="no" dir="ltr">nvidia.com/gpu=present:NoSchedule</code> taint. If your ComputeClass uses nodes with specialized hardware, Pods <em>must</em> have a toleration for these taints to schedule on those nodes.</p> <p>Check the <code translate="no" dir="ltr">tolerations</code> field for the Pod:</p> 
+<pre>kubectl get pod POD_NAME
+    -n NAMESPACE
+    -o jsonpath='{.spec.tolerations}'
+</pre> <h4 id="evaluate_the_result_6">Evaluate the result</h4> <ul> <li>
+<strong>Correct tolerations:</strong> taints and tolerations are correctly configured.</li> <li>
+<p><strong>Missing tolerations:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> missing tolerations prevent the Pod from scheduling on nodes with specialized hardware taints. For example, if the ComputeClass uses GPU nodes, the Pod might be missing the <code translate="no" dir="ltr">nvidia.com/gpu=present:NoSchedule</code> toleration. For GPU-specific requirements, see <a href="#verify-gpu">Verify GPU configuration</a>.</li> <li>
+<p><strong>Resolution:</strong> in the <code translate="no" dir="ltr">tolerations</code> field in your Pod specification, add the necessary tolerations to match the taints on the nodes defined by the ComputeClass. For example, for GPU nodes, add a toleration for the <code translate="no" dir="ltr">nvidia.com/gpu=present:NoSchedule</code> taint as follows:</p> 
+<pre>spec:
+template:
+spec:
+tolerations:
+- key: "nvidia.com/gpu"
+operator: "Exists"
+effect: "NoSchedule"
+# ... other tolerations and Pod spec
+</pre>
+</li> </ul>
+</li> </ul> <h2 id="analyze-ca-metric">Analyze the cluster autoscaler pending Pods metric</h2> <p><em>Applicable GKE versions: 1.37 and later</em></p> <p>To understand why Pods requesting a specific ComputeClass are pending, use the <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_pending_pods_per_ccc</code> metric in Cloud Monitoring. This metric helps you pinpoint whether the issue is a lack of suitable nodes for the ComputeClass, a problem with provisioning, or something inherent to the Pod's configuration. This metric shows the number of Pods the cluster autoscaler is processing, broken down by the ComputeClass, the reason for being pending, and whether it's a system or user Pod.</p> <h3 id="steps-to-query">Steps to query</h3> <p>To query the metric in the Google Cloud console, perform the following steps:</p> <ol> <li>In the Google Cloud console, go to the Metrics explorer page.</li> <li>Select the <strong>Resource type:</strong> <code translate="no" dir="ltr">k8s_entity</code>.</li> <li>Select the <strong>Metric:</strong> <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_pending_pods_per_ccc</code>.</li> <li>Add a <strong>Filter:</strong> <code translate="no" dir="ltr">entity_type = ComputeClass</code>.</li> <li>Add a <strong>Filter</strong> for your specific ComputeClass: <code translate="no" dir="ltr">entity_name = "<var translate="no">COMPUTECLASS_NAME</var>"</code>. <ul> <li>To see Pods that are not using any ComputeClass, filter with <code translate="no" dir="ltr">entity_name = ""</code>.</li> </ul>
+</li> <li>
+<strong>Group by</strong> <code translate="no" dir="ltr">metric.labels.reason</code> to see the autoscaler states for these Pods. You can also group Pods by using the <code translate="no" dir="ltr">metric.labels.type</code> key label.</li> </ol> <h3 id="example-promql-query">Example PromQL query</h3> <p>To find the status of pending user Pods requesting the "<var translate="no">COMPUTECLASS_NAME</var>" ComputeClass, use the following PromQL query:</p> 
+<pre>sum by (reason) (
+  kubernetes_io:autoscaler_cluster_pending_pods_per_ccc{
+    monitored_resource="k8s_entity",
+    entity_type="ComputeClass",
+    entity_name="COMPUTECLASS_NAME",
+    type="user_pod"
+  }
+)
+</pre> <h3 id="metric-reasons">Metric reasons</h3> <p>The output of the <code translate="no" dir="ltr">metric.labels.reason</code> key label might include the following:</p> <ul> <li><p><strong><code translate="no" dir="ltr">unable_to_provision</code></strong>: The cluster autoscaler is blocked. Pods in this state for a ComputeClass can't be scheduled because new nodes can't be created. Check cluster autoscaler logs in the control plane for details about stockouts, quotas, or misconfigurations within the ComputeClass definition. Also review cluster autoscaler visibility events.</p></li> <li><p><strong><code translate="no" dir="ltr">provisioning_in_progress</code></strong>: A scale-up has been triggered for nodes that should match the ComputeClass requirements. If Pods remain here, there might be delays in node creation or readiness.</p></li> <li><p><strong><code translate="no" dir="ltr">unprocessed</code></strong>: The cluster autoscaler hasn't yet evaluated these Pods. A persistent high number might indicate autoscaler lag.</p></li> <li><p><strong><code translate="no" dir="ltr">no_action_taken</code></strong>: The cluster autoscaler has decided not to scale for these Pods. This behavior might result from Pod constraints that can't be satisfied by the ComputeClass's node types, or other cluster-level limits. Examine the Pod specification (<code translate="no" dir="ltr">kubectl describe pod</code>) and cluster autoscaler logs.</p></li> </ul> <h2 id="analyze-provisioning-failures">Analyze node provisioning failures</h2> <p><em>Applicable GKE versions: 1.37 and later</em></p> <p>To check the current health status of a ComputeClass, see <a href="#check-health">Verify ComputeClass health</a>. If you observe that Pods associated with a ComputeClass are in an <code translate="no" dir="ltr">unable_to_provision</code> state, the cluster autoscaler is not provisioning new nodes that match the requirements of the ComputeClass. You can use the <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_node_provisioning_failed_attempts_count_per_ccc</code> Cloud Monitoring metric to diagnose the root cause.</p> <ol> <li>In the Google Cloud console, go to <strong>Monitoring</strong>, then <strong>Metrics Explorer</strong>.</li> <li>Select the <strong>Resource type</strong> as <code translate="no" dir="ltr">k8s_entity</code>.</li> <li>Select the <strong>Metric</strong> as <code translate="no" dir="ltr">kubernetes.io/autoscaler/cluster_node_provisioning_failed_attempts_count_per_ccc</code>.</li> <li>Add a <strong>Filter</strong>: <code translate="no" dir="ltr">resource.labels.entity_type = ComputeClass</code>.</li> <li>Add a <strong>Filter</strong> for your specific ComputeClass: <code translate="no" dir="ltr">entity_name = "<var translate="no">CUSTOM_COMPUTECLASS_NAME</var>"</code>. <ul> <li>To see Pods <em>not</em> using any ComputeClass, filter with <code translate="no" dir="ltr">entity_name = ""</code>.</li> </ul>
+</li> <li>In the <strong>Group By</strong> section, select <code translate="no" dir="ltr">metric.labels.reason</code> and <code translate="no" dir="ltr">resource.labels.entity_name</code>.</li> <li>Choose an <strong>Aggregator</strong>, such as <code translate="no" dir="ltr">rate</code> or <code translate="no" dir="ltr">delta</code>.</li> </ol> <p>The rate or change in failures is displayed, broken down by the reason.</p> <h3 id="interpreting-failure-reasons">Interpret failure reasons</h3> <p>The <code translate="no" dir="ltr">metric.labels.reason</code> field provides insight into why node creation is failing. By identifying the primary reasons for failure, you can take corrective actions.</p> <p>The possible reasons include the following:</p> <table> <thead> <tr> <th>Reason</th> <th>Explanation</th> <th>Potential corrective actions</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">QUOTA_EXCEEDED</code></td> <td>A Google Cloud quota limit was reached (for example, CPUs, disks, or IP addresses). Review your project quotas.</td> <td>
+<a href="https://docs.cloud.google.com/docs/quota_detail/view_manage#requesting_higher_quota">Request a quota increase</a>.</td> </tr> <tr> <td><code translate="no" dir="ltr">RESOURCE_POOL_EXHAUSTED</code></td> <td>Compute Engine unavailability; insufficient capacity for the requested resources in the zone.</td> <td>Try different machine types or zones. Modify the ComputeClass to include <a href="../concepts/about-custom-compute-classes#choose-priorities">fallback machine types or zones</a>. Use <a href="https://docs.cloud.google.com/compute/docs/instances/reservations-overview">reservations</a>.</td> </tr> <tr> <td><code translate="no" dir="ltr">IP_SPACE_EXHAUSTED</code></td> <td>The node subnet has run out of available IP addresses.</td> <td>
+<a href="https://docs.cloud.google.com/vpc/docs/using-vpc#expand-subnet">Expand the subnet's primary IP address range</a>.</td> </tr> <tr> <td><code translate="no" dir="ltr">PERMISSIONS_ERROR</code></td> <td>The GKE service account lacks necessary IAM permissions to create resources (for example, instances, disks).</td> <td>Grant required roles to the <a href="../how-to/hardening-your-cluster#use_least_privilege">GKE service account</a>.</td> </tr> <tr> <td><code translate="no" dir="ltr">VM_EXTERNAL_IP_ACCESS_POLICY_CONSTRAINT</code></td> <td>An organization policy (<code translate="no" dir="ltr">constraints/compute.vmExternalIpAccess</code>) prevents creating nodes with external IPs as configured.</td> <td>Review and modify the <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/using-constraints#boolean-constraint">organization policy</a> or ComputeClass node configuration.</td> </tr> <tr> <td><code translate="no" dir="ltr">INVALID_RESERVATION</code></td> <td>The configured Compute Engine reservation is invalid, misconfigured, or doesn't match the node request.</td> <td>Check the <a href="https://docs.cloud.google.com/compute/docs/instances/reservations-overview">reservation settings</a> and ComputeClass definition.</td> </tr> <tr> <td><code translate="no" dir="ltr">RESERVATION_NOT_FOUND</code></td> <td>The specified Compute Engine reservation name does not exist.</td> <td>Verify the reservation name in the ComputeClass.</td> </tr> <tr> <td><code translate="no" dir="ltr">RESERVATION_NOT_READY</code></td> <td>The targeted reservation is not yet active or is still being provisioned.</td> <td>Wait for the reservation to become active.</td> </tr> <tr> <td><code translate="no" dir="ltr">RESERVATION_CAPACITY_EXCEEDED</code></td> <td>The reservation is full and cannot accommodate the request.</td> <td>Increase reservation size or use other machine types.</td> </tr> <tr> <td><code translate="no" dir="ltr">RESERVATION_INCOMPATIBLE</code></td> <td>The node configuration (for example, machine type or zone) does not match the reservation's properties.</td> <td>Align the ComputeClass node spec with the reservation's properties.</td> </tr> <tr> <td><code translate="no" dir="ltr">AUTOMATIC_RESERVATIONS_NOT_AVAILABLE</code></td> <td>An issue occurred while trying to use automatic reservations.</td> <td>Check the logs; you might need to contact <a href="https://cloud.google.com/support">Cloud Customer Care</a>.</td> </tr> <tr> <td><code translate="no" dir="ltr">AUTOMATIC_RESERVATIONS_NO_CAPACITY</code></td> <td>Automatic reservations lack sufficient capacity.</td> <td>Might need to switch to manual reservations or different machine types.</td> </tr> <tr> <td><code translate="no" dir="ltr">UNSUPPORTED_TPU_CONFIGURATION</code></td> <td>The requested TPU configuration is invalid or not supported in the selected zone or project.</td> <td>Check the <a href="https://docs.cloud.google.com/tpu/docs/types-zones">TPU documentation</a> and the ComputeClass.</td> </tr> <tr> <td><code translate="no" dir="ltr">GkePersistentOperationError</code></td> <td>A persistent error occurred within the GKE control plane during the node creation process.</td> <td>
+<a href="https://cloud.google.com/support">Contact Cloud Customer Care</a>.</td> </tr> <tr> <td><code translate="no" dir="ltr">OTHER</code></td> <td>A catch-all explanation for failures that don't fit into other categories.</td> <td>For more details, review the cluster autoscaler logs on the control plane.</td> </tr> </tbody> </table> <h2 id="node-pool-config">Node pool configuration (Standard clusters)</h2> <p>In GKE Standard clusters, manually created node pools must be labeled and tainted to work with a custom ComputeClass.</p> <h3 id="verify-np-labels-taints">Verify node pool labels and taints</h3> <ol> <li>
+<p>Identify node pools in your custom ComputeClass. If the custom ComputeClass uses the <code translate="no" dir="ltr">nodePools</code> field, note the names of the listed node pools:</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME -o yaml
+</pre>
+</li> <li>
+<p>For each node pool that you identified, verify its configuration:</p> 
+<pre>gcloud container node-pools describe NODE_POOL_NAME
+    --cluster CLUSTER_NAME
+    --location LOCATION
+    --format="yaml(config.labels, config.taints)"
+</pre>
+</li> </ol> <h4 id="evaluate_the_result_7">Evaluate the result</h4> <ul> <li>
+<strong>Node pool correctly configured:</strong> the node pool has the label <code translate="no" dir="ltr">cloud.google.com/compute-class: <var translate="no">CUSTOM_COMPUTECLASS_NAME</var></code> and the taint <code translate="no" dir="ltr">cloud.google.com/compute-class=<var translate="no">CUSTOM_COMPUTECLASS_NAME</var>:NoSchedule</code>.</li> <li>
+<p><strong>Node pool misconfigured:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> the node pool was not configured with the label and taint required to associate it with the custom ComputeClass.</li> <li>
+<p><strong>Resolution:</strong> <a href="https://docs.cloud.google.com/sdk/gcloud/reference/container/node-pools/update">update the node pool</a> to add the label and taint:</p> <ol> <li>
+<p>Add or update node label:</p> 
+<pre>gcloud container node-pools update NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME --location=LOCATION \
+    --node-labels=cloud.google.com/compute-class=CUSTOM_COMPUTECLASS_NAME
+</pre>
+</li> <li>
+<p>Add or update node taint:</p> 
+<pre>gcloud container node-pools update NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME --location=LOCATION \
+    --node-taints=cloud.google.com/compute-class=CUSTOM_COMPUTECLASS_NAME:NoSchedule
+</pre>
+</li> </ol>
+</li> </ul>
+</li> </ul> <h2 id="nap-integration">Verify node pool auto-creation configuration</h2> <p>For both Autopilot and Standard clusters with <code translate="no" dir="ltr">nodePoolAutoCreation</code> set to <code translate="no" dir="ltr">true</code>, node pool auto-creation must be correctly configured.</p> <h3 id="verify-nap-enabled">Verify node pool auto-creation is enabled</h3> <ol> <li>
+<p>Check if the <code translate="no" dir="ltr">nodePoolAutoCreation.enabled</code> field in the custom ComputeClass is set to <code translate="no" dir="ltr">true</code>:</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME -o yaml
+</pre>
+</li> <li>
+<p>Check if node pool auto creation is enabled on the cluster:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME
+    --location LOCATION
+    --format="value(autoscaling.enableNodeAutoprovisioning)"
+</pre>
+</li> </ol> <p>If either is disabled, node pool auto-creation won't create new node pools for your custom ComputeClass.</p> <h4 id="evaluate_the_result_8">Evaluate the result</h4> <ul> <li>
+<strong>Node pool auto-creation enabled:</strong> in the ComputeClass, the <code translate="no" dir="ltr">nodePoolAutoCreation.enabled</code> field is set to <code translate="no" dir="ltr">true</code>, and node auto-provisioning is enabled at the cluster-level.</li> <li>
+<p><strong>Node pool auto-creation disabled:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> node pool auto-creation is disabled if the value of <code translate="no" dir="ltr">nodePoolAutoCreation.enabled</code> field is <code translate="no" dir="ltr">false</code> or missing in the ComputeClass, or if cluster-level node auto-provisioning is disabled.</li> <li>
+<p><strong>Resolution:</strong> enable node pool auto-creation:</p> <ol> <li>
+<p>Edit the custom ComputeClass YAML file to include <code translate="no" dir="ltr">nodePoolAutoCreation: enabled: true</code>:</p> 
+<pre>spec:
+  # ... priorities
+  nodePoolAutoCreation:
+    enabled: true
+</pre>
+</li> <li>
+<p><a href="../how-to/node-auto-provisioning#enable">Enable node pool auto-creation at cluster level and configure resource limits</a>:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME --location LOCATION \
+  --enable-autoprovisioning \
+  --autoprovisioning-min-cpu=MIN_CPU \
+  --autoprovisioning-max-cpu=MAX_CPU \
+  --autoprovisioning-min-memory=MIN_MEMORY \
+  --autoprovisioning-max-memory=MAX_MEMORY
+</pre>
+</li> </ol>
+</li> </ul>
+</li> </ul> <h3 id="check-nap-limits">Check resource limits for node pool auto-creation</h3> <p>Node pool auto-creation has cluster-wide limits for CPU and memory. If the cluster's current usage plus the resources of a new node exceeds these limits, node pool auto-creation won't provision new nodes.</p> <ol> <li>
+<p>View the resource limits:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME
+    --location LOCATION
+--format="value(autoscaling.resourceLimits)"
+</pre> <p>The output lists the <code translate="no" dir="ltr">resourceType</code>, <code translate="no" dir="ltr">minimum</code>, and <code translate="no" dir="ltr">maximum</code> fields for CPU and memory (in GB).</p>
+</li> <li><p>Review the machine types in your custom ComputeClass's priorities. Check their CPU and memory specifications in the <a href="https://docs.cloud.google.com/compute/docs/machine-types">machine types documentation</a>.</p></li> <li><p>Determine the current total CPU and memory capacity of all nodes in the cluster. The sum of current capacity plus the resources of a potential new node must not exceed the maximum limit for node pool auto-creation.</p></li> </ol> <h4 id="evaluate_the_result_9">Evaluate the result</h4> <ul> <li>
+<strong>Sufficient capacity:</strong> the cluster has sufficient CPU and memory capacity within resource limits for node pool auto-creation to provision a new node.</li> <li>
+<p><strong>Limits exceeded:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> node pool auto-creation can't provision new nodes because the cluster has reached CPU or memory limits, or limits were set too low for the machine types in the ComputeClass.</li> <li>
+<p><strong>Resolution:</strong> increase the resource limits for node pool auto-creation:</p> <ol> <li><p>Determine new maximum limits that account for current usage and future growth, including the largest machine types in the custom ComputeClass.</p></li> <li>
+<p><a href="../how-to/node-auto-provisioning#set_limits">Update resource limits for node pool auto-creation</a>. You can set multiple resources in one command:</p> 
+<pre>gcloud container clusters update CLUSTER_NAME --location LOCATION \
+  --set-nap-resource-limits resourceType=cpu,maximum=NEW_MAX_CPU \
+  --set-nap-resource-limits resourceType=memory,maximum=NEW_MAX_GB
+</pre>
+</li> </ol>
+</li> </ul>
+</li> </ul> <h2 id="fallback-analysis">Analyze autoscaler fallback behavior</h2> <p>This section helps you investigate external factors to understand why the cluster autoscaler might be skipping preferred options and using fallbacks, or failing to scale up.</p> <p>Custom ComputeClasses use prioritized fallback logic. If a Pod isn't scheduling on nodes matching the highest-priority rule, it's often due to constraints like resource unavailability or project quotas. When GKE can't provision nodes matching a specific priority rule, for example, due to a <code translate="no" dir="ltr">ZONE_RESOURCE_POOL_EXHAUSTED</code> or <code translate="no" dir="ltr">QUOTA_EXCEEDED</code> error from Compute Engine, the cluster autoscaler immediately tries the next rule in the <code translate="no" dir="ltr">priorities</code> list. There is no waiting period before GKE falls back to the next priority, except when using TPUs or the Flex Start provisioning model, which support a configurable delay.</p> <h3 id="check-unavailability">Check for resource unavailability</h3> <p>Verify if resources are unavailable in the specified zone by checking cluster autoscaler logs or Compute Engine Managed instance group (MIG) errors.</p> <p><strong>Option 1: Check cluster autoscaler visibility events</strong></p> <p>In the Google Cloud console, go to <strong>Cloud Logging &gt; Logs Explorer</strong> and run the following query to find autoscaler events that might indicate resource unavailability:</p> 
+<pre>resource.type="k8s_cluster"
+resource.labels.location="LOCATION"
+resource.labels.cluster_name="CLUSTER_NAME"
+log_id("container.googleapis.com/cluster-autoscaler-visibility")
+jsonPayload.noScaleUpReason.messageId="no.scale.up.nap.resource.exhausted"
+</pre> <p><strong>Option 2: Check MIG errors</strong></p> <p>You can check for MIG errors in the Google Cloud console or by using a Cloud Logging query.</p> <ul> <li>
+<p><strong>Using Google Cloud console</strong>:</p> <ol> <li>In the Google Cloud console, go to <strong>Compute Engine</strong> &gt; <strong>Instance groups</strong>.</li> <li>Find the MIG corresponding to the node pool that is failing to scale up.</li> <li>Click the MIG name and go to the <strong>Errors</strong> tab. Look for messages indicating resource exhaustion.</li> </ol>
+</li> <li>
+<p><strong>Using Cloud Logging query</strong>:</p> <ol> <li>In the Google Cloud console, go to <strong>Cloud Logging &gt; Logs explorer</strong>.</li> <li>Run the following query to check for resource exhaustion errors from the MIG:</li> </ol> 
+<pre>resource.type="gce_instance"
+log_id("cloudaudit.googleapis.com/activity")
+protoPayload.status.message:("ZONE_RESOURCE_POOL_EXHAUSTED" OR "does not have enough resources available to fulfill the request" OR "resource pool exhausted" OR "does not exist in zone")
+</pre>
+</li> </ul> <h4 id="evaluate_the_result_10">Evaluate the result</h4> <ul> <li>
+<strong>Resources are available:</strong> if logs don't show the <code translate="no" dir="ltr">ZONE_RESOURCE_POOL_EXHAUSTED</code> messages, resource unavailability is unlikely to be the cause of scale-up failure.</li> <li>
+<p><strong>Resources are not available:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> node provisioning fails due to a temporary high demand for a specific machine type (especially Spot VMs or GPUs) in that zone, or because a Pod is constrained by PersistentVolume affinity to a zone that's experiencing resource unavailability.</li> <li>
+<p><strong>Resolution:</strong> Resource unavailability is transient, but you can improve resilience by adding flexibility to your configuration:</p> <ul> <li>
+<p><strong>Diversify machine types</strong>: ensure the <code translate="no" dir="ltr">spec.priorities</code> field in the custom ComputeClass contains multiple machine types or families as fallbacks:</p> 
+<pre>spec:
+  priorities:
+  - machineFamily: c3  # Highest priority
+  - machineFamily: n2d # Fallback option
+  - machineFamily: e2  # Lowest priority
+</pre>
+</li> <li><p><strong>Use regional clusters</strong>: if the cluster is zonal, it is vulnerable to resource unavailability in that single zone. Using regional clusters lets the cluster autoscaler attempt to provision nodes in other zones within the region where capacity might be available.</p></li> <li><p><strong>Use Compute Engine reservations</strong>: for critical workloads that cannot tolerate delays, <a href="https://docs.cloud.google.com/compute/docs/instances/reservations-overview">create Compute Engine reservations</a> to help ensure capacity for specific machine types.</p></li> </ul>
+</li> </ul>
+</li> </ul> <h3 id="validate-quotas">Verify project quotas</h3> <p>Confirm that your project has sufficient quota for the resources, such as CPUs, GPUs, and IP addresses required by the new nodes.</p> <ol> <li>
+<p>Check autoscaler logs for quota errors. Use Cloud Logging to search for quota-related error messages in the autoscaler visibility events:</p> 
+<pre>resource.type="k8s_cluster"
+resource.labels.location="LOCATION"
+resource.labels.cluster_name="CLUSTER_NAME"
+log_id("container.googleapis.com/cluster-autoscaler-visibility")
+jsonPayload.noScaleUpReason.messageId="no.scale.up.nap.quota.exceeded"
+</pre> <p>Alternatively, use the following Cloud Logging query to check logs for quota-related errors from the MIG:</p> 
+<pre>resource.type="gce_instance"
+protoPayload.methodName:"compute.instances.insert"
+protoPayload.status.message:"QUOTA_EXCEEDED"
+severity=ERROR
+</pre>
+</li> <li>
+<p>Review quotas in Google Cloud console:</p> <ol> <li>In the Google Cloud console, go to <strong>IAM &amp; Admin &gt; Quotas</strong>.</li> <li>Filter for the <strong>Compute Engine API</strong> service.</li> <li>Check the usage for relevant metrics like CPUs, GPUs (all types), and in-use IP addresses for the region your GKE cluster is in. Verify that current usage is not at the limit.</li> </ol>
+</li> </ol> <h4 id="evaluate_the_result_11">Evaluate the result</h4> <ul> <li>
+<strong>Quota below limits:</strong> if quota usage is below the quota limits and no <code translate="no" dir="ltr">QUOTA_EXCEEDED</code> errors are found in the logs, quota limits won't block scale-up.</li> <li>
+<strong>Quota exceeded:</strong> <ul> <li>
+<strong>Interpretation:</strong> node provisioning fails due to insufficient quota for resources like CPUs, GPUs, IP addresses, or MIGs.</li> <li>
+<strong>Resolution:</strong> if your project has reached a quota limit, <a href="https://docs.cloud.google.com/docs/quota_detail/view_manage#requesting_higher_quota">request a quota increase</a>.</li> </ul>
+</li> </ul> <h2 id="advanced-config">Advanced configurations</h2> <p>Configurations such as GPUs, Spot VMs, and Compute Engine reservations have their own specific requirements and potential points of failure that need to be checked.</p> <h3 id="verify-gpu">Verify GPU configuration</h3> <p>For custom ComputeClasses that provision GPU nodes, validate the GPU configuration in the custom ComputeClass and ensure the Pod has the mandatory <code translate="no" dir="ltr">nvidia.com/gpu</code> toleration.</p> <ol> <li>
+<p>Check the custom ComputeClass's YAML for a <code translate="no" dir="ltr">gpu</code> block within a priority rule:</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME -o yaml
+</pre> <p>The <code translate="no" dir="ltr">gpu</code> block should specify a <code translate="no" dir="ltr">type</code> field and <code translate="no" dir="ltr">count</code> field, for example:</p> 
+<pre>priorities:
+- machineType: a2-highgpu-1g
+  gpu:
+    type: nvidia-tesla-a100
+    count: 1
+</pre>
+</li> <li>
+<p>Inspect the Pod for GPU toleration. Any Pod that needs to be scheduled on a GPU node <em>must</em> have the <code translate="no" dir="ltr">nvidia.com/gpu</code> toleration, even if the Pod doesn't request a GPU itself.</p> 
+<pre>kubectl get pod POD_NAME -n NAMESPACE -o jsonpath='{.spec.tolerations}'
+</pre> <p>Check for the toleration under <code translate="no" dir="ltr">spec.tolerations</code> field.</p>
+</li> </ol> <h4 id="evaluate_the_result_12">Evaluate the result</h4> <ul> <li>
+<p><strong>GPU configured correctly:</strong> if the ComputeClass defines GPU <code translate="no" dir="ltr">type</code> and <code translate="no" dir="ltr">count</code>, and Pods include the <code translate="no" dir="ltr">nvidia.com/gpu</code> toleration, the GPU configuration is correct. Following shows the required toleration:</p> 
+<pre>tolerations:
+- key: "nvidia.com/gpu"
+  operator: "Exists"
+  effect: "NoSchedule"
+</pre>
+</li> <li>
+<p><strong>GPU misconfigured:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> the Pod might be missing the required <code translate="no" dir="ltr">nvidia.com/gpu</code> toleration, the ComputeClass might be unhealthy due to GPU field mismatches, or the GKE version might not handle GPU configuration correctly.</li> <li>
+<strong>Resolution:</strong> perform one of the following actions: <ul> <li>Modify the workload's YAML file to include the mandatory GPU toleration and re-apply the YAML file.</li> <li>Upgrade the GKE cluster. If the custom ComputeClass is unhealthy and the issue is related to GPU fields, check for known issues and upgrade to a patched GKE version, for example, 1.31.8-gke.1045000 or later.</li> </ul>
+</li> </ul>
+</li> </ul> <h3 id="validate-spot-vms-configuration">Verify Spot VMs configuration</h3> <p>If you use Spot VMs, ensure that <code translate="no" dir="ltr">spot: true</code> setting is in the correct priority rules in your ComputeClass manifest. Also, ensure that you understand the cluster autoscaler's pricing logic.</p> <p>Inspect the ComputeClass manifest:</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME -o yaml
+</pre> <p>In the output, look for <code translate="no" dir="ltr">spot: true</code> in <code translate="no" dir="ltr">spec.priorities</code> field, for example:</p> 
+<pre>priorities:
+- machineFamily: n2d
+  spot: true
+</pre> <p>The cluster autoscaler might use pricing data from <code translate="no" dir="ltr">us-central1</code> as a baseline when comparing the cost of different Spot VMs types, which can lead to seemingly non-optimal choices in other regions. This is a known behavior.</p> <h4 id="evaluate_the_result_13">Evaluate the result</h4> <ul> <li>
+<strong>Spot VMs configured correctly:</strong> if the <code translate="no" dir="ltr">spot: true</code> field is specified and cluster autoscaler provisions Spot VMs, the configuration works as expected.</li> <li>
+<p><strong>Spot VMs failing to schedule:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> Pods requiring Spot VMs might be failing to schedule on Spot VMs due to resource unavailability in the target zone, or because the cluster autoscaler might be choosing a different VM type based on its <code translate="no" dir="ltr">us-central1</code> pricing model.</li> <li>
+<p><strong>Resolution:</strong></p> <ul> <li>If you suspect resource unavailability, see <a href="#check-unavailability">Check for resource unavailability</a>.</li> <li>
+<p>To control the selection of Spot VMs, explicitly list <code translate="no" dir="ltr">machineType</code> entries in your <code translate="no" dir="ltr">priorities</code> field from cheapest to most expensive for your region. This approach gives you direct control over the fallback order. For example:</p> 
+<pre>spec:
+  priorities:
+  - machineType: t2d-standard-48 # Cheapest in this region
+    spot: true
+  - machineType: n2d-standard-48 # Fallback Spot option
+    spot: true
+  - machineType: n2d-standard-48 # On-demand fallback
+    spot: false
+</pre>
+</li> </ul>
+</li> </ul>
+</li> </ul> <h2 id="general-autoscaler-health">General cluster autoscaler health</h2> <p>This section helps you check for issues that might not be directly related to the custom ComputeClass configuration but might be affecting its operation.</p> <h3 id="check-operations">Check for concurrent operations</h3> <p>Verify that no other cluster or node pool operations are in progress concurrently. GKE has limits on concurrent operations, which can block autoscaling.</p> <p>List ongoing operations that are not in a <code translate="no" dir="ltr">DONE</code> state:</p> 
+<pre>gcloud container operations list \
+    --location=LOCATION \
+    --filter='targetLink~"/clusters/CLUSTER_NAME" AND status!=DONE'
+</pre> <p>If the command returns any operations, an action like a cluster upgrade, node pool creation, or another modification might be in progress. Autoscaling events might be blocked until this operation completes.</p> <h4 id="evaluate_the_result_14">Evaluate the result</h4> <ul> <li>
+<strong>No concurrent operations:</strong> if the <code translate="no" dir="ltr">list</code> command returns an empty list, cluster autoscaler is not blocked by any operations.</li> <li>
+<p><strong>Concurrent operations found:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> if the command lists operations with status <code translate="no" dir="ltr">RUNNING</code> or <code translate="no" dir="ltr">PENDING</code>, a concurrent operation, such as a cluster upgrade or node pool modification, might be in progress and blocking autoscaling.</li> <li>
+<p><strong>Resolution:</strong> wait for the ongoing operation to complete. You can monitor the status using an operation ID by using:</p> 
+<pre>gcloud container operations wait OPERATION_ID --location LOCATION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">OPERATION_ID</var></code> with the ID from the <code translate="no" dir="ltr">list</code> command's output. After the blocking operation completes, cluster autoscaler should resume normal function.</p>
+</li> </ul>
+</li> </ul> <h3 id="review-active-migration">Review active migration</h3> <p>If you observe workloads staying on lower-priority nodes when higher-priority nodes are available, verify whether active migration is enabled. If the <code translate="no" dir="ltr">activeMigration.optimizeRulePriority</code> field is set to <code translate="no" dir="ltr">false</code> or omitted in your ComputeClass, GKE won't automatically move workloads to higher-priority nodes when they become available.</p> <ol> <li>
+<p>To check Pod tolerations, review <code translate="no" dir="ltr">spec.tolerations</code> field. If the Pod has tolerations that match taints on multiple node pools of different priorities, the scheduler might place it on a lower-priority node if it's available first.</p> 
+<pre>kubectl get pod POD_NAME -n NAMESPACE -o jsonpath='{.spec.tolerations[*]}{"\n"}'
+</pre>
+</li> <li>
+<p>To check if active migration is enabled, inspect the ComputeClass manifest for the <code translate="no" dir="ltr">spec.activeMigration.optimizeRulePriority</code> field.</p> 
+<pre>kubectl get computeclass CUSTOM_COMPUTECLASS_NAME -o yaml
+</pre>
+</li> </ol> <h4 id="evaluate_the_result_15">Evaluate the result</h4> <ul> <li>
+<strong>Active migration enabled:</strong> if the <code translate="no" dir="ltr">activeMigration.optimizeRulePriority</code> field is <code translate="no" dir="ltr">true</code>, GKE attempts to move workloads to higher-priority nodes when they become available.</li> <li>
+<p><strong>Active migration disabled or ineffective:</strong></p> <ul> <li>
+<strong>Interpretation:</strong> if <code translate="no" dir="ltr">activeMigration.optimizeRulePriority</code> field is <code translate="no" dir="ltr">false</code> or omitted, or if Pod <a href="#check-taints">tolerations</a> are too broad, workloads stay on lower-priority nodes when higher-priority nodes are available. This approach allows workloads to be scheduled on lower-priority nodes that become available first.</li> <li>
+<p><strong>Resolution:</strong> if you want workloads to move to higher-priority nodes, perform one of the following actions:</p> <ul> <li>Use more specific scheduling constraints like <code translate="no" dir="ltr">nodeAffinity</code> to prefer higher-priority node pools.</li> <li>
+<p>Edit the ComputeClass manifest to set <code translate="no" dir="ltr">activeMigration.optimizeRulePriority: true</code> and apply the YAML file:</p> 
+<pre>spec:
+  activeMigration:
+    optimizeRulePriority: true
+</pre>
+</li> </ul>
+</li> </ul>
+</li> </ul> <h2 id="get-support">Get support</h2> <ul> <li>
+<p>If you can't find a solution to your problem in the documentation, see <a href="../getting-support" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Get support</a> for further help, including advice on the following topics:</p> <ul> <li>Opening a support case by contacting <a href="https://cloud.google.com/support-hub" track-type="troubleshooting" track-name="internalLink" track-metadata-position="body">Cloud Customer Care</a>.</li> <li>Getting support from the community by <a href="http://stackoverflow.com/questions/tagged/google-kubernetes-engine" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">asking questions on StackOverflow</a> and using the <code translate="no" dir="ltr">google-kubernetes-engine</code> tag to search for similar issues. You can also join the <a href="https://googlecloud-community.slack.com/messages/C0B9GKTKJ/" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body"><code translate="no" dir="ltr">#kubernetes-engine</code> Slack channel</a> for more community support.</li> <li>Opening issues or feature requests by using the <a href="https://docs.cloud.google.com/support/docs/issue-trackers" track-type="troubleshooting" track-name="externalLink" track-metadata-position="body">public issue tracker</a>.</li> </ul>
+</li> </ul> <h2 id="whats-next">What's next</h2> <ul> <li><a href="../best-practices/computeclasses">Read best practices for ComputeClasses</a></li> <li><a href="../how-to/run-pods-default-compute-classes">Apply ComputeClasses to Pods by default</a></li> <li><a href="../how-to/node-taints">Configure workload separation in GKE</a></li> <li><a href="cluster-autoscaler-scale-up">Troubleshoot cluster autoscaler scale-up issues</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/custom-computeclass" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/custom-computeclass</a>
+  </p>
+</div>

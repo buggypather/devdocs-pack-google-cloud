@@ -1,0 +1,432 @@
+<h1>Configure semantic governance policies</h1> <aside class="beta"> <p><b>Preview</b></p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://cloud.google.com/terms/service-terms#1">Service Specific Terms</a> and the <a href="https://cloud.google.com/terms/service-terms#20">Generative AI Service Specific Terms</a>, as well as the <a href="https://cloud.google.com/trustedtester/aitos">Additional Terms for Generative AI Preview Products</a>. </p> <p> When you use this feature with AI Agents, the terms applicable to AI Agents in the Agreement apply. </p> <p> Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages">launch stage descriptions</a>.</p> </aside> <aside class="note"> <p><b>Note:</b> Semantic governance policy is a Generative AI Service that uses an LLM to implement natural language policies. LLMs are probabilistic and can make mistakes. Verdicts may not be accurate.</p> </aside> <h2 id="configure-sgp">Configure Semantic governance policies and the policy engine</h2> <p>This section covers the transition from infrastructure readiness to policy authoring.</p> <h3 id="prerequisites">Prerequisites</h3> <p>Before you configure Semantic governance policies, complete the following steps.</p> <h4 id="enable_required_apis">Enable required APIs</h4> <p>Before you begin, enable the APIs required for Semantic governance policy and its networking components:</p> 
+<pre>gcloud services enable \
+    aiplatform.googleapis.com \
+    agentregistry.googleapis.com \
+    networkservices.googleapis.com \
+    networksecurity.googleapis.com \
+    compute.googleapis.com \
+    dns.googleapis.com \
+    --project=PROJECT_ID
+</pre> <h4 id="grant-p4sa-iam">Grant IAM permissions to the Gemini Enterprise Agent Platform service account (Google-managed binding only)</h4> <p>If you use the <a href="#google-managed">Google-managed binding</a> option during provisioning, grant the Gemini Enterprise Agent Platform service account (P4SA) the roles it needs to create the Private Service Connect (PSC) endpoint (<code translate="no" dir="ltr">roles/compute.networkAdmin</code>) and DNS record set (<code translate="no" dir="ltr">roles/dns.admin</code>) in your project. If you use the <a href="#self-managed">Self-managed binding</a> option, you can skip this step because you create those network resources yourself.</p> <p>Create the service identity (idempotent) and grant the roles:</p> 
+<pre>export PROJECT_NUM=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+
+gcloud beta services identity create \
+    --service=aiplatform.googleapis.com \
+    --project=PROJECT_ID
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-${PROJECT_NUM}@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/compute.networkAdmin"
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-${PROJECT_NUM}@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/dns.admin"
+</pre> <p>The corresponding removal commands are in <a href="#remove-iam-bindings">Remove the IAM bindings</a> under the cleanup section.</p> <aside class="note"> <p><b>Prerequisites:</b> This guide assumes you have already created an Agent Gateway, including the service identity and required IAM roles. For instructions, see <a href="../gateways/set-up-agent-gateway">Set up Agent Gateway</a>.</p> </aside> <aside class="note"> <p><b>Administrative quotas:</b> Semantic governance policy management operations—such as creating policies or enabling the policy engine—consume administrative quotas. For information about rate limits and how to view your quota in the Google Cloud console, see <a href="../../models/quotas#sgp-quotas">Semantic governance policy quotas</a>.</p> </aside> <h4 id="agent-eligibility">Agent eligibility requirements</h4> <p>To appear in a Semantic governance policy's agent selector in the Google Cloud console, an agent's reasoning engine must have been deployed with <strong>both</strong> <code translate="no" dir="ltr">identity_type=AGENT_IDENTITY</code> and <code translate="no" dir="ltr">agent_gateway_config</code> set. If either is missing, the Google Cloud console filters the agent out of the selector. The API and <code translate="no" dir="ltr">gcloud</code> return an explicit error instead.</p> <p>To deploy an agent that meets these requirements, follow <a href="../../scale/runtime/agent-gateway-runtime-deploy">Route Agent Runtime traffic through Agent Gateway</a>. Both fields are immutable on an existing reasoning engine, so an agent deployed without them must be redeployed — patching will not work.</p> <p>To verify an existing agent is eligible, confirm that its reasoning engine's <code translate="no" dir="ltr">spec.effectiveIdentity</code> starts with <code translate="no" dir="ltr">agents.global.</code>:</p> 
+<pre>gcloud ai reasoning-engines describe REASONING_ENGINE_ID \
+    --region=LOCATION \
+    --project=PROJECT_ID \
+    --format='value(spec.effectiveIdentity)' \
+    | grep -q '^agents.global.' \
+    &amp;&amp; echo "Eligible" || echo "Not eligible"
+</pre> <h4 id="supported-providers">Supported model providers</h4> <p>Your agent must call its model through one of the <a href="semantic-governance-overview#supported-providers">supported model providers</a>, without streaming. Note the request path for each provider; the authorization policy that you create in <a href="#connect-policy-engine">Connect the policy engine to Agent Gateway</a> must match it.</p> <h3 id="supported-locations">Supported locations</h3> <p>The Semantic governance policy engine and Semantic governance policies are supported in the following regional locations:</p> <table> <thead> <tr> <th style="text-align: left">Geography</th> <th style="text-align: left">Available regions</th> </tr> </thead> <tbody> <tr> <td style="text-align: left"><strong>Americas</strong></td> <td style="text-align: left">
+<code translate="no" dir="ltr">us-central1</code>, <code translate="no" dir="ltr">us-east1</code>, <code translate="no" dir="ltr">us-east4</code>, <code translate="no" dir="ltr">us-west1</code>
+</td> </tr> <tr> <td style="text-align: left"><strong>Europe</strong></td> <td style="text-align: left">
+<code translate="no" dir="ltr">europe-southwest1</code>, <code translate="no" dir="ltr">europe-west1</code>, <code translate="no" dir="ltr">europe-west4</code>, <code translate="no" dir="ltr">europe-west8</code>
+</td> </tr> </tbody> </table> <h3 id="provisioning-and-enablement">Provisioning and enablement</h3> <p>Enable the Semantic governance policy engine. This provisions the necessary runtime environment. Provisioning usually takes approximately 2 to 3 minutes to complete. However, when demand is high or the warmup pool is refilling, provisioning can take up to 20 minutes. Choose one of the following options for provisioning:</p> <ul> <li>
+<strong><a href="#google-managed">Google-managed binding</a>:</strong> Google creates the underlying network resources in your Google Cloud project and manages their lifecycle automatically.</li> <li>
+<strong><a href="#self-managed">Self-managed binding</a>:</strong> You create and manage the necessary network resources (<code translate="no" dir="ltr">network</code>, <code translate="no" dir="ltr">subnetwork</code>, and <code translate="no" dir="ltr">dnsZoneName</code>) directly in your Google Cloud project.</li> </ul> <p>After you complete the provisioning, you must <a href="#connect-policy-engine">connect the policy engine to Agent Gateway</a>.</p> <h4 id="google-managed">Google-managed binding</h4> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">curl -X PATCH \
+    "https://LOCATION-aiplatform.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicyEngine?updateMask=gatewayConfigs" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{ "gatewayConfigs": {
+        "GATEWAY_NAME": {
+          "network": "NETWORK_NAME",
+            "subnetwork": "SUBNETWORK_NAME",
+            "dnsZoneName": "DNS_NAME" }
+        }
+      }'
+</pre></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud beta ai semantic-governance-policy-engine update \
+--location=LOCATION \
+--project=PROJECT_ID \
+--gateway-config="name='GATEWAY_NAME',network=NETWORK_NAME,subnetwork=SUBNETWORK_NAME,dns-zone-name=DNS_NAME"
+</pre></section> </div> <aside class="note"> <p><b>Note:</b> When you specify the <code translate="no" dir="ltr">gatewayConfig</code> parameter, all subsequent updates must include existing gateways to keep and new gateways to add. Exclude gateways that you want to remove.</p> </aside> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr">GATEWAY_NAME</code> with a unique gateway name.</li> <li>
+<code translate="no" dir="ltr">DNS_NAME</code> with the name of the private DNS zone to use.</li> <li>
+<code translate="no" dir="ltr">PROJECT_ID</code> with your Google Cloud project ID (<code translate="no" dir="ltr">projects/PROJECT_ID/global/networks/default</code>). If you use a custom network and subnet, replace the complete <code translate="no" dir="ltr">network</code> and <code translate="no" dir="ltr">subnetwork</code> resource paths accordingly.</li> </ul> <aside class="note"> <p>Format for the network name is `projects/PROJECT_ID/global/networks/NETWORK_NAME` and format of the subnetwork name is `projects/PROJECT_ID/regions/LOCATION/subnetworks/SUBNET_NAME`</p> </aside> <h5 id="retrieve-managed-dns">Retrieve the automatically generated DNS hostname</h5> <p>When you provision the engine with Google-managed binding, Google automatically creates a Private Service Connect (PSC) endpoint and registers a DNS A-record in your private DNS zone. The FQDN of this record serves as the <code translate="no" dir="ltr">SGP_DNS_HOSTNAME</code> and is populated in the <code translate="no" dir="ltr">dnsRecord</code> output-only field of your gateway configuration.</p> <p>To retrieve the automatically generated DNS hostname:</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Run the following command to describe the policy engine configuration:</p> 
+<pre data-language="bash">gcloud beta ai semantic-governance-policy-engine describe \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+<p>Send a GET request to retrieve the engine resource:</p> 
+<pre data-language="">curl "https://LOCATION-aiplatform.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicyEngine" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)"
+</pre></section> </div> <p>In the response, locate the <code translate="no" dir="ltr">dnsRecord</code> field under <code translate="no" dir="ltr">gatewayConfigs.GATEWAY_NAME.dnsRecord</code>. Save this FQDN—you'll need it as the <code translate="no" dir="ltr">SGP_DNS_HOSTNAME</code> when you <a href="#connect-policy-engine">connect the policy engine to Agent Gateway</a>.</p> <h4 id="self-managed">Self-managed binding</h4> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">curl  -X PATCH "https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicyEngine" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicyEngine"
+    }'
+</pre></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud beta ai semantic-governance-policy-engine update \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre></section> </div> <p>This command returns a long-running operation. You can poll the operation status by replacing <code translate="no" dir="ltr"><var label="operation" translate="no">OPERATION</var></code> with the <code translate="no" dir="ltr">name</code> value from the response:</p> 
+<pre>curl "https://LOCATION-aiplatform.googleapis.com/v1beta1/OPERATION" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json"
+</pre> <p>Alternatively, check the overall engine status until the <code translate="no" dir="ltr">state</code> field returns <code translate="no" dir="ltr">ACTIVE</code>:</p> 
+<pre>curl "https://LOCATION-aiplatform.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicyEngine" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json"
+</pre> <aside class="note"> <p><b>Provisioning requirement:</b> Wait until the <code translate="no" dir="ltr">state</code> field returns <code translate="no" dir="ltr">ACTIVE</code> before proceeding. Save the <code translate="no" dir="ltr">pscServiceAttachment</code> value from the response — you'll need it when you <a href="#configuring-the-network">configure the network</a>.</p> </aside> <h4 id="configuring-the-network">Configuring the network (self-managed only)</h4> <p>After the policy engine is provisioned, configure the networking components required for Agent Gateway to communicate with the policy engine.</p> <p>While Google automatically creates the PSC endpoint in a Google-managed tenant project for the Google-managed path, for the self-managed path, you must manually create and manage the PSC endpoint in your own Google Cloud project.</p> <p><strong>1. Provision VPC network and subnet</strong></p> <p>In this step, you create a VPC network, a subnet, and a proxy-only subnet for agentic traffic. The IP ranges shown (<code translate="no" dir="ltr">10.11.12.0/24</code> and <code translate="no" dir="ltr">10.11.13.0/24</code>) are examples. You can use any RFC 1918 private range that fits your network design.</p> <aside class="note"> <p><b>Subnet requirements:</b> The subnet range mustn't overlap with ranges reserved by Agent Gateway for internal use (<code translate="no" dir="ltr">10.0.0.0/24</code>, <code translate="no" dir="ltr">10.0.1.0/24</code>, <code translate="no" dir="ltr">10.0.2.0/24</code>). For the full list of subnet requirements, see <a href="../gateways/set-up-vpc-connectivity#configure-vpc-connectivity">Configure VPC connectivity</a>.</p> </aside> <ol> <li>
+<p>Create the VPC network:</p> 
+<pre>gcloud compute networks create NETWORK_NAME \
+    --subnet-mode=auto \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var label="network identifier" translate="no">NETWORK_NAME</var></code> with the name for your VPC network (for example, <code translate="no" dir="ltr">agent-network</code>).</p>
+</li> <li>
+<p>Create the subnet:</p> 
+<pre>gcloud compute networks subnets create SUBNET_NAME \
+    --network=NETWORK_NAME \
+    --region=LOCATION \
+    --range=10.11.12.0/24 \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var label="subnet identifier" translate="no">SUBNET_NAME</var></code> with the name for your subnet (for example, <code translate="no" dir="ltr">agent-subnet</code>).</p>
+</li> <li>
+<p>Create the proxy-only subnet (required for managed load balancers):</p> 
+<pre>gcloud compute networks subnets create PROXY_SUBNET_NAME \
+    --network=NETWORK_NAME \
+    --region=LOCATION \
+    --range=10.11.13.0/24 \
+    --purpose=REGIONAL_MANAGED_PROXY --role=ACTIVE \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var label="proxy subnet identifier" translate="no">PROXY_SUBNET_NAME</var></code> with the name for your proxy-only subnet (for example, <code translate="no" dir="ltr">agent-proxy-subnet</code>).</p>
+</li> </ol> <p><strong>2. Provision private DNS zone</strong></p> <p>Create a private DNS zone to allow Agent Gateway to resolve the policy engine's hostname:</p> 
+<pre>gcloud dns managed-zones create DNS_ZONE_NAME \
+    --description="Private zone for my internal agentic VPC services" \
+    --dns-name="internal.example.com." \
+    --visibility=private \
+    --networks=NETWORK_NAME \
+    --project=PROJECT_ID
+</pre>
+
+<pre>Replace the following:
+</pre> <ul> <li>
+<code translate="no" dir="ltr"><var label="dns zone name" translate="no">DNS_ZONE_NAME</var></code>: the name for your DNS zone (for example, <code translate="no" dir="ltr">my-private-zone</code>).</li> <li>
+<code translate="no" dir="ltr"><var label="dns name" translate="no">internal.example.com.</var></code>: the DNS name for your zone, including the trailing dot.</li> </ul> <p><strong>3. Create network attachment</strong></p> <p>Create a network attachment to allow Agent Gateway to connect to resources in your VPC. The connection preference must be set to <code translate="no" dir="ltr">ACCEPT_AUTOMATIC</code>.</p> 
+<pre>gcloud compute network-attachments create NETWORK_ATTACHMENT_NAME \
+    --region=LOCATION \
+    --subnets=SUBNET_NAME \
+    --connection-preference=ACCEPT_AUTOMATIC \
+    --project=PROJECT_ID
+</pre>
+
+<pre>Replace the following:
+</pre> <ul> <li>
+<code translate="no" dir="ltr"><var label="network attachment name" translate="no">NETWORK_ATTACHMENT_NAME</var></code>: the name for your network attachment (for example, <code translate="no" dir="ltr">sgp-nw-attachment</code>).</li> <li>
+<code translate="no" dir="ltr"><var label="subnet identifier" translate="no">SUBNET_NAME</var></code>: the subnet you created in step 1.</li> </ul> <p><strong>4. Create static IP, PSC endpoint, and DNS record</strong></p> <p>Reserve a static IP address, create a Private Service Connect (PSC) endpoint pointing to the policy engine's service attachment, and create a DNS record to make it reachable.</p> <aside class="note"> <p><b>Note (Self-managed binding only):</b> The <code translate="no" dir="ltr">SGP_DNS_HOSTNAME</code> is a custom FQDN that you define. In this step, you create a private DNS A-record mapping this hostname to the static IP address of the PSC endpoint. This resolves the hostname to the policy engine's <code translate="no" dir="ltr">pscServiceAttachment</code> over your private network. Ensure that the <code translate="no" dir="ltr">SGP_DNS_HOSTNAME</code> value used in the next command matches the FQDN you define here.</p> </aside> 
+<pre># Reserve a static IP address
+gcloud compute addresses create STATIC_IP_NAME \
+    --region=LOCATION \
+    --subnet=SUBNET_NAME \
+    --purpose=GCE_ENDPOINT \
+    --project=PROJECT_ID
+
+# Capture the reserved IP address
+IP=$(gcloud compute addresses describe STATIC_IP_NAME \
+    --region=LOCATION \
+    --project=PROJECT_ID \
+    --format=value(address))
+
+# Create the PSC endpoint
+gcloud compute forwarding-rules create PSC_ENDPOINT_NAME \
+    --region=LOCATION \
+    --network=NETWORK_NAME \
+    --address=STATIC_IP_NAME \
+    --target-service-attachment=PSC_SERVICE_ATTACHMENT \
+    --project=PROJECT_ID
+
+# Create a DNS A record for the policy engine
+gcloud dns record-sets create SGP_DNS_HOSTNAME \
+    --zone=DNS_ZONE_NAME \
+    --type=A \
+    --ttl=300 \
+    --rrdatas=$IP \
+    --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var label="static ip name" translate="no">STATIC_IP_NAME</var></code>: the name for your reserved IP address (for example, <code translate="no" dir="ltr">sgp-psc-ip</code>).</li> <li>
+<code translate="no" dir="ltr"><var label="psc endpoint name" translate="no">PSC_ENDPOINT_NAME</var></code>: the name for your PSC endpoint (for example, <code translate="no" dir="ltr">sgp-psc-endpoint</code>).</li> <li>
+<code translate="no" dir="ltr"><var label="psc service attachment" translate="no">PSC_SERVICE_ATTACHMENT</var></code>: the <code translate="no" dir="ltr">pscServiceAttachment</code> value saved from the provisioning response.</li> <li>
+<code translate="no" dir="ltr"><var label="sgp dns hostname" translate="no">SGP_DNS_HOSTNAME</var></code>: a hostname under your private DNS zone, in the format <code translate="no" dir="ltr"><var label="location" translate="no">LOCATION</var>.<var label="dns zone name" translate="no">DNS_ZONE_SUFFIX</var></code>, where <code translate="no" dir="ltr"><var label="dns zone name" translate="no">DNS_ZONE_SUFFIX</var></code> is the DNS name you specified when creating your private DNS zone. For example, if your location is <code translate="no" dir="ltr">us-west1</code> and your DNS zone suffix is <code translate="no" dir="ltr">internal.example.com</code>, use <code translate="no" dir="ltr">us-west1.internal.example.com</code>.</li> </ul> <p id="configure-vpc-connectivity"><strong>5. Configure VPC connectivity on Agent Gateway</strong> </p> <p>After creating the network resources, you must register the network attachment and DNS peering on your Agent Gateway so that it can reach the policy engine over the private network.</p> <p>For detailed instructions, see <a href="../gateways/set-up-vpc-connectivity#configure-vpc-connectivity">Configure VPC connectivity</a> in the Agent Gateway setup guide. At a minimum, you must:</p> <ul> <li>Register the <strong>network attachment</strong> created in step 3 with your Agent Gateway egress configuration.</li> <li>Register <strong>DNS peering</strong> so the gateway can resolve the private DNS hostname created in step 4.</li> </ul> <aside class="caution"><strong>Caution:</strong><span> Without this step, the Agent Gateway cannot resolve the policy engine's private DNS hostname. Agent sessions will fail with <code translate="no" dir="ltr">FAILED_PRECONDITION</code> errors.</span></aside> <h4 id="connect-policy-engine">Connect the policy engine to Agent Gateway</h4> <p>After the network is configured, you must create an authorization extension and an authorization policy so that Agent Gateway can forward traffic to the policy engine for evaluation.</p> <ol> <li>
+<p><strong>Create the authorization extension</strong>: Create an authorization extension that points to the policy engine's DNS hostname. Use the same <code translate="no" dir="ltr"><var label="sgp dns hostname" translate="no">SGP_DNS_HOSTNAME</var></code> that you created a DNS record for in <a href="#configuring-the-network">Configuring the network</a> (step 4). This is the mechanism by which Agent Gateway sends traffic to the policy engine for evaluation.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Define the extension configuration in a YAML file (<code translate="no" dir="ltr">authz-ext.yaml</code>) and import it:</p> 
+<pre data-language="bash">name: AUTHZ_EXTENSION_NAME
+service: SGP_DNS_HOSTNAME
+authority: SGP_DNS_HOSTNAME
+failOpen: false
+loadBalancingScheme: LOAD_BALANCING_SCHEME_UNSPECIFIED
+</pre>
+
+<pre data-language="bash">gcloud service-extensions authz-extensions import AUTHZ_EXTENSION_NAME \
+    --source=authz-ext.yaml \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">curl -X POST \
+    "https://networkservices.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/authzExtensions?authzExtensionId=AUTHZ_EXTENSION_NAME" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "service": "SGP_DNS_HOSTNAME",
+      "authority": "SGP_DNS_HOSTNAME",
+      "failOpen": false,
+      "loadBalancingScheme": "LOAD_BALANCING_SCHEME_UNSPECIFIED"
+    }'
+</pre></section> </div> <p>Replace <code translate="no" dir="ltr"><var label="sgp dns hostname" translate="no">SGP_DNS_HOSTNAME</var></code> with the DNS hostname for which you created an A record in <a href="#configuring-the-network">Configuring the network</a> (step 4).</p> <p>This command returns a long-running operation. Wait for the operation to complete before proceeding.</p>
+</li> <li>
+<p><strong>Create the authorization policy</strong>: Create an authorization policy that binds the extension to your Agent Gateway. This tells Agent Gateway to send traffic through the policy engine for evaluation.</p> <aside class="note"> <p><b>Important:</b> The <code translate="no" dir="ltr">httpRules</code> must include a <a href="https://cloud.google.com/service-extensions/docs/cel-matcher-language-reference">CEL expression</a> to exclude gRPC traffic. Without this exclusion, the policy engine intercepts gRPC calls (such as Cloud Resource Manager) and causes agent startup failures.</p> </aside> <aside class="warning"> <p><b>Important:</b> The <code translate="no" dir="ltr">when</code> condition sends only model-inference requests to the policy engine. The example matches every <a href="semantic-governance-overview#supported-providers">supported model provider</a>. You can remove the paths for providers that your agents don't use. Don't broaden the condition: other traffic, such as MCP tool calls, isn't evaluated but still adds latency. The condition uses <code translate="no" dir="ltr">contains()</code> because <code translate="no" dir="ltr">request.path</code> includes the query string, so a path match with <code translate="no" dir="ltr">endsWith()</code> would miss requests that have query parameters. Streaming paths such as <code translate="no" dir="ltr">:streamGenerateContent</code> and <code translate="no" dir="ltr">:streamRawPredict</code> don't match the condition, so they aren't sent to the policy engine.</p> </aside> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>Define the authorization policy configuration in a YAML file (<code translate="no" dir="ltr">authz-policy.yaml</code>) and import it:</p> 
+<pre data-language="bash">name: AUTHZ_POLICY_NAME
+target:
+  loadBalancingScheme: LOAD_BALANCING_SCHEME_UNSPECIFIED
+  resources:
+  - projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME
+httpRules:
+- to:
+    operations:
+    - paths:
+      - prefix: /
+  when: "!request.headers['content-type'].startsWith('application/grpc') &amp;&amp; (request.path.contains(':generateContent') || request.path.contains(':rawPredict') || request.path.contains('/v1/messages') || request.path.contains('/chat/completions'))"
+action: CUSTOM
+policyProfile: CONTENT_AUTHZ
+customProvider:
+  authzExtension:
+    resources:
+    - projects/PROJECT_ID/locations/LOCATION/authzExtensions/AUTHZ_EXTENSION_NAME
+</pre>
+
+<pre data-language="bash">gcloud network-security authz-policies import AUTHZ_POLICY_NAME \
+    --source=authz-policy.yaml \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">curl -X POST \
+    "https://networksecurity.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/authzPolicies?authzPolicyId=AUTHZ_POLICY_NAME" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "target": {
+        "loadBalancingScheme": "LOAD_BALANCING_SCHEME_UNSPECIFIED",
+        "resources": ["projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"]
+      },
+      "httpRules": [{
+        "to": {
+          "operations": [{"paths": [{"prefix": "/"}]}]
+        },
+        "when": "!request.headers['"'"'content-type'"'"'].startsWith('"'"'application/grpc'"'"') &amp;&amp; (request.path.contains('"'"':generateContent'"'"') || request.path.contains('"'"':rawPredict'"'"') || request.path.contains('"'"'/v1/messages'"'"') || request.path.contains('"'"'/chat/completions'"'"'))"
+      }],
+      "action": "CUSTOM",
+      "policyProfile": "CONTENT_AUTHZ",
+      "customProvider": {
+        "authzExtension": {
+          "resources": ["projects/PROJECT_ID/locations/LOCATION/authzExtensions/AUTHZ_EXTENSION_NAME"]
+        }
+      }
+    }'
+</pre></section> </div> <p>This command returns a long-running operation. Wait for the operation to complete before proceeding.</p>
+</li> </ol> <h3 id="create-a-policy">Create a policy</h3> <p>Once the policy engine is active, you can define the technical and behavioral guardrails for your agents.</p> <aside class="note"> <p><b>Best practice:</b> The LLM in the semantic governance policy engine can make mistakes. We recommend enabling <b>dry run mode</b> first before enforcing policies in production. This lets you observe the policy engine's verdicts in <a href="#view-logs">Log Explorer</a> and ensure that your natural language constraints behave as expected without blocking real actions. For instructions, see <a href="#enabling-dry-run-mode">Enabling dry run mode</a>.</p> </aside> <ol> <li>
+<strong>Define the scope</strong>: Determine if the policy applies to all actions taken by an agent or targets a specific tool.</li> <li>
+<strong>Author the constraints</strong>: Provide your business rules in plain English.</li> </ol> <aside class="note"> <p><b>Note:</b> Semantic governance policy is a protection service for Gemini Enterprise Agent Platform. It provides a smart security and compliance layer designed to ensure that an AI agent's tool calls and skill invocations align with user intent and organizational business rules. Policies are Service Data. Because the policy engine may cite constraints or parameters in the rationale shown to the end user, don't include sensitive or confidential information in your constraints that you don't want to appear to end users.</p> </aside> <aside class="tip">Tip: Before creating your first policy, ensure you've completed the network configuration described in [Configure Semantic governance policies](#configure-sgp). Otherwise, you can't apply policies to your agent gateway traffic.</aside> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>In the Google Cloud console, navigate to the <strong>Semantic governance policies</strong> page. <p><a href="https://console.cloud.google.com/agent-platform/policies/business-policies" class="button button-primary" target="console" track-name="consoleLink" track-type="tutorial">Go to the Semantic governance policies page</a></p>
+</li> <li>Click <strong>+ Add Policy</strong>.</li> <li>In the <strong>Add Policy</strong> side panel, configure the following: <ul> <li>
+<strong>Name</strong>: Enter a unique ID for the policy. The name can contain only lowercase letters, numbers, and hyphens.</li> <li>
+<strong>Description</strong>: (Optional) Enter a brief description of the policy's purpose.</li> <li>
+<strong>Agent selection</strong>: Select the specific agent or all agents this rule applies to. If the picker is empty or an agent you expect is missing, see <a href="#agent-eligibility">Agent eligibility requirements</a>.</li> <li>
+<strong>Access targets</strong>: <ul> <li>To apply the constraint to every action, select the <strong>Apply constraints to all tools</strong> checkbox.</li> <li>To target specific resources, select an <strong>MCP Server</strong> and the individual <strong>Tools</strong> from the drop-down menus.</li> </ul>
+</li> <li>
+<strong>Constraints</strong>: Enter your business rules in natural language (up to 5,000 characters).</li> <li>
+<strong>Denial message</strong>: (Optional) Enter a message (up to 1,000 characters) to show users when this policy denies a request, in place of the policy rationale. In the REST API, this maps to <code translate="no" dir="ltr">agentResponseCustomization.denialMessage</code> on the policy resource; with the Google Cloud CLI, use <code translate="no" dir="ltr">--agent-response-denial-message</code> on <code translate="no" dir="ltr">gcloud beta ai semantic-governance-policies create</code> or <code translate="no" dir="ltr">gcloud beta ai semantic-governance-policies update</code> (see the <strong>gcloud</strong> tab below). See <a href="semantic-governance-overview#natural-language-constraints-nlc">Information exposure risk</a> and <a href="#denial-messages-multiple-policies">Denial messages with multiple policies</a>.</li> </ul>
+</li> <li>Click <strong>Create</strong>.</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>You can configure a constraint at <strong>agent scope</strong> (applies to all tools) or <strong>tool scope</strong> using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/ai/semantic-governance-policies"><code translate="no" dir="ltr">gcloud beta ai semantic-governance-policies create</code></a> command.</p> <h5 id="find_your_agent_id">Find your agent ID</h5> <p>To create a policy, you need your agent's unique ID from the <a href="../agent-registry">Agent Registry</a>. List agents in your project to find the ID:</p> 
+<pre data-language="bash">gcloud alpha agent-registry agents list \
+    --project=PROJECT_ID \
+    --location=LOCATION
+</pre> <p>The agent ID is the last segment of the <code translate="no" dir="ltr">name</code> field (for example, <code translate="no" dir="ltr">agentregistry-00000000-0000-0000-abcd-012345678901</code>). Use this value for the <code translate="no" dir="ltr"><var label="agent unique id" translate="no">AGENT_ID</var></code> segment of the fully qualified agent name — <code translate="no" dir="ltr">projects/<var label="project id" translate="no">PROJECT_ID</var>/locations/<var label="location" translate="no">LOCATION</var>/agents/<var label="agent unique id" translate="no">AGENT_ID</var></code> — that the following commands pass to <code translate="no" dir="ltr">--agent</code>.</p> <p>Before running Semantic governance policy commands, set the regional API endpoint override:</p> 
+<pre data-language="bash">gcloud config set api_endpoint_overrides/aiplatform \
+    https://LOCATION-aiplatform.googleapis.com/
+</pre> <h5 id="create_an_agent-scope_policy">Create an agent-scope policy</h5> 
+<pre data-language="bash">gcloud beta ai semantic-governance-policies create POLICY_ID \
+    --location=LOCATION \
+    --display-name="Semantic governance policy for ShippingAgent-1" \
+    --description="Applies to all tool calls from the Cymbal shipping assistant agent" \
+    --agent=projects/PROJECT_ID/locations/LOCATION/agents/AGENT_ID \
+    --natural-language-constraint="Always use UPS as the shipping provider for shipments within the USA. Always use DHL as the shipping provider for shipments within the EU." \
+    --project=PROJECT_ID
+</pre> <p>To configure a denial message (see the <strong>Denial message</strong> bullet under the <strong>Console</strong> tab, and <a href="#denial-messages-multiple-policies">Denial messages with multiple policies</a>), add <code translate="no" dir="ltr">--agent-response-denial-message</code>:</p> 
+<pre data-language="bash">gcloud beta ai semantic-governance-policies create POLICY_ID \
+    --location=LOCATION \
+    --display-name="Semantic governance policy for ShippingAgent-1" \
+    --agent=projects/PROJECT_ID/locations/LOCATION/agents/AGENT_ID \
+    --natural-language-constraint="Always use UPS as the shipping provider for shipments within the USA. Always use DHL as the shipping provider for shipments within the EU." \
+    --agent-response-denial-message="Sorry, I can only book shipments through the approved carriers for your region." \
+    --project=PROJECT_ID
+</pre> <p>You can also add or update <code translate="no" dir="ltr">--agent-response-denial-message</code> on an existing policy with <code translate="no" dir="ltr">gcloud beta ai semantic-governance-policies update</code>.</p> <h5 id="find_your_mcp_server">Find your MCP server</h5> 
+<pre data-language="bash">gcloud alpha agent-registry mcp-servers list \
+    --project=PROJECT_ID \
+    --location=LOCATION
+</pre> <h5 id="create_a_tool-scope_policy">Create a tool-scope policy</h5> 
+<pre data-language="bash">gcloud beta ai semantic-governance-policies create POLICY_ID \
+    --location=LOCATION \
+    --display-name="DISPLAY_NAME" \
+    --description="DESCRIPTION" \
+    --agent=projects/PROJECT_ID/locations/LOCATION/agents/AGENT_ID \
+    --mcp-tools="mcp-server=MCP_SERVER,tools=TOOL_NAME" \
+    --natural-language-constraint="NLC_TEXT" \
+    --project=PROJECT_ID
+</pre></section> </div> <h3 id="denial-messages-multiple-policies">Denial messages with multiple policies</h3> <p>When a single request triggers denials from multiple policies, the policy engine combines the denial messages configured on those policies before returning the response to the user. The following behavior applies:</p> <ul> <li>Denial messages from each policy with a deny verdict are shown together, separated by blank lines.</li> <li>Duplicate messages are shown once.</li> <li>If some firing policies have a denial message configured and others don't, a generic line <em>"This request was denied due to another business policy."</em> is appended to cover the policies without one.</li> <li>At most 5 denial messages are shown per request; additional ones are omitted.</li> </ul> <aside class="note"> <p><b>Note:</b> Because Semantic governance policies use an LLM to attribute a denial to specific firing policies, attribution isn't always available for every request. When a relevant policy has a denial message configured but no policy is attributed, the policy engine returns the generic message <i>"This request was denied due to another business policy."</i> The LLM may not evaluate all policies if it determines that the request should be denied based on the first few policies.</p> <p>If a request returns only the generic denial message, try the following troubleshooting steps:</p> <ul> <li>
+<b>Users:</b> Resubmit the request. Because the LLM is non-deterministic, a subsequent evaluation may attribute the denial to a specific policy and return that policy's configured denial message.</li> <li>
+<b>Policy administrators:</b> Review the <a href="#view-logs">policy evaluation logs</a> for the request. Each log entry includes the per-policy verdict and rationale, so you can identify which policy denied the request even when attribution isn't surfaced to the end user.</li> </ul> </aside> <h3 id="enabling-dry-run-mode">Enabling dry run mode</h3> <p>You can enable <strong>dry run mode</strong> (<code translate="no" dir="ltr">DRY_RUN</code>). Dry run is an audit-only or simulation mode that lets you evaluate policies without enforcing them. In this mode, the policy engine evaluates all tool calls against your constraints and logs verdicts, but never blocks actions. This lets you test and validate your constraints before enabling enforcement.</p> <p>To enable dry run mode, add <code translate="no" dir="ltr">sgpEnforcementMode: DRY_RUN</code> to the metadata of your authorization extension:</p> 
+<pre>curl -X PATCH \
+    "https://networkservices.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/authzExtensions/AUTHZ_EXTENSION_NAME?updateMask=metadata" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "metadata": {
+        "sgpEnforcementMode": "DRY_RUN"
+      }
+    }'
+</pre> <p>In dry run mode:</p> <ul> <li>All tool calls are <strong>allowed</strong> regardless of the verdict.</li> <li>Verdicts and rationales are <strong>logged</strong> for review.</li> <li>You can review the logs to identify which actions would have been blocked and refine your constraints before switching to enforcement mode.</li> </ul> <p>To switch back to normal enforcement mode, remove <code translate="no" dir="ltr">sgpEnforcementMode</code> from the metadata:</p> 
+<pre>curl -X PATCH \
+    "https://networkservices.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/authzExtensions/AUTHZ_EXTENSION_NAME?updateMask=metadata" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "metadata": {}
+    }'
+</pre> <h3 id="control-intent-matching">Control user intent matching</h3> <p>By default, the policy engine checks each proposed tool call for both of the following:</p> <ul> <li>
+<strong>Constraint adherence:</strong> the tool call complies with the constraints set on the agent.</li> <li>
+<strong>User intent matching:</strong> the tool call is consistent with what the user asked for.</li> </ul> <p>With user intent matching on, the policy engine can deny a tool call that doesn't match the user's request, even if the tool call violates no constraint or the agent has no constraints. To base verdicts only on your constraints, turn off user intent matching. The setting applies to every request that the authorization extension sends to the policy engine.</p> <aside class="caution"> <p><b>Caution:</b> User intent matching is what detects tool calls that untrusted content, such as an email or web page, injects into the agent. If you turn it off, only your constraints can block those tool calls.</p> </aside> <p>To turn off user intent matching, set <code translate="no" dir="ltr">sgpUserIntentMatching</code> to <code translate="no" dir="ltr">DISABLED</code> in the <code translate="no" dir="ltr">metadata</code> of your authorization extension:</p> 
+<pre>curl -X PATCH \
+    "https://networkservices.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/authzExtensions/AUTHZ_EXTENSION_NAME?updateMask=metadata" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "metadata": {
+        "sgpUserIntentMatching": "DISABLED"
+      }
+    }'
+</pre> <p>To turn it back on, set the value to <code translate="no" dir="ltr">ENABLED</code> or remove the key. Use uppercase values. The policy engine ignores any other value and keeps user intent matching on.</p> <aside class="caution"> <p><b>Caution:</b> <code translate="no" dir="ltr">updateMask=metadata</code> replaces the entire <code translate="no" dir="ltr">metadata</code> map. Include every key that you want to keep, such as <code translate="no" dir="ltr">"sgpEnforcementMode": "DRY_RUN"</code>. Likewise, the request in <a href="#enabling-dry-run-mode">Enabling dry run mode</a> that clears <code translate="no" dir="ltr">metadata</code> also turns user intent matching back on.</p> </aside> <p>The update is a long-running operation, and the new setting can take a few minutes to reach the policy engine. To confirm the mode an evaluation used, check the <code translate="no" dir="ltr">sgpUserIntentMatchingMode</code> field in the <a href="#view-logs">policy evaluation logs</a>. The field appears only when <code translate="no" dir="ltr">sgpUserIntentMatching</code> is set, and has one of the following values:</p> <ul> <li>
+<code translate="no" dir="ltr">CONSTRAINTS_AND_INTENT</code>: user intent matching is on.</li> <li>
+<code translate="no" dir="ltr">CONSTRAINTS_ONLY</code>: user intent matching is off.</li> <li>
+<code translate="no" dir="ltr">INTENT_ONLY</code>: user intent matching is on, and no constraints apply to the tool call.</li> </ul> <p>User intent matching and dry run mode are independent. For example, keep user intent matching on in dry run mode to review intent-based denials in the logs before you enforce them.</p> <h3 id="view-logs">View policy evaluation logs</h3> <p>The policy engine writes a structured log entry for each evaluation to Cloud Logging in your project. The entry records an overall <code translate="no" dir="ltr">verdict</code> and an <code translate="no" dir="ltr">evaluations</code> array with a <code translate="no" dir="ltr">verdict</code> and <code translate="no" dir="ltr">rationale</code> for each tool or action.</p> <ol> <li>
+<strong>From the Console:</strong> On the <strong>Policies</strong> page, select a policy.</li> <li>In the <strong>Details</strong> panel, in the <strong>Observability</strong> section, click <strong>Cloud Logging &gt; View details</strong>.</li> <li>
+<p><strong>In Logs Explorer:</strong> type <code translate="no" dir="ltr">semantic-governance-policy</code> in the query box or use the following explicit filter:</p> <p><code translate="no" dir="ltr">logName="projects/<var label="project id" translate="no">PROJECT_ID</var>/logs/semantic-governance-policy"</code></p>
+</li> </ol> <p>The following example is a sample log entry:</p> 
+<pre>{
+  "jsonPayload": {
+    "token_usage": 1859,
+    "verdict": "ALLOW",
+    "token_usage_breakdown": {"output": 43, "thinking": 0, "input": 1816, "total": 1859},
+    "evaluations": [
+      {
+        "toolName": "process_refund",
+        "verdict": "ALLOW",
+        "actionName": "process_refund",
+        "rationale": "The action is aligned with the user's request to process a refund and complies with the constraints regarding order ID length."
+      }
+    ]
+  },
+  "resource": {"type": "global", "labels": {"project_id": "PROJECT_NUMBER"}},
+  "logName": "projects/PROJECT_ID/logs/semantic-governance-policy"
+}
+</pre> <p>Key fields:</p> <ul> <li>
+<code translate="no" dir="ltr">verdict</code>: Overall decision, either <code translate="no" dir="ltr">ALLOW</code> or <code translate="no" dir="ltr">DENY</code>.</li> <li>
+<code translate="no" dir="ltr">evaluations[].rationale</code>: The rationale as to why the policy engine reached a particular verdict for each tool or action.</li> <li>
+<code translate="no" dir="ltr">token_usage</code>: The number of model tokens the evaluation consumed.</li> </ul> <h3 id="enable-request-tracing">Enable request tracing</h3> <p>The policy engine exports a trace for each request it evaluates to Cloud Trace in your project, so you can inspect per-request latency and policy enforcement. To receive these traces, enable the Cloud Trace API and grant the Gemini Enterprise Agent Platform service account (P4SA) permission to write traces.</p> <ol> <li>
+<p>Enable the Cloud Trace API:</p> 
+<pre>gcloud services enable cloudtrace.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+</li> <li>
+<p>Grant the Cloud Trace Agent role (<code translate="no" dir="ltr">roles/cloudtrace.agent</code>) to the Gemini Enterprise Agent Platform service account. This role grants only the trace-write permission (<code translate="no" dir="ltr">cloudtrace.traces.patch</code>):</p> 
+<pre>export PROJECT_NUM=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-${PROJECT_NUM}@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/cloudtrace.agent"
+</pre>
+</li> </ol> <p>After both are configured, send a request through your agent and view the traces in <a href="https://docs.cloud.google.com/trace/docs/finding-traces">Trace explorer</a> for your project.</p> <aside class="note"> <p>If the Cloud Trace API is disabled or the role is missing, requests are still governed, but their traces aren't exported.</p> </aside> <h3 id="manage-sgp-configuration">Manage policy configuration</h3> <p>After Semantic governance policy is running, you can delete individual policies or disconnect the engine from your Agent Gateway.</p> <h4 id="delete_a_policy">Delete a policy</h4> <p>To remove an individual policy without affecting the overall Semantic governance policy integration:</p> 
+<pre>gcloud beta ai semantic-governance-policies delete POLICY_ID \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre> <p>Alternatively, use the following <code translate="no" dir="ltr">curl</code> command:</p> 
+<pre>curl -X DELETE \
+    "https://LOCATION-aiplatform.googleapis.com/v1beta1/projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicies/POLICY_ID" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)"
+</pre> <h4 id="de-provision_a_policy_engine">De-provision a policy engine</h4> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<pre data-language="">curl  -X POST "https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/semanticGovernancePolicyEngine:deprovision" \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    -H "Content-Type: application/json" \
+    -d '{}'
+</pre></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<pre data-language="bash">gcloud beta ai semantic-governance-policy-engine deprovision \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre></section> </div> <aside class="note"> <p>If you receive a failed precondition error and you would still like to continue with deprovisioning, you can force deprovisioning and bypass the current state by providing the `{ "force":true }` to the REST call as the request body or `--force=true` option in the gcloud command.</p> </aside> <h4 id="disconnect-sgp-from-agent-gateway">Disconnect the policy engine from Agent Gateway</h4> <p>You can disconnect the policy engine from your Agent Gateway to stop tool calls from being evaluated against your constraints.</p> <p>Delete the authorization policy that binds Semantic governance policy enforcement to your Agent Gateway:</p> 
+<pre>gcloud network-security authz-policies delete AUTHZ_POLICY_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre> <p>To reconnect the policy engine later, recreate the authorization policy as described in <a href="#connect-policy-engine">Connect the policy engine to Agent Gateway</a>.</p> <h4 id="optional_delete_the_authorization_extension">(Optional) Delete the authorization extension</h4> <p>Delete the authorization extension created during setup.</p> 
+<pre>gcloud network-services authz-extensions delete AUTHZ_EXTENSION_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre> <h4 id="optional_clean_up_customer-managed_resources">(Optional) Clean up customer-managed resources</h4> <p>Deprovisioning the engine only tears down the Google-managed backing resources. You must manually delete the resources you created in your own project during setup if they are no longer needed.</p> <h5 id="remove_the_private_dns_zone">Remove the private DNS zone</h5> 
+<pre>gcloud dns managed-zones delete DNS_ZONE_NAME \
+    --project=PROJECT_ID
+</pre> <h5 id="remove-the-subnet-and-vpc">Remove the subnet and VPC</h5> 
+<pre>gcloud compute networks subnets delete SUBNET_NAME \
+    --region=LOCATION \
+    --project=PROJECT_ID
+
+gcloud compute networks delete NETWORK_NAME \
+    --project=PROJECT_ID
+</pre> <h5 id="remove-iam-bindings">(Optional) Remove the IAM bindings</h5> <p>If you granted permissions to the Gemini Enterprise Agent Platform service account (P4SA), you can remove them:</p> 
+<pre>export PROJECT_NUM=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+
+gcloud projects remove-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-${PROJECT_NUM}@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/compute.networkAdmin"
+
+gcloud projects remove-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-${PROJECT_NUM}@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/dns.admin"
+
+gcloud projects remove-iam-policy-binding PROJECT_ID \
+    --member="serviceAccount:service-${PROJECT_NUM}@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/cloudtrace.agent"
+</pre> <h5 id="disable-trace-api">(Optional) Disable the Cloud Trace API</h5> 
+<pre>gcloud services disable cloudtrace.googleapis.com --project=PROJECT_ID
+</pre> <h5 id="disable-api">(Optional) Disable the Agent Platform API</h5> 
+<pre>gcloud services disable aiplatform.googleapis.com --project=PROJECT_ID
+</pre> <h2 id="debug-enforcement">Debug policy enforcement</h2> <table> <thead> <tr> <th style="text-align: left">Symptom</th> <th style="text-align: left">Likely cause</th> <th style="text-align: left">What to check</th> </tr> </thead> <tbody> <tr> <td style="text-align: left">Tool call <strong>allowed</strong> but expected a block</td> <td style="text-align: left">Policy didn't match scope and agent or constraint too permissive</td> <td style="text-align: left">In the evaluation log, confirm the policy matched and read the verdict; refine the NLC</td> </tr> <tr> <td style="text-align: left">Tool call <strong>denied</strong> but expected allow</td> <td style="text-align: left">Constraint too strict or conflicting rules</td> <td style="text-align: left">Read the <code translate="no" dir="ltr">rationale</code> in the log; tune the NLC; iterate in dry-run mode</td> </tr> <tr> <td style="text-align: left">No verdict at all</td> <td style="text-align: left">Engine not active, gateway not bound, or the request path doesn't match the authorization policy's <code translate="no" dir="ltr">when</code> condition</td> <td style="text-align: left">Verify that the engine <code translate="no" dir="ltr">state</code> is <code translate="no" dir="ltr">ACTIVE</code> and that the authorization extension and policy exist. In the <a href="../gateways/monitor-agent-gateway#logging">Agent Gateway request log</a>, check that <code translate="no" dir="ltr">serviceExtensionInfo</code> lists your authorization extension. If it doesn't, add the provider's <a href="semantic-governance-overview#supported-providers">request path</a> to the <code translate="no" dir="ltr">when</code> condition.</td> </tr> <tr> <td style="text-align: left">Streamed model call returns no verdict or an error</td> <td style="text-align: left">The policy engine doesn't support streamed model responses</td> <td style="text-align: left">Configure the agent to call its model without streaming</td> </tr> </tbody> </table> <p>To debug an unexpected verdict:</p> <ol> <li>
+<strong>Check the verdict and rationale</strong> in <a href="#view-logs">policy evaluation logs</a>.</li> <li>
+<strong>Trace the request</strong> -- see <a href="#enable-request-tracing">Enable request tracing</a>.</li> <li>
+<strong>Validate changes safely</strong> with <a href="#enabling-dry-run-mode">dry run mode</a>.</li> <li>
+<strong>Confirm deployment</strong> -- engine state is <code translate="no" dir="ltr">ACTIVE</code> and the gateway binding is established.</li> </ol> <h2 id="error-catalog">Error catalog</h2> <p>The following table lists errors that you might encounter when managing Semantic governance policies, along with steps to resolve them:</p> <table> <thead> <tr> <th style="text-align: left">Error name</th> <th style="text-align: left">Description</th> <th style="text-align: left">Suggested action</th> </tr> </thead> <tbody> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_ALREADY_EXISTS</code></td> <td style="text-align: left">The policy ID you specified already exists in this project and location.</td> <td style="text-align: left">Use a unique policy ID, or use a <code translate="no" dir="ltr">PATCH</code> request to update the existing policy.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_ETAG_MISMATCH</code></td> <td style="text-align: left">The etag in your request does not match the current version of the resource.</td> <td style="text-align: left">Retrieve the latest version of the policy to get the current etag before attempting your update.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_AGENT_REQUIRED</code></td> <td style="text-align: left">The <code translate="no" dir="ltr">agent</code> field is missing from the request.</td> <td style="text-align: left">Specify the resource name of the agent this policy applies to.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_CONSTRAINT_REQUIRED</code></td> <td style="text-align: left">The <code translate="no" dir="ltr">natural_language_constraint</code> field is missing.</td> <td style="text-align: left">Provide your business rules in plain English in the constraint field.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_AGENT_INVALID_NAME</code></td> <td style="text-align: left">The agent resource name is malformed.</td> <td style="text-align: left">Verify the format: <code translate="no" dir="ltr">projects/PROJECT_ID/locations/LOCATION/agents/AGENT_ID</code>.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_AGENT_UNSUPPORTED_REGION</code></td> <td style="text-align: left">The region specified for the agent is not supported by Agent Registry.</td> <td style="text-align: left">Use a region supported by both Agent Registry and Semantic governance policy.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_AGENT_NOT_FOUND</code></td> <td style="text-align: left">The specified agent couldn't be found.</td> <td style="text-align: left">Verify that the agent exists in the Agent Registry for the specified project and location.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_AGENT_NOT_CONFIGURED</code></td> <td style="text-align: left">The agent lacks a valid <code translate="no" dir="ltr">RuntimeIdentity</code>.</td> <td style="text-align: left">Configure your agent with a valid runtime identity before applying a policy.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_MCP_SERVER_NOT_FOUND</code></td> <td style="text-align: left">The specified MCP server couldn't be found.</td> <td style="text-align: left">Verify that the MCP server is registered in the Agent Registry for the project.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_MCP_SERVER_INVALID_NAME</code></td> <td style="text-align: left">The MCP server resource name is malformed.</td> <td style="text-align: left">Verify the format: <code translate="no" dir="ltr">projects/PROJECT_ID/locations/LOCATION/mcpServers/SERVER_ID</code>.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_MCP_SERVER_UNSUPPORTED_REGION</code></td> <td style="text-align: left">The region specified for the MCP server is not supported.</td> <td style="text-align: left">Use a supported region for your MCP server.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_REGISTRY_DENIED</code></td> <td style="text-align: left">The system cannot query the Agent Registry due to missing permissions.</td> <td style="text-align: left">Enable the Agent Registry API and ensure your account has the <code translate="no" dir="ltr">agentregistry.viewer</code> role.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_ENGINE_NOT_ENABLED_IN_REGION</code></td> <td style="text-align: left">The policy engine is not active in the requested region.</td> <td style="text-align: left">Follow the steps in <a href="#provisioning-and-enablement">Provisioning and enablement</a> to enable the engine in your region.</td> </tr> <tr> <td style="text-align: left"><code translate="no" dir="ltr">SEMANTIC_GOVERNANCE_POLICY_ENGINE_SERVICE_NOT_AVAILABLE_IN_LOCATION</code></td> <td style="text-align: left">The Semantic governance policy engine service is not available in the requested location.</td> <td style="text-align: left">Use one of the <a href="#supported-locations">supported locations</a> for the Semantic governance policy engine service.</td> </tr> </tbody> </table> <h2 id="whats_next">What's next</h2> <ul> <li>Learn more about <a href="https://docs.cloud.google.com/sdk/gcloud/reference/beta/ai">Gemini Enterprise Agent Platform gcloud CLI commands</a>.</li> <li>Monitor policy verdicts in <a href="#view-logs">Log Explorer</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/policies/configure-semantic-governance" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/policies/configure-semantic-governance</a>
+  </p>
+</div>

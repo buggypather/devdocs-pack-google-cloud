@@ -1,0 +1,468 @@
+<h1>Delegate authorization with Service Extensions</h1> <p>Use this page to learn how to delegate authorization for Agent Gateway to Identity-Aware Proxy, Model Armor, and other custom authorization engines by using Service Extensions.</p> <h2 id="authz-policies-extensions">Authorization policies and extensions</h2> <p>Authorization policies let you enforce centralized access control and governance policies on traffic passing through endpoints published by Agent Gateway. To handle complex access control, content safety, and governance decisions, Agent Gateway lets you configure authorization policies with <a href="https://docs.cloud.google.com/service-extensions/docs/lb-extensions-overview#authorization-extensions">authorization extensions</a> that let you delegate authorization and content safety decisions to designated authorization engines of your choice.</p> <p>An authorization extension intercepts requests passing through an Agent Gateway deployment and makes a real-time gRPC call to the designated authorization service. This allows the service to inspect, modify, or block traffic before it continues to its destination. You can delegate authorization to Google Cloud services such as Identity-Aware Proxy, Model Armor, and semantic governance policies, or to any custom authorization engine of your choice.</p> <p>Authorization policies use <em>policy profiles</em> to determine the type of traffic data sent to the authorization extension:</p> <ul> <li>
+<strong>Request-based authorization (<code translate="no" dir="ltr">REQUEST_AUTHZ</code>)</strong>: Evaluates HTTP request headers before any application payload is processed. This profile is used for identity verification and access control, such as delegating authorization to <strong>Identity-Aware Proxy</strong>.</li> <li>
+<strong>Content-based authorization (<code translate="no" dir="ltr">CONTENT_AUTHZ</code>)</strong>: Evaluates complete HTTP request and response payloads. This profile is used for deep content inspection and AI safety, such as delegating to <strong>Model Armor</strong> for prompt and response safety or to <strong>semantic governance policies</strong> for natural-language constraint enforcement.</li> </ul> <p>Custom authorization engines can use either <code translate="no" dir="ltr">REQUEST_AUTHZ</code> or <code translate="no" dir="ltr">CONTENT_AUTHZ</code> extensions depending on whether they inspect headers or full application payloads.</p> <p>You can configure authorization extensions separately for request-based and content-based policies, or combine both on a gateway for comprehensive security. For recommended configurations, see <a href="#recommended-ingress-egress-config">Recommended ingress and egress configuration</a>.</p> <p>To learn more about authorization policies, policy profiles, and their use cases, see <a href="https://docs.cloud.google.com/load-balancing/docs/auth-policy/auth-policy-overview">Authorization policies overview</a>.</p> <h3 id="recommended-ingress-egress-config">Recommended ingress and egress configuration</h3> <p>For comprehensive security across the entire agent lifecycle, we recommend the following multi-gateway architecture pattern:</p> <ul> <li><p><strong>Client-to-agent gateways:</strong> Client-to-agent (ingress) gateways only support a single <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policy. This means you cannot use Model Armor and semantic governance policies together on ingress. We strongly recommend using a Model Armor <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policy to protect against prompt injection attacks. However, if you want to use a semantic governance policy extension instead, you must ensure that Model Armor is not configured on the gateway. Other types of service extensions are not supported for ingress gateways.</p></li> <li>
+<p><strong>Agent-to-Anywhere gateways:</strong> Agent-to-Anywhere (egress) gateways support up to <a href="#limitations">four</a> authorization policies. Egress gateways support both <code translate="no" dir="ltr">REQUEST_AUTHZ</code> and <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policy profiles, and you can configure multiple policies of each type within this limit.</p> <p>We recommend the following configuration:</p> <ul> <li>A <code translate="no" dir="ltr">REQUEST_AUTHZ</code> policy delegating to Identity-Aware Proxy (IAP) to authorize the agent identity.</li> <li>One or more <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policies delegating further decisions to Model Armor or semantic governance policies to protect against sensitive data exposure and enforce natural-language constraints on outgoing tool calls and responses.</li> </ul> <p>See <a href="#policy-evaluation-sequence-egress">Policy evaluation on egress</a> for more information on how policies are evaluated.</p>
+</li> </ul> <p>This multi-gateway topology ensures that Model Armor screens incoming prompts while IAP, Model Armor, and semantic governance policies screen outgoing responses.</p> <h3 id="policy-evaluation-sequence-egress">Policy evaluation on egress</h3> <p>When multiple authorization policies are configured on an egress gateway, they are evaluated sequentially according to their policy profile type:</p> <ol> <li>
+<strong><code translate="no" dir="ltr">REQUEST_AUTHZ</code> (header-based) policies</strong>: These policy types are evaluated first. For example, an IAP extension checks the mTLS identity of the calling agent and validates its IAM allow policies before any content is processed. If the request fails this check, it is immediately rejected.</li> <li>
+<strong><code translate="no" dir="ltr">CONTENT_AUTHZ</code> (content-based) policies</strong>: These policy types are evaluated next. If the request passes the header-based check, the payload is streamed to the content-based authorization extension (such as the semantic governance policy engine) for deep content inspection and compliance evaluation.</li> </ol> <h2 id="before_you_begin">Before you begin</h2> <p>Before you begin, ensure that you meet the following requirements:</p> <ul> <li><p>The Agent Gateway is deployed. See <a href="set-up-agent-gateway">Configure Agent Gateway</a>.</p></li> <li><p>You must have the <code translate="no" dir="ltr">networkservices.agentGateways.use</code> IAM permission on the deployed Agent Gateway resource to be able to attach authorization policies to the gateway.</p></li> </ul> <h2 id="configure-authz-extensions">Configure authorization policies with extensions</h2> <p>This section shows you how to configure authorization policies that delegate authorization and content safety decisions to Identity-Aware Proxy, Model Armor, and other custom services.</p> <h3 id="configure-authz-iap">Delegate authorization to IAP</h3> <p>You can configure a request authorization extension to delegate access decisions for authorization policies to IAP.</p> <p>The following steps show you how to configure an authorization extension with an authorization policy for an Agent Gateway instance.</p> <ol> <li><p><strong>Before you begin</strong>: Turn off enforcement for the <strong>Disable binding access policy to resource</strong> (<code translate="no" dir="ltr">constraints/iam.managed.disableAccessPolicyBindings</code>) managed organization policy constraint. By default, this boolean constraint is enabled for new organizations and will prevent you from binding an <a href="../policies/configure-iam-policies-uap">IAM Unified Access Policy</a> to a resource. For more information, see <a href="https://docs.cloud.google.com/organization-policy/apply-policies#boolean_constraints">Updating policies with boolean rules</a>.</p></li> <li><p>Create the required IAM egress policies for your agents and tools. For more information, see <a href="../policies/configure-iam-policies-uap">Create IAM agent policies</a>.</p></li> <li><p>See <a href="set-up-agent-gateway#config-agent-to-anywhere">Configure Agent Gateway in Agent-to-Anywhere (Egress) mode</a> to enable IAP while creating the Agent Gateway (by using the <strong>Access authorization</strong> parameter).</p></li> <li>
+<p>Configure an authorization extension to point to IAP.</p> <ol> <li>
+<p>Define the extension in a YAML file. Use the sample values provided. If you want to deploy the extension in a dry run <em>audit-only</em> mode, to test the authorization policy without enforcing it, you can specify the <code translate="no" dir="ltr">iamEnforcementMode</code> field inside the <code translate="no" dir="ltr">metadata</code> block.</p> 
+<pre>cat &gt;iap-request-authz-extension.yaml &lt;&lt;EOF
+name: my-iap-request-authz-ext
+service: iap.googleapis.com
+failOpen: false
+timeout: 1s
+metadata:
+  iapPolicyVersion: "V2"
+EOF
+</pre> <p>If you want to deploy the extension in a dry run <em>audit-only</em> mode, to test the authorization policy without enforcing it, you can specify the <code translate="no" dir="ltr">iamEnforcementMode</code> field inside the <code translate="no" dir="ltr">metadata</code> block. This lets you verify your policy and minimize the risk of disrupting traffic due to configuration errors:</p> 
+<pre>cat &gt;iap-request-authz-extension.yaml &lt;&lt;EOF
+name: my-iap-request-authz-ext
+service: iap.googleapis.com
+failOpen: false
+timeout: 1s
+metadata:
+  iapPolicyVersion: "V2"
+  iamEnforcementMode: "DRY_RUN"
+EOF
+</pre> <p>Remove the <code translate="no" dir="ltr">iamEnforcementMode: "DRY_RUN"</code> field from the <code translate="no" dir="ltr">metadata</code> block (or select <strong>Enforce policies</strong> in the Google Cloud console) when you're ready to start enforcing policies. For instructions on auditing dry-run violations before enabling enforcement, see <a href="../policies/dry-run-report">Audit dry-run policy violations across controls</a>.</p> <aside class="note"><strong>Note:</strong><span> We strongly recommend using Unified Access Policy (<code translate="no" dir="ltr">iapPolicyVersion: "V2"</code>) for advanced, expressive, and fine-grained access control. To replace a legacy Allow policy (<code translate="no" dir="ltr">iapPolicyVersion:
+"V1"</code>) on an existing gateway, navigate to the Policies UI and manually redefine your rules under the UAP tab. For more information, see <a href="../policies/configure-iam-policies-uap">Create IAM agent policies</a>.</span></aside>
+</li> <li>
+<p>Import the authorization extension. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/service-extensions/authz-extensions/import"><code translate="no" dir="ltr">gcloud service-extensions authz-extensions import</code> command</a> with the following sample values.</p> 
+<pre>
+gcloud service-extensions authz-extensions import my-iap-request-authz-ext \
+    --source=iap-request-authz-extension.yaml \
+    --location=LOCATION
+</pre>
+</li> </ol>
+</li> <li>
+<p>In the same project, configure an authorization policy that delegates the decision to the extension.</p> <ol> <li>
+<p>Define an authorization policy that associates the <code translate="no" dir="ltr">my-iap-request-authz-ext</code> extension with your gateway. Use the sample values provided.</p> 
+<pre>cat &gt;iap-request-authz-policy.yaml &lt;&lt;EOF
+name: my-iap-request-authz-policy
+target:
+  resources:
+    - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: REQUEST_AUTHZ
+action: CUSTOM
+customProvider:
+  authzExtension:
+    resources:
+      - "projects/PROJECT_ID/locations/LOCATION/authzExtensions/my-iap-request-authz-ext"
+EOF
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>.</p>
+</li> <li>
+<p>Import the authorization policy to the project. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/network-security/authorization-policies/import"><code translate="no" dir="ltr">gcloud network-security authz-policies import</code> command</a> with the following sample values.</p> 
+<pre>
+gcloud network-security authz-policies import my-iap-request-authz-policy \
+    --source=iap-request-authz-policy.yaml \
+    --location=LOCATION
+</pre>
+</li> </ol>
+</li> </ol> <h3 id="configure-authz-ma">Delegate authorization to Model Armor</h3> <p>You can configure an authorization extension to delegate content security decisions for authorization policies to Model Armor. Your Model Armor templates can reside in the same project as the Agent Gateway and agent or in a separate project, such as a central security or governance project.</p> <aside class="note"><strong>Note:</strong><span> If your Model Armor templates are in a different project from the project that contains the agent or Agent Gateway and you use VPC Service Controls, both projects must be in the same <a href="set-up-vpc-connectivity#vpc-sc-compliance">VPC Service Controls service perimeter</a>.</span></aside> <p>The following example shows how to configure such an authorization extension with an authorization policy for Agent Gateway.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To use the Google Cloud console to enable Model Armor for Agent Gateway, perform the following steps:</p> <ol> <li><p>Create the required <a href="https://docs.cloud.google.com/model-armor/manage-templates#create-ma-template">Model Armor templates</a>.</p></li> <li><p>See <a href="set-up-agent-gateway">Configure Agent Gateway</a> to enable Model Armor while creating the Agent Gateway (by using the <strong>Enable Model Armor</strong> checkbox). Model Armor templates are supported in both Client-to-Agent and Agent-to-Anywhere modes.</p></li> <li>
+<p>When you're using Model Armor, you must grant the Agent Gateway service account the permissions required to be able to use the Model Armor templates. The service account is of the format: <code translate="no" dir="ltr">service-<var translate="no">PROJECT_NUMBER</var>@gcp-sa-dep.iam.gserviceaccount.com</code>, where <var translate="no">PROJECT_NUMBER</var> is the project number of the project where you created the gateway.</p> <p>You must complete this step even if both the gateway and the templates are in the same project. Grant the following roles:</p> <ul> <li>The <code translate="no" dir="ltr">roles/modelarmor.calloutUser</code> and <code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code> roles in the project that contains the gateway.</li> <li>The <code translate="no" dir="ltr">roles/modelarmor.user</code> role in the project that contains the Model Armor templates.</li> </ul> <p>You will need to use the gcloud CLI to complete this step.</p> 
+<pre data-language="bash">
+gcloud projects add-iam-policy-binding GATEWAY_PROJECT_ID \
+    --member=serviceAccount:service-GATEWAY_PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/modelarmor.calloutUser
+gcloud projects add-iam-policy-binding GATEWAY_PROJECT_ID \
+    --member=serviceAccount:service-GATEWAY_PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/serviceusage.serviceUsageConsumer
+gcloud projects add-iam-policy-binding MODEL_ARMOR_PROJECT_ID \
+    --member=serviceAccount:service-GATEWAY_PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/modelarmor.user
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_PROJECT_ID</var></code>: The project ID of the project where you created the gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_PROJECT_NUMBER</var></code>: The project number of the project where you created the gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MODEL_ARMOR_PROJECT_ID</var></code>: The project ID of the project that contains the Model Armor template.</li> </ul> <p>If you're using the gateway for Agent Runtime, the Agent Runtime service agent also requires these permissions as documented in <a href="../../scale/runtime/agent-gateway-runtime-deploy#route-traffic">Route Agent Runtime traffic through Agent Gateway</a>.</p>
+</li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li><p>Create the required <a href="https://docs.cloud.google.com/model-armor/manage-templates#create-ma-template">Model Armor templates</a>.</p></li> <li>
+<p>When you're using Model Armor, you must grant the Agent Gateway service account the permissions required to be able to use the Model Armor templates. The service account is of the format: <code translate="no" dir="ltr">service-<var translate="no">PROJECT_NUMBER</var>@gcp-sa-dep.iam.gserviceaccount.com</code>, where <var translate="no">PROJECT_NUMBER</var> is the project number of the project where you created the gateway.</p> <p>You must complete this step even if both the gateway and the templates are in the same project. Grant the following roles:</p> <ul> <li>The <code translate="no" dir="ltr">roles/modelarmor.calloutUser</code> and <code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code> roles in the project that contains the gateway.</li> <li>The <code translate="no" dir="ltr">roles/modelarmor.user</code> role in the project that contains the Model Armor template.</li> </ul> 
+<pre data-language="bash">
+gcloud projects add-iam-policy-binding GATEWAY_PROJECT_ID \
+    --member=serviceAccount:service-GATEWAY_PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/modelarmor.calloutUser
+gcloud projects add-iam-policy-binding GATEWAY_PROJECT_ID \
+    --member=serviceAccount:service-GATEWAY_PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/serviceusage.serviceUsageConsumer
+gcloud projects add-iam-policy-binding MODEL_ARMOR_PROJECT_ID \
+    --member=serviceAccount:service-GATEWAY_PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com \
+    --role=roles/modelarmor.user
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_PROJECT_ID</var></code>: The project ID of the project where you created the gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_PROJECT_NUMBER</var></code>: The project number of the project where you created the gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MODEL_ARMOR_PROJECT_ID</var></code>: The project ID of the project that contains the Model Armor template.</li> </ul>
+</li> <li>
+<p>Configure the authorization extension to point to Model Armor.</p> <ol> <li>
+<p>Define the extension in a YAML file. Use the sample values provided.</p> 
+<pre data-language="bash">cat &gt;ma-content-authz-extension.yaml &lt;&lt;EOF
+name: my-ma-content-authz-ext
+service: modelarmor.LOCATION.rep.googleapis.com
+metadata:
+  model_armor_settings: '[
+    {
+    "response_template_id": "projects/MODEL_ARMOR_PROJECT_ID/locations/LOCATION/templates/TEMPLATE_ID",
+    "request_template_id": "projects/MODEL_ARMOR_PROJECT_ID/locations/LOCATION/templates/TEMPLATE_ID"
+    }
+  ]'
+failOpen: false
+timeout: 1s
+EOF
+</pre>
+</li> <li>
+<p>Import the authorization extension. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/service-extensions/authz-extensions/import"><code translate="no" dir="ltr">gcloud service-extensions authz-extensions import</code> command</a> with the following sample values.</p> 
+<pre data-language="bash">
+gcloud service-extensions authz-extensions import my-ma-content-authz-ext \
+   --source=ma-content-authz-extension.yaml \
+   --location=LOCATION
+</pre>
+</li> </ol>
+</li> <li>
+<p>Configure an authorization policy with the extension.</p> <ol> <li>
+<p>Define an authorization policy that associates the extension <code translate="no" dir="ltr">my-ma-content-authz-ext</code> with an Agent Gateway.</p> <div> <section><p class="_code-tab"><strong>Agent-to-Anywhere</strong></p>
+
+<pre data-language="">cat &gt;ma-content-authz-policy.yaml &lt;&lt;EOF
+name: my-ma-content-authz-policy
+target:
+  resources:
+    - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: CONTENT_AUTHZ
+action: CUSTOM
+customProvider:
+  authzExtension:
+    resources:
+      - "projects/PROJECT_ID/locations/LOCATION/authzExtensions/my-ma-content-authz-ext"
+httpRules:
+  - to:
+      operations: [ { "paths": [ { "prefix": "/" } ] } ]
+    when: &gt;
+      request.headers['content-type'] == 'application/json' ||
+      request.headers['content-type'].startsWith('text/')
+EOF
+</pre> <p>Note the following:</p> <ul> <li><p>The value of <code translate="no" dir="ltr">policyProfile</code> is set to <code translate="no" dir="ltr">CONTENT_AUTHZ</code>. This indicates that the custom policy provider processes request and response traffic including the request body.</p></li> <li><p>The <code translate="no" dir="ltr">httpRules</code> parameter demonstrates how to use <a href="https://docs.cloud.google.com/service-extensions/docs/cel-matcher-language-reference">CEL</a> attributes to create conditions that match the specific traffic you want to forward to Model Armor for evaluation. In this example, the rules match all traffic with <code translate="no" dir="ltr">application/json</code> or <code translate="no" dir="ltr">text/</code> content types. We recommend using such rules to limit Model Armor evaluation to relevant traffic. This lets you route supported LLM API, MCP, and A2A traffic to Model Armor while excluding internal traffic such as agent gRPC calls.</p></li> </ul></section> <section><p class="_code-tab"><strong>Client-to-Agent</strong></p>
+
+<pre data-language="">cat &gt;ma-content-authz-policy.yaml &lt;&lt;EOF
+name: my-ma-content-authz-policy
+target:
+  resources:
+    - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: CONTENT_AUTHZ
+action: CUSTOM
+customProvider:
+  authzExtension:
+    resources:
+      - "projects/PROJECT_ID/locations/LOCATION/authzExtensions/my-ma-content-authz-ext"
+EOF
+</pre> <p>The value of <code translate="no" dir="ltr">policyProfile</code> is set to <code translate="no" dir="ltr">CONTENT_AUTHZ</code>. This indicates that the custom policy provider processes request and response traffic including the request body.</p></section> </div>
+</li> <li>
+<p>Import the authorization policy to the project. Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/network-security/authorization-policies/import"><code translate="no" dir="ltr">gcloud network-security authz-policies import</code> command</a> with the following sample values.</p> 
+<pre data-language="bash">
+gcloud network-security authz-policies import my-ma-content-authz-policy \
+  --source=ma-content-authz-policy.yaml \
+  --location=LOCATION
+</pre>
+</li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>To configure Model Armor authorization extensions and <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policies declaratively using the <code translate="no" dir="ltr">google</code> provider, define the required service agent IAM bindings, authorization extension, and authorization policy. This configuration applies whether your Model Armor templates are in the same project as the Agent Gateway and agent or in a separate project. If your Model Armor templates are in a different project from the project that contains the agent or Agent Gateway and you use VPC Service Controls, both projects must be in the same <a href="set-up-vpc-connectivity#vpc-sc-compliance">VPC Service Controls service perimeter</a>.</p> <ol> <li>
+<p>Grant the Service Extensions service agent the required roles in the project that contains the Agent Gateway and in the project that contains your Model Armor templates. You must complete this step even if both the gateway and the templates are in the same project:</p> 
+<pre data-language="">resource "google_project_iam_member" "dep_ma_callout_user" {
+  project = "PROJECT_ID"
+  role    = "roles/modelarmor.calloutUser"
+  member  = "serviceAccount:service-PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dep_service_usage_consumer" {
+  project = "PROJECT_ID"
+  role    = "roles/serviceusage.serviceUsageConsumer"
+  member  = "serviceAccount:service-PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "dep_ma_template_user" {
+  project = "MODEL_ARMOR_PROJECT_ID"
+  role    = "roles/modelarmor.user"
+  member  = "serviceAccount:service-PROJECT_NUMBER@gcp-sa-dep.iam.gserviceaccount.com"
+}
+</pre> <p>If you're using the gateway for Agent Runtime, the Agent Runtime service agent also requires permissions as documented in <a href="../../scale/runtime/agent-gateway-runtime-deploy#route-traffic">Route Agent Runtime traffic through Agent Gateway</a>.</p>
+</li> <li>
+<p>Define the <code translate="no" dir="ltr">google_network_services_authz_extension</code> resource pointing to Model Armor:</p> 
+<pre data-language="">resource "google_network_services_authz_extension" "ma_content_authz_ext" {
+  project   = "PROJECT_ID"
+  location  = "LOCATION"
+  name      = "my-ma-content-authz-ext"
+  service   = "modelarmor.LOCATION.rep.googleapis.com"
+  timeout   = "1s"
+  fail_open = false
+
+  metadata = {
+    model_armor_settings = jsonencode([
+      {
+        response_template_id = "projects/MODEL_ARMOR_PROJECT_ID/locations/LOCATION/templates/TEMPLATE_ID"
+        request_template_id  = "projects/MODEL_ARMOR_PROJECT_ID/locations/LOCATION/templates/TEMPLATE_ID"
+      }
+    ])
+  }
+
+  depends_on = [
+    google_project_iam_member.dep_ma_callout_user,
+    google_project_iam_member.dep_service_usage_consumer,
+    google_project_iam_member.dep_ma_template_user,
+  ]
+}
+</pre>
+</li> <li>
+<p>Attach the extension to your Agent Gateway with a <code translate="no" dir="ltr">google_network_security_authz_policy</code> resource:</p> <div> <section><p class="_code-tab"><strong>Agent-to-Anywhere</strong></p>
+
+<pre data-language="">resource "google_network_security_authz_policy" "ma_content_authz_policy" {
+  project        = "PROJECT_ID"
+  location       = "LOCATION"
+  name           = "my-ma-content-authz-policy"
+  policy_profile = "CONTENT_AUTHZ"
+  action         = "CUSTOM"
+
+  target {
+    resources = [
+      "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+    ]
+  }
+
+  custom_provider {
+    authz_extension {
+      resources = [
+        google_network_services_authz_extension.ma_content_authz_ext.id
+      ]
+    }
+  }
+
+  http_rules {
+    to {
+      operations {
+        paths {
+          prefix = "/"
+        }
+      }
+    }
+    when = "request.headers['content-type'] == 'application/json' || request.headers['content-type'].startsWith('text/')"
+  }
+}
+</pre></section> <section><p class="_code-tab"><strong>Client-to-Agent</strong></p>
+
+<pre data-language="">resource "google_network_security_authz_policy" "ma_content_authz_policy" {
+  project        = "PROJECT_ID"
+  location       = "LOCATION"
+  name           = "my-ma-content-authz-policy"
+  policy_profile = "CONTENT_AUTHZ"
+  action         = "CUSTOM"
+
+  target {
+    resources = [
+      "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+    ]
+  }
+
+  custom_provider {
+    authz_extension {
+      resources = [
+        google_network_services_authz_extension.ma_content_authz_ext.id
+      ]
+    }
+  }
+}
+</pre></section> </div>
+</li> </ol> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the project ID of the project where you created the Agent Gateway.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number of the project where you created the Agent Gateway.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">MODEL_ARMOR_PROJECT_ID</var></code>: the project ID of the project that contains the Model Armor template. This can be the same project as <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> or a separate project. If the template is in a different project from the agent or Agent Gateway project and you use VPC Service Controls, both projects must be in the same service perimeter.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region where your Agent Gateway and Model Armor template are located.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">TEMPLATE_ID</var></code>: the ID of the Model Armor template.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">AGENT_GATEWAY_NAME</var></code>: the name of the Agent Gateway resource.</p></li> </ul></section> </div> <h3 id="configure-custom-authz">Delegate authorization to custom authorization extensions</h3> <p>You can configure custom authorization extensions to delegate decisions to custom services. These custom extensions can target only fully qualified domain names (FQDNs).</p> <p>When you use FQDN targets, the extension uses the HTTP2 protocol with TLS encryption to communicate with endpoints on port 443. However, the extension doesn't validate the server certificate. Therefore, for better security, you must ensure that the resolved endpoints are within the VPC network. Also ensure that you have DNS peering set up between the Agent Gateway project and your VPC network.</p> <ol> <li>
+<p>To configure an authorization extension with an authorization policy for a specific FQDN, such as <code translate="no" dir="ltr">mycustomauthz.internal.net</code>, specify it as the value for <code translate="no" dir="ltr">service</code> in the extension YAML file as the following example shows. This example assumes that you have deployed a server in your VPC network implementing the <a href="https://docs.cloud.google.com/service-extensions/docs/callouts-overview#ext_proc"><code translate="no" dir="ltr">ext_proc</code></a> protocol in <code translate="no" dir="ltr">FULL_DUPLEX_STREAMED</code> body processing mode.</p> 
+<pre>cat &gt;custom-authz-extension.yaml &lt;&lt;EOF
+name: my-custom-authz-ext
+service: mycustomauthz.internal.net
+failOpen: false
+timeout: 1s
+EOF
+</pre>
+</li> <li>
+<p>Create the authorization extension to point to the custom service.</p> 
+<pre>
+gcloud beta service-extensions authz-extensions import custom-authz-extension \
+  --source=custom-authz-extension.yaml \
+  --location=LOCATION
+</pre>
+</li> <li>
+<p>After you create the extension, configure a <code translate="no" dir="ltr">CUSTOM</code> authorization policy that delegates decisions to the authorization extension.</p> 
+<pre>  cat &gt;authz-policy.yaml &lt;&lt;EOF
+  name: authz-with-extension
+  target:
+    resources:
+      - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+  policyProfile: CONTENT_AUTHZ
+  action: CUSTOM
+  customProvider:
+    authzExtension:
+      resources:
+        - "projects/PROJECT_ID/locations/LOCATION/authzExtensions/custom-authz-extension"
+  EOF
+</pre>
+</li> <li>
+<p>Create the authorization policy.</p> 
+<pre>
+gcloud network-security authz-policies import authz-policy-with-extension \
+--source=authz-policy.yaml \
+--location=LOCATION
+</pre>
+</li> </ol> <p>Note that when an authorization extension is associated with an authorization policy using the <code translate="no" dir="ltr">CONTENT_AUTHZ</code> profile as demonstrated in this example, the gateway invokes the extension for request and response payloads (headers and bodies), allowing deep content inspection, prompt guardrails, and data sanitization for your agent traffic. By default, <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policies use the Envoy <code translate="no" dir="ltr">ext_proc</code> protocol in <code translate="no" dir="ltr">FULL_DUPLEX_STREAMED</code> mode to process body events.</p> <h3 id="combine-iap-ma">Combine IAP authorization with Model Armor guardrails</h3> <p>For comprehensive security, we recommend that you set up a CUSTOM authorization policy with a <code translate="no" dir="ltr">REQUEST_AUTHZ</code> policy profile and another CUSTOM authorization policy with a <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policy profile.</p> <p>The following example uses IAP as a centralized request authorization system and Model Armor for AI guardrails. As shown in previous examples, you can swap each of these with service extensions to use your own custom solutions.</p> <ol> <li>
+<p>Configure a <code translate="no" dir="ltr">REQUEST_AUTHZ</code> authorization extension that delegates to IAP and an authorization policy that points to the extension.</p> <ol> <li>
+<p>Define the authorization extension. The <code translate="no" dir="ltr">iapPolicyVersion</code> field under <code translate="no" dir="ltr">metadata</code> is mandatory.</p> 
+<pre>cat &gt;iap-extension.yaml &lt;&lt;EOF
+name: iap-extension
+service: iap.googleapis.com
+failOpen: false
+timeout: 1s
+metadata:
+  iapPolicyVersion: "V2"
+EOF
+</pre>
+</li> <li>
+<p>Create the authorization extension.</p> 
+<pre>
+gcloud service-extensions authz-extensions import iap-extension \
+--source=iap-extension.yaml \
+--location=LOCATION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">LOCATION</var></code> with the region of the extension.</p>
+</li> <li>
+<p>Configure the <code translate="no" dir="ltr">REQUEST_AUTHZ</code> authorization policy that delegates to the extension.</p> 
+<pre>cat &gt;authz-policy-request-authz.yaml &lt;&lt;EOF
+name: authz-iap
+target:
+  resources:
+  - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: REQUEST_AUTHZ
+action: CUSTOM
+customProvider:
+  authzExtension:
+    resources:
+    - "projects/PROJECT_ID/locations/LOCATION/authzExtensions/iap-extension"
+EOF
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The location of the resources.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_GATEWAY_NAME</var></code>: The name of the Agent Gateway.</li> </ul>
+</li> <li>
+<p>Create the authorization policy.</p> 
+<pre>
+gcloud network-security authz-policies import authz-iap \
+--source=authz-policy-request-authz.yaml \
+--location=LOCATION
+</pre>
+</li> </ol>
+</li> <li>
+<p>Configure a <code translate="no" dir="ltr">CONTENT_AUTHZ</code> authorization extension that delegates to Model Armor and an authorization policy that points to the extension.</p> <ol> <li>
+<p>Define the extension.</p> 
+<pre>cat &gt;ma-extension-file.yaml &lt;&lt;EOF
+name: ma-extension
+service: modelarmor.LOCATION.rep.googleapis.com
+metadata:
+  model_armor_settings: '[
+    {
+    "response_template_id": "projects/MODEL_ARMOR_PROJECT_ID/locations/LOCATION/templates/RESPONSE_TEMPLATE_ID",
+    "request_template_id": "projects/MODEL_ARMOR_PROJECT_ID/locations/LOCATION/templates/REQUEST_TEMPLATE_ID"
+    }
+  ]'
+failOpen: false
+timeout: 1s
+EOF
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The region where your Model Armor templates reside.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MODEL_ARMOR_PROJECT_ID</var></code>: The Project ID containing the Model Armor templates.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RESPONSE_TEMPLATE_ID</var></code>: The ID of the response template.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REQUEST_TEMPLATE_ID</var></code>: The ID of the request template.</li> </ul>
+</li> <li>
+<p>Create the authorization extension.</p> 
+<pre>
+gcloud service-extensions authz-extensions import ma-extension \
+--source=ma-extension-file.yaml \
+--location=LOCATION
+</pre>
+</li> <li>
+<p>Configure the <code translate="no" dir="ltr">CONTENT_AUTHZ</code> authorization policy that delegates to the extension.</p> 
+<pre>cat &gt;authz-policy-content-authz.yaml &lt;&lt;EOF
+name: authz-ma
+target:
+  resources:
+  - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: CONTENT_AUTHZ
+action: CUSTOM
+customProvider:
+  authzExtension:
+    resources:
+    - "projects/PROJECT_ID/locations/LOCATION/authzExtensions/ma-extension"
+EOF
+</pre>
+</li> <li>
+<p>Create the authorization policy.</p> 
+<pre>
+gcloud network-security authz-policies import ma-authz-policy \
+--source=authz-policy-content-authz.yaml \
+--location=LOCATION
+</pre>
+</li> </ol>
+</li> </ol> <p>When an authorization extension is associated with a <code translate="no" dir="ltr">CONTENT_AUTHZ</code> profile, it receives all <code translate="no" dir="ltr">ext_proc</code> events, including request and response headers, body, and trailers. If your <code translate="no" dir="ltr">ext_proc</code>-based authorization extension is capable of handling both request-time authorization and content-based authorization, we recommend configuring a single <code translate="no" dir="ltr">CUSTOM</code> authorization policy with the <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policy profile. This policy should point to your versatile authorization extension. This approach enables both types of authorization through a single extension and <code translate="no" dir="ltr">ext_proc</code> connection, which can improve latency profiles.</p> <h3 id="configure-authz-sgp">Delegate authorization to Semantic governance policies</h3> <p>You can configure an authorization extension to delegate intent-gating and natural-language constraint decisions for authorization policies to the Semantic governance policy engine (<code translate="no" dir="ltr">semanticGovernancePolicyEngine</code>).</p> <p>To learn how to provision the policy engine and create the required <code translate="no" dir="ltr">CONTENT_AUTHZ</code> authorization policy and authorization extension binding on your gateway, see <a href="../policies/configure-semantic-governance#connect-policy-engine">Connect the policy engine to Agent Gateway</a>.</p> <h3 id="mcp-attributes">Authorization based on MCP protocol attributes</h3> <aside class="note"><strong>Note:</strong><span> For authorization policies, conditions based on agentic protocol attributes are only supported for the Model Context Protocol (MCP). Other agentic protocols aren't supported.</span></aside> <p>Agent Gateway parses the MCP protocol payload in a request and makes the extracted attributes available for authorization policies.</p> <p>You can restrict access based on MCP method parameters such as the names of specific tools. This section shows you two examples, one for an <code translate="no" dir="ltr">ALLOW</code> policy and one for <code translate="no" dir="ltr">DENY</code>.</p> <ol> <li>
+<p>Configure the authorization policy.</p> <p><strong><code translate="no" dir="ltr">ALLOW</code> policy example</strong></p> <p>This example allows access to a specific set of tools on the MCP server and the base protocol features but disallows access to prompts and resources.</p> <p>When writing an <code translate="no" dir="ltr">ALLOW</code> policy, make sure you specify <code translate="no" dir="ltr">baseProtocolMethodsOption: MATCH_BASE_PROTOCOL_METHODS</code> so that non-access specific MCP RPCs like initialize, logging, completion, notifications, and ping continue to work. Failing to do so results in the inability to establish an MCP session.</p> 
+<pre>cat &gt;authz-policy-restrict-tools.yaml &lt;&lt;EOF
+name: my-authz-policy-restrict-tools
+target:
+  resources:
+  - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: REQUEST_AUTHZ
+httpRules:
+- to:
+    operations:
+    - mcp:
+        baseProtocolMethodsOption: MATCH_BASE_PROTOCOL_METHODS
+        methods:
+        - name: "tools/list"
+        - name: "tools/call"
+          params:
+          - exact: "get_weather"
+          - exact: "get_location"
+action: ALLOW
+EOF
+</pre> <p><strong><code translate="no" dir="ltr">DENY</code> policy example</strong></p> <p>This example disallows all prompts/ method access to an MCP server behind an Agent Gateway.</p> 
+<pre>cat &gt;authz-policy-disallow-prompts.yaml &lt;&lt;EOF
+name: my-authz-policy-disallow-prompts
+target:
+  resources:
+  - "projects/PROJECT_ID/locations/LOCATION/agentGateways/AGENT_GATEWAY_NAME"
+policyProfile: REQUEST_AUTHZ
+httpRules:
+- to:
+    operations:
+    - mcp:
+        methods:
+        - name: "prompts"
+action: DENY
+EOF
+</pre>
+</li> <li>
+<p>Create the authorization policy.</p> 
+<pre>
+gcloud network-security authz-policies import AUTHZ_POLICY_NAME \
+--source=AUTH_POLICY_YAML_FILE_PATH \
+--location=LOCATION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">AUTHZ_POLICY_NAME</var></code>: The name of the authorization policy.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AUTH_POLICY_YAML_FILE_PATH</var></code>: The path to the authorization policy YAML file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The location of the resources.</li> </ul>
+</li> </ol> <h2 id="limitations">Limitations</h2> <p>The following limitations apply when you use authorization policies:</p> <ul> <li>
+<p>The maximum number of authorization policies per gateway depends on the gateway mode:</p> <ul> <li>For Agent-to-Anywhere (egress) gateways, you can configure a maximum of four authorization policies per gateway, regardless of policy profile (<code translate="no" dir="ltr">REQUEST_AUTHZ</code> or <code translate="no" dir="ltr">CONTENT_AUTHZ</code>).</li> <li>For Client-to-Agent (ingress) gateways, you can configure a maximum of one <code translate="no" dir="ltr">CONTENT_AUTHZ</code> policy.</li> </ul> <p>For more information, see <a href="#recommended-ingress-egress-config">Recommended ingress and egress configuration</a>.</p>
+</li> <li><p>If you use custom authorization extensions with the <code translate="no" dir="ltr">CONTENT_AUTHZ</code> profile, they must support the <code translate="no" dir="ltr">ext_proc</code> protocol and <code translate="no" dir="ltr">FULL_DUPLEX_STREAMED</code> mode for body events.</p></li> <li><p>If you configure multiple custom authorization policies that use the same profile, their execution order is not guaranteed.</p></li> </ul> <p>Additionally, see the following sections for more information about the limitations of authorization extensions:</p> <ul> <li><p>For limitations that are applicable to all extensions, see <a href="https://docs.cloud.google.com/service-extensions/docs/lb-extensions-overview#limitations">Limitations of extensions</a>.</p></li> <li><p>For limitations that are applicable to callouts, see <a href="https://docs.cloud.google.com/service-extensions/docs/callouts-overview#limitations">Limitations of callouts</a>.</p></li> </ul> <h2 id="what-next">What's next</h2> <div class="devsite-card-group">                <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-green"> Codelab </span> <h3 class="hide-from-toc no-link" id="codelab:-govern-agentic-workloads-with-agent-platform"> <a href="https://codelabs.developers.google.com/cloudnet-agent-gateway" track-metadata-eventdetail="https://codelabs.developers.google.com/cloudnet-agent-gateway" track-type="card" track-name="
+  Codelab: Govern agentic workloads with Agent Platform
+" track-metadata-child_headline="Codelab: Govern agentic workloads with Agent Platform" track-metadata-child_chip_label="Codelab"> Codelab: Govern agentic workloads with Agent Platform </a> </h3> <p class="devsite-card-summary"> Learn how to govern agentic workloads with Agent Gateway on Gemini Enterprise Agent Platform. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="manage-agent-gateway"> <a href="manage-agent-gateways" track-metadata-eventdetail="/gemini-enterprise-agent-platform/govern/gateways/manage-agent-gateways" track-type="card" track-name="
+  Manage Agent Gateway
+" track-metadata-child_headline="Manage Agent Gateway" track-metadata-child_chip_label="Guide"> Manage Agent Gateway </a> </h3> <p class="devsite-card-summary"> Learn how to view, update, disassociate, and delete Agent Gateway resources. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="monitor-agent-gateway"> <a href="monitor-agent-gateway" track-metadata-eventdetail="/gemini-enterprise-agent-platform/govern/gateways/monitor-agent-gateway" track-type="card" track-name="
+  Monitor Agent Gateway
+" track-metadata-child_headline="Monitor Agent Gateway" track-metadata-child_chip_label="Guide"> Monitor Agent Gateway </a> </h3> <p class="devsite-card-summary"> Learn how to monitor Agent Gateway. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Troubleshooting </span> <h3 class="hide-from-toc no-link" id="troubleshoot-agent-gateway"> <a href="../../troubleshooting/troubleshoot-agent-gateway" track-metadata-eventdetail="/gemini-enterprise-agent-platform/troubleshooting/troubleshoot-agent-gateway" track-type="card" track-name="
+  Troubleshoot Agent Gateway
+" track-metadata-child_headline="Troubleshoot Agent Gateway" track-metadata-child_chip_label="Troubleshooting"> Troubleshoot Agent Gateway </a> </h3> <p class="devsite-card-summary"> Learn how to troubleshoot Agent Gateway connectivity. </p> </div> </div> </div> </div>                         </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/delegate-authorization" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/delegate-authorization</a>
+  </p>
+</div>

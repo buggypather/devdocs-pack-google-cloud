@@ -1,0 +1,161 @@
+<h1>Run prebuilt workloads</h1> <div class="note"> If you're interested in Gemini Enterprise Agent Platform Managed Training, contact your sales representative for access. </div> <p>This guide shows you how to use the NVIDIA NeMo ecosystem on a Managed Training cluster for end-to-end generative AI model development. It provides step-by-step instructions for the following distinct but related workflows, each covered in its own dedicated section:</p> <ul> <li>
+<a href="#nvidia-nemo">NVIDIA NeMo</a>: For foundational model development, follow these instructions to perform large-scale pre-training, continuous pre-training (CPT), and supervised fine-tuning (SFT).</li> <li>
+<a href="#nvidia-nemo-rl">NVIDIA NeMo-RL</a>: For model alignment and preference tuning, use this section to apply advanced techniques like Reinforcement Learning (RL) to align your model with human instructions and preferences.</li> </ul> <p>Whether you're building a model from scratch or refining an existing one, this document guides you through setting up your environment, managing containerized jobs, and launching training scripts on the cluster.</p> <h2 id="nvidia-nemo">NVIDIA NeMo</h2> <p>The <a href="https://docs.nvidia.com/nemo-framework/user-guide/latest/overview.html">NVIDIA NeMo framework</a> is an end-to-end platform for building, customizing, and deploying generative AI models. This section of the guide is specifically for developers and researchers focused on the foundational stages of model development. It provides step-by-step instructions for using NeMo to perform large-scale pre-training, continuous pre-training (CPT), and supervised fine-tuning (SFT) on a Managed Training cluster.</p> <p>This training clusters guide provides the complete workflow for running a training job with the NeMo framework. The process is divided into two main parts: the initial one-time setup of your environment and the recurring steps for launching a job.</p> <h3 id="setup-env">Set up your environment</h3> <p>Before launching a job, you need to prepare your environment by ensuring you have a container image and the necessary training scripts.</p> <h4 id="install_nemo-run">Install NeMo-Run</h4> 
+<pre>pip install git+https://github.com/NVIDIA/NeMo-Run.git
+</pre> <h4 id="prepare-container-image">Prepare a container image</h4> <p>You have two options for the container image: use a prebuilt image (recommended) or build a custom one.</p> <h5 id="prebuilt-image">Use a prebuilt image (recommended)</h5> <p>Prebuilt container images are provided in the <code translate="no" dir="ltr">.squashfs</code> format. Copy the appropriate image for your region into your working directory.</p> 
+<pre># Example for the US region
+gcloud storage cp gs://vmds-containers-us/vmds_nemo_squashfs/nemo-20250721.sqsh .
+</pre> <h5 id="build-custom-container">Build a customized container (advanced)</h5> <p>Follow these steps only if the prebuilt containers don't meet your needs. This procedure guides you through converting a custom container image into the <code translate="no" dir="ltr">.squashfs</code> format using <code translate="no" dir="ltr">enroot</code>.</p> <p>Step 1: Authenticate with Google Cloud.</p> <p>Use the following commands to ensure that both your Google Cloud user account and the Docker registry where your image is hosted are authenticated:</p> 
+<pre>gcloud auth login
+gcloud auth configure-docker us-docker.pkg.dev
+</pre>
+<aside class="special"><strong>Important:</strong><span> The address used here (<code translate="no" dir="ltr">us-docker.pkg.dev</code>) is an example for an Artifact Registry repository. This address must match the hostname of the registry where your image is stored (for example, an Artifact Registry or Container Registry address). For example, if your image URI is <code translate="no" dir="ltr">gcr.io/my-project/my-image</code>, you must use <code translate="no" dir="ltr">gcr.io</code>.</span></aside> <p>Step 2: Create the conversion script.</p> <p>Create a file named <code translate="no" dir="ltr">enroot-convert.sh</code> and add the following script content. Before running this script, you must update the <code translate="no" dir="ltr">REMOTE_IMG</code> and <code translate="no" dir="ltr">LOCAL_IMG</code> variables to point to your container image and your chosen output path.</p> 
+<pre>#!/bin/bash
+
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --mem=0
+#SBATCH --ntasks-per-node=1
+
+# Run this script on the slurm login node:
+# sbatch -N 1 enroot-convert.sh
+
+set -x
+set -e
+
+# The remote docker image URI.
+REMOTE_IMG="docker://us-docker.pkg.dev/{YOUR_CONTAINER_IMG_URI}:{YOUR_CONTAINER_IMAGE_TAG}"
+
+# The local path to the to be imported enroot squash file.
+LOCAL_IMG="${HOME}/my_nemo.sqsh"
+
+# The path to the enroot config file.
+TMP_ENROOT_CONFIG_PATH="/tmp/\$(id -u --name)/config/enroot"
+
+# Download the docker image to each node.
+srun -l -N "${SLURM_NNODES}" \
+bash -c "
+mkdir -p ${TMP_ENROOT_CONFIG_PATH};
+echo 'machine us-docker.pkg.dev login oauth2accesstoken password $(gcloud auth print-access-token)' &gt; ${TMP_ENROOT_CONFIG_PATH}/.credentials;
+rm -f ${LOCAL_IMG};
+ENROOT_CONFIG_PATH=${TMP_ENROOT_CONFIG_PATH} ENROOT_MAX_PROCESSORS=$(( $(nproc) / 2 )) enroot import -o ${LOCAL_IMG} ${REMOTE_IMG};
+"
+</pre> <p>Step 3: Run the script and verify the output.</p> <p>Execute the script on the Slurm login node.</p> 
+<pre>sbatch -N 1 enroot-convert.sh
+</pre> <p>After the job completes, find the conversion logs in a file named <code translate="no" dir="ltr">slurm-&lt;JOB_ID&gt;</code>.out and the final container image at the path you specified for <code translate="no" dir="ltr">LOCAL_IMG</code>.</p> <h4 id="download-recipes">Download the training recipes</h4> <p>The training recipes are stored in a private <code translate="no" dir="ltr">googlesource.com</code> repository. To access them with the Git command line, you must first generate authentication credentials.</p> <ol> <li>
+<p><strong>Generate authentication credentials</strong>.</p> <p>Visit the following URL and follow the on-screen instructions. This configures your local environment to authenticate with the repository. <a href="https://www.googlesource.com/new-password">https://www.googlesource.com/new-password</a></p>
+</li> <li>
+<p><strong>Clone the repository</strong>.</p> <p>Once the credentials are authenticated, run the following command to download the recipes.</p> 
+<pre>git clone -b release-allowlist-ga https://vertex-model-garden.googlesource.com/vertex-oss-training
+</pre>
+</li> </ol> <h3 id="launch-training-job">Launch a training job</h3> <p>Once your environment is set up, you can launch a training job.</p> <p>Step 1: Set environment variables</p> <p>The following environment variables may be required for your job:</p> <ul> <li>The <code translate="no" dir="ltr">HF_TOKEN</code> is required to download models and datasets from Hugging Face.</li> <li>The <code translate="no" dir="ltr">WANDB_API_KEY</code> is required to use <a href="https://docs.wandb.ai/">Weights &amp; Biases</a> for experiment analysis.</li> </ul> 
+<pre>export HF_TOKEN=YOUR_HF_TOKEN
+export WANDB_API_KEY=YOUR_WANDB_API_KEY
+</pre> <p>Step 2: Run the launch script</p> <p>Navigate to your working directory and run the <code translate="no" dir="ltr">run.py</code> script to start a job. This example kicks off a demo training job with Llama 3.1-2b.</p> 
+<pre># Set the working directory
+export WORK_DIR=$HOME/vertex-oss-training/nemo
+cd $WORK_DIR
+
+gcloud storage cp
+gs://vmds-containers-&lt;region&gt;/vmds_nemo_squashfs/nemo-20250721.sqsh nemo-demo.sqsh
+
+# Launch the training job
+export NEMORUN_HOME=$WORK_DIR &amp;&amp; \
+python3 run.py -e slurm --slurm-type hcc-a3m --partition a3m \
+  -d $WORK_DIR -i $WORK_DIR/nemo-demo.sqsh \
+  -s pretrain/llama3p1_2b_pt.py -n 2 \
+  --experiment-name nemo-demo-run
+</pre> <h3 id="launch-parameters">Launch parameters</h3> <ul> <li>
+<code translate="no" dir="ltr">--slurm-type</code> is set based on the cluster type (for example, <code translate="no" dir="ltr">hcc-a3m</code>, <code translate="no" dir="ltr">hcc-a3u</code>, <code translate="no" dir="ltr">hcc-a4</code>).</li> <li>
+<code translate="no" dir="ltr">--partition</code> must be set to an available partition. You can check partition names with the <code translate="no" dir="ltr">sinfo</code> command.</li> <li>The <code translate="no" dir="ltr">run.py</code> script automatically mounts several directories to the Docker container, including <code translate="no" dir="ltr">--log-dir</code>, <code translate="no" dir="ltr">--cache-dir</code>, and <code translate="no" dir="ltr">--data-dir</code>, if they are set.</li> </ul> <h3 id="monitor-job-status-logs">Monitoring job status and logs</h3> <p>After you launch the job, a status block is displayed:</p> 
+<pre>Experiment Status for nemo-demo-run_1753123402
+
+Task 0: nemo-demo-run
+- Status: RUNNING
+- Executor: SlurmExecutor on @localhost
+- Job id: 75
+- Local Directory: $NEMORUN_HOME/experiments/nemo-demo-run/nemo-demo-run_1753123402/nemo-demo-run
+</pre> <p>The execution logs are written to the path shown in the <code translate="no" dir="ltr">Local Directory</code> field from the status output. For example, you can find the log files at a path similar to this:</p> 
+<pre>$NEMORUN_HOME/experiments/nemo-demo-run/nemo-demo-run_1753123402/nemo-demo-run/&lt;JOB_ID&gt;.log
+</pre> <h3 id="common-errors">Common errors and solutions</h3> <p>This section describes common issues that may arise during job execution and provides recommended steps to resolve them.</p> <p><strong>Invalid partition error</strong></p> <p>By default, jobs attempt to launch on the general partition. If the general partition doesn't exist or isn't available, the job will fail with the following error:</p> 
+<pre>sbatch: error: invalid partition specified: general
+sbatch: error: Batch job submission failed: Invalid partition name specified
+</pre> <p>Solution:</p> <p>Specify an available partition using the <code translate="no" dir="ltr">--partition</code> or <code translate="no" dir="ltr">-p</code> argument in your launch command. To see a list of available partitions, run the <code translate="no" dir="ltr">sinfo</code> command on the Slurm login node.</p> 
+<pre>sinfo
+</pre> <p>The output shows the available partition names, such as <code translate="no" dir="ltr">a3u</code> in this example:</p> <table> <thead> <tr> <th style="text-align: left">PARTITION</th> <th style="text-align: left">AVAIL</th> <th style="text-align: left">TIMELIMIT</th> <th style="text-align: left">NODES</th> <th style="text-align: left">STATE</th> <th style="text-align: left">NODELIST</th> </tr> </thead> <tbody> <tr> <td style="text-align: left">a3u*</td> <td style="text-align: left">up</td> <td style="text-align: left">infinite</td> <td style="text-align: left">2</td> <td style="text-align: left">idle~</td> <td style="text-align: left">alice-a3u-[2-3]</td> </tr> <tr> <td style="text-align: left">a3u*</td> <td style="text-align: left">up</td> <td style="text-align: left">infinite</td> <td style="text-align: left">2</td> <td style="text-align: left">idle</td> <td style="text-align: left">alice-a3u-[0-1]</td> </tr> </tbody> </table> <p><strong>Tokenizer download error</strong></p> <p>You may encounter an OSError related to a cross-device link when the script attempts to download the GPT2 tokenizer:</p> 
+<pre>OSError: [Errno 18] Invalid cross-device link: 'gpt2-vocab.json' -&gt; '/root/.cache/torch/megatron/megatron-gpt-345m_vocab'
+</pre> <p>Solutions:</p> <p>You have two options to resolve this issue:</p> <ul> <li>Option #1: Rerun the job. This error is often transient. Rerunning the job using the same <code translate="no" dir="ltr">--cache-dir</code> may resolve the issue.</li> <li>Option #2: Manually download the tokenizer files. If rerunning the job fails, follow these steps: <ul> <li>Download the following two files: <ul> <li><code translate="no" dir="ltr">gpt2-vocab.json</code></li> <li><code translate="no" dir="ltr">gpt2-merges.txt</code></li> </ul>
+</li> <li>Move the downloaded files into the <code translate="no" dir="ltr">torch/megatron/</code> subdirectory within your cache directory (for example, <code translate="no" dir="ltr">&lt;var&gt;YOUR_CACHE_DIR&lt;/var&gt;/torch/megatron/</code>).</li> <li>Rename the files as follows: <ul> <li>Rename <code translate="no" dir="ltr">gpt2-vocab.json</code> to <code translate="no" dir="ltr">megatron-gpt-345m_vocab</code>.</li> <li>Rename <code translate="no" dir="ltr">gpt2-merges.txt</code> to <code translate="no" dir="ltr">megatron-gpt-345m_merges</code>.</li> </ul>
+</li> </ul>
+</li> </ul> <h2 id="nvidia-nemo-rl">NVIDIA NeMo-RL</h2> <p>The <a href="https://docs.nvidia.com/nemo/rl/latest/about/overview.html">NVIDIA NeMo-RL</a> framework is designed to align large language models with human preferences and instructions. This section guides you through using NeMo-RL on a cluster to perform advanced alignment tasks, including supervised fine-tuning (SFT), preference-tuning (such as Direct Preference Optimization, or DPO), and Reinforcement Learning (RL).</p> <p>The guide covers two primary workflows: running a standard batch training job and using the interactive development environment for debugging.</p> <h3 id="prerequisites">Prerequisites</h3> <p>Before you begin, create a cluster by following the instructions on the <a href="create-cluster">Create cluster</a> page, or use an existing Managed Training cluster, if you have one.</p> <h3 id="connect-cluster-login-node">Connect to the cluster login node</h3> <p>To connect to the cluster's login node, find the correct Google Cloud CLI command by navigating to the <a href="https://console.cloud.google.com/compute/instances">Compute Engine Virtual Machine</a> page in the Google Cloud console and clicking SSH &gt; View Google Cloud CLI command. It will look similar to this:</p> 
+<pre>ssh $USER_NAME@machine-addr
+</pre> <p>Example:</p> 
+<pre>ssh $USER_NAME@nic0.sliua3m1-login-001.europe-north1-c.c.infinipod-shared-dev.internal.gcpnode.com
+</pre> <h3 id="prebuilt-docker-image">Use the prebuilt Docker image</h3> <p>Converted <code translate="no" dir="ltr">.sqsh</code> files are provided for prebuilt container images. You can select a container for your region and either set it directly as the container image parameter or download it to the cluster's file system.</p> <p>To directly set it as the container image param, use one of the following paths. Note that you should replace <code translate="no" dir="ltr">&lt;region&gt;</code> with your specific region (for example, <code translate="no" dir="ltr">europe</code>, <code translate="no" dir="ltr">asia</code>, <code translate="no" dir="ltr">us</code>):</p> 
+<pre>/gcs/vmds-containers-&lt;region&gt;/vmds_nemo_rl_squashfs/nemo_rl-h20260302.sqsh
+</pre> <p>To download the image to the cluster's lustre storage, use the following command:</p> 
+<pre>gs://vmds-containers-&lt;region&gt;/vmds_nemo_rl_squashfs/nemo_rl-h20260302.sqsh DESTINATION
+
+</pre> <h3 id="download-code">Download code</h3> <p>In order to get access to the training recipe with git CLI, visit <a href="https://www.googlesource.com/new-password">https://www.googlesource.com/new-password</a>. The recipe can be downloaded with the following command:</p> 
+<pre>cd $HOME
+git clone -b release-allowlist-ga https://vertex-model-garden.googlesource.com/vertex-oss-training
+</pre> <h3 id="launch-jobs">Launch jobs</h3> <p>Step 1: Set environment variables.</p> <p>To pull models and data from Hugging Face, the <code translate="no" dir="ltr">HF_TOKEN</code> may need to be set. To use Weights &amp; Biases for experiment analysis, the <code translate="no" dir="ltr">WANDB_API_KEY</code> needs to be set. Update these variables in the following file:</p> <p>File to update: <code translate="no" dir="ltr">$HOME/vertex-oss-training/nemo_rl/configs/auth.sh</code></p> <p>If you don't want to use Weights &amp; Biases, set the <code translate="no" dir="ltr">logger.wandb_enabled</code> to <code translate="no" dir="ltr">False</code> in your launch script.</p> <p>Step 2: Download or copy the container file to your launch folder.</p> <p>Here are some examples.</p> 
+<pre>gcloud storage cp \
+  gs://vmds-containers-&lt;region&gt;/vmds_nemo_rl_squashfs/nemo_rl-h20260302.sqsh \
+  $HOME/vertex-oss-training/nemo_rl/nemo_rl-h20260302.sqsh
+
+
+# OR
+
+/gcs/vmds-containers-&lt;region&gt;/vmds_nemo_rl_squashfs/nemo_rl-h20260302.sqsh \
+  $HOME/vertex-oss-training/nemo_rl/nemo_rl-h20260302.sqsh
+
+cd $HOME/vertex-oss-training/nemo_rl/
+
+# Where region is either `us`, `asia`, or `europe`
+</pre> <p>Step 3: Prepare or Clone the NeMo-RL repository.</p> <p>Create a clone of the NeMo-RL code if not already present. Note that you may need to use <code translate="no" dir="ltr">git submodule update --init --recursive</code> if you've already cloned the repository without the <code translate="no" dir="ltr">--recursive</code> flag.</p> 
+<pre>git clone https://github.com/NVIDIA-NeMo/RL --recursive
+</pre> <p>Step 4: Launch the training job.</p> 
+<pre>sbatch -N &lt;num_nodes&gt; launch.sh --cluster_type hcc-a3m --job_script algorithms/dpo.sh
+</pre> <p>Where:</p> <ul> <li>
+<code translate="no" dir="ltr">--cluster-type</code> is set based on the cluster type: <ul> <li>A3-Mega: <code translate="no" dir="ltr">hcc-a3m</code>
+</li> <li>A3-Ultra: <code translate="no" dir="ltr">hcc-a3u</code>
+</li> <li>A4: <code translate="no" dir="ltr">hcc-a4</code>
+</li> <li>A3H: <code translate="no" dir="ltr">hcc-a3h</code>
+</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">--partition</code> should be set accordingly, where <code translate="no" dir="ltr">sinfo</code> can be used to check the slurm partitions.</li> </ul> <p>After your job starts, a new directory named after its SLURM Job ID are created in your current location. Inside, you'll find all the logs and checkpoints belonging to this job. More precisely, inside that you'll find the following directories and files:</p> <ul> <li>
+<code translate="no" dir="ltr">checkpoints/</code> → This directory is mounted inside the NeMo-RL container and contains all of the checkpoints from the training.</li> <li>
+<code translate="no" dir="ltr">ray-logs/</code> → This directory contains the logs from ray head and ray workers.</li> <li>
+<code translate="no" dir="ltr">nemo_rl_output.log</code> → This file contains the Slurm logs from your submitted job.</li> <li>
+<code translate="no" dir="ltr">attach.sh</code> (Interactive jobs only) → This is a bash script which lets you attach to an interactive job. If your job is launched successfully, it might take a couple of minutes for this file to be created.</li> </ul> <h3 id="dev-nemo-rl">Development with NeMo-RL</h3> <p><strong>Interactive Setup</strong></p> <p>Two options are available for quick interactive development with NeMo-RL.</p> <h4 id="nemorlinteractive">nemorlinteractive</h4> <p>This is a straightforward helper command which lets you choose a GPU node from the cluster (let's say node number 5), and then it takes you to a running container for NeMo-RL inside your selected node. This command is helpful for your single node workflows.</p> <p>In order to use <code translate="no" dir="ltr">nemorlinteractive</code>, you need to follow these prerequisite steps:</p> <ol> <li>Provide all auth tokens you want (for example, HF and WandB) loaded to the job in the <code translate="no" dir="ltr">configs/auth.sh</code> file.</li> <li>
+<p>Set the <code translate="no" dir="ltr">CLUSTER_TYPE</code> environment variable according to the following guideline:</p> 
+<pre>export CLUSTER_TYPE="hcc-a3m" # --&gt; if you have A3-Mega cluster
+export CLUSTER_TYPE="hcc-a3u" # --&gt; if you have A3-Ultra cluster
+export CLUSTER_TYPE="hcc-a4"  # --&gt; If you have A4 cluster
+export CLUSTER_TYPE="hcc-a3h" # --&gt; If you have A3H cluster
+</pre>
+</li> <li>
+<p>Import <code translate="no" dir="ltr">nemorlinteractive</code> in your bash terminal by sourcing the <code translate="no" dir="ltr">bash_utils.sh</code>:</p> 
+<pre>source bash_utils.sh
+</pre>
+</li> <li>
+<p>Run the <code translate="no" dir="ltr">nemorlinteractive</code> command. For example:</p> 
+<pre># Assuming you want to take the compute node number 5.
+nemorlinteractive 5
+</pre>
+</li> </ol> <h4 id="interactive-launch">Interactive launch</h4> <p>This option lets you run workloads interactively on multiple compute nodes. Interactive jobs are most suitable for debugging and verification use cases. These workloads reserve the node indefinitely until the developer decides that the debugging has concluded and they want to release the resources.</p> <p>The following are the steps that need to be followed for this option:</p> <p>Provide all auth tokens you want (for example HF and WandB) loaded to the job in the <code translate="no" dir="ltr">configs/auth.sh</code> file.</p> 
+<pre>sbatch -N &lt;num_nodes&gt; launch.sh --cluster_type hcc-a3m --interactive
+</pre> <ul> <li><p>Wait for 2-5 minutes and you should see <code translate="no" dir="ltr">&lt;job_id&gt;/attach.sh</code> created.</p></li> <li><p>To monitor progress of the launch check <code translate="no" dir="ltr">&lt;job_id&gt;/nemo_rl_output.log</code> to see the progress of the launch script and check <code translate="no" dir="ltr">&lt;job_id&gt;/ray_logs/</code> to see the progress of ray head and workers launch.</p></li> <li><p>Connect to the interactive job. This script lets you connect again even if you lose connection:</p></li> </ul> 
+<pre>bash &lt;job_id&gt;/attach.sh
+</pre> <h2 id="what-next">What's next</h2> <p>Running a prebuilt workload verifies the cluster's operational status. The next step is to run your own custom training application.</p> <ul> <li>Run your own custom workload: Package your training code into a container and submit the container as a <code translate="no" dir="ltr">CustomJob</code> to your training cluster. This process includes configuring the job for a distributed environment. <ul> <li><a href="../distributed-training">Learn how to run a distributed training job</a></li> </ul>
+</li> <li>Monitor your training jobs: Effectively track the progress, resource utilization, and logs for the jobs running on your cluster using the the Google Cloud console or Cloud Logging. <ul> <li><a href="../../general/monitoring-metrics">Monitor training jobs on Gemini Enterprise Agent Platform</a></li> </ul>
+</li> <li>View your cluster: After running your tests, check the status of your cluster and of its individual nodes. <ul> <li><a href="view-clusters">Learn how to view your training clusters</a></li> </ul>
+</li> <li>Manage your cluster: Update your cluster's configuration, or delete it to manage costs. <ul> <li><a href="manage-cluster">Learn how to manage your training cluster</a></li> </ul>
+</li> <li>Orchestrate jobs with Gemini Enterprise Agent Platform Pipelines: After running jobs manually, automate the process by creating a pipeline to orchestrate your training workflows. <ul> <li><a href="orchestration">Learn about orchestrating jobs on a training cluster</a></li> </ul>
+</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/training/training-clusters/run-prebuilt-workloads" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/training/training-clusters/run-prebuilt-workloads</a>
+  </p>
+</div>

@@ -1,0 +1,61 @@
+<h1>Configure Customer-managed encryption keys (CMEK) for sandboxes</h1> <p>Encrypt a sandbox's data at rest with a Cloud Key Management Service key that you own and control.</p> <h2 id="overview">Overview</h2> <p>By default, Google Cloud encrypts your data at rest with Google-owned and Google-managed encryption keys. <a href="https://docs.cloud.google.com/kms/docs/cmek">Customer-managed encryption keys (CMEK)</a> let you create and manage a <a href="https://docs.cloud.google.com/kms/docs">Cloud KMS</a> encryption key so you can audit its use, rotate it, and disable or destroy it to make the protected data unreadable.</p> <p>The Gemini Enterprise Agent Platform sandbox runs your agent's code, browser, or custom container in an isolated environment. That environment writes customer content to disk and can be checkpointed to snapshots, which CMEK protects when you enable it on the sandbox's parent Gemini Enterprise Agent Platform instance.</p> <p>You can only configure CMEK for Gemini Enterprise Agent Platform sandboxes when you create the Gemini Enterprise Agent Platform instance. The CMEK key secures the Gemini Enterprise Agent Platform instance and its sub-resources, including the sandbox environments, templates, and snapshots.</p> <h2 id="cmek-sandbox">What CMEK encrypts for the sandbox</h2> <p>Enabling CMEK on the parent Gemini Enterprise Agent Platform instance encrypts the sandbox's at-rest surfaces with your key:</p> <ul> <li>
+<strong>GKE node boot disk / root filesystem:</strong> Files the session writes at runtime and in-memory state paged to disk (node boot-disk CMEK).</li> <li>
+<strong>Snapshot Cloud Storage bucket:</strong> Disk and memory checkpoints of a sandbox (snapshots) (bucket default encryption).</li> </ul> <p>Resource metadata (names, labels, state, connection info), and environment variables and service-account emails aren't encrypted with the CMEK key.</p> <p>To encrypt <a href="custom-containers">custom container images</a>, set CMEK on your own Artifact Registry repository.</p> <h2 id="limitations-and-considerations">Limitations and considerations</h2> <ul> <li>Only single-region keys are supported for CMEK on Gemini Enterprise Agent Platform. Multi-region, dual-region, and global keys are not supported.</li> <li>The key is immutable when you create the Gemini Enterprise Agent Platform instance. To use a different key, you need to create a new Gemini Enterprise Agent Platform instance. Rotating to new versions of the same key is supported and applied automatically.</li> <li>If you disable or destroy the key version, or revoke the Encrypter/Decrypter role, sandboxes can't be provisioned or resumed, and snapshot writes fail. Restore key access to recover the sandbox resources.</li> </ul> <h2 id="before-you-begin">Before you begin</h2> <ul> <li>Have or create a Cloud KMS <a href="https://docs.cloud.google.com/kms/docs/resource-hierarchy">key ring and key</a>. As a best practice, keep keys in a separate project from your Gemini Enterprise Agent Platform workloads, managed by a different administrator.</li> <li>Confirm you hold the roles to create and manage keys (<code translate="no" dir="ltr">roles/cloudkms.admin</code>) and to create the Gemini Enterprise Agent Platform instance.</li> <li>
+<p>Create an Agent Runtime service agent, if you haven't already:</p> 
+<pre># Create the service agent if needed
+gcloud beta services identity create \
+    --service=aiplatform.googleapis.com \
+    --project=PROJECT_ID
+</pre>
+</li> </ul> <h2 id="create-kms-key">Create a Cloud KMS key</h2> <p>Create a single-region key in the same region as your Gemini Enterprise Agent Platform instance:</p> 
+<pre># Key ring (once per region)
+gcloud kms keyrings create sandbox-keyring \
+    --location=REGION
+
+# Key
+gcloud kms keys create sandbox-key \
+    --location=REGION \
+    --keyring=sandbox-keyring \
+    --purpose=encryption
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr">REGION</code>: The Google Cloud region of your Gemini Enterprise Agent Platform instance (for example, <code translate="no" dir="ltr">us-central1</code>).</li> </ul> <h2 id="grant-agent-engine-access">Grant the Agent Platform service agent access to your key</h2> <p>Grant the Agent Runtime service agent the Cloud KMS CryptoKey Encrypter/Decrypter role (<code translate="no" dir="ltr">roles/cloudkms.cryptoKeyEncrypterDecrypter</code>) on the key:</p> 
+<pre># Grant Encrypter/Decrypter on the key
+gcloud kms keys add-iam-policy-binding sandbox-key \
+    --location=REGION \
+    --keyring=sandbox-keyring \
+    --member="serviceAccount:service-PROJECT_NUMBER@gcp-sa-aiplatform-re.iam.gserviceaccount.com" \
+    --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr">PROJECT_NUMBER</code>: Your Google Cloud project number.</li> </ul> <h2 id="enable-cmek-agent-platform">Enable CMEK on the Agent Platform instance</h2> <p>Set <code translate="no" dir="ltr">encryption_spec.kms_key_name</code> when you create the Gemini Enterprise Agent Platform instance. Every sandbox template and sandbox you create under it inherits this key.</p> <div> <section><p class="_code-tab"><strong>Python SDK</strong></p>
+
+<pre data-language="">import vertexai
+
+client = vertexai.Client(project="PROJECT_ID", location="REGION",
+                        http_options={"api_version": "v1beta1"})
+agent_instance = client.agent_engines.create(
+    config={
+        "encryption_spec": {
+            "kms_key_name":
+                "projects/PROJECT_ID/locations/REGION/keyRings/sandbox-keyring/cryptoKeys/sandbox-key"
+        }
+    },
+)
+</pre></section> <section><p class="_code-tab"><strong>REST</strong></p>
+<p>Using the REST API, set the same value at <code translate="no" dir="ltr">reasoningEngines.encryptionSpec.kmsKeyName</code> on create:</p> 
+<pre data-language="">curl -X POST \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" \
+  https://REGION-aiplatform.googleapis.com/v1beta1/projects/PROJECT_ID/locations/REGION/reasoningEngines \
+  -d '{
+    "display_name": "cmek-protected-engine",
+    "encryption_spec": {
+      "kms_key_name": "projects/PROJECT_ID/locations/REGION/keyRings/sandbox-keyring/cryptoKeys/sandbox-key"
+    }
+  }'
+</pre></section> </div> <h2 id="create-sandbox-cmek">Create a sandbox and verify CMEK configuration</h2> <ol> <li>
+<a href="custom-containers">Create your sandbox template and sandbox</a> under the CMEK-protected Gemini Enterprise Agent Platform instance.</li> <li>Confirm the Gemini Enterprise Agent Platform instance reports your key in <code translate="no" dir="ltr">encryption_spec.kms_key_name</code> by <a href="../runtime/manage-deployed-agents#get">getting the instance details</a>.</li> <li>Optionally, check <a href="https://docs.cloud.google.com/kms/docs/audit-logging">Cloud KMS audit logs</a> to confirm encrypt and decrypt operations occur as sandboxes start and snapshots are written.</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>Read <a href="../../machine-learning/general/cmek">CMEK for Gemini Enterprise Agent Platform</a>.</li> <li>See <a href="../runtime/deploy-an-agent">Deploy agents</a> for enabling CMEK on the Agent Runtime.</li> <li>Review <a href="https://docs.cloud.google.com/kms/docs/cmek">CMEK integrations</a> and <a href="https://docs.cloud.google.com/kms/docs/key-rotation">key rotation</a> in Cloud KMS.</li> <li>Read the <a href="../sandbox">Sandbox overview</a> and <a href="manage-snapshots">Manage snapshots</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/sandbox/configure-cmek" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/sandbox/configure-cmek</a>
+  </p>
+</div>

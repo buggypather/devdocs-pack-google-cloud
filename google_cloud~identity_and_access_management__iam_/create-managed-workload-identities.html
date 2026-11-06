@@ -1,0 +1,306 @@
+<h1>Configure managed workload identity authentication for Compute Engine</h1> <p>This document describes how to configure <a href="managed-workload-identity">managed workload identities</a> for Compute Engine by using the gcloud CLI. It also describes how to set up automatic provisioning and lifecycle management of managed workload identities for Compute Engine by using <a href="https://docs.cloud.google.com/certificate-authority-service">Certificate Authority Service</a>, which lets you establish mutual TLS (mTLS) connections between workloads.</p> <h2 id="before_you_begin">Before you begin</h2> <ol> <li>
+
+<p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li><p>Understand <a href="managed-workload-identity">managed workload identities</a>.</p></li> <li><p>Learn about certificate issuance using <a href="https://docs.cloud.google.com/certificate-authority-service">Certificate Authority Service</a>.</p></li> <li><p>Learn how to <a href="https://docs.cloud.google.com/compute/docs/access/authenticate-workloads-over-mtls">authenticate Compute Engine workloads using managed workload identities</a>.</p></li> <li>
+
+<p> Enable the IAM and Certificate Authority Service APIs, if any are not already enabled: </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+
+<pre>gcloud services enable iam.googleapis.com privateca.googleapis.com</pre> </li> <li>
+<p>Configure Google Cloud CLI to use a project for billing and quota.</p> 
+<pre>
+gcloud config set billing/quota_project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of the project.</p>
+</li> </ol> <h3 id="required_roles">Required roles</h3> 
+<p> To get the permissions that you need to create managed workload identities and provision managed workload identity certificates, ask your administrator to grant you the following IAM roles on the project: </p> <ul> <li> To create and configure managed workload identities: <ul> <li>
+<a href="roles-permissions/iam#iam.workloadIdentityPoolAdmin">IAM Workload Identity Pool Admin </a> (<code translate="no" dir="ltr">roles/iam.workloadIdentityPoolAdmin</code>)</li> <li>
+<a href="roles-permissions/iam#iam.serviceAccountAdmin">Service Account Admin </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>)</li> </ul> </li> <li> To create and configure CA pools: <a href="roles-permissions/privateca#privateca.admin">CA Service Admin </a> (<code translate="no" dir="ltr">roles/privateca.admin</code>) </li> </ul> <p> For more information about granting roles, see <a href="granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="creating-custom-roles">custom roles</a> or other <a href="roles-overview#predefined">predefined roles</a>. </p> <p>Alternatively, the IAM Owner (<code translate="no" dir="ltr">roles/owner</code>) basic role also includes permissions to configure managed workload identities. You should not grant basic roles in a production environment, but you can grant them in a development or test environment. </p> <h2 id="overview">Overview</h2> <p>To use managed workload identities for your applications, you must perform the following tasks:</p> <ol> <li>
+<p><strong>Security Administrator</strong>:</p> <ul> <li>
+<a href="#create_workload_id_pool">Create a workload identity pool</a>.</li> <li>
+<a href="#configure-ca-options">Configure a CA</a> (to choose a CA option, configure CAs, and update the pool).</li> <li>
+<a href="#configure_identities">Create managed workload identities</a> in the workload identity pool.</li> <li>
+<a href="#define_a_workload_attestation_policy">Define a workload attestation policy</a> and create a service account.</li> </ul>
+</li> <li>
+<p><strong>Compute Administrator</strong>:</p> <p>Enable managed workload identities for workloads running in Compute Engine:</p> <ul> <li>For <a href="https://docs.cloud.google.com/compute/docs/access/authenticate-workloads-over-mtls#enable-workload-id-vms">individual VMs</a>.</li> <li>For <a href="https://docs.cloud.google.com/compute/docs/access/authenticate-workloads-over-mtls#create-workload-id-migs">managed instance groups (MIGs)</a>.</li> </ul>
+</li> </ol> <h2 id="create_workload_id_pool">Create a workload identity pool</h2> <ol> <li>
+<p>To configure managed workload identities, you must create a pool in <code translate="no" dir="ltr">TRUST_DOMAIN</code> mode.</p> 
+<pre>
+gcloud iam workload-identity-pools create POOL_ID \
+  --location="global" \
+  --mode="TRUST_DOMAIN"
+</pre> <p>Replace <var translate="no">POOL_ID</var> with the unique ID for the pool. The ID must be between 4 and 32 characters long, contain only lowercase alphanumeric characters and dashes, and start and end with an alphanumeric character. After you create a workload identity pool, you can't change its ID.</p>
+</li> <li>
+<p>To verify that your workload identity pool was created in <code translate="no" dir="ltr">TRUST_DOMAIN</code> mode, run the <code translate="no" dir="ltr">workload-identity-pools describe</code> command.</p> 
+<pre>
+gcloud iam workload-identity-pools describe POOL_ID \
+  --location="global"
+</pre> <p>The output is similar to the following:</p> 
+<pre>
+mode: TRUST_DOMAIN
+name: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID
+state: ACTIVE
+</pre> <p>If <code translate="no" dir="ltr">mode: TRUST_DOMAIN</code> isn't present in the command output, verify that you've correctly configured your gcloud CLI to use the correct project for billing and quota. Ensure that you have updated to the latest version of the gcloud CLI.</p>
+</li> </ol> <h2 id="choose-ca">Choose a CA option</h2> <p>To sign your workload certificates, choose the certificate authority (CA) option that best fits your use case:</p> <ul> <li><p><strong>Google-managed default CA</strong>: Use this option for a fully managed, no-cost solution. The default CA provides a shared root of trust for all Google Cloud users.</p></li> <li><p><strong>Custom CA</strong>: Use this option to configure your own public key infrastructure (PKI) through Certificate Authority Service. This option is appropriate if you require a custom root of trust or if you must store signing keys in a hardware security module (HSM) to meet compliance requirements. Certificate Authority Service is charged separately from managed workload identity. For more information, see <a href="https://cloud.google.com/certificate-authority-service/pricing">CA Service pricing</a>.</p></li> </ul> <h2 id="configure-ca-options">Configure a CA</h2> <div>  <section> <p class="_code-tab"><strong>Default CA</strong></p> <p>To bind the default CA to the workload identity pool, update the workload identity pool with the <code translate="no" dir="ltr">use-default-shared-ca</code> flag.</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools update TRUST_DOMAIN_NAME \
+    --location="global" \
+    --use-default-shared-ca \
+    --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN_NAME</var></code>: The name of the trust domain.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: The project ID.</li> </ul> </section> <section> <p class="_code-tab"><strong>Custom CA</strong></p> <p>To configure managed workload identities by using a custom CA, complete the following steps:</p> <ol> <li>
+<a href="#configure_ca">Configure CA Service to issue certificates for managed workload identities</a>.</li> <li>
+<a href="#bind-cas">Bind the CAs to the workload identity pool</a>.</li> <li>
+<a href="#grant-role-ca-pool">Authorize managed workload identities to request certificates from the CA pool</a>.</li> </ol> <h3 id="configure_ca">Configure CA Service to issue certificates for managed workload identities</h3> <p>Create the recommended configuration for root and subordinate certificate authorities (CAs) by using <a href="https://docs.cloud.google.com/certificate-authority-service/docs/ca-pool">Certificate Authority Service pools</a>. The subordinate CA pool issues the X.509 workload identity certificates to VMs.</p> <p>The CA pools configured to issue certificates for Compute Engine VMs by using managed workload identities must reside in the same region as the VM. If you want to design a <a href="https://docs.cloud.google.com/architecture/deployment-archetypes/multiregional#reference_architecture">multi-region architecture for resilience to regional outages</a>, we recommend that you configure a subordinate Certificate Authority Service CA pool for each of your workload's regions. This way, each of your Compute Engine VMs can reference an in-region subordinate Certificate Authority Service CA pool.</p> <aside class="caution"><strong>Caution:</strong><span> If you also <a href="https://docs.cloud.google.com/certificate-authority-service/docs/use-issuance-policy">attach certificate issuance policies to your CA pools</a>, the issuance policy must <a href="https://docs.cloud.google.com/load-balancing/docs/mtls#certificate-requirements">comply with certificate requirements for mTLS</a> to ensure that the provisioned certificates can be used for mTLS. Otherwise, the certificates might be provisioned successfully but fail when used for mTLS connections.</span></aside> <p>After configuring the CA pools, you then authorize the managed workload identities to request and receive the signed certificates from the CA pools.</p> <h4 id="create_root_ca_pool">Configure your root CA pool</h4> <p>Use the Google Cloud CLI interface to Certificate Authority Service to configure a root CA pool.</p> <p>You can't move or export a CA pool after it's created.</p> <ol> <li>
+<p>Create the root CA pool in the <strong>Enterprise</strong> tier by running the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/pools/create"><code translate="no" dir="ltr">gcloud privateca pools create</code> command</a>. The <strong>Enterprise</strong> tier is intended for long-lived, low-volume certificate issuance.</p> 
+<pre data-language="">
+gcloud privateca pools create ROOT_CA_POOL_ID \
+   --location=REGION \
+   --tier=enterprise
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">ROOT_CA_POOL_ID</var>: A unique ID for the root CA pool. The ID can be up to 64 characters long and must contain only lower and uppercase alphanumeric characters, underscores, or hyphens. The pool ID must be unique within the region.</li> <li>
+<var translate="no">REGION</var>: the region where the root CA pool is located.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">Creating CA pools</a>.</p>
+</li> <li>
+<p>Create a root CA in the root CA pool by running the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/roots/create"><code translate="no" dir="ltr">gcloud privateca roots create</code> command</a>. You might be prompted to <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-certificate-authorities#enable-root">enable the root CA</a> if this is the only CA in the root CA pool.</p> <p>For example, you might use a command similar to the following to create a root CA.</p> 
+<pre data-language="">
+gcloud privateca roots create ROOT_CA_ID \
+   --pool=ROOT_CA_POOL_ID \
+   --subject "CN=ROOT_CA_CN, O=ROOT_CA_ORGANIZATION" \
+   --key-algorithm="ec-p256-sha256" \
+   --max-chain-length=1 \
+   --location=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">ROOT_CA_ID</var>: A unique name for the root CA. The CA name can be up to 64 characters long and must contain only lower and uppercase alphanumeric characters, underscores, or hyphens. The CA name must be unique within the region.</li> <li>
+<var translate="no">ROOT_CA_POOL_ID</var>: the ID of the root CA pool.</li> <li>
+<var translate="no">ROOT_CA_CN</var>: the common name of the root CA.</li> <li>
+<var translate="no">ROOT_CA_ORGANIZATION</var>: the organization of the root CA.</li> <li>
+<var translate="no">REGION</var>: the region where the root CA pool is located.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-certificate-authorities">Create a root certificate authority</a>. For more information about the <code translate="no" dir="ltr">subject</code> fields for the CA, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/using-cel#subject">Subject</a>.</p>
+</li> <li><p>Optional: Repeat the previous steps to create an additional root CA in the root CA pool. This can be useful for <a href="https://docs.cloud.google.com/certificate-authority-service/docs/managing-ca-rotation">root CA rotation</a>.</p></li> </ol> <h4 id="create_sub_ca_pools">Configure the subordinate CAs</h4> <p>Use the Google Cloud CLI interface to Certificate Authority Service to create a subordinate CA pool and subordinate CA.</p> <p>If you have multiple certificate issuance scenarios, you can create a subordinate CA for each of those scenarios. Also, adding multiple subordinate CAs in a CA pool helps you achieve better load-balancing of certificate requests.</p> <p>Use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/pools/create"><code translate="no" dir="ltr">gcloud privateca pools create</code> command</a> to create a subordinate CA pool.</p> <ol> <li>
+<p>Create the subordinate CA pool in the <strong>DevOps</strong> tier. This tier is intended for high-volume, short-lived certificate issuance.</p> 
+<pre data-language="">
+gcloud privateca pools create SUBORDINATE_CA_POOL_ID \
+  --location=REGION \
+  --tier=devops
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SUBORDINATE_CA_POOL_ID</var>: A unique ID for the subordinate CA pool. The ID can be up to 64 characters long and must contain only lowercase and uppercase alphanumeric characters, underscores, or hyphens. The pool ID must be unique within the region.</li> <li>
+<var translate="no">REGION</var>: the region in which to create the subordinate CA pool.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">Creating CA pools</a>.</p>
+</li> <li>
+<p>Create a subordinate CA in the subordinate CA pool by running the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/subordinates/create"><code translate="no" dir="ltr">gcloud privateca subordinates create</code> command</a>. Don't change the default <a href="https://docs.cloud.google.com/certificate-authority-service/docs/reference/rest/v1/projects.locations.caPools#issuancemodes">config-based issuance mode</a>.</p> <p>For example, you might use a command similar to the following to create a subordinate CA.</p> 
+<pre data-language="">
+gcloud privateca subordinates create SUBORDINATE_CA_ID \
+  --pool=SUBORDINATE_CA_POOL_ID \
+  --location=REGION \
+  --issuer-pool=ROOT_CA_POOL_ID \
+  --issuer-location=REGION \
+  --subject="CN=SUBORDINATE_CA_CN, O=SUBORDINATE_CA_ORGANIZATION" \
+  --key-algorithm="ec-p256-sha256" \
+  --use-preset-profile=subordinate_mtls_pathlen_0
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SUBORDINATE_CA_ID</var>: A unique name for the subordinate CA. The name can be up to 64 characters long and must contain only lowercase and uppercase alphanumeric characters, underscores, or hyphens. The CA name must be unique within the region.</li> <li>
+<var translate="no">SUBORDINATE_CA_POOL_ID</var>: the name of the subordinate CA pool.</li> <li>
+<var translate="no">REGION</var>: the region where the subordinate CA pool is located.</li> <li>
+<var translate="no">ROOT_CA_POOL_ID</var>: the ID of the root CA pool.</li> <li>
+<var translate="no">REGION</var>: the region of the root CA pool.</li> <li>
+<var translate="no">SUBORDINATE_CA_CN</var>: the common name of the subordinate CA.</li> <li>
+<var translate="no">SUBORDINATE_CA_ORGANIZATION</var>: the name of the subordinate CA issuing organization.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">Creating CA pools</a>. For more information about the <code translate="no" dir="ltr">subject</code> fields for the CA, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/using-cel#subject">Subject</a>.</p>
+</li> </ol> <h3 id="bind-cas">Bind the CAs to the workload identity pool</h3> <p>After you create your CA hierarchy, you bind the CAs to the workload identity pool by updating the pool with each of the CA's certificate issuance config.</p> <ol> <li>
+<p>Create an <code translate="no" dir="ltr">issuance-config.yaml</code> file with the following content:</p> 
+<pre data-language="">inlineCertificateIssuanceConfig:
+caPools:
+REGION: projects/PROJECT_ID/locations/REGION/caPools/SUBORDINATE_CA_POOL_ID
+keyAlgorithm: RSA_2048
+lifetime: 86400s
+rotationWindowPercentage: 50</pre> <p>Replace the following in the file:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region where the subordinate CA pool is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: The ID of the project that contains the subordinate CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_POOL_ID</var></code>: The ID of the subordinate CA pool.</li> </ul>
+</li> <li>
+<p>Run the following command to update the workload identity pool:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools update POOL_ID \
+   --location="global" \
+   --inline-certificate-issuance-config-file=ISSUANCE_CONFIG_FILE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ISSUANCE_CONFIG_FILE</var></code>: The path to the <code translate="no" dir="ltr">issuance-config.yaml</code> file.</li> </ul>
+</li> </ol> <h3 id="grant-role-ca-pool">Authorize managed workload identities to request certificates from the CA pool</h3> <p>The managed workload identities require permissions to request certificates from the CA Service and get the public certificates.</p> <ol> <li>
+<p>Grant the <a href="roles-permissions/privateca#privateca.workloadCertificateRequester">CA Service Workload Certificate Requester (<code translate="no" dir="ltr">roles/privateca.workloadCertificateRequester</code>)</a> IAM role on each subordinate CA pool to the managed workload identity. The following <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/pools/add-iam-policy-binding"><code translate="no" dir="ltr">gcloud privateca pools add-iam-policy-binding</code> command</a> authorizes the managed workload identity to request certificates from the CA Service certificate chains.</p> 
+<pre data-language="">
+gcloud privateca pools add-iam-policy-binding SUBORDINATE_CA_POOL_ID \
+  --location=REGION \
+  --role=roles/privateca.workloadCertificateRequester \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/name/locations/global/workloadIdentityPools/POOL_ID/*"
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SUBORDINATE_CA_POOL_ID</var>: the ID for the subordinate CA pool.</li> <li>
+<var translate="no">REGION</var>: the region of the subordinate CA pool.</li> <li>
+<var translate="no">PROJECT_NUMBER</var>: the project number of the project that contains the workload identity pool.</li> <li>
+<var translate="no">POOL_ID</var>: the ID of the workload identity pool.</li> </ul>
+</li> <li>
+<p>Grant the <a href="roles-permissions/privateca#privateca.poolReader">CA Service Pool Reader (<code translate="no" dir="ltr">roles/privateca.poolReader</code>)</a> IAM role on the subordinate CA pools to the managed workload identity. This authorizes the managed workload identity to get the signed X.509 certificates from the CA's certificate chains.</p> 
+<pre data-language="">
+gcloud privateca pools add-iam-policy-binding SUBORDINATE_CA_POOL_ID \
+  --location=REGION \
+  --role=roles/privateca.poolReader \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/name/locations/global/workloadIdentityPools/POOL_ID/*"
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">SUBORDINATE_CA_POOL_ID</var>: the ID for the subordinate CA pool.</li> <li>
+<var translate="no">REGION</var>: the region of the subordinate CA pool.</li> <li>
+<var translate="no">PROJECT_NUMBER</var>: the project number of the project that contains the workload identity pool.</li> <li>
+<var translate="no">POOL_ID</var>: the ID of the workload identity pool.</li> </ul>
+</li> </ol> </section>  </div> <h2 id="configure_identities">Create managed workload identities</h2> <p>Managed workload identities enable Google Cloud to automatically provision credentials for workload identity pool identities onto your workloads. Workload identities are defined within a workload identity pool, and are organized into administrative boundaries called <em>namespaces</em>.</p> <h3 id="create_a_namespace">Create a namespace</h3> <p>The <code translate="no" dir="ltr">workload-identity-pools namespaces create</code> command lets you create a namespace in a workload identity pool.</p> 
+<pre>
+gcloud iam workload-identity-pools namespaces create NAMESPACE_ID \
+    --workload-identity-pool="POOL_ID" \
+    --location="global"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_ID</var></code>: the unique ID for the namespace. The ID must be between 2 and 63 characters long, contain only lowercase alphanumeric characters and dashes, and start and end with an alphanumeric character. After you create a namespace, you cannot change its ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload identity pool ID that you created earlier.</li> </ul> <h3 id="create_a_managed_workload_identity">Create a managed workload identity</h3> <p>The <code translate="no" dir="ltr">workload-identity-pools managed-identities create</code> command lets you create a managed workload identity in a workload identity pool namespace.</p> 
+<pre>
+gcloud iam workload-identity-pools managed-identities create MANAGED_IDENTITY_ID \
+    --namespace="NAMESPACE_ID" \
+    --workload-identity-pool="POOL_ID" \
+    --location="global"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MANAGED_IDENTITY_ID</var></code>: the unique ID for the managed identity. The ID must be between 2 and 63 characters long, contain only lowercase alphanumeric characters and dashes, and start and end with an alphanumeric character. After you create a managed workload identity, you cannot change its ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_ID</var></code>: the namespace ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload identity pool ID that you created earlier.</li> </ul> <p>Your managed workload identity ID is the SPIFFE identifier, which is formatted as follows:</p> 
+<pre>
+spiffe://POOL_ID.global.PROJECT_NUMBER.workload.id.goog/ns/NAMESPACE_ID/sa/MANAGED_IDENTITY_ID
+</pre> <h2 id="define_a_workload_attestation_policy">Define a workload attestation policy</h2> <p>This section describes how to set up an <a href="managed-workload-identity#resources">attestation policy</a>. This policy determines which attributes are used by <a href="managed-workload-identity">Google Cloud IAM</a> to verify the identity of the workload. After verification, the calling workload can receive a credential.</p> <p>Verification is based on one of the following attributes of the workload:</p> <ul> <li>Attached service account email address</li> <li>Attached service account UID</li> <li>VM instance name</li> <li>VM instance ID</li> </ul> <aside class="deprecated"><strong>Deprecated:</strong><span> Workload sources are deprecated as of October 11, 2024. As of this date, you can no longer create new workload sources. Existing workload sources will be removed on or after April 24, 2025. Attestations based on workload sources will fail. To prevent disruption, we recommend that you attest using another method described later in this document. To learn how to list previously configured workload sources, use the following command: <code translate="no" dir="ltr">gcloud iam workload-identity-pools managed-identities workload-sources list --help</code>.</span></aside> <h3 id="define_a_workload_attestation_policy_with_attestation_rules">Define a workload attestation policy with attestation rules</h3> <p>To create an attestation policy that lets your workload use the managed identity, do the following:</p> <ol> <li><p>Decide whether you want to create an attestation policy that lets your workload attest the managed identity by using its attached service account, by using its instance name, or by using its instance ID.</p></li> <li>
+<p>Create a JSON-formatted attestation policy file.</p> <ol> <li>
+<p>Optional: To receive X.509 credentials on your Compute Engine instance, you must enable an attached service account. We recommend that you attach a new service account to your workload by first creating it using the following command:</p> 
+<pre>
+gcloud iam service-accounts create SERVICE_ACCOUNT_NAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_NAME</var></code> with the name of the service account</p>
+</li> <li>
+<p>Create a JSON-formatted attestation policy file that attests based on the service account email address, service account UID, the instance name, or the instance ID.</p> <div> <section><p class="_code-tab"><strong>Service account email address</strong></p>
+<p>To create an attestation policy file that attests based on the service account email address, create a file with the following contents:</p> 
+<pre data-language="">
+{
+   "attestationRules": [
+      {
+         "googleCloudResource": "//compute.googleapis.com/projects/WORKLOAD_PROJECT_NUMBER/type/Instance/attached_service_account.email/SERVICE_ACCOUNT_EMAIL"
+      }
+   ],
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<p><code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROJECT_NUMBER</var></code>: the number of the project that contains the VM instance or service account</p> <p>To get the project number of the project that contains the managed identity or the service account that you just created, run the following command:</p> 
+<pre data-language="">
+gcloud projects describe $(gcloud config get-value project) \
+  --format="value(projectNumber)"
+</pre>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>: the email address of the service account attached to the VM</p></li> </ul></section> <section><p class="_code-tab"><strong>Service account UID</strong></p>
+<p>To create an attestation policy file that attests based on the service account UID, create a file with the following contents:</p> 
+<pre data-language="">
+{
+   "attestationRules": [
+      {
+         "googleCloudResource": "//compute.googleapis.com/projects/WORKLOAD_PROJECT_NUMBER/type/Instance/attached_service_account.uid/SERVICE_ACCOUNT_UID"
+      }
+   ],
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<p><code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROJECT_NUMBER</var></code>: the number of the project that contains the VM instance or service account</p> <p>To get the project number of the project that contains the managed identity or the service account that you just created, run the following command:</p> 
+<pre data-language="">
+gcloud projects describe $(gcloud config get-value project) \
+  --format="value(projectNumber)"
+</pre>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_UID</var></code>: the UID of the service account attached to the VM</p></li> </ul> <p>To get the Unique ID of the service account, run the following command:</p> 
+<pre data-language="">
+   gcloud iam service-accounts describe SERVICE_ACCOUNT_EMAIL\
+      --format="value(uniqueId)"
+</pre></section> <section><p class="_code-tab"><strong>Instance name</strong></p>
+<p>To create an attestation policy file that attests based on the instance name, create a file with the following contents:</p> 
+<pre data-language="">
+{
+   "attestationRules": [
+      {
+         "googleCloudResource": "//compute.googleapis.com/projects/WORKLOAD_PROJECT_NUMBER/name/zones/ZONE/instances/INSTANCE_NAME"
+      }
+   ],
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<p><code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROJECT_NUMBER</var></code>: the number of the project that contains the VM instance or service account</p> <p>To get the project number of the project that contains the managed identity or the service account that you just created, run the following command:</p> 
+<pre data-language="">
+gcloud projects describe $(gcloud config get-value project) \
+  --format="value(projectNumber)"
+</pre>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the Compute Engine VM zone</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code>: the name of a new or existing Compute Engine VM instance</p></li> </ul></section> <section><p class="_code-tab"><strong>Instance ID</strong></p>
+<p>To create an attestation policy file that attests based on the instance ID, create a file with the following contents:</p> 
+<pre data-language="">
+{
+   "attestationRules": [
+      {
+         "googleCloudResource": "//compute.googleapis.com/projects/WORKLOAD_PROJECT_NUMBER/uid/zones/ZONE/instances/INSTANCE_ID"
+      }
+   ],
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<p><code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROJECT_NUMBER</var></code>: the number of the project that contains the VM instance or service account</p> <p>To get the project number of the project that contains the managed identity or the service account that you just created, run the following command:</p> 
+<pre data-language="">
+gcloud projects describe $(gcloud config get-value project) \
+  --format="value(projectNumber)"
+</pre>
+</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">INSTANCE_ID</var></code>: the Compute Engine VM instance ID</p> <p>The value for an instance ID must come from an existing Compute Engine instance. To obtain your instance ID, run the following command:</p> 
+<pre data-language="">
+gcloud compute instances describe INSTANCE_NAME --zone=ZONE --format="get(id)"
+</pre>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">INSTANCE_NAME</var></code>: the Compute Engine VM instance name</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the Compute Engine VM zone</p></li> </ul></section> </div>
+</li> </ol>
+</li> <li>
+<p>Create the attestation policy using the policy JSON file that you created earlier in this document:</p> 
+<pre>
+gcloud iam workload-identity-pools managed-identities set-attestation-rules MANAGED_IDENTITY_ID \
+   --namespace=NAMESPACE_ID \
+   --workload-identity-pool=POOL_ID \
+   --policy-file=PATH_TO_POLICY_JSON_FILE \
+   --location=global
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MANAGED_IDENTITY_ID</var></code>: the unique ID for the managed identity. The ID must be between 2 and 63 characters long, contain only lowercase alphanumeric characters and dashes, and start and end with an alphanumeric character. After you create a managed workload identity, you cannot change its ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE_ID</var></code>: the namespace ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload identity pool ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH_TO_POLICY_JSON_FILE</var></code>: Path to the JSON file representing the attestation policy that you created earlier.</li> </ul> <p>You can also update the policy by adding or removing attestation rules individually. To add an attestation to your attestation policy, run the following command:</p> 
+<pre>
+gcloud iam workload-identity-pools managed-identities add-attestation-rule MANAGED_IDENTITY_ID \
+   --namespace=NAMESPACE_ID \
+   --workload-identity-pool=POOL_ID \
+   --google-cloud-resource='//compute.googleapis.com/projects/WORKLOAD_PROJECT_NUMBER/type/Instance/attached_service_account.uid/SERVICE_ACCOUNT_UID' \
+   --location=global
+</pre>
+</li> <li>
+<p>To learn about how to list or remove the attestation rules, run the following commands:</p> 
+<pre>
+gcloud iam workload-identity-pools managed-identities list-attestation-rules --help
+gcloud iam workload-identity-pools managed-identities remove-attestation-rule --help
+</pre>
+</li> </ol> <h2 id="enable-trust-federation">Optional: Enable trust federation between workload identity pools</h2> <p>To enable mutual authentication for workloads in different trust domains, you can configure trust federation.</p> <ol> <li>
+<p>Create a <code translate="no" dir="ltr">trust-config.yaml</code> file with the following content:</p> 
+<pre>inlineTrustConfig:
+additionalTrustBundles:
+  POOL_ID.global.PROJECT_NUMBER.workload.id.goog:
+     trustAnchors:
+     - pemCertificate: "-----BEGIN CERTIFICATE-----\nPEM_ENCODED_CERTIFICATE\n-----END CERTIFICATE-----"</pre> <p>Replace the following in the file:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The ID of the workload identity pool that you want to federate with.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: The project number of the workload identity pool that you want to federate with.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PEM_ENCODED_CERTIFICATE</var></code>: The PEM-encoded root CA certificate of the workload identity pool that you want to federate with.</li> </ul>
+</li> <li>
+<p>To update the workload identity pool with the trust configuration, run the following command:</p> 
+<pre>
+gcloud iam workload-identity-pools update POOL_ID \
+  --location="global" \
+  --inline-trust-config-file=TRUST_CONFIG_FILE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_CONFIG_FILE</var></code>: the path to the <code translate="no" dir="ltr">trust-config.yaml</code> file.</li> </ul>
+</li> </ol> <h2 id="whats_next">What's next</h2> <ul> <li>
+<a href="https://docs.cloud.google.com/compute/docs/troubleshooting/troubleshooting-workload-to-workload-auth">Troubleshoot managed workload identity authentication for Compute Engine</a>.</li> <li>
+<a href="https://docs.cloud.google.com/compute/docs/access/authenticate-workloads-over-mtls">Configure workload to workload authentication using mTLS</a>.</li> <li>
+<a href="https://docs.cloud.google.com/load-balancing/docs/set-up-backend-mtls-managed-identity">Set up load balancing with backend mTLS using managed workload identity</a>.</li> <li>Learn more about <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">creating CA pools</a>.</li> </ul> <cloud-free-trial> <div class="eligible"> <div> <h2 class="hide-from-toc" id="try-it-for-yourself"> Try it for yourself </h2> <p> If you're new to Google Cloud, create an account to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </p> <a href="https://console.cloud.google.com/freetrial" class="button button-primary" track-type="button" track-metadata-modifier="primary" track-name="Get started for free" track-metadata-anchor_text="Get started for free" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-href="https://console.cloud.google.com/freetrial"> Get started for free </a> </div> </div> </cloud-free-trial><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/iam/docs/create-managed-workload-identities" class="_attribution-link">https://docs.cloud.google.com/iam/docs/create-managed-workload-identities</a>
+  </p>
+</div>

@@ -1,0 +1,117 @@
+<h1>Configure VPC Service Controls and Private Service Connect with sandboxes</h1> <p>Control an Agent Platform sandbox's private ingress and internet egress with <a href="https://docs.cloud.google.com/vpc/docs/private-service-connect">Private Service Connect</a> (PSC-E / PSC-I). These controls make the sandbox compliant with <a href="https://docs.cloud.google.com/vpc-service-controls/docs/overview">VPC Service Controls</a> inside a perimeter or without a perimeter.</p> <aside class="note"><strong>Note:</strong><span> For VPC Service Controls as it applies to the broader Agent Runtime and other Agent Platform services, see <a href="../../machine-learning/general/vpc-service-controls">VPC Service Controls with Agent Platform</a>.</span></aside> <h2 id="overview">Overview</h2> <p><a href="https://docs.cloud.google.com/vpc-service-controls/docs/overview">VPC Service Controls</a> lets you define a service perimeter that isolates Google Cloud resources to mitigate the risk of data exfiltration. The Gemini Enterprise Agent Platform sandbox gives your agents a secure, isolated compute environment to run untrusted code, drive a web browser (computer use), or execute a custom container image. The sandbox exposes an interactive data plane and makes outbound calls, so it is governed with two Private Service Connect controls: private ingress (PSC-E) and egress control (PSC-I).</p> <p>When you run the sandbox inside a perimeter, the following stay protected within your boundary:</p> <ul> <li>Data your agent reads or writes during a sandbox session (files on the sandbox disk, in-memory state).</li> <li>Sandbox <a href="manage-snapshots">snapshots</a> that capture disk and in-memory state and are stored automatically in a Cloud Storage bucket.</li> <li>Requests and responses exchanged with the sandbox data plane (for example, computer-use commands and screenshots).</li> <li>Custom container images pulled from Artifact Registry.</li> <li>Calls the sandbox makes to Google APIs (for example, Cloud Storage or Agent Platform).</li> </ul> <p>You can also set up ingress and egress control without a VPC Service Controls perimeter, since the PSC-E (private ingress) and PSC-I (egress) are what makes a sandbox VPC Service Controls-compliant. To set up ingress and egress without a VPC Service Controls perimeter, skip to <a href="#control-egress">Control sandbox egress with a Private Service Connect interface (PSC-I)</a>.</p> <h2 id="limitations-and-considerations">Limitations and considerations</h2> <p>Keep the following limitations and security boundaries in mind when configuring VPC Service Controls and Private Service Connect for sandboxes:</p> <ul> <li>
+<strong>No built-in sandbox domain allowlist</strong>: Sandboxes and <code translate="no" dir="ltr">SandboxEnvironmentTemplate</code> resources don't have a built-in domain allowlist field. Enabling <code translate="no" dir="ltr">internet_access: True</code> on <code translate="no" dir="ltr">egress_control_config</code> without a <code translate="no" dir="ltr">network_attachment</code> grants unrestricted outbound access to public IP addresses (<code translate="no" dir="ltr">0.0.0.0/0</code>, excluding private RFC 1918 ranges and the <code translate="no" dir="ltr">169.254.0.0/16</code> metadata range). To restrict outbound connections by domain name (FQDN), URL, or IP address, you must bridge sandbox egress into your VPC with a Private Service Connect interface (<code translate="no" dir="ltr">network_attachment</code>) and enforce filtering in your VPC using Cloud Next Generation Firewall (Cloud NGFW) or Secure Web Proxy (Secure Web Proxy).</li> <li>
+<strong>Single consumer project for private ingress</strong>: Private ingress (PSC-E) can be enabled for at most one consumer project, which must be the same user project that the sandbox runs in.</li> <li>
+<strong>DNS resolution and anti-tunneling</strong>: When egress is bridged into your VPC, only private name resolution through Cloud DNS peering (<code translate="no" dir="ltr">dns_peering_configs</code>) is supported; public DNS forwarding is disabled to prevent DNS-tunnel exfiltration.</li> <li>
+<strong>Cloud Audit Logs and network threat inspection</strong>: Cloud Audit Logs records control-plane lifecycle calls and data-plane execution RPCs (<code translate="no" dir="ltr">ExecuteSandboxEnvironment</code>, <code translate="no" dir="ltr">BidiExecuteSandboxEnvironment</code>, and <code translate="no" dir="ltr">AuthorizeSandboxEnvironmentAccess</code>), while request and response payload logging is unavailable for resources protected by VPC Service Controls. Individual child processes and network sockets inside the container aren't logged in Cloud Audit Logs; to inspect outbound connections and detect network threats, enable VPC Flow Logs, Cloud NGFW rule logging, Cloud DNS query logging, and Secure Web Proxy logs in your VPC.</li> <li>
+<strong>Isolated in-sandbox identity</strong>: Code inside the sandbox runs under an unprivileged tenant identity with no Identity and Access Management (IAM) roles on your project, doesn't inherit the parent agent's <a href="../runtime/agent-identity">Agent Identity</a> or service account, and can't query the Compute Engine metadata server (<code translate="no" dir="ltr">169.254.169.254:80</code>) for credentials. For details, see <a href="../sandbox#execution-identity">Execution identity and credential boundaries</a>.</li> <li>
+<strong>Perimeter access levels</strong>: Programmatic and console access from outside the perimeter is denied unless the caller matches an access level on the perimeter.</li> </ul> <h2 id="before-you-begin">Before you begin</h2> <p>Before configuring VPC Service Controls or Private Service Connect for your sandboxes, complete the following prerequisites:</p> <ul> <li>Create or identify the VPC Service Controls <a href="https://docs.cloud.google.com/vpc-service-controls/docs/create-service-perimeters">service perimeter</a> that contains your project. In order for the sandboxes to be secured by the VPC Service Controls perimeter, your Google Cloud project must be in the perimeter before you create the sandboxes.</li> <li>Enable the Agent Platform API (<code translate="no" dir="ltr">aiplatform.googleapis.com</code>) in your project.</li> <li>Have a VPC network in the region where you run sandboxes.</li> <li>Confirm you hold the required roles: <ul> <li>
+<a href="https://docs.cloud.google.com/vpc-service-controls/docs/access-control#required_roles">Access Context Manager admin</a> role for the perimeter</li> <li>Compute Network Admin (<code translate="no" dir="ltr">roles/compute.networkAdmin</code>) in the project that owns the network attachment.</li> </ul>
+</li> </ul> <h2 id="add-agent-platform-perimeter">Add Agent Platform to your service perimeter</h2> <p>Add the Agent Platform API to the list of restricted services in your VPC Service Controls perimeter. This protects Agent Platform (including the sandbox control plane) and blocks public internet access to the API unless the caller is on an <a href="https://docs.cloud.google.com/vpc-service-controls/docs/use-access-levels">access level</a>.</p> <ol> <li>Open <strong>VPC Service Controls</strong> in the Google Cloud console and edit your perimeter.</li> <li>Under <strong>Restricted services</strong>, add <strong>Agent Platform API</strong> (<code translate="no" dir="ltr">aiplatform.googleapis.com</code>).</li> <li>Ensure dependencies your sandbox uses are in the same perimeter, typically <strong>Cloud Storage</strong> (<code translate="no" dir="ltr">storage.googleapis.com</code>) and <strong>Artifact Registry</strong> (<code translate="no" dir="ltr">artifactregistry.googleapis.com</code>, for custom container images). Snapshot storage is handled for you automatically.</li> <li>To restore access for trusted users outside the perimeter (for example, your corporate network), attach an access level to the perimeter.</li> </ol> <h2 id="optional-configure-private-access-google-apis">Optional: Configure private access to Google APIs</h2> <p>Inside the VPC Service Controls perimeter, the sandbox reaches Google APIs privately over the restricted virtual IP address (VIP). From your own VPC and on-premises networks, use the restricted VIP as well so requests never traverse the public internet:</p> <ul> <li>Route <code translate="no" dir="ltr">*.googleapis.com</code> to the restricted VIP <code translate="no" dir="ltr">199.36.153.4/30</code> and enable <a href="https://docs.cloud.google.com/vpc/docs/private-google-access">Private Google Access</a> on the subnets that call Google APIs.</li> <li>Create Cloud DNS private zones for <code translate="no" dir="ltr">googleapis.com</code> (and, if you pull images, <code translate="no" dir="ltr">pkg.dev</code> / <code translate="no" dir="ltr">gcr.io</code>) that resolve to the restricted VIP.</li> </ul> <aside class="note"><strong>Note:</strong><span> If you use Private Service Connect for Google APIs, you can define a custom endpoint IP and DNS name. See <a href="https://docs.cloud.google.com/vpc/docs/configure-private-service-connect-apis">Configure Private Service Connect for Google APIs</a>.</span></aside> <h2 id="control-egress">Control sandbox egress with a Private Service Connect interface (PSC-I)</h2> <p>Because sandboxes don't include a built-in domain allowlist setting, use a Private Service Connect interface (PSC-I) whenever you need to allowlist outbound domains (FQDNs), filter URLs, or let the sandbox reach private services. PSC-I bridges all sandbox egress into your VPC so you can govern and log that traffic with your own VPC security controls, whether or not your project is inside a VPC Service Controls perimeter.</p> <p>Every resource in this step is created in the user project that owns the sandbox or in its Shared VPC host project. Egress is directed to the single VPC network and network attachment you set on the template.</p> <h3 id="create-network-attachment">Create the network attachment</h3> <p>Create the network attachment for the sandbox:</p> 
+<pre># A dedicated subnet for the PSC interface (minimum /28)
+gcloud compute networks subnets create sandbox-psc-subnet \
+    --network=YOUR_VPC \
+    --range=10.0.0.0/28 \
+    --region=REGION
+
+# The network attachment the sandbox connects into
+gcloud compute networks network-attachments create sandbox-egress-na \
+    --region=REGION \
+    --connection-preference=ACCEPT_AUTOMATIC \
+    --subnets=sandbox-psc-subnet
+</pre> <h3 id="ref-attachment-sandbox">Reference the attachment from the sandbox template</h3> <p>Set the egress fields on the <code translate="no" dir="ltr">SandboxEnvironmentTemplate</code> so the sandbox routes egress through your VPC:</p> 
+<pre>from vertexai import Client
+
+client = Client(project="PROJECT_ID", location="REGION",
+                http_options={"api_version": "v1beta1"})
+
+templates = client.agent_engines.sandboxes.templates
+op = templates.create(
+    name=agent_instance_name,
+    display_name="cu-vpcsc-template",
+    config={
+        "custom_container_environment": {
+            "custom_container_spec": {"image_uri": "IMAGE_URI"},
+            "ports": [{"port": 8080, "protocol": "TCP"}],
+        },
+        "egress_control_config": {
+            "internet_access": True, # Enables outbound access from the sandbox. With VPC-SC, that traffic is bridged into your VPC.
+            "customer_vpc_network":
+                "projects/PROJECT_ID/global/networks/YOUR_VPC", # The VPC network in your project that egress is bridged into. Checked by VPC-SC at creation time.
+            "network_attachment":
+                "projects/PROJECT_ID/regions/REGION/networkAttachments/sandbox-egress-na", # The network attachment that accepts the sandbox's PSC interface.
+        },
+    },
+)
+</pre> <p>The PSC interface builds the private path into your VPC, and the platform automatically steers the sandbox's egress onto it when <code translate="no" dir="ltr">internet_access</code> is enabled.</p> <p>To set up and govern the path out of your VPC, decide if you need internet or private-only egress:</p> <ul> <li>
+<a href="#set-up-internet-egress"><strong>Internet egress:</strong></a> For internet egress, Cloud NAT is required, plus destination control using Cloud Next Generation Firewall (Cloud NGFW) rules or Secure Web Proxy.</li> <li>
+<a href="#setup-private-egress"><strong>Private-only egress</strong></a> (reach services in your VPC or on-premises, no internet): Cloud NAT isn't required. You only need routes, a firewall rule, and DNS peering.</li> </ul> <h4 id="set-up-internet-egress">Set up for internet egress and govern destinations</h4> <p>The sandbox enters your VPC on an internal (RFC 1918) address, so it needs <a href="https://docs.cloud.google.com/nat/docs/overview">Cloud NAT</a> to reach the internet. Reserve a static egress IP if your destinations allow-list by source IP.</p> 
+<pre># Reserve a static egress IP (optional, for destination-side allow-listing)
+gcloud compute addresses create sandbox-egress-ip --region=REGION
+
+# Cloud Router + NAT for the region, scoped to the PSC subnet
+gcloud compute routers create sandbox-egress-router \
+    --network=YOUR_VPC --region=REGION
+
+gcloud compute routers nats create sandbox-egress-nat \
+    --router=sandbox-egress-router --region=REGION \
+    --nat-external-ip-pool=sandbox-egress-ip \
+    --nat-custom-subnet-ip-ranges=sandbox-psc-subnet
+</pre> <p>To restrict which destinations the sandbox may reach as its traffic transits your VPC, choose the level of control you need:</p> <ul> <li>
+<p><a href="https://docs.cloud.google.com/firewall/docs/about-firewalls"><strong>Cloud NGFW</strong></a> (network-level): a global network firewall policy with allow rules (FQDN objects are supported) plus a default-deny for everything else:</p> 
+<pre>gcloud compute network-firewall-policies create sandbox-egress-policy --global
+
+# Allow only the destinations your agent needs (by FQDN)
+gcloud compute network-firewall-policies rules create 1000 \
+    --firewall-policy=sandbox-egress-policy --global-firewall-policy \
+    --direction=EGRESS --action=allow --layer4-configs=tcp:443 \
+    --dest-fqdns=api.partner.example.com
+
+# Default-deny the rest of egress
+gcloud compute network-firewall-policies rules create 65000 \
+    --firewall-policy=sandbox-egress-policy --global-firewall-policy \
+    --direction=EGRESS --action=deny --layer4-configs=all \
+    --dest-ip-ranges=0.0.0.0/0
+
+gcloud compute network-firewall-policies associations create \
+    --firewall-policy=sandbox-egress-policy --global-firewall-policy \
+    --network=YOUR_VPC
+</pre>
+</li> <li><p><a href="https://docs.cloud.google.com/secure-web-proxy/docs/overview"><strong>Secure Web Proxy</strong></a> (application/L7): deploy Secure Web Proxy as the egress inspection point in your VPC for TLS-aware, per-URL policy, and route the PSC subnet's egress through it.</p></li> </ul> <aside class="note"><strong>Note:</strong><span> To monitor outbound connections and detect potential threats or data exfiltration attempts from inside the sandbox, enable <a href="https://docs.cloud.google.com/firewall/docs/using-firewall-rules-logging">Firewall Rules Logging</a> (<code translate="no" dir="ltr">--enable-logging</code>) on your allow and deny rules, <a href="https://docs.cloud.google.com/vpc/docs/flow-logs">VPC Flow Logs</a> on <code translate="no" dir="ltr">sandbox-psc-subnet</code>, and access logging in Secure Web Proxy.</span></aside> <h4 id="setup-private-egress">Set up for private-only egress</h4> <p>If the sandbox only needs private services in your VPC or on-premises, make sure your VPC has a route to the destination, allow it with an egress firewall rule from the PSC subnet (<code translate="no" dir="ltr">10.0.0.0/28</code>), and <a href="https://docs.cloud.google.com/dns/docs/zones/zones-overview#peering-zones">resolve the service name through DNS peering</a>.</p> <h3 id="set-up-dns-peering">Set up DNS peering</h3> <p>Give the sandbox name resolution through your VPC instead of public resolvers (this also blocks DNS-tunnel exfiltration). Create a Cloud DNS private zone in your VPC with the records the sandbox needs, then configure <a href="https://docs.cloud.google.com/dns/docs/zones/zones-overview#peering-zones">DNS peering</a> so the sandbox resolves names from that zone.</p> <h3 id="grant-service-agent-shared-vpc">Grant the service agent access (Shared VPC)</h3> <p>If the network attachment lives in a separate project (Project A) from the project where the sandbox is run (Project B), grant Project B's Agent Platform service agent the Compute Network User role on Project A:</p> 
+<pre># Agent Platform service agent of the project that runs the sandbox
+service-PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com
+
+# On the project that owns the network attachment
+gcloud projects add-iam-policy-binding NETWORK_PROJECT_ID \
+    --member="serviceAccount:service-PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com" \
+    --role="roles/compute.networkUser"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr">PROJECT_NUMBER</code>: the project number of the project that runs the sandbox.</li> <li>
+<code translate="no" dir="ltr">NETWORK_PROJECT_ID</code>: the ID of the project that owns the network attachment.</li> </ul> <h2 id="enable-private-ingress-psc-e">Enable private ingress with Private Service Connect (PSC-E)</h2> <p>Interactive workloads expose a data plane that a client must connect to. Reach that data plane over a private Private Service Connect endpoint (PSC-E) in your VPC instead of over the public internet.</p> <h3 id="declare-allowed-consumer-project">Declare the allowed consumer project</h3> <p>Set the ingress configuration on the template with the consumer project allowed to connect. Only the same user project that the sandbox runs in can have private ingress to the sandbox VPC.</p> <p>Connect to the sandbox from a VPC in that same project:</p> 
+<pre>config = {
+    # ...custom_container_environment, egress_control_config...
+    "ingress_control_config": {
+        "private_service_connect_config": {
+            # Must be the same project the sandbox runs in.
+            "enable_private_service_connect": True,
+        }
+    },
+}
+</pre> <h3 id="create-psc-endpoint">Create the PSC endpoint in your VPC</h3> <p>After the sandbox is created, read the service attachment from its connection info:</p> 
+<pre># The sandbox returns a service attachment to connect to
+service_attachment = sandbox.connection_info.service_attachment
+</pre> <p>Then, reserve an internal IP address and create a forwarding rule (PSC endpoint) in your VPC that targets the service attachment:</p> 
+<pre># Reserve an internal IP and create the PSC endpoint
+gcloud compute addresses create sandbox-ingress-ip \
+    --region=REGION --subnet=YOUR_SUBNET
+
+gcloud compute forwarding-rules create sandbox-ingress-ep \
+    --region=REGION \
+    --network=YOUR_VPC \
+    --address=sandbox-ingress-ip \
+    --target-service-attachment=SERVICE_ATTACHMENT_URI
+</pre> <p>Clients in that project's VPC (or reachable through it) now connect to the sandbox through the endpoint's private IP (for example, a client connecting over the sandbox WebSocket or CDP port).</p> <h2 id="whats-next">What's next</h2> <p>To continue configuring and securing your sandboxes, see the following resources:</p> <ul> <li>Read the <a href="../sandbox">Sandbox overview</a> and <a href="custom-containers">Custom containers (BYOC)</a>.</li> <li>Learn how <a href="../runtime/private-service-connect-interface">Private Service Connect interfaces work with Agent Runtime</a>.</li> <li>Review <a href="https://docs.cloud.google.com/vpc-service-controls/docs/troubleshooting">VPC Service Controls troubleshooting</a>.</li> <li>Follow the <a href="https://codelabs.developers.google.com/agent-engine-psc-interface-private">Agent Engine PSC interface codelab</a> for an end-to-end egress walkthrough.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/sandbox/configure-vpc-sc" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/sandbox/configure-vpc-sc</a>
+  </p>
+</div>

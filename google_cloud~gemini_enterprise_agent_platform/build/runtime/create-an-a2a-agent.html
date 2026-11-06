@@ -1,0 +1,242 @@
+<h1>Create an Agent2Agent agent</h1> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>Agent Runtime lets you develop and deploy agents using the Agent2Agent (A2A) protocol. A2A is an open standard designed to enable seamless communication and collaboration between AI agents.</p> <p>This document explains how to develop and test an A2A agent locally, including defining components like <code translate="no" dir="ltr">AgentCard</code> and <code translate="no" dir="ltr">AgentExecutor</code>.</p> <p>For more information on managing your deployed agents, see <a href="../../scale/runtime/manage-deployed-agents">Manage deployed agents</a>.</p> <div> <aside class="objective"><p>To see an example of Get started with A2A on Agent Runtime on Gemini Enterprise Agent Platform, run the "Get started with A2A on Agent Runtime" notebook in one of the following environments: </p>
+<p><a href="https://colab.research.google.com/github/GoogleCloudPlatform/generative-ai/blob/main/agents/agent_engine/tutorial_a2a_on_agent_engine.ipynb" track-type="notebookTutorial" track-name="colabLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/colab-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">Open in Colab</a> | <a href="https://console.cloud.google.com/agent-platform/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2FGoogleCloudPlatform%2Fgenerative-ai%2Fmain%2Fagents%2Fagent_engine%2Ftutorial_a2a_on_agent_engine.ipynb" track-type="notebookTutorial" track-name="colabEnterpriseLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/colab-enterprise-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">Open in Colab Enterprise</a> | <a href="https://console.cloud.google.com/agent-platform/workbench/deploy-notebook" track-type="notebookTutorial" track-name="workbenchLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/vertex-ai-workbench-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">Open in Agent Platform Workbench</a> | <a href="https://github.com/GoogleCloudPlatform/generative-ai/blob/main/agents/agent_engine/tutorial_a2a_on_agent_engine.ipynb" track-type="notebookTutorial" track-name="gitHubLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/github-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">View on GitHub</a></p></aside> </div> <p>The core workflow involves the following steps:</p> <ol> <li><a href="#define_agent_components">Define key components</a></li> <li><a href="#create_a_local_agent">Create local agent</a></li> <li><a href="#test_the_local_agent">Test the local agent</a></li> </ol> <h2 id="define_agent_components">Define agent components</h2> <p>To create an A2A agent, you need to define the following components: an <code translate="no" dir="ltr">AgentCard</code>, an <code translate="no" dir="ltr">AgentExecutor</code>, and an ADK <code translate="no" dir="ltr">LlmAgent</code>.</p> <ul> <li>
+<code translate="no" dir="ltr">AgentCard</code> contains a metadata document that describes your agent's capabilities. <code translate="no" dir="ltr">AgentCard</code> is like a business card that other agents can use to discover what your agent can do. For more details, see the <a href="https://a2a-protocol.org/dev/specification/agent-card/">Agent Card specification</a>.</li> <li>
+<code translate="no" dir="ltr">AgentExecutor</code> contains the agent's core logic and defines how it handles tasks. This is where you implement the agent's behavior. You can read more about it in the <a href="https://a2a-protocol.org/dev/specification/">A2A protocol specification</a>.</li> <li>Optional: <code translate="no" dir="ltr">LlmAgent</code> defines the ADK agent, including its system instructions, generative model, and tools.</li> </ul> <h3 id="define_an_agentcard">Define an <code translate="no" dir="ltr">AgentCard</code>
+</h3> <p>The following code sample defines an <code translate="no" dir="ltr">AgentCard</code> for a currency exchange rate agent:</p> 
+<pre>from a2a.types import AgentCard, AgentSkill
+from vertexai.agent_engines.templates.a2a import create_agent_card
+
+# Define the skill for the CurrencyAgent
+currency_skill = AgentSkill(
+    id='get_exchange_rate',
+    name='Get Currency Exchange Rate',
+    description='Retrieves the exchange rate between two currencies on a specified date.',
+    tags=['Finance', 'Currency', 'Exchange Rate'],
+    examples=[
+        'What is the exchange rate from USD to EUR?',
+        'How many Japanese Yen is 1 US dollar worth today?',
+    ],
+)
+
+# Create the agent card using the utility function
+agent_card = create_agent_card(
+    agent_name='Currency Exchange Agent',
+    description='An agent that can provide currency exchange rates',
+    skills=[currency_skill]
+)
+</pre> <h3 id="define_an_agentexecutor">Define an <code translate="no" dir="ltr">AgentExecutor</code>
+</h3> <p>The following code example defines an <code translate="no" dir="ltr">AgentExecutor</code> that responds with the currency exchange rate. It takes a <code translate="no" dir="ltr">CurrencyAgent</code> instance and initializes the ADK Runner to execute requests.</p> 
+<pre>import requests
+from a2a.server.agent_execution.agent_executor import AgentExecutor
+from a2a.server.agent_execution.context import RequestContext
+from a2a.server.events.event_queue import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a import types as a2a_types
+from a2a.types import Part
+
+from google.adk import Runner
+from google.adk.agents import LlmAgent
+from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
+from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
+from google.adk.sessions.in_memory_session_service import InMemorySessionService
+from google.genai import types as genai_types
+
+class CurrencyAgentExecutorWithRunner(AgentExecutor):
+    """Executor that takes an LlmAgent instance and initializes the ADK Runner internally."""
+
+    def __init__(self, agent: LlmAgent):
+        self.agent = agent
+        self.runner = None
+
+    def _init_adk(self):
+        if not self.runner:
+            self.runner = Runner(
+                app_name=self.agent.name,
+                agent=self.agent,
+                artifact_service=InMemoryArtifactService(),
+                session_service=InMemorySessionService(),
+                memory_service=InMemoryMemoryService(),
+            )
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -&gt; None:
+        task_id = context.task_id
+        updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=task_id or "",
+            context_id=context.context_id or "",
+        )
+        await updater.cancel()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -&gt; None:
+        self._init_adk() # Initialize on first execute call
+
+        if not context.message:
+            return
+
+        user_id = context.message.metadata.get('user_id') if context.message and context.message.metadata else 'a2a_user'
+
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        
+        task = a2a_types.Task(
+            id=context.task_id,
+            context_id=context.context_id,
+            status=a2a_types.TaskStatus(state=a2a_types.TaskState.TASK_STATE_SUBMITTED),
+            history=[context.message] if context.message else [],
+        )
+        await event_queue.enqueue_event(task)
+
+        await updater.start_work()
+
+        query = context.get_user_input()
+        content = genai_types.Content(role='user', parts=[genai_types.Part.from_text(text=query)])
+
+        try:
+            session = await self.runner.session_service.get_session(
+                app_name=self.runner.app_name,
+                user_id=user_id,
+                session_id=context.context_id,
+            ) or await self.runner.session_service.create_session(
+                app_name=self.runner.app_name,
+                user_id=user_id,
+                session_id=context.context_id,
+            )
+
+            final_event = None
+            async for event in self.runner.run_async(
+                session_id=session.id,
+                user_id=user_id,
+                new_message=content
+            ):
+                if event.is_final_response():
+                    final_event = event
+
+            if final_event and final_event.content and final_event.content.parts:
+                response_text = "".join(
+                    part.text for part in final_event.content.parts if hasattr(part, 'text') and part.text
+                )
+                if response_text:
+                    await updater.add_artifact(
+                        [Part(text=response_text)],
+                        name='result',
+                        last_chunk=True,
+                    )
+                    await updater.complete()
+                    return
+
+            await updater.update_status(
+                a2a_types.TaskState.TASK_STATE_FAILED,
+                message=updater.new_agent_message([Part(text='Failed to generate a final response with text content.')]),
+            )
+
+        except Exception as e:
+            await updater.update_status(
+                a2a_types.TaskState.TASK_STATE_FAILED,
+                message=updater.new_agent_message([Part(text=f"An error occurred: {str(e)}")]),
+            )
+</pre> <h3 id="define_an_llmagent">Define an <code translate="no" dir="ltr">LlmAgent</code>
+</h3> <p>First, define a currency exchange tool for the <code translate="no" dir="ltr">LlmAgent</code> to use:</p> 
+<pre>def get_exchange_rate(
+    currency_from: str = "USD",
+    currency_to: str = "EUR",
+    currency_date: str = "latest",
+):
+    """Retrieves the exchange rate between two currencies on a specified date.
+    Uses the Frankfurter API (https://api.frankfurter.app/) to obtain
+    exchange rate data.
+    """
+    try:
+        response = requests.get(
+            f"https://api.frankfurter.app/{currency_date}",
+            params={"from": currency_from, "to": currency_to},
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+</pre> <p>Then, define an ADK <code translate="no" dir="ltr">LlmAgent</code> that uses the tool.</p> 
+<pre>my_llm_agent = LlmAgent(
+    model='gemini-2.0-flash',
+    name='currency_exchange_agent',
+    description='An agent that can provide currency exchange rates.',
+    instruction="""You are a helpful currency exchange assistant.
+                   Use the get_exchange_rate tool to answer user questions.
+                   If the tool returns an error, inform the user about the error.""",
+    tools=[get_exchange_rate],
+)
+</pre> <h2 id="create_a_local_agent">Create a local agent</h2> <p>Once you have defined your agent's components, create an instance of the <a href="https://docs.cloud.google.com/python/docs/reference/vertexai/latest/vertexai.preview.reasoning_engines.A2aAgent"><code translate="no" dir="ltr">A2aAgent</code></a> class that uses the <code translate="no" dir="ltr">AgentCard</code>, <code translate="no" dir="ltr">AgentExecutor</code>, and <code translate="no" dir="ltr">LlmAgent</code> to begin local testing.</p> 
+<pre>from vertexai.agent_engines.templates.a2a import A2aAgent
+
+a2a_agent = A2aAgent(
+    agent_card=agent_card, # Assuming agent_card is defined
+    agent_executor_builder=lambda: CurrencyAgentExecutorWithRunner(
+        agent=my_llm_agent,
+    )
+)
+a2a_agent.set_up()
+</pre> <p>The A2A Agent template helps you create an A2A-compliant service. The service acts as a wrapper, abstracting away the converting layer from you.</p> <h2 id="test_the_local_agent">Test the local agent</h2> <p>The currency exchange rate agent supports the following three methods:</p> <ul> <li><code translate="no" dir="ltr">handle_authenticated_agent_card</code></li> <li><code translate="no" dir="ltr">on_message_send</code></li> <li><code translate="no" dir="ltr">on_get_task</code></li> </ul> <h3 id="test_handle_authenticated_agent_card">Test <code translate="no" dir="ltr">handle_authenticated_agent_card</code>
+</h3> <p>The following code retrieves the agent's authenticated card, which describes the agent's capabilities.</p> 
+<pre># Test the `authenticated_agent_card` endpoint.
+response_get_card = await a2a_agent.handle_authenticated_agent_card(request=None, context=None)
+print(response_get_card)
+</pre> <h3 id="test_on_message_send">Test <code translate="no" dir="ltr">on_message_send</code>
+</h3> <p>The following code simulates a client sending a new message to the agent. The <a href="https://docs.cloud.google.com/python/docs/reference/vertexai/latest/vertexai.preview.reasoning_engines.A2aAgent"><code translate="no" dir="ltr">A2aAgent</code></a> creates a new task and returns the task's ID.</p> 
+<pre>from a2a.types import SendMessageRequest, Message, Part
+from a2a.server.context import ServerCallContext
+
+# 1. Define the message
+message = Message(
+    role="ROLE_USER",
+    message_id="local-test-message-id",
+    parts=[Part(text="What is the exchange rate from USD to EUR today?")]
+)
+
+# 2. Construct the request
+request = SendMessageRequest(message=message)
+
+# 3. Construct context
+context = ServerCallContext()
+
+# 4. Call the agent
+send_message_response = await a2a_agent.on_message_send(request=request, context=context)
+
+print(send_message_response)
+</pre> <h3 id="test_on_get_task">Test <code translate="no" dir="ltr">on_get_task</code>
+</h3> <p>The following code retrieves the status and the result of a task. The output shows that the task is completed and includes the "Hello World" response artifact.</p> 
+<pre>from a2a.types import GetTaskRequest
+
+# 1. Provide the task_id from the previous step.
+# In a real application, you would store and retrieve this ID.
+task_id_to_get = send_message_response.id
+
+# 2. Construct the request
+request = GetTaskRequest(id=task_id_to_get)
+
+# 3. Call the agent's handler to get the task status.
+# Reusing the context constructed in the previous step
+task_status_response = await a2a_agent.on_get_task(request=request, context=context)
+
+print(f"Successfully retrieved status for Task ID: {task_id_to_get}")
+print("\nFull task status response:")
+print(task_status_response)
+</pre> <h2 id="whats_next">What's next</h2> <div class="devsite-card-group">             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="deploy-agents"> <a href="../../scale/runtime/deploy-an-agent" track-metadata-eventdetail="/gemini-enterprise-agent-platform/scale/runtime/deploy-an-agent" track-type="card" track-name="
+  Deploy agents
+" track-metadata-child_headline="Deploy agents" track-metadata-child_chip_label="Guide"> Deploy agents </a> </h3> <p class="devsite-card-summary"> Learn the five ways to deploy an agent on Agent Platform Runtime based on your development needs. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="use-an-agent2agent-agent"> <a href="../../scale/runtime/use-an-a2a-agent" track-metadata-eventdetail="/gemini-enterprise-agent-platform/scale/runtime/use-an-a2a-agent" track-type="card" track-name="
+  Use an Agent2Agent agent
+" track-metadata-child_headline="Use an Agent2Agent agent" track-metadata-child_chip_label="Guide"> Use an Agent2Agent agent </a> </h3> <p class="devsite-card-summary"> Use an Agent2Agent agent with Agent Platform Runtime. </p> </div> </div> </div> </div>             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="evaluate-your-agents"> <a href="../../optimize/evaluation/evaluate-agents" track-metadata-eventdetail="/gemini-enterprise-agent-platform/optimize/evaluation/evaluate-agents" track-type="card" track-name="
+  Evaluate your agents
+" track-metadata-child_headline="Evaluate your agents" track-metadata-child_chip_label="Guide"> Evaluate your agents </a> </h3> <p class="devsite-card-summary"> Create and deploy a basic agent and use the Gen AI evaluation service to evaluate the agent </p> </div> </div> </div> </div>             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Troubleshooting </span> <h3 class="hide-from-toc no-link" id="troubleshoot-agent-creation"> <a href="../../troubleshooting/agent-creation" track-metadata-eventdetail="/gemini-enterprise-agent-platform/troubleshooting/agent-creation" track-type="card" track-name="
+  Troubleshoot agent creation
+" track-metadata-child_headline="Troubleshoot agent creation" track-metadata-child_chip_label="Troubleshooting"> Troubleshoot agent creation </a> </h3> <p class="devsite-card-summary"> Learn how to resolve common errors when creating custom agents. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Resource </span> <h3 class="hide-from-toc no-link" id="get-support"> <a href="../../resources/agent-support" track-metadata-eventdetail="/gemini-enterprise-agent-platform/resources/agent-support" track-type="card" track-name="
+  Get support
+" track-metadata-child_headline="Get support" track-metadata-child_chip_label="Resource"> Get support </a> </h3> <p class="devsite-card-summary"> Find resources and support for Google Agent Platform. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Resource </span> <h3 class="hide-from-toc no-link" id="agent2agent-samples-repository"> <a href="https://github.com/a2aproject/a2a-samples/tree/main/samples/python/agents" track-metadata-eventdetail="https://github.com/a2aproject/a2a-samples/tree/main/samples/python/agents" track-type="card" track-name="
+  Agent2Agent samples repository
+" track-metadata-child_headline="Agent2Agent samples repository" track-metadata-child_chip_label="Resource"> Agent2Agent samples repository </a> </h3> <p class="devsite-card-summary"> Explore Agent2Agent samples in Python on GitHub. </p> </div> </div> </div> </div>    </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/create-an-a2a-agent" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/create-an-a2a-agent</a>
+  </p>
+</div>

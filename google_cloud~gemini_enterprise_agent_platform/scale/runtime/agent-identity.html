@@ -1,0 +1,271 @@
+<h1>Use Agent Identity with Agent Runtime</h1> Using agent identity on Agent Runtime provides a secure, per-agent identity that enables a least-privilege approach to access management. This document explains how to create agents with agent identities, authorize access to Google Cloud APIs, and manage credentials for third-party services. <h2 id="overview">Overview</h2> <p>Agent identity provides a per-agent identity that enables a least-privilege approach and is tied to the lifecycle of the agent, making agent identity a more secure principal than service accounts. Existing access management controls through IAM support agent identity to enable strong governance.</p> <p>Agent identity credentials are secured by default through a Google-managed Context-Aware Access (CAA) policy. This policy enforces <a href="https://cloud.google.com/blog/products/identity-security/how-to-prevent-account-takeovers-with-new-certificate-based-access">mTLS binding</a> to ensure that the agent's credentials in the form of <a href="https://datatracker.ietf.org/doc/html/rfc8705">certificate-bound tokens</a> can only be used from their intended, trusted runtime environment (for example, a Cloud Run container). This security baseline makes stolen credentials un-replayable, protecting against Credential Theft and Account Takeover (ATO).</p> <p>This page covers the following topics:</p> <ul> <li><p><a href="#create-agent-identity"><strong>Creating an agent with agent identity</strong></a>: Create an agent such that the agent automatically receives a unique identity when you deploy to Agent Runtime.</p></li> <li><p><a href="#google-cloud-agent-identity"><strong>Authorize access to Google Cloud APIs using agent identity</strong></a>: Use the provisioned agent identity to grant or deny the agent access to Google Cloud's first party tools, APIs, and resources. This also includes access to other agents hosted on Agent Runtime using <a href="https://a2a-protocol.org/latest/">Agent2Agent (A2A) Protocol</a>.</p></li> <li><p><a href="#log-agent-activity"><strong>Log agent activity</strong></a>: View agent identity in logs across Google Cloud services. For user-delegated flows, logs show both the user identity and the agent identity.</p></li> <li><p><a href="#list-agents-identities"><strong>List agents and agent identity</strong></a>: View the list of your agents and their identities in Agent Runtime.</p></li> <li><p><a href="#opt-out-caa"><strong>Opt out of Context-Aware Access</strong></a> (not recommended): Opt out of the default Context-Aware Access (CAA) policy.</p></li> </ul> <h3 id="limitations">Limitations</h3> <p>Agent identities cannot be granted Legacy Bucket roles (<code translate="no" dir="ltr">storage.legacyBucketReader</code>, <code translate="no" dir="ltr">storage.legacyBucketWriter</code>, or <code translate="no" dir="ltr">storage.legacyBucketOwner</code>) on Cloud Storage buckets.</p> <h2 id="create-agent-identity">Create an agent with agent identity</h2> <p>You can provision agents you deploy to Agent Runtime with a unique identity upon creating your Agent Runtime instance. The identity is tied to the Agent Runtime's agent resource ID and is independent of the agent framework you used to develop the agent.</p> <p>You have the following options when creating an agent identity:</p> <ul> <li>
+<p><strong>Create an Agent Runtime instance without deploying agent code</strong>: If you want to set up IAM policies before deploying the agent, you can create an agent identity without deploying your agent code. To do so, create an Agent Runtime instance with just the <code translate="no" dir="ltr">identity_type</code> field:</p> 
+<pre>import agentplatform
+from agentplatform import types
+
+client = agentplatform.Client(
+  project=PROJECT_ID,
+  location=LOCATION,
+  http_options=dict(api_version="v1beta1")
+)
+remote_app = client.runtimes.create(
+  config={
+    "display_name": "identity-for-agent",
+    "identity_type": types.IdentityType.AGENT_IDENTITY,
+  },
+)
+</pre> <p>Once you create the Agent Runtime instance with the agent identity, you can add agent code using <a href="manage-deployed-agents#update"><code translate="no" dir="ltr">client.runtimes.update(...)</code></a>.</p>
+</li> <li>
+<p><strong>Create an Agent Runtime instance while deploying agent code</strong>: If you want to provision the agent identity while deploying your agent code, use the Agent Platform SDK for Python and the <code translate="no" dir="ltr">identity_type=AGENT_IDENTITY</code> flag.</p> <p>Define the agent in your preferred framework:</p> 
+<pre>from google.adk.agents import Agent
+
+agent = Agent(
+    model="gemini-2.5-flash",
+    name="minimal_agent",
+    instruction="You are a helpful assistant.",
+)
+</pre> <p>Then, deploy it:</p> 
+<pre>import agentplatform
+from agentplatform import types
+from agentplatform.frameworks import AdkApp
+
+# Initialize the Agent Platform client with v1beta1 API for agent identity support
+client = agentplatform.Client(
+  project=PROJECT_ID,
+  location=LOCATION,
+  http_options=dict(api_version="v1beta1")
+)
+
+# Use the proper wrapper class for your Agent Framework
+app = AdkApp(agent=agent)
+
+# Deploy the agent with Agent Identity
+remote_app = client.runtimes.create(
+  agent=app,
+  config={
+    "display_name": "running-agent-with-identity",
+    "identity_type": types.IdentityType.AGENT_IDENTITY,
+    "requirements": ["google-cloud-agentplatform[adk,runtimes]"],
+    "staging_bucket": f"gs://"BUCKET_NAME",
+  },
+)
+
+print(f"Effective Identity: {remote_app.api_resource.spec.effective_identity}")
+</pre> <p>where <var translate="no">BUCKET_NAME</var> is the name of your Cloud Storage bucket.</p>
+</li> <li>
+<p><strong>Deploy agents by using the Agents CLI</strong>: The <a href="https://google.github.io/agents-cli/">Agents CLI</a> is ideal for learners, prototyping, and rapid testing, as it offers a quick deployment solution with foundational resources for monitoring. The following command deploys your agent:</p> 
+<pre>agents-cli deploy --agent-identity
+</pre>
+</li> <li>
+<p><strong>Deploy agents with Agent Identity using ADK deploy</strong>: <a href="https://adk.dev/deploy/agent-engine/deploy/">Setup your agent with ADK</a>. Before you run <code translate="no" dir="ltr">adk deploy</code>, run the following commands in your agent's folder to add a config file with agent identity.</p> 
+<pre># Create the file
+$ touch .agent_engine_config.json
+
+# Update the file to specify that you're using Agent Identity
+$ echo '{ "identity_type": "AGENT_IDENTITY" }' &gt; .agent_engine_config.json
+</pre>
+</li> </ul> <p>The Agent Runtime instance is created with a read-only, system attested agent identity (a <a href="https://docs.cloud.google.com/iam/docs/principal-identifiers">principal identifier</a>):</p> 
+<pre># Agent identity Format
+principal://TRUST_DOMAIN/NAMESPACE/AGENT_NAME
+
+# Example agent identity
+principal://agents.global.org-ORGANIZATION_ID.system.id.goog/resources/aiplatform/projects/PROJECT_NUMBER/locations/LOCATION/reasoningEngines/AGENT_ENGINE_ID
+</pre> <p>The following parts are auto-provisioned to you as part of agent identity:</p> <ul> <li>
+<p><var translate="no">TRUST_DOMAIN</var>: A trust domain is provisioned for you when you enable the Agent Platform API:</p> <ul> <li><p>If you have an organization, the trust domain is created at the organization level with the format <code translate="no" dir="ltr">agents.global.org-<var translate="no">ORGANIZATION_ID</var>.system.id.goog</code>.</p></li> <li><p>If your project doesn't have an organization, a trust domain is created at the project level with the format <code translate="no" dir="ltr">agents.global.proj-<var translate="no">PROJECT_NUMBER</var>.system.id.goog</code>.</p></li> </ul>
+</li> <li><p><var translate="no">NAMESPACE</var>: The agent's immutable resource path.</p></li> <li><p><var translate="no">AGENT_NAME</var>: The immutable <code translate="no" dir="ltr">agent-reasoning-engine-id</code>.</p></li> </ul> <p>Agent identity is based on <a href="https://spiffe.io/docs/latest/spiffe-about/spiffe-concepts/">SPIFFE</a>. We also auto-provision and manage an x509 certificate on the agent with the same identity for secure authentication. By default, the agent gets access to its own logging, metrics, model access, sessions, memories, and sandboxes (<a href="https://cloud.google.com/products#product-launch-stages">Preview</a>).</p> <p>Agent identities come with a default <code translate="no" dir="ltr">roles/aiplatform.agentContextEditor</code> and <code translate="no" dir="ltr">roles/aiplatform.agentDefaultAccess</code> roles so that agents have basic permissions to operate.</p> <p>You can <a href="#list-agents-identities">view the identity</a> through the Agent Runtime Google Cloud console and API.</p> <aside class="note"><strong>Note:</strong><span> If the identity flag isn't configured, the Agent Runtime instance continues to use service accounts. This ensures backward compatibility if you already implemented Infrastructure-as-Code-based deployments on your agents.</span></aside> <h2 id="google-cloud-agent-identity">Access Google Cloud APIs and services using agent identity</h2> <p>Once you create an agent with agent identity, you can grant or deny the agent access to Google Cloud APIs and services using the following IAM policies:</p> <ul> <li><p><strong>Allow policies</strong>: Grant an agent access to a Google Cloud resource.</p></li> <li><p><strong>Deny policies</strong>: Deny an agent access to a Google Cloud resource.</p></li> </ul> <h3 id="grant-access-agent">Grant access to an agent</h3> <p>Grant IAM permissions to the agent identity.</p> <aside class="note"><strong>Note:</strong><span> By default, deployed agent identities are granted <code translate="no" dir="ltr">roles/aiplatform.agentDefaultAccess</code> and <code translate="no" dir="ltr">roles/aiplatform.agentContextEditor</code> roles, which provide all necessary permissions for core operation, including running inference (<code translate="no" dir="ltr">aiplatform.endpoints.predict</code>), sessions, and memory. Don't grant project-level roles such as <code translate="no" dir="ltr">roles/aiplatform.expressUser</code> or <code translate="no" dir="ltr">roles/aiplatform.user</code> to agent identities, because doing so violates the principle of least privilege and allows agents to modify or delete other agents in the project.</span></aside> <p>We recommend the following roles:</p> <ul> <li><p><code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code>: Grant the agent permission to use the project's quota and the Agent Platform SDK.</p></li> <li><p><code translate="no" dir="ltr">roles/browser</code>: Grant access to basic Google Cloud functionalities.</p></li> <li><p><code translate="no" dir="ltr">roles/secretmanager.secretAccessor</code>: Grant the agent access to secrets in Secret Manager. If you reference secrets as <a href="deploy-an-agent#environment-variables">environment variables</a>, you must also grant <code translate="no" dir="ltr">roles/secretmanager.secretAccessor</code> to the Agent Platform Service Agent (<code translate="no" dir="ltr">service-<var translate="no">PROJECT_NUMBER</var>@gcp-sa-aiplatform.iam.gserviceaccount.com</code>) so it can retrieve the secret values during deployment.</p></li> </ul> <p>Additional permissions might be needed if you use logging, metrics, and Cloud API registry, and for any other resource you want to expose to your agent. See later for more examples.</p> <p>Create an <a href="https://docs.cloud.google.com/iam/docs/allow-policies">IAM allow policy</a> to grant an agent an IAM role:</p> 
+<pre>  # Example: Grant the agent access to vision API.
+  gcloud RESOURCE_TYPE add-iam-policy-binding RESOURCE_ID \
+  --member="principal://agents.global.org-ORGANIZATION_ID.system.id.goog/resources/aiplatform/projects/PROJECT_NUMBER/locations/LOCATION/reasoningEngines/AGENT_ENGINE_ID" \
+  --role="ROLE_NAME" \
+</pre> <p>Replace the following:</p> <ul> <li><p><var translate="no">RESOURCE_TYPE</var>: The type of resource (for example, <code translate="no" dir="ltr">projects</code> or <code translate="no" dir="ltr">organizations</code>).</p></li> <li><p><var translate="no">RESOURCE_ID</var>: The ID of the resource to which you want to grant access.</p></li> <li><p><var translate="no">ORGANIZATION_ID</var>: The ID for your organization.</p></li> <li><p><var translate="no">PROJECT_NUMBER</var>: Your project number.</p></li> <li><p><var translate="no">LOCATION</var>: Your region. See the <a href="../../resources/agent-locations#supported-regions-agent-engine">supported regions</a> for Runtime.</p></li> <li><p><var translate="no">AGENT_ENGINE_ID</var>: The resource ID of your Agent Runtime instance.</p></li> <li><p><var translate="no">ROLE_NAME</var> is the name of the role that you want to grant. For example, <code translate="no" dir="ltr">roles/vision.user</code>. For a list of predefined roles, see <a href="https://docs.cloud.google.com/iam/docs/understanding-roles">Understanding roles</a>.</p></li> </ul> <p>Once IAM is configured, the Agent Platform SDK's <a href="https://docs.cloud.google.com/docs/authentication/application-default-credentials">Application Default Credentials</a> automatically uses the agent identity to perform authentication to Google Cloud resources.</p> <h3 id="a2a-delegation">Grant access for Agent-to-Agent (A2A) delegation</h3> <p>When you design a multi-agent system where a parent agent invokes a remote subagent registered in <a href="https://docs.cloud.google.com/agent-registry/overview">Agent Registry</a>, the parent agent's identity must have permissions to discover the subagent in Agent Registry and to invoke its endpoint.</p> <p> To ensure that the parent agent's identity has the necessary permissions to discover and invoke a remote subagent, ask your administrator to grant the following IAM roles to the parent agent's identity: </p> <aside class="Important"> <b>Important:</b> You must grant these roles to the parent agent's identity, <em>not</em> to your user account. Failure to grant the roles to the correct principal might result in permission errors. </aside> <ul> <li> Let the parent agent look up the subagent's endpoint at runtime: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/agentregistry#agentregistry.viewer">Agent Registry API Viewer </a> (<code translate="no" dir="ltr">roles/agentregistry.viewer</code>) on the parent project or registry resource </li> <li> Let the parent agent send messages to the subagent: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/aiplatform#aiplatform.user">Agent Platform User </a> (<code translate="no" dir="ltr">roles/aiplatform.user</code>) on the target subagent's reasoning engine resource </li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> Your administrator might also be able to give the parent agent's identity the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>For example, to grant the <code translate="no" dir="ltr">roles/agentregistry.viewer</code> role on the project, you can use the following Google Cloud CLI command:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_NUMBER \
+    --member="principal://agents.global.org-ORGANIZATION_ID.system.id.goog/resources/aiplatform/projects/PROJECT_NUMBER/locations/LOCATION/reasoningEngines/PARENT_AGENT_ENGINE_ID" \
+    --role="roles/agentregistry.viewer"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ORGANIZATION_ID</var></code>: The ID for your organization.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: Your project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The region where your parent agent is deployed.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PARENT_AGENT_ENGINE_ID</var></code>: The resource ID of your parent agent's Agent Runtime instance.</li> </ul> <h3 id="grant-access-multiple-agents">Grant access to multiple agents</h3> <p>You can grant an IAM role to all Agent Runtime agents in a particular project or across an entire organization.</p> <p>To grant a role to all Agent Runtime agents in a project, use one of the following commands.</p> <p>If your project belongs to an organization:</p> 
+<pre># Grant all agents in a project the following role
+gcloud RESOURCE_TYPE add-iam-policy-binding RESOURCE_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role="ROLE_NAME"
+</pre> <p>If your project does not belong to an organization:</p> 
+<pre># Grant all agents in an orgless project the following role
+gcloud RESOURCE_TYPE add-iam-policy-binding RESOURCE_ID \
+--member="principalSet://agents.global.proj-PROJECT_NUMBER.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role="ROLE_NAME"
+</pre> <p>It can be easier to grant common permissions such as quota, logging, or access to models to all agents in the project to simplify deployments. Then grant specific narrow permissions to individual agents for more sensitive permissions such as access to data. Granting such permissions is possible at any time after the first usage of the agent identity feature within an organization or project, so it can be performed before the deployment of the agent.</p> <p>For example, the following commands grant basic roles to all agents in a project:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role=roles/serviceusage.serviceUsageConsumer
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role=roles/browser
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role=roles/cloudapiregistry.viewer
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role=roles/logging.logWriter
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platformContainer/aiplatform/projects/PROJECT_NUMBER" \
+--role=roles/monitoring.metricWriter
+</pre> <p>To grant a role to all Agent Runtime agents across an organization:</p> 
+<pre># Grant all agents in an organization the following role
+gcloud RESOURCE_TYPE add-iam-policy-binding RESOURCE_ID \
+--member="principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/attribute.platform/aiplatform" \
+--role="ROLE_NAME"
+</pre> <h3 id="agent-to-agent-calls">Grant access for agent-to-agent (A2A) calls</h3> <p>If an agent (Agent A) needs to invoke another agent (Agent B), do not grant project-wide permissions. Instead, grant a custom role containing only <code translate="no" dir="ltr">aiplatform.reasoningEngines.query</code> and <code translate="no" dir="ltr">aiplatform.reasoningEngines.get</code>, bound to Agent B's resource path.</p> <ol> <li>
+<p>Create a custom role <code translate="no" dir="ltr">agentInvoker</code> with the required permissions:</p> 
+<pre>gcloud iam roles create agentInvoker --project=PROJECT_ID \
+  --permissions=aiplatform.reasoningEngines.query,aiplatform.reasoningEngines.get \
+  --stage=GA
+</pre>
+</li> <li>
+<p>Bind the custom role to Agent B's resource to grant access to Agent A's identity:</p> 
+<pre>gcloud beta ai reasoning-engines add-iam-policy-binding AGENT_B_ID \
+  --region=LOCATION \
+  --member="principal://agents.global.org-ORGANIZATION_ID.system.id.goog/resources/aiplatform/projects/PROJECT_NUMBER/locations/LOCATION/reasoningEngines/AGENT_A_ID" \
+  --role="projects/PROJECT_ID/roles/agentInvoker"
+</pre>
+</li> <li>
+<p>To prevent agent identities from performing sensitive management operations on other agents, create an IAM deny policy for <code translate="no" dir="ltr">reasoningEngines.create</code>, <code translate="no" dir="ltr">.delete</code>, and <code translate="no" dir="ltr">.update</code>:</p> 
+<pre>deniedPrincipals:
+  - principalSet://agents.global.org-ORGANIZATION_ID.system.id.goog/*
+deniedPermissions:
+  - aiplatform.googleapis.com/reasoningEngines.create
+  - aiplatform.googleapis.com/reasoningEngines.delete
+  - aiplatform.googleapis.com/reasoningEngines.update
+</pre>
+</li> </ol> <h3 id="deny-agent-access">Deny access to an agent</h3> <p>To deny an agent access to resources, you can use the <a href="https://docs.cloud.google.com/iam/docs/deny-overview">IAM deny policy</a> or set up a <a href="https://docs.cloud.google.com/iam/docs/principal-access-boundary-policies">principal access boundary policy</a>.</p> <ul> <li>
+<p>Deny the agent access to certain resources using the IAM deny policy.</p> 
+<pre>// Deny policy (deny all agents across the org from ability to create or delete buckets)
+
+{
+"displayName": "Deny access to bucket for all agent identities in the org",
+"rules": [
+  {
+    "denyRule": {
+      "deniedPrincipals": [
+        "principalSet://&lt;org.id&gt;.global.agent.id.goog/*"
+      ],
+      "deniedPermissions": [
+        "iam.googleapis.com/roles.create",
+        "storage.googleapis.com/buckets.delete"
+      ]
+    }
+  }
+]
+}
+</pre>
+</li> <li>
+<p>Set up principal access boundary to limit the resources that the agent may access, despite other permissions that the agent might have:</p> 
+<pre>// PAB Policy (Only allow agents to operate within resource boundary)
+
+{
+    "name":"organizations/ORGANIZATION_ID/locations/global/principalAccessBoundaryPolicies/example-policy",
+    "details": {
+    "rules": [
+      {
+        "description": "Restrict agent identity inside a folder",
+        "resources": [
+          "//cloudresourcemanager.googleapis.com/folder/0123456789012"
+        ],
+        "effect": "ALLOW"
+      }
+    ],
+  }
+}
+
+// Bind PAB policy to all identities in the organization (incl agent id)
+
+gcloud iam principal-access-boundary-policies bindings create example-pab-binding \
+      --organization=organizations/ORGANIZATION_ID \
+      --policy=example-policy \ --target-principal-set=cloudresourcemanager.googleapis.com/organizations/ORGANIZATION_ID
+</pre>
+</li> </ul> <h2 id="cicd-guidance">CI/CD and automation guidance</h2> <p>Automated deployment pipelines that delete and re-create agents (such as blue-green deployments, ephemeral testing environments, or Terraform workflows) can experience silent runtime access loss. Because each redeployment creates a new <code translate="no" dir="ltr">reasoningEngines</code> resource with a unique ID, the agent receives a new principal identifier. Any prior IAM permissions granted to the previous principal are not inherited by the new principal.</p> <p>To manage permissions in automated pipelines, use the following strategies:</p> <ul> <li>
+<p><strong>Retrieve the new principal ID dynamically:</strong> Capture the <code translate="no" dir="ltr">spec.effectiveIdentity</code> value from the deployment response, or query the REST API after deployment to obtain the active identity of the agent. Apply the required IAM bindings to this new principal as a post-deployment step.</p> <p>For example, you can query the active identity with <code translate="no" dir="ltr">gcloud</code> by using the following command:</p> 
+<pre>gcloud ai reasoning-engines describe RESOURCE_ID \
+  --project=PROJECT_ID \
+  --location=LOCATION \
+  --format="value(spec.effectiveIdentity)"
+</pre> <p>In Terraform, you can dynamically construct the agent identity principal from the deployed <code translate="no" dir="ltr">google_vertex_ai_reasoning_engine</code> resource ID and reference it in IAM bindings:</p> 
+<pre>resource "google_vertex_ai_reasoning_engine" "reasoning_engine" {
+  provider = google-beta
+
+  project      = var.project_id
+  region       = var.region
+  display_name = var.display_name
+  description  = var.agent_description
+
+  spec {
+    agent_framework = "google-adk"
+    identity_type   = "AGENT_IDENTITY"
+
+    source_code_spec {
+      inline_source {
+        source_archive = filebase64(data.archive_file.agent_tarball.output_path)
+      }
+
+      python_spec {
+        entrypoint_module = var.agent_python_spec.entrypoint_module
+        entrypoint_object = var.agent_python_spec.entrypoint_object
+        requirements_file = var.agent_python_spec.requirements_path
+        version           = var.agent_python_spec.version
+      }
+    }
+
+    deployment_spec {
+      env {
+        name  = "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY"
+        value = "true"
+      }
+
+      env {
+        name  = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+        value = "true"
+      }
+    }
+  }
+}
+
+locals {
+  agent_resource_id        = element(split("/", google_vertex_ai_reasoning_engine.reasoning_engine.id), -1)
+  agent_identity_principal = "principal://agents.global.org-${data.google_organization.org.org_id}.system.id.goog/resources/aiplatform/projects/${data.google_project.project.number}/locations/${var.region}/reasoningEngines/${local.agent_resource_id}"
+}
+</pre>
+</li> <li><p><strong>Use project-scoped <code translate="no" dir="ltr">principalSets</code> for baseline permissions:</strong> Because <code translate="no" dir="ltr">principalSet</code> bindings target all agents in a project, they survive agent deletion and re-creation. Grant common, non-sensitive roles (such as service usage, logging, and general model inference) to the project-wide <code translate="no" dir="ltr">principalSet</code> instead of individual agent principals. Limit individual <code translate="no" dir="ltr">principal://</code> bindings to highly sensitive data sources.</p></li> </ul> <h2 id="log-agent-activity">Log agent activity</h2> <p>If you enable Cloud Logging, you can <a href="logging#query-logs">view logs</a> of which agent and users have accessed a Google Cloud resource.</p> <ul> <li><p>When the agent acts on a user's behalf, the logs show both the agent's and user's identities.</p></li> <li><p>When the agent is acting on its own authority, the logs only show the agent's identity.</p></li> </ul> <h2 id="list-agents-identities">List agents and their identities</h2> <p>You can see the list of your agent identities in Agent Runtime using the Google Cloud console and command line.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>In the Google Cloud console, go to the Agent Platform <b>Deployments</b> page.<br> <p><a class="button button-primary" href="https://console.cloud.google.com/agent-platform/runtimes" target="console">Go to Deployments</a></p> <p>Deployed agents that are part of the selected project appear in the list. You can use the <strong>Filter</strong> field to filter the list by your specified column.</p>
+</li> <li><p>For each agent, agent identity is listed under the <strong>Identity</strong> column.</p></li> </ol></section> <section><p class="_code-tab"><strong>REST API</strong></p>
+<p>You can retrieve the agent identity when <a href="manage-deployed-agents#get">getting an Agent Runtime instance</a> using the REST API.</p> <p>The response includes the agent identity in the following format:</p> 
+<pre data-language="">{
+  ...
+  spec: {
+    "effectiveIdentity": "agents.global.org-ORGANIZATION_ID.system.id.goog/resources/aiplatform/projects/PROJECT_ID/locations/LOCATION/reasoningEngines/AGENT_ENGINE_ID"
+  }
+  ...
+}
+</pre> <p>For Agent Runtime instances not using agent identity, the <code translate="no" dir="ltr">effectiveIdentity</code> field contains the service agent or service account name associated with the Agent Runtime instance.</p></section> </div> <h2 id="opt-out-caa">Opt out of Context-Aware Access (CAA)</h2> <p>By default, attempting to use an access token outside of its intended Agent Runtime runtime results in the following error:</p> 
+<pre>Error Code: "401"
+Error Details: "Context-Aware Access requirements are not met"
+</pre> <p>For corner cases, such as specific token sharing requirements among agents, you can opt out of the default CAA policy. This action is strongly discouraged, as it leaves an agent vulnerable to credential theft.</p> <p>Opt out of the default Context-Aware Access (CAA) policy by setting the following <a href="deploy-an-agent#environment-variables">environment variable</a> when you <a href="#create-agent-identity">create your Agent Runtime instance</a>:</p> 
+<pre>config={
+  "env_vars": {
+    "GOOGLE_API_PREVENT_AGENT_TOKEN_SHARING_FOR_GCP_SERVICES": False,
+  }
+}
+</pre> <h2 id="whats-next">What's next</h2> <div class="devsite-card-group">             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="manage-deployed-agents"> <a href="manage-deployed-agents" track-metadata-eventdetail="/gemini-enterprise-agent-platform/scale/runtime/manage-deployed-agents" track-type="card" track-name="
+  Manage deployed agents
+" track-metadata-child_headline="Manage deployed agents" track-metadata-child_chip_label="Guide"> Manage deployed agents </a> </h3> <p class="devsite-card-summary"> Learn how to manage agents that have been deployed to the Agent Platform managed runtime. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="use-an-agent"> <a href="use-an-agent" track-metadata-eventdetail="/gemini-enterprise-agent-platform/scale/runtime/use-an-agent" track-type="card" track-name="
+  Use an agent
+" track-metadata-child_headline="Use an agent" track-metadata-child_chip_label="Guide"> Use an agent </a> </h3> <p class="devsite-card-summary"> Use an agent with Agent Platform Runtime. </p> </div> </div> </div> </div>                            </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/runtime/agent-identity" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/runtime/agent-identity</a>
+  </p>
+</div>

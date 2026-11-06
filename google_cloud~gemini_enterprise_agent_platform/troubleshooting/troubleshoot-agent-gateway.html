@@ -1,0 +1,191 @@
+<h1>Troubleshoot Agent Gateway connectivity</h1> <p>This guide helps you debug and troubleshoot connectivity issues with the Gemini Enterprise Agent Platform, especially when you use Agent Gateway, agent identity, Identity and Access Management (IAM) policies, and delegated authorization with Service Extensions.</p> <h2 id="troubleshooting-skill">Troubleshoot using the Agent Platform Troubleshooting skill</h2> <p>To diagnose connectivity, authorization, and startup issues interactively with an AI coding assistant, you can install the <a href="https://github.com/google/skills/tree/main/skills/cloud/agent-platform-troubleshooting"><code translate="no" dir="ltr">agent-platform-troubleshooting</code></a> skill from the Google Cloud Agent Skills repository.</p> <p>This skill equips AI agents with domain-specific diagnostic playbooks, log filters, and resolution steps across the Agent Platform stack, including:</p> <ul> <li>
+<strong>Agent Gateway egress denials</strong>: Diagnosing <code translate="no" dir="ltr">403 Forbidden</code> errors intercepted by the gateway and verifying IAP authorization decisions.</li> <li>
+<strong>Agent Runtime startup failures</strong>: Identifying missing roles (such as <code translate="no" dir="ltr">roles/browser</code> or <code translate="no" dir="ltr">resourcemanager.projects.get</code>) and bootstrap exceptions.</li> <li>
+<strong>Agent Registry destination issues</strong>: Verifying service entries, endpoint interfaces, and consolidated Google APIs configurations.</li> <li>
+<strong>IAM access policies</strong>: Validating Unified Access Policy (UAP) bindings, condition expressions, and Principal Access Boundary (PAB) scoping.</li> <li>
+<strong>Container trust</strong>: Diagnosing TLS certificate and handshake errors for custom containers (BYOC) or private Certificate Authorities (CAs).</li> </ul> <p>To install the skill in your agent environment, run the following command:</p> 
+<pre>
+npx skills add https://github.com/google/skills --skill agent-platform-troubleshooting
+</pre> <h2 id="request-flow">Egress request flow</h2> <p>Agent Platform adopts a <em>default-deny</em> policy for all outgoing traffic. For an agent to connect to external resources, you must explicitly allow access at every network and identity layer. When Agent Gateway is enabled, the gateway intercepts all requests from the agent and applies the configured policies.</p> <p>For a request to succeed, it must meet all of the following conditions:</p> <ul> <li>
+<strong>IAM Access policy</strong>: The <em>agent identity</em> assigned to the agent must be granted the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission on the destination resource, directly or through a principal set. For details, see <a href="../govern/policies/configure-iam-policies-uap">Create IAM agent policies</a>. Learn how to <a href="troubleshoot-iam-policies-uap">Troubleshoot IAP policies</a>.</li> <li>
+<strong>Agent Registry</strong>: Registering destinations in Agent Registry is recommended to enforce granular, per-resource access policies and tool-level controls. If the agent is trying to reach a destination that isn't registered, you must grant the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission to the agent identity by configuring a policy for an <a href="../govern/policies/iam-overview-uap">unregistered endpoint</a>.</li> <li>
+<strong>Agent Gateway</strong>: The gateway must be associated with an authorization policy that explicitly targets it. By default, the gateway uses IAP and Model Armor to secure requests.</li> <li>
+<strong>Delegated authorization with Service Extensions</strong>: You can delegate authorization decisions to a custom authorization engine by using Service Extensions. Depending on the configured authorization policy, one or more of these authorization engines will allow or deny the request.</li> </ul> <h2 id="other-common-issues">Common issues</h2> <p>Review these common issues and their solutions when troubleshooting Agent Gateway.</p> <h3 id="bootstrap-errors">Errors during Agent Runtime startup</h3> <p>If your Agent Runtime instances fail to start or deploy then it might mean that either IAP is blocking internal traffic or your agent lacks the basic roles it needs to initialize.</p> <ol> <li>
+<p><strong>Confirm that IAP isn't blocking calls to internal services</strong></p> <p><strong>Symptom</strong>: <code translate="no" dir="ltr">403 Forbidden</code> errors during startup.</p> <p><strong>Cause</strong>: Agent Gateway uses a <em>default deny</em> policy for all traffic. Therefore, when IAP is in enforcement mode, it blocks calls even to internal services (such as <code translate="no" dir="ltr">aiplatform</code> or <code translate="no" dir="ltr">logging</code>) unless they are registered and the agent has the required IAM permissions.</p> <p><strong>Fix</strong>: Temporarily switch IAP to dry-run mode to see which connections are failing without blocking startup, or query Cloud Logging to identify the exact blocked hostnames. After you identify the target service hostnames, register them in Agent Registry and grant the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission to the agent.</p> <p>To find specific blocked hostnames using Cloud Logging, run the following query in the Logs Explorer:</p> 
+<pre>
+resource.type="networkservices.googleapis.com/Gateway"
+resource.labels.gateway_type="SECURE_WEB_GATEWAY"
+httpRequest.status=403
+</pre> <p>Examine the <code translate="no" dir="ltr">httpRequest.requestUrl</code> or <code translate="no" dir="ltr">jsonPayload.authzPolicyInfo</code> fields in the results to find the destination hostnames.</p> <p>Common internal services that may require registration during startup include:</p> <ul> <li>Agent Platform (Reasoning Engine and Agent Platform Sessions): <code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.mtls.googleapis.com</code>
+</li> <li>Resource Manager: <code translate="no" dir="ltr">https://cloudresourcemanager.mtls.googleapis.com</code> and <code translate="no" dir="ltr">https://cloudresourcemanager.mtls.googleapis.com/</code>
+</li> <li>Google Cloud Observability (if enabled): <code translate="no" dir="ltr">https://telemetry.mtls.googleapis.com/</code>
+</li> <li>Cloud Logging (if enabled): <code translate="no" dir="ltr">https://logging.googleapis.com/</code>
+</li> <li>Cloud Monitoring: <code translate="no" dir="ltr">https://monitoring.googleapis.com/</code> and <code translate="no" dir="ltr">https://monitoring.mtls.googleapis.com/</code>
+</li> <li>Cloud Trace: <code translate="no" dir="ltr">https://cloudtrace.googleapis.com/</code> and <code translate="no" dir="ltr">https://cloudtrace.mtls.googleapis.com/</code>
+</li> <li>Secret Manager: <code translate="no" dir="ltr">https://secretmanager.googleapis.com/</code> and <code translate="no" dir="ltr">https://secretmanager.mtls.googleapis.com/</code>
+</li> </ul>
+</li> <li>
+<p><strong>Confirm that the agent identity has the required basic roles</strong></p> <p><strong>Symptoms</strong>: In the <code translate="no" dir="ltr">aiplatform.googleapis.com/reasoning_engine_stderr</code> logs, you see errors such as <code translate="no" dir="ltr">google.api_core.exceptions.Unknown: None</code> or <code translate="no" dir="ltr">Failed
+to convert project number to project ID</code>. The error appears during Reasoning Engine startup.</p> <p><strong>Cause</strong>. The agent identity lacks the <code translate="no" dir="ltr">resourcemanager.projects.get</code> permission required to resolve the project name during initialization.</p> <p><strong>Fix</strong>. Ensure that the agent identity (or its principal set) has the permissions required to read its own runtime configuration. The following roles are required:</p> <ul> <li>
+<code translate="no" dir="ltr">roles/aiplatform.agentDefaultAccess</code>: Default agent role.</li> <li>
+<code translate="no" dir="ltr">roles/aiplatform.user</code>: Required to run the agent.</li> <li>
+<code translate="no" dir="ltr">roles/agentregistry.viewer</code>: Required to view registered resources.</li> <li>
+<code translate="no" dir="ltr">roles/logging.logWriter</code> and <code translate="no" dir="ltr">roles/monitoring.metricWriter</code>: Required for observability.</li> <li>
+<code translate="no" dir="ltr">roles/browser</code>: Required to run <code translate="no" dir="ltr">resourcemanager.projects.get</code> during SDK initialization.</li> </ul> <p>To verify the roles assigned to the agent identity, run the following command:</p> 
+<pre>
+gcloud projects get-iam-policy PROJECT_ID \
+  --flatten="bindings[].members" \
+  --filter="bindings.members:AGENT_IDENTITY_PRINCIPAL"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_IDENTITY_PRINCIPAL</var></code>: The agent identity principal. Uses the format: <code translate="no" dir="ltr">principal://<var translate="no">TRUST_DOMAIN</var>/resources/<var translate="no">SERVICE</var>/<var translate="no">RESOURCE_PATH</var></code>
+</li> </ul> <p>To learn how to grant roles, see <a href="../scale/runtime/agent-identity">Use Agent Identity with Agent Runtime</a>.</p>
+</li> </ol> <h3 id="confirm-egress-error">
+<code translate="no" dir="ltr">403 Forbidden</code> errors</h3> <p>If you encounter a <code translate="no" dir="ltr">403 Forbidden</code> error, confirm that it is related to Agent Gateway egress. Here is a sample egress error message:</p> 
+<pre>{"code": 403, "message": "403 Forbidden. {'message': 'Egress request is not authorized.', 'status': 'Forbidden'}"}</pre> <p>Query the agent logs in Logging to find the specific failing calls:</p> 
+<pre>
+resource.type="aiplatform.googleapis.com/ReasoningEngine"
+resource.labels.location="LOCATION"
+resource.labels.reasoning_engine_id="AGENT_ID"
+textPayload:"403"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: The region where the agent is deployed, for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_ID</var></code>: The ID of the agent (Reasoning Engine).</li> </ul> <p>Look for the <code translate="no" dir="ltr">Egress request is not authorized</code> message in the log entry's <code translate="no" dir="ltr">textPayload</code>. If the 403 error contains different text, then the destination service might be rejecting the call directly, rather than Agent Gateway.</p> <p>You can also view egress traffic logs, including <code translate="no" dir="ltr">403</code> denials, by using the built-in <a href="../govern/gateways/monitor-agent-gateway#observability-dashboard">observability dashboard</a>.</p> <h3 id="self-signed-ca-fail">Self-signed or private CA destinations fail to connect</h3> <ul> <li>
+<strong>Symptom:</strong> The agent fails to connect to destinations that present self-signed or private CA-issued certificates.</li> <li>
+<strong>Cause:</strong> By default, Agent Gateway only trusts certificates issued by publicly trusted CAs. Connecting to destinations that use private CAs or self-signed certificates requires additional configuration.</li> <li>
+<strong>Mitigation:</strong> To connect to destinations using private CAs or self-signed certificates, you must configure custom TLS trust anchors by using the <code translate="no" dir="ltr">tlsConfig</code> setting in an <a href="../govern/gateways/set-up-vpc-connectivity#tls-certificate-requirements">agent connectivity template</a>. If your agents also connect to Google Cloud APIs (<code translate="no" dir="ltr">*.googleapis.com</code>) or other public HTTPS endpoints, ensure that <code translate="no" dir="ltr">additionalRoots</code> is set to <code translate="no" dir="ltr">PUBLICLY_TRUSTED_ROOTS</code> in <code translate="no" dir="ltr">tlsConfig</code>. If you update <code translate="no" dir="ltr">tlsConfig</code> settings, you must bind a new connectivity template (or unbind and rebind the template) because Agent Gateway doesn't automatically pick up in-place <code translate="no" dir="ltr">tlsConfig</code> changes on an attached template.</li> </ul> <h3 id="byoc-ca-fail">Agent deployed with custom container (BYOC) fails to connect to Agent Gateway</h3> <ul> <li>
+<strong>Symptom:</strong> The <a href="../build/runtime/setup#byoc">BYOC</a> agent fails to establish connections when routed through Agent Gateway. Logs might show TLS handshake or certificate verification errors.</li> <li>
+<strong>Cause:</strong> The agent's custom container does not trust the Agent Gateway's certificate authority.</li> <li>
+<strong>Fix:</strong> Ensure you have added the Agent Gateway's root certificate to your container's CA store. See <a href="../scale/runtime/agent-gateway-runtime-deploy#configure-byoc">Configure custom container (BYOC) agents for Agent Gateway</a>.</li> </ul> <h3 id="disabled-iap-api">Policy binding fails or mimics a governance denial</h3> <ul> <li>
+<strong>Symptom:</strong> Policy binding configurations fail, you are prompted interactively for an <code translate="no" dir="ltr">etag</code> when binding policies, or requests fail with a false governance denial error (such as "unregistered destination correctly rejected").</li> <li>
+<strong>Cause:</strong> The Identity-Aware Proxy API (<code translate="no" dir="ltr">iap.googleapis.com</code>) is disabled in your project.</li> <li>
+<strong>Fix:</strong> Enable the IAP API.</li> </ul> <h3 id="wif-failures">Failures when managing Agent Gateway with Workforce Identity Federation</h3> <p>You might encounter this issue if you manage Agent Gateway in the Google Cloud console or use gcloud CLI when authenticated with Workforce Identity Federation (WIF).</p> <p>The console displays generic loading or creation errors, such as the following:</p> <ul> <li>"There was an error while loading..."</li> <li>"The server was not able to fulfill your request"</li> <li>"Failed to create agent gateway"</li> <li>"Failed to load"</li> </ul> <p>Additionally, <code translate="no" dir="ltr">gcloud</code> commands (such as <code translate="no" dir="ltr">gcloud network-services agent-gateways
+import</code>) might return an internal error, such as <code translate="no" dir="ltr">error 13: an internal error
+has occurred</code>.</p> <p>To resolve this issue, authenticate with a standard Google Account managed through Cloud Identity or Google Workspace that has the required permissions, such as <code translate="no" dir="ltr">roles/networkservices.admin</code>.</p> <p>Federated identities have limited support across Agent Platform Governance and Gateway services in Preview. Granting broader IAM roles to a federated principal doesn't resolve the issue.</p> <h2 id="egress-errors">Debugging workflow</h2> <p>If any of the conditions described in the <a href="#request-flow">Egress request flow section</a> are missing, your requests might get blocked.</p> <h3 id="review-iap-logs">Review the IAP decision</h3> <p>To narrow your log search to IAP egress decisions, run the following query in Logging:</p> 
+<pre>
+protoPayload.serviceName="iap.googleapis.com"
+protoPayload.authorizationInfo.permission="iap.resources.egressViaIAP"
+protoPayload.metadata.mcp_attributes.base_protocol_method="true"
+</pre> <p>If you don't see a matching IAP log entry at all, then the gateway might have denied the request before IAP evaluated it. Move on to the next step.</p> <aside class="note"><strong>Note:</strong><span> You can monitor authorization failures by using the built-in <a href="../govern/gateways/monitor-agent-gateway#observability-dashboard">observability dashboard</a>.</span></aside> <p>If you do see a matching log entry, review the following fields:</p> <ul> <li>
+<code translate="no" dir="ltr">protoPayload.authorizationInfo[].granted</code>: Indicates whether the request was allowed (<code translate="no" dir="ltr">true</code>) or denied (<code translate="no" dir="ltr">false</code>).</li> <li>
+<code translate="no" dir="ltr">protoPayload.authenticationInfo.principalSubject</code>: The SPIFFE ID or <code translate="no" dir="ltr">principal://...</code> identity of the caller. Verify that this matches your agent's identity.</li> <li>
+<code translate="no" dir="ltr">protoPayload.authorizationInfo[].resource</code>: The registered destination resource that the call resolved to.</li> <li>
+<code translate="no" dir="ltr">labels."iap.googleapis.com/audited_resource_name"</code>: If this value is <code translate="no" dir="ltr">unregisteredResource</code>, the destination hostname isn't registered. Register the destination hostname with Agent Registry and make sure the agent has the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission for this destination.</li> <li>
+<strong>Enforcement mode</strong>: Review the request's enforcement mode. To filter for dry-run requests, you can add <code translate="no" dir="ltr">protoPayload.metadata.iamEnforcementMode="DRY_RUN"</code> to the query. In <code translate="no" dir="ltr">DRY_RUN</code> mode, IAP logs denials but does not enforce them. So if the agent fails with a <code translate="no" dir="ltr">403</code> error in dry-run mode, the denial likely comes from either the gateway's egress proxy or the destination resource.</li> </ul> <h3 id="review-agw-logs">Review the Agent Gateway decision</h3> <p>To review how Agent Gateway evaluated the request, query the gateway logs in Logging. In this example we're filtering the logs for <code translate="no" dir="ltr">403</code> errors only:</p> 
+<pre>
+resource.type="networkservices.googleapis.com/Gateway"
+resource.labels.gateway_type="SECURE_WEB_GATEWAY"
+resource.labels.location="REGION"
+resource.labels.gateway_name="AGENT_GATEWAY_NAME"
+httpRequest.status=403
+-httpRequest.requestMethod="CONNECT"
+</pre> <p>Review the following fields in the matching log entry:</p> <ul> <li>
+<code translate="no" dir="ltr">jsonPayload.authzPolicyInfo.policies.result</code>: The overall authorization result, either <code translate="no" dir="ltr">ALLOWED</code> or <code translate="no" dir="ltr">DENIED</code>.</li> <li>
+<code translate="no" dir="ltr">httpRequest.requestUrl</code>: Note the exact destination URL that the agent attempted to reach. In the next step, we check to see whether the hostname used by the destination resource has been registered in Agent Registry.</li> </ul> <h3 id="verify-destination-registered">Verify destination registration and IAM access policy coverage</h3> <p>Access to destinations always requires an IAM allow policy granting the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission to the agent identity. Registering destinations in Agent Registry is recommended to enforce granular, per-resource access policies and ensure accurate hostname matching. For destinations that are not registered, verify whether a policy for <a href="../govern/policies/iam-overview-uap">unregistered endpoints</a> grants the required permission to the agent identity.</p> <p>If you rely on per-resource policies, every destination hostname and any variations of the hostname that the agent attempts to reach must be registered in Agent Registry. This is because a Google API such as <code translate="no" dir="ltr">aiplatform.googleapis.com</code> can resolve through multiple hostnames depending on the SDK version, regional client configuration, or mTLS usage (for example, <code translate="no" dir="ltr">us-central1-aiplatform.googleapis.com</code> or <code translate="no" dir="ltr">us-central1-aiplatform.mtls.googleapis.com</code>).</p> <p>Because the gateway matches hostnames exactly, if you register <code translate="no" dir="ltr">aiplatform.googleapis.com</code> but the agent calls <code translate="no" dir="ltr">us-central1-aiplatform.googleapis.com</code>, the gateway considers it an unregistered resource and denies the request.</p> <aside class="note"><strong>Note:</strong><span> You can view logs for outbound traffic to unregistered destinations by using the built-in <a href="../govern/gateways/monitor-agent-gateway#observability-dashboard">observability dashboard</a>.</span></aside> <p>Run the following sample script to list your registry entries based on the resource type and check the entries for the specific hostname used by the agent's call:</p> 
+<pre>HOSTNAME="HOSTNAME"
+PROJECT_ID="PROJECT_ID"
+LOCATION="REGION"
+
+echo "Checking Endpoints..."
+gcloud agent-registry endpoints list \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" | grep "$HOSTNAME"
+
+echo "Checking MCP Servers..."
+gcloud agent-registry mcp-servers list \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" | grep "$HOSTNAME"
+
+echo "Checking Agents..."
+gcloud agent-registry agents list \
+  --project="$PROJECT_ID" \
+  --location="$LOCATION" | grep "$HOSTNAME"</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">HOSTNAME</var></code>: The destination hostname that the agent is attempting to reach, for example, <code translate="no" dir="ltr">us-central1-aiplatform.mtls.googleapis.com</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The location of your Agent Registry and Agent Gateway resources, for example, <code translate="no" dir="ltr">us-central1</code>.</li> </ul> <h4 id="hostname-registered">Output 1: Hostname is already registered</h4> <p>If the hostname exists in an Agent Registry entry, you see output similar to the following example:</p> 
+<pre>Checking Endpoints...
+  url: https://us-central1-aiplatform.mtls.googleapis.com
+Checking MCP Servers...
+Checking Agents...</pre> <p>Proceed to <a href="#verify-iam-bindings">Verify IAM bindings on the destination resource</a> to check whether a per-resource or registry-wide policy grants access to the agent identity.</p> <h4 id="hostname-not-in-registry">Output 2: Hostname does not exist in the registry</h4> <p>If the hostname does not exist in the registry, you see output similar to the following example:</p> 
+<pre>Checking Endpoints...
+Checking MCP Servers...
+Checking Agents...</pre> <p>If you plan to use per-resource or registry-wide policies, register the destination in Agent Registry first. If you use policies for unregistered endpoints, proceed to <a href="#verify-iam-bindings">Verify IAM bindings on the destination resource</a>.</p> <aside class="note"> <p><b>Note:</b> In a production environment, you should authorize only the exact endpoints needed by the agent. To do this:</p> <ol> <li>Run IAP in dry-run mode to record the endpoint combinations that the agent uses.</li> <li>Identify the endpoints in the gateway or IAP logs.</li> <li>Register those endpoints, authorize the agent to access them, and then enable IAP enforcement.</li> </ol> </aside> <h3 id="verify-iam-bindings">Verify IAM bindings on the destination resource</h3> <p>Ensure that the agent identity or its principal set has the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission on the destination.</p> <p>You can configure policy bindings across three scopes:</p> <ul> <li>
+<strong>Registry-wide</strong>: Access to every agent, MCP server, and endpoint registered in the registry.</li> <li>
+<strong>Per-resource</strong>: Narrow access. A per-resource binding replaces the registry-wide binding for that specific resource instead of merging with it.</li> <li>
+<strong>Policies for unregistered endpoints</strong>: Access to destinations that are not registered in Agent Registry.</li> </ul> <p>Use one of the following examples to check for bindings:</p> <ul> <li>
+<p>To check for <strong>registry-level</strong> IAM policy bindings, run the following command:</p> 
+<pre>
+curl -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  -d '{}' \
+  -X POST "https://iap.googleapis.com/v1/projects/PROJECT_NUMBER/locations/LOCATION/iap_web/agentRegistry:getIamPolicy" \
+  -H "Content-Type: application/json"
+</pre>
+</li> <li>
+<p>To check for <strong>per-endpoint</strong> IAM policy bindings, run the following command:</p> 
+<pre>export HOSTNAME=HOSTNAME
+
+ENDPOINT_ID=$(gcloud agent-registry endpoints list \
+  --project="PROJECT_ID" \
+  --location="REGION" \
+  --filter="interfaces.url:$HOSTNAME" \
+  --format="value(name.basename())")
+
+echo "ENDPOINT_ID=$ENDPOINT_ID"
+
+curl -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  -X POST "https://iap.googleapis.com/v1/projects/PROJECT_NUMBER/locations/LOCATION/iap_web/agentRegistry/endpoints/${ENDPOINT_ID}:getIamPolicy"</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">HOSTNAME</var></code> with the hostname of the destination that the agent is attempting to reach, for example, <code translate="no" dir="ltr">us-central1-aiplatform.mtls.googleapis.com</code>.</p>
+</li> <li>
+<p>To check for <strong>per-MCP server</strong> IAM policy bindings, run the following command:</p> 
+<pre>export MCP_SERVER=MCP_SERVER
+
+MCP_SERVER_ID=$(gcloud agent-registry mcp-servers list \
+  --project="PROJECT_ID" \
+  --location="REGION" \
+  --filter="interfaces.url:$MCP_SERVER" \
+  --format="value(name.basename())")
+
+echo "MCP_SERVER_ID=$MCP_SERVER_ID"
+
+curl -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  -X POST "https://iap.googleapis.com/v1/projects/PROJECT_NUMBER/locations/LOCATION/iap_web/agentRegistry/mcpServers/${MCP_SERVER_ID}:getIamPolicy"</pre> <p>Replace <var translate="no">MCP_SERVER</var> with the URL of the MCP server (for example, <code translate="no" dir="ltr">https://example-abc12345-uc.a.run.app/mcp</code>).</p>
+</li> </ul> <p>In the returned policy information, look for a binding with the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission that matches the agent's identity or principal set. If the returned output contains an <code translate="no" dir="ltr">"etag"</code> field but no bindings, that means that no IAM policy exists.</p> <p>If a binding exists but includes a <code translate="no" dir="ltr">condition</code>, verify that the Common Expression Language (CEL) expression is not excluding the agent. A condition that filters by an attribute the agent lacks might be silently excluding the agent.</p> <p>If the target destination does not have a matching policy binding granting the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission to your agent identity or principal set, grant the permission using one of the following policy options:</p> <ul> <li>
+<strong>Registry-level policy (recommended)</strong>: <a href="../govern/policies/configure-iam-policies-uap#agent-to-registry">Configure an agent-to-registry policy</a> to grant access to all resources registered in Agent Registry.</li> <li>
+<strong>Per-resource policy (MCP server or endpoint)</strong>: <a href="https://docs.cloud.google.com/agent-registry/register-mcp-servers">Register the MCP server</a> or <a href="https://docs.cloud.google.com/agent-registry/register-endpoints">register the endpoint</a> in Agent Registry, and create an <a href="../govern/policies/configure-iam-policies-uap#agent-to-mcp-server">agent-to-MCP server policy</a> or <a href="../govern/policies/configure-iam-policies-uap#agent-to-endpoint">agent-to-endpoint policy</a>.</li> <li>
+<strong>Policy for unregistered endpoints</strong>: <a href="../govern/policies/iam-overview-uap">Configure a policy for unregistered endpoints</a> to grant access without registering the resource.</li> </ul> <h3 id="inspect-auth-policy">Inspect the authorization policy and extension</h3> <p>In this section we make sure that there is an authorization policy that is explicitly targeting the Agent Gateway associated with the agent.</p> <ol> <li>
+<p>Get the details of the authorization extension associated with the gateway and confirm that the extension you're using is configured as expected.</p> 
+<pre>
+  gcloud service-extensions authz-extensions describe AUTHORIZATION_EXTENSION_NAME \
+    --location=LOCATION \
+    --project=PROJECT_ID
+</pre> <p>Replace <var translate="no">AUTHORIZATION_EXTENSION_NAME</var> with the name of the extension associated with the gateway. If you don't know the name of the extension, you can navigate to the gateway's details page in the Google Cloud Google Cloud console and note the value of the <strong>Extension name</strong> field under Service Extensions.</p>
+</li> <li>
+<p>Verify that an authorization policy explicitly targets the gateway resource and links to the same authorization extension. You can navigate to the gateway's details page in the Google Cloud Google Cloud console and note the value of the <strong>Policy name</strong> field under Service Extensions.</p> <p>If no policy targets the gateway, or if the gateway-to-policy mapping is incorrect, the authorization extension won't be executed.</p>
+</li> </ol> <h3 id="check-principal-access-boundary-policies">Check principal access boundary policies</h3> <p>Principal access boundary policies take precedence over IAM allow policies. This means even if you have correctly configured all the IAM bindings, a request will fail if there is an active principal access boundary policy that excludes the destination resource from the agent's scope.</p> <p>To list organization-wide policies run:</p> 
+<pre>
+gcloud iam principal-access-boundary-policies list \
+  --organization="ORGANIZATION_ID" \
+  --location=global
+</pre> <p>To find policies that are bound to the agent's principal set, run:</p> 
+<pre>
+gcloud iam policy-bindings search-target-policy-bindings \
+  --project="PROJECT_ID" \
+  --target="PRINCIPAL_SET"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ORGANIZATION_ID</var></code>: Your Google Cloud organization ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: Your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PRINCIPAL_SET</var></code>: The principal set of the agent identity.</li> </ul> <p>If a binding exists, inspect the <code translate="no" dir="ltr">details.rules[].resources[]</code> field to verify that the destination is in scope for your agent.</p> <h3 id="test-principal-vs-set-bindings">Test principal versus principal set bindings</h3> <p>If permissions work inconsistently or fail unexpectedly, the issue might relate to how your agent's group identity (the <a href="https://docs.cloud.google.com/iam/docs/principals-overview#crm-principal-sets">principal set</a>) is configured. Principal set-based permissions might fail for the following reasons:</p> <ul> <li>
+<strong>Sync delays</strong>: When you add an identity to a set, it can take a few minutes for IAM to update and recognize the new member.</li> <li>
+<strong>Missing attributes</strong>: If membership in a principal set requires certain attributes, the agent's identity must carry those exact attributes (for example, department or team labels). If the identity is missing these attributes, the agent might be silently excluded from the group.</li> </ul> <p>To test if group membership is the issue, grant permissions directly to the specific agent by adding a direct <code translate="no" dir="ltr">principal://</code> binding on the affected resource. If the agent successfully connects with the direct binding, then the root cause is likely an attribute mismatch or sync delay with the principal set. To resolve this, verify and correct the agent's identity attributes, or use direct <code translate="no" dir="ltr">principal://</code> bindings.</p> <h2 id="what-next">What's next</h2> <div class="devsite-card-group">                <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-green"> Codelab </span> <h3 class="hide-from-toc no-link" id="codelab:-govern-agentic-workloads-with-agent-platform"> <a href="https://codelabs.developers.google.com/cloudnet-agent-gateway" track-metadata-eventdetail="https://codelabs.developers.google.com/cloudnet-agent-gateway" track-type="card" track-name="
+  Codelab: Govern agentic workloads with Agent Platform
+" track-metadata-child_headline="Codelab: Govern agentic workloads with Agent Platform" track-metadata-child_chip_label="Codelab"> Codelab: Govern agentic workloads with Agent Platform </a> </h3> <p class="devsite-card-summary"> Learn how to govern agentic workloads with Agent Gateway on Gemini Enterprise Agent Platform. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="monitor-agent-gateway"> <a href="../govern/gateways/monitor-agent-gateway" track-metadata-eventdetail="/gemini-enterprise-agent-platform/govern/gateways/monitor-agent-gateway" track-type="card" track-name="
+  Monitor Agent Gateway
+" track-metadata-child_headline="Monitor Agent Gateway" track-metadata-child_chip_label="Guide"> Monitor Agent Gateway </a> </h3> <p class="devsite-card-summary"> Learn how to monitor Agent Gateway. </p> </div> </div> </div> </div>                         </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/troubleshoot-agent-gateway" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/troubleshoot-agent-gateway</a>
+  </p>
+</div>

@@ -1,0 +1,441 @@
+<h1>Configure Workload Identity Federation with Active Directory</h1> <p>This guide describes how to use Workload Identity Federation to let workloads use Active Directory credentials to authenticate to Google Cloud.</p> <p>If you're running Windows Server workloads in an Active Directory environment, then these workloads might have access to Active Directory credentials. For example:</p> <ul> <li>A Windows Service might be configured to log on as a domain user.</li> <li>An IIS application might be configured to run as a group managed service account (gMSA).</li> </ul> <p>By using Workload Identity Federation in combination with Active Directory Federation Services (AD FS), you can let these workloads exchange their Active Directory Kerberos credentials for short-lived Google Cloud credentials. Workloads can use these short-lived credentials to access Google Cloud APIs.</p> <p>Exchanging Active Directory credentials against short-lived Google Cloud credentials works by <a href="best-practices-for-using-workload-identity-federation#additional-token-exchange">chaining two token exchanges</a>:</p> <ol> <li>A workload uses OpenID Connect (OIDC), SAML-POST, or WS-Trust to request an OIDC token or SAML assertion from AD FS. To authenticate to AD FS, the workload uses <a href="https://docs.microsoft.com/en-us/aspnet/web-api/overview/security/integrated-windows-authentication" target="microsoft">integrated Windows authentication (IWA)</a> and its existing Active Directory credentials.</li> <li>The workload then uses Workload Identity Federation to exchange the OIDC token or SAML assertion against an Security Token Service token and, optionally, to impersonate a Google Cloud service account.</li> </ol> <p>This document shows you how you can automate this process in a way that doesn't require changes to your application by using the <a href="https://github.com/GoogleCloudPlatform/iam-windows-authenticator" target="github">Workload Authenticator for Windows</a>.</p> <h2 id="prepare">Prepare AD FS</h2> <p>You only need to perform these steps once.</p> <h3 id="select_a_protocol">Select a protocol</h3> <p>The way to prepare AD FS depends on which protocol you want to use:</p> <ul> <li>
+<p>SAML: You can let workloads use SAML or WS-Trust to obtain SAML assertions.</p> <p>To use SAML or WS-Trust, you create a <em>relying party</em> in AD FS and configure a workload identity pool to trust assertions issued for this relying party.</p> <p>A workload can use its Active Directory user to authenticate to AD FS either by using the SAML-POST binding or WS-Trust. AD FS then issues a SAML assertion that contains information about the workload's Active Directory user and additional information such as group memberships.</p> <p>Using SAML or WS-Trust requires AD FS 3.0, AD FS for Windows Server 2016, or a newer version of AD FS.</p>
+</li> <li>
+<p>OIDC: You can let workloads use OIDC to obtain OIDC tokens.</p> <p>To use OIDC, you create an OIDC client (<em>native application</em>) and an OIDC resource (<em>Web API</em>) in AD FS. You then configure a workload identity pool to trust access tokens issued for the <em>Web API</em>.</p> <p>A workload can use its Active Directory user and the OAuth <code translate="no" dir="ltr">client_credentials</code> grant to authenticate to AD FS. AD FS then issues an access token, but no ID token.</p> <p>The access token contains information about the OIDC client application, but doesn't include any information about the workload's Active Directory user or its group memberships.</p> <p>Because access tokens don't contain any information about the Active Directory user, using OIDC can be less flexible than using SAML or WS-Trust.</p> <p>Using OIDC requires AD FS for Windows Server 2016 or a newer version of AD FS.</p>
+</li> </ul> <p> For sign-in, your IdP must provide signed authentication information: OIDC IdPs must provide a JWT, and SAML IdP responses must be signed. </p> <h3 id="iwa_prerequisites">IWA prerequisites</h3> <p>This section describes IWA prerequisites that are required in order to use this guide.</p> <p>If you haven't used IWA with AD FS before, make sure that you meet the following prerequisites:</p> <ul> <li>You've <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/configure-authentication-policies" target="microsoft">configured AD FS to allow Windows Authentication</a> and <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/troubleshooting/ad-fs-tshoot-iwa#spn-misconfiguration" target="microsoft">to use the right service principal name</a>.</li> <li>You've configured <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/design/best-practices-for-secure-planning-and-deployment-of-ad-fs" target="microsoft">extended protection for authentication</a> so that it's compatible with your AD FS deployment.</li> </ul> <h3 id="register_the_workload">Register the workload</h3> <p>To register your workload in AD FS, do the following:</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+<p>To let workloads use OIDC, you need two <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/development/ad-fs-openid-connect-oauth-concepts#application-types" target="microsoft">application registrations</a> in AD FS:</p> <ul> <li><p>An application registration of type <strong>native application</strong> or <strong>server application</strong>.</p></li> <li><p>An application registration of type <strong>Web API</strong> that corresponds to a workload identity pool provider on Google Cloud.</p></li> </ul> <p><strong>Registering the client application</strong></p> <p>Create a client application that represents the workload. If you have multiple workloads that need access to Google Cloud, you might need to create multiple client applications.</p> <p>To register a client application in AD FS, do the following:</p> <ol> <li>Open the AD FS MMC snap-in and navigate to <strong>Application Groups</strong>.</li> <li>Click <strong>Add application group</strong>.</li> <li>
+<p>On the <strong>Welcome</strong> page, do the following:</p> <ol> <li>In the text field, enter a name for the client.</li> <li>Select <strong>Server application</strong>.</li> <li>Click <strong>Next</strong>.</li> </ol>
+</li> <li>
+<p>On the <strong>Server application</strong> page, do the following:</p> <ol> <li>
+<p>In the <strong>text-field</strong> text field, enter a client identifier (Client ID) and a redirect URI.</p> <p>If you're only planning to use the <code translate="no" dir="ltr">client_credentials</code> grant type, the redirect URI won't be used and you can use a URI such as <code translate="no" dir="ltr">http://localhost/</code>.</p>
+</li> <li><p>Click <strong>Next</strong>.</p></li> </ol>
+</li> <li>
+<p>On the <strong>Configure application credentials</strong> page, do the following:</p> <ol> <li>Choose how the client authenticates. To use IWA, set <strong>Windows Integrated Authentication</strong> to <strong>enabled</strong>.</li> <li>Select the domain user that your application is configured to run as.</li> <li>Click <strong>Next</strong>.</li> </ol>
+</li> <li><p>On the <strong>Summary</strong> page, review the settings and click <strong>Next</strong>.</p></li> <li><p>Click <strong>Close</strong> to dismiss the dialog.</p></li> </ol> <p><strong>Creating a Web API application for the workload identity pool</strong></p> <p>Create another application registration of type <strong>Web API</strong>. This application corresponds to a workload identity pool provider, and you use it to set up a trust relationship to Google Cloud.</p> <p>To create the application in AD FS, do the following:</p> <ol> <li>Open the AD FS MMC snap-in and navigate to <strong>Application Groups</strong>.</li> <li>Click <strong>Add application group</strong>.</li> <li>On the <strong>Welcome page</strong>, enter a name such as <code translate="no" dir="ltr">Workload Identity Federation (test environment)</code> and select <strong>Web API</strong>. Then click <strong>Next</strong>.</li> <li>
+<p>On the <strong>Configure Web API</strong> page, enter a relying party identifier for the Web API.</p> <p>Instead of defining a custom relying party identifier, you can use the following URI as relying party identifier:</p> 
+<pre data-language="">
+https://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/WORKLOAD_POOL_ID/providers/WORKLOAD_PROVIDER_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a> of the Google Cloud project that you use to create workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: an ID of your choice that identifies the workload identity pool. You must use the same ID when creating the workload identity pool later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: an ID of your choice that identifies the workload identity pool provider. You must use the same ID when you create the workload identity pool provider later.</li> </ul> <p>Formatting the URI this way ensures that the relying party identifier uniquely identifies a workload identity pool provider.</p> <p>You need the relying party identifier later when you configure the workload identity pool provider.</p>
+</li> <li><p>Click <strong>Next</strong>.</p></li> <li><p>On the <strong>Apply access control policy</strong> page, select an appropriate <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/access-control-policies-in-ad-fs#access-control-policy-templates-in-ad-fs" target="microsoft">access policy</a>, then click <strong>Next</strong>.</p></li> <li><p>On the <strong>Configure application permissions</strong> page, add the client application that you created previously. Then click <strong>Next</strong>.</p></li> <li><p>On the <strong>Summary</strong> page, review the settings and click <strong>Next</strong>.</p></li> <li><p>Click <strong>Close</strong> to dismiss the dialog.</p></li> </ol></section> <section><p class="_code-tab"><strong>SAML or WS-Trust</strong></p>
+<p>Create a relying party trust in AD FS:</p> <ol> <li>Open the AD FS MMC snap-in.</li> <li>Navigate to <strong>Relying party trusts</strong>.</li> <li>Click <strong>Add relying party trust</strong>.</li> <li>On the <strong>Welcome</strong> page of the <strong>Add relying party trust</strong> wizard, do the following: <ol> <li>Select <strong>Claims aware</strong>
+</li> <li>Click <strong>Start</strong>.</li> </ol>
+</li> <li>On the <strong>Select data source</strong> page, do the following: <ol> <li>Select <strong>Enter data about the relying party manually</strong>.</li> <li>Click <strong>Next</strong>.</li> </ol>
+</li> <li>
+<p>On the <strong>Specify display name</strong> page, do the following:</p> <ol> <li>Enter a name for the trust.</li> <li>Click <strong>Next</strong>.</li> </ol>
+</li> <li><p>On the <strong>Configure certificate</strong> page, click <strong>Next</strong>. While Workload Identity Federation supports encrypted SAML, it is not described in this procedure. To learn more, see the gcloud CLI instructions in <a href="#create-pool-provider">Create the identity pool and provider</a>, later in this guide.</p></li> <li>
+<p>On the <strong>Configure URL</strong> page, do the following:</p> <div> <section><p class="_code-tab"><strong>SAML</strong></p>
+<p>Use the following settings:</p> <ul> <li>Set <strong>Enable support for the SAML 2.0 WebSSO protocol</strong> to <strong>enabled</strong>
+</li> <li>
+<p>In the <strong>Relying party SAML 2.0 SSO service URL</strong> field, enter the following URL:</p> 
+<pre data-language="">
+https://sts.googleapis.com/v1/token
+</pre>
+</li> </ul></section> <section><p class="_code-tab"><strong>WS-Trust</strong></p>
+<p>Keep the default settings</p></section> </div>
+</li> <li><p>Click <strong>Next</strong>.</p></li> <li>
+<p>On the <strong>Configure identifiers</strong> page, enter a relying party identifier.</p> <p>Instead of defining a custom relying party identifier, you can use the following URI as relying party identifier:</p> 
+<pre data-language="">
+https://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/WORKLOAD_POOL_ID/providers/WORKLOAD_PROVIDER_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a> of the Google Cloud project that you use to create workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: an ID of your choice that identifies the workload identity pool. You must use the same ID when creating the workload identity pool later.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: an ID of your choice that identifies the workload identity pool provider. You must use the same ID when creating the workload identity pool provider later.</li> </ul> <p>Formatting the URI this way ensures that the relying party identifier uniquely identifies a workload identity pool provider.</p> <p>You need the relying party identifier later when you configure the workload identity pool provider.</p>
+</li> <li><p>Click <strong>Next</strong>.</p></li> <li><p>On the <strong>Choose access control policy</strong> page, select an appropriate <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/access-control-policies-in-ad-fs#access-control-policy-templates-in-ad-fs" target="microsoft">access control policy</a>, then click <strong>Next</strong>.</p></li> <li><p>On the <strong>Ready to add trust</strong> page, review the settings and click <strong>Next</strong>.</p></li> <li><p>On the <strong>Finish</strong> page, click <strong>Close</strong> to dismiss the dialog.</p></li> </ol> <p>To be compatible with Workload Identity Federation, SAML assertions must contain at least one <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/technical-reference/the-role-of-claims" target="microsoft">claim</a> that uniquely identifies the Active Directory user. Typically, you use the <strong>Name ID</strong> claim for this purpose, which corresponds to the value of the <code translate="no" dir="ltr">NameID</code> element in the SAML assertion.</p> <p>To customize the SAML assertion's set of claims, you must edit the relying party trust's claim issuance policy. To edit the claim issuance policy, do the following:</p> <ol> <li>In the list of relying party trusts, select the trust that you just created and click <strong>Edit claim issuance policy</strong>.</li> <li>Click <strong>Add rule</strong>
+</li> <li>On the <strong>Choose rule type</strong> page of the <strong>Add transform claim rule</strong> wizard, do the following: <ol> <li>Select <strong>Transform an incoming claim</strong>.</li> <li>Click <strong>Next</strong>.</li> </ol>
+</li> <li>
+<p>On the <strong>Configure claim rule</strong> page, configure the following settings:</p> <ul> <li>
+<strong>Claim rule name</strong>: <code translate="no" dir="ltr">Name Identifier</code>.</li> <li>
+<strong>Incoming claim type</strong>: Select <strong>Primary SID</strong>, <strong>UPN</strong>, or a different claim to uniquely identify the subject.</li> <li>
+<strong>Outgoing claim type</strong>: <strong>Name ID</strong>.</li> <li>
+<strong>Outgoing name ID format</strong>: <strong>Unspecified</strong>.</li> </ul>
+</li> <li><p>Select <strong>Pass through all claim values</strong> and click <strong>Finish</strong>.</p></li> <li><p>Optionally, <a href="https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/configure-claim-rules" target="microsoft">configure additional rules</a> to include more attributes in the SAML assertions.</p></li> <li><p>Click <strong>OK</strong> to close the claim issuance policy dialog.</p></li> </ol></section> </div> <h2 id="configure">Configure Workload Identity Federation</h2> <p>You only need to perform these steps once for each Microsoft Active Directory domain that you want to federate with. You can then use the same workload identity pool and provider for multiple workloads and across multiple Google Cloud projects.</p> <p>To start configuring Workload Identity Federation, do the following:</p> <ol> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> It's best to <a href="best-practices-for-using-workload-identity-federation#dedicated-project"> use a dedicated project to manage workload identity pools and providers</a>. <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <p> Enable the IAM, Resource Manager, Service Account Credentials, and Security Token Service APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p> </ol> <h3 id="mappings-and-conditions">Define an attribute mapping and condition</h3> <p>The environment-specific credentials of your Active Directory workload contain multiple attributes, and you must decide which attribute you want to use as the subject identifier (<code translate="no" dir="ltr">google.subject</code>) in Google Cloud.</p> <p>Optionally, you can <a href="workload-identity-federation#mapping">map additional attributes</a>. You can then refer to these additional attributes when granting access to resources.</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+<p>Your attribute mappings can use the <a href="https://docs.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-R2-and-2012/ee913589(v=ws.11)" target="microsoft">claims embedded in AD FS access tokens</a> as source attributes.</p> <p>To authenticate an application, you can use the following attribute mapping:</p> 
+<pre data-language="">
+google.subject=assertion.appid
+</pre> <p>This mapping sets <code translate="no" dir="ltr">google.subject</code> to the value of the <code translate="no" dir="ltr">appid</code> claim, which contains the Client ID of the AD FS application.</p></section> <section><p class="_code-tab"><strong>SAML or WS-Trust</strong></p>
+<p>Your attribute mappings can use the claims embedded in the assertion issued by AD FS, as described earlier in this guide.</p> <p>Use the following mapping to let Workload Identity Federation use the <strong>Name ID</strong> claim from the SAML assertion to uniquely identify the user:</p> 
+<pre data-language="">
+google.subject=assertion.subject
+</pre> <p>If you've configured your claim issuance policy to include additional claims in SAML assertions, you can add additional mappings. For example:</p> 
+<pre data-language="">
+google.groups=assertion.attributes['http://schemas.microsoft.com/ws/2008/06/identity/claims/groupsid']
+attribute.userip=['http://schemas.microsoft.com/2014/09/requestcontext/claims/userip'][0]
+</pre></section> </div> <p>Optionally, define an <a href="workload-identity-federation#conditions">attribute condition</a>. Attribute conditions are CEL expressions that can check assertion attributes and target attributes. If the attribute condition evaluates to <code translate="no" dir="ltr">true</code> for a given credential, the credential is accepted. Otherwise, the credential is rejected.</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+<p>You can use an attribute condition to restrict which clients can use Workload Identity Federation to obtain short-lived Google Cloud tokens.</p> <p>For example, the following condition defines that applications have to use IWA to authenticate to AD FS:</p> 
+<pre data-language="">
+assertion.authmethod=='http://schemas.microsoft.com/ws/2008/06/identity/authenticationmethod/windows'
+</pre> <p>To control the list of applications that can obtain short-lived credential for Google Cloud, don't define attribute conditions. Instead, use <a href="https://docs.microsoft.com/en-us/powershell/module/adfs/set-adfsapplicationpermission">client permissions</a> in AD FS to define which applications are allowed.</p></section> <section><p class="_code-tab"><strong>SAML or WS-Trust</strong></p>
+<p>You can use an attribute condition to restrict which Active Directory users can use Workload Identity Federation to obtain short-lived Google Cloud tokens.</p> <p>For example, the following condition only permits SAML assertions that include a certain group membership claim:</p> 
+<pre data-language="">
+"S-1-5-6" in google.groups
+</pre></section> </div> <h3 id="create-pool-provider">Create the workload identity pool and provider</h3> <div>  <h4 class="showalways" id="required-roles">Required roles</h4> <div> <p> To get the permissions that you need to configure Workload Identity Federation, ask your administrator to grant you the following IAM roles on the project: </p> <ul> <li>
+<a href="roles-permissions/iam#iam.workloadIdentityPoolAdmin">Workload Identity Pool Admin </a> (<code translate="no" dir="ltr">roles/iam.workloadIdentityPoolAdmin</code>)</li> <li>
+<a href="roles-permissions/iam#iam.serviceAccountAdmin">Service Account Admin </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>)</li> </ul> <p> For more information about granting roles, see <a href="granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="creating-custom-roles">custom roles</a> or other <a href="roles-overview#predefined">predefined roles</a>. </p> Alternatively, the IAM Owner (<code translate="no" dir="ltr">roles/owner</code>) basic role also includes permissions to configure identity federation. You should not grant basic roles in a production environment, but you can grant them in a development or test environment. </div>  </div> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>New workload provider and pool</strong> page.</p> <p><a href="https://console.cloud.google.com/iam-admin/workload-identity-pools/create" class="button button-primary" target="console" track-name="consoleLink" track-type="tasks" track-metadata-position="body" track-metadata-end-goal="createWorkloadIdentityPool">Go to New workload provider and pool</a></p>
+</li> <li>
+<p>Under <strong>Create an identity pool</strong>, enter the following:</p> <ul> <li>
+<strong>Name</strong>: Name for the pool. The name is also used as the pool ID. You can't change the pool ID later.</li> <li>
+<strong>Description</strong>: Text that describes the purpose of the pool.</li> </ul>
+</li> <li><p>Click <strong>Continue</strong>.</p></li> <li>
+<p>Configure provider settings:</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+<ul> <li>
+<strong>Select a provider</strong>: <strong>OpenID Connect (OIDC)</strong>.</li> <li>
+<strong>Provider name</strong>: the name of the provider. The name is also used as the provider ID. You cannot change the provider ID later.</li> <li>
+<strong>Issuer URL</strong>: <code translate="no" dir="ltr">https://<var translate="no">ADFS_DOMAIN</var>/adfs</code> where <code translate="no" dir="ltr"><var translate="no">ADFS_DOMAIN</var></code> is the public domain name of the AD FS server or farm.</li> </ul></section> <section><p class="_code-tab"><strong>SAML</strong></p>
+<p>To configure Workload Identity Federation from a <strong>SAML</strong> 2.0 compatible IdP, you can use the gcloud CLI instructions.</p></section> </div>
+</li> <li><p>Click <strong>Continue</strong>.</p></li> <li><p>Under <strong>Configure provider attributes</strong>, add the <a href="#mappings-and-conditions">attribute mappings that you've identified previously</a>.</p></li> <li><p>Under <strong>Attribute conditions</strong>, enter the <a href="#mappings-and-conditions">attribute condition that you've identified previously</a>. Leave the field blank if you don't have an attribute condition.</p></li> <li><p>Click <strong>Save</strong> to create the workload identity pool and provider.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>Create a new workload identity pool:</p> 
+<pre data-language="bash">
+gcloud iam workload-identity-pools create WORKLOAD_POOL_ID \
+    --location="global" \
+    --description="DESCRIPTION" \
+    --display-name="DISPLAY_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: Unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISPLAY_NAME</var></code>: Name of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DESCRIPTION</var></code>: Description of the pool. This description appears when granting access to pool identities.</li> </ul>
+</li> <li>
+<p>Add a workload identity pool provider:</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+
+<pre data-language="">
+gcloud iam workload-identity-pools providers create-oidc WORKLOAD_PROVIDER_ID \
+    --location="global" \
+    --workload-identity-pool="WORKLOAD_POOL_ID" \
+    --issuer-uri="https://ADFS_DOMAIN/adfs" \
+    --allowed-audiences="RELYING_PARTY_ID" \
+    --attribute-mapping="MAPPINGS" \
+    --attribute-condition="CONDITIONS"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: a unique ID for the provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the ID of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ADFS_DOMAIN</var></code>: the public domain name of the AD FS server or farm.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RELYING_PARTY_ID</var></code>: the relying party identifier of the <a href="#prepare">Web API application for the workload identity pool</a> in AD FS. You only need this parameter if you use a custom relying party identifier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPINGS</var></code>: Comma-separated list of <a href="#mappings-and-conditions">attribute mappings that you've identified previously</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONDITIONS</var></code>: <a href="#mappings-and-conditions">Attribute condition that you've identified previously</a>. Remove the parameter if you don't have an attribute condition.</li> </ul> <p>The prefix <code translate="no" dir="ltr">gcp-</code> is reserved and can't be used in a workforce identity pool or workforce identity pool provider ID.</p></section> <section><p class="_code-tab"><strong>SAML or WS-Trust</strong></p>
+
+<pre data-language="">
+curl -O https://ADFS_DOMAIN/federationmetadata/2007-06/federationmetadata.xml
+
+gcloud iam workload-identity-pools providers create-saml WORKLOAD_PROVIDER_ID \
+    --location="global" \
+    --workload-identity-pool="POOL_ID" \
+    --idp-metadata-path="federationmetadata.xml" \
+    --attribute-mapping="MAPPINGS" \
+    --attribute-condition="CONDITIONS"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: a unique ID for the provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ADFS_DOMAIN</var></code>: the domain name of your AD FS server or server farm.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the ID of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPINGS</var></code>: a comma-separated list of <a href="#mappings-and-conditions">attribute mappings that you've identified previously</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONDITIONS</var></code>: Optional: the <a href="#mappings-and-conditions">attribute condition</a> that you created earlier in this guide.</li> </ul> <p>The prefix <code translate="no" dir="ltr">gcp-</code> is reserved and can't be used in a workforce identity pool or workforce identity pool provider ID.</p> <p>Example:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools providers create-saml example-provider \
+    --location="global" \
+    --workload-identity-pool="pool-1" \
+    --idp-metadata-path="federationmetadata.xml" \
+    --attribute-mapping=google.subject=assertion.subject"
+</pre> 
+<h3 id="encrypted-saml">Optional: Accept encrypted SAML assertions from your IdP</h3> <p> To enable your SAML 2.0 IdP to produce encrypted SAML assertions that can be accepted by workload identity federation, do the following: </p>
+<ul> <li>In workload identity federation, do the following:</li> <ul> <li>Create an asymmetric key pair for your workload identity pool provider.</li> <li>Download a certificate file that contains the public key.</li> <li>Configure your SAML IdP to use the public key to encrypt SAML assertions it issues.</li> </ul> <li>In your IdP, do the following:</li> <ul> <li>Enable assertion encryption, also known as token encryption.</li> <li> Upload the public key that you created in workload identity federation. </li> <li>Confirm that your IdP produces encrypted SAML assertions.</li> </ul> </ul> Note that, even with SAML encryption provider keys configured, workload identity federation can still process a plaintext assertion. <h4 id="create-saml-encryption-keys">Create workload identity federation SAML assertion encryption keys</h4> <p> This section guides you through creating an asymmetric key pair that enables workload identity federation to accept encrypted SAML assertions. </p> <p> Google Cloud uses the private key to decrypt the SAML assertions that your IdP issues. To create an asymmetric key pair for use with SAML encryption, run the following command. To learn more, see <a href="#supported-saml-encryption-algorithms">Supported SAML encryption algorithms</a>. </p> 
+<pre data-language="">gcloud iam workload-identity-pools providers keys create KEY_ID \
+    --workload-identity-pool WORKLOAD_POOL_ID \
+    --provider WORKLOAD_PROVIDER_ID \
+    --location global \
+    --use encryption \
+    --spec KEY_SPECIFICATION</pre> <p> Replace the following: </p>
+<ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_ID</var></code>: a key name of your choice</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: the workforce identity pool provider ID</li> <li> <code translate="no" dir="ltr"><var translate="no">KEY_SPECIFICATION</var></code>: the key specification, which can be one of <code translate="no" dir="ltr">rsa-2048</code>, <code translate="no" dir="ltr">rsa-3072</code>, and <code translate="no" dir="ltr">rsa-4096</code>. </li> </ul> <p> After the key pair is created, to download the public key into a certificate file, execute the following command. Only workload identity federation has access to the private key. </p> 
+<pre data-language="">gcloud iam workload-identity-pools providers keys describe KEY_ID \
+    --workload-identity-pool WORKLOAD_POOL_ID \
+    --provider WORKLOAD_PROVIDER_ID \
+    --location global \
+    --format "value(keyData.key)" \
+    &gt; CERTIFICATE_PATH</pre> <p> Replace the following: </p>
+<ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_ID</var></code>: the key name</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: the workforce identity pool provider ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_PATH</var></code>: the path to write the certificate to—for example, <code translate="no" dir="ltr">saml-certificate.cer</code> or <code translate="no" dir="ltr">saml-certificate.pem</code> </li>
+</ul> 
+<h4 id="configure-your-idp">Configure your SAML 2.0-compliant IdP to issue encrypted SAML assertions</h4> <ol> <li>Move the certificate file to your AD FS server.</li> <li>On your AD FS server, right-click the <b>Start</b> button (or press <b>Win</b>+<b>X</b>) and click <b>Windows PowerShell (Admin)</b>. </li> <li> In PowerShell, run the following command to enable encryption: 
+<pre data-language="">
+        Set-AdfsRelyingPartyTrust `
+        -TargetName NAME `
+        -SamlResponseSignature MessageAndAssertion `
+        -EncryptionCertificate PATH `
+        -EncryptClaims $True
+    </pre> <p> Replace the following: </p>
+<ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAME</var></code>: the name of your relying party trust</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH</var></code>: the path of the certificate file</li> </ul> </li> </ol> <p> WS-Trust users: This feature is only available when you use SAML. </p> <p> After you configure your IdP to encrypt SAML assertions, we recommend that you check to make sure that the assertions it generates are actually encrypted. Even with SAML assertion encryption configured, workload identity federation can still process plaintext assertions. </p> <h4 id="delete-encryption-keys">Delete workload identity federation encryption keys</h4> To delete SAML encryption keys run the following command: 
+<pre data-language="">  gcloud iam workload-identity-pools providers keys delete KEY_ID \
+      --workload-identity-pool WORKLOAD_POOL_ID \
+      --provider WORKLOAD_PROVIDER_ID \
+      --location global</pre> <p> Replace the following: </p>
+<ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_ID</var></code>: the key name</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: the workforce identity pool provider ID</li> </ul> 
+<h4 id="supported-saml-encryption-algorithms">Supported SAML encryption algorithms</h4> <p>Workload identity federation supports the following key transport algorithms:</p>
+ <ul> <li><a href="http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p">http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p</a></li> <li><a href="http://www.w3.org/2009/xmlenc11#rsa-oaep">http://www.w3.org/2009/xmlenc11#rsa-oaep"</a></li> <li><a href="http://www.w3.org/2001/04/xmlenc#rsa-1_5">http://www.w3.org/2001/04/xmlenc#rsa-1_5"</a></li> </ul> <p>Workload identity federation supports the following block encryption algorithms:</p> <ul> <li><a href="http://www.w3.org/2001/04/xmlenc#aes128-cbc">http://www.w3.org/2001/04/xmlenc#aes128-cbc</a></li> <li><a href="http://www.w3.org/2001/04/xmlenc#aes192-cbc">http://www.w3.org/2001/04/xmlenc#aes192-cbc</a></li> <li><a href="http://www.w3.org/2001/04/xmlenc#aes256-cbc">http://www.w3.org/2001/04/xmlenc#aes256-cbc</a></li> <li><a href="http://www.w3.org/2009/xmlenc11#aes128-gcm">http://www.w3.org/2009/xmlenc11#aes128-gcm</a></li> <li><a href="http://www.w3.org/2009/xmlenc11#aes256-gcm">http://www.w3.org/2009/xmlenc11#aes256-gcm</a></li> </ul></section> </div>
+</li> </ol></section> </div> <h3 id="enable-saml-encryption">Optional: Enable SAML encryption</h3> <p>SAML assertions that are issued by AD FS are cryptographically signed and exchanged over an encrypted TLS channel. However, the SAML assertions themselves are not encrypted. By using SAML encryption, you can configure AD FS to encrypt assertions so that they can only be decrypted and read by your workload identity pool.</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+<p>This feature is only available when you use SAML.</p></section> <section><p class="_code-tab"><strong>SAML or WS-Trust</strong></p>
+<ol> <li>
+<p>Create an encryption key for your workload identity pool provider:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools providers keys create rsa2048 \
+    --workload-identity-pool=POOL_ID \
+    --provider=WORKLOAD_PROVIDER_ID \
+    --location=global \
+    --use=ENCRYPTION \
+    --spec=RSA_2048
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: ID of the provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the ID of the pool.</li> </ul> <p>The key pair is stored and managed by Workload Identity Federation. You can export the public key, but only Workload Identity Federation can access the private key.</p>
+</li> <li>
+<p>Export a certificate that contains the public key:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools providers keys describe rsa2048 \
+    --workload-identity-pool=POOL_ID \
+    --provider=WORKLOAD_PROVIDER_ID \
+    --location=global \
+    --format="value(keyData.key)" &gt; workload-identity-federation.cer
+</pre>
+</li> <li><p>Move the certificate file to your AD FS server.</p></li> <li><p>On your AD FS server, right-click <strong>Start</strong>, then click <strong>Windows PowerShell (Admin)</strong>.</p></li> <li>
+<p>In PowerShell, modify the relying party trust so that it uses encryption:</p> 
+<pre data-language="">
+Set-AdfsRelyingPartyTrust `
+  -TargetName NAME `
+  -SamlResponseSignature MessageAndAssertion `
+  -EncryptionCertificate PATH `
+  -EncryptClaims $True
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAME</var></code>: the name of your relying party trust</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PATH</var></code>: the path of the certificate file</li> </ul>
+</li> </ol></section> </div> <h2 id="authenticate">Authenticate a workload</h2> <p>You must perform these steps once per workload.</p> <h3 id="access">Allow your external workload to access Google Cloud resources</h3> <p>To provide your workload with access to Google Cloud resources, we recommend that you grant direct resource access to the principal. In this case, the principal is the federated user. Some Google Cloud products have <a href="federated-identity-supported-services">Google Cloud API limitations</a>. If your workload calls an API endpoint that has a limitation, you can instead use service account impersonation. In this case, the principal is the Google Cloud service account, which acts as the identity. You grant access to the service account on the resource.</p> <div> <section><p class="_code-tab"><strong>Direct resource access</strong></p>
+<p>You can grant access to a federated identity directly on resources by using the Google Cloud console or the gcloud CLI.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To use the Google Cloud console to grant IAM roles directly on a resource, you must go to the resource's page, and then grant the role. The following example shows you how to go to the Cloud Storage page and grant the role Storage Object Viewer (<code translate="no" dir="ltr">roles/storage.objectViewer</code>) to a federated identity directly on a Cloud Storage bucket.</p> <ol> <li>In the Google Cloud console, go to the Cloud Storage <b>Buckets</b> page.<br> <p><a class="button button-primary" href="https://console.cloud.google.com/storage/browser" target="console">Go to Buckets</a></p>
+</li> <li><p>In the list of buckets, click the name of the bucket for which you want to grant the role.</p></li> <li><p>Select the <strong>Permissions</strong> tab near the top of the page.</p></li> <li>
+<p>Click the <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Grant access</strong> button.</p> <p>The <strong>Add principals</strong> dialog appears.</p>
+</li> <li>
+<p>In the <strong>New principals</strong> field, enter one or more identities that need access to your bucket.</p> <div> <section><p class="_code-tab"><strong>By subject</strong></p>
+
+<pre data-language="">principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the individual subject mapped from your IdP—for example, <code translate="no" dir="ltr">administrator@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By group</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the group mapped from your IdP—for example: <code translate="no" dir="ltr">administrator-group@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By attribute</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: one of the attributes that was mapped from your IdP</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the attribute</li> </ul></section> </div>
+</li> <li><p>Select a role (or roles) from the <strong>Select a role</strong> drop-down menu. The roles you select appear in the pane with a short description of the permissions they grant.</p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To use the gcloud CLI to grant IAM roles on a resource in a project, do the following:</p> <ol> <li>
+<p>Obtain the project number of the project in which the resource is defined.</p> 
+<pre data-language="bash">
+gcloud projects describe $(gcloud config get-value core/project) --format=value\(projectNumber\)
+</pre>
+</li> <li>
+<p>Grant access to the resource.</p> 
+<p> To use the gcloud CLI to grant the role Storage Object Viewer (<code translate="no" dir="ltr">roles/storage.objectViewer</code>) to external identities that meet certain criteria, run the following command. </p>  <section> <p class="_code-tab"><strong>By subject</strong></p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding BUCKET_ID \
+    --role=roles/storage.objectViewer \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT"</pre> </section> <section> <p class="_code-tab"><strong>By group</strong></p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding BUCKET_ID \
+    --role=roles/storage.objectViewer \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP"</pre> </section> <section> <p class="_code-tab"><strong>By attribute</strong></p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding BUCKET_ID \
+    --role=roles/storage.objectViewer \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE"</pre> </section>  <p>Replace the following:</p> <ul>
+<li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_ID</var></code>: the bucket on which to grant access</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a>. of the project that contains the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the pool ID of the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.subject</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.groups</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: the name of a custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> </ul> <p>You can grant roles on any Google Cloud resource that supports IAM allow policies.</p> <aside class="note"><strong>Note:</strong><span> You must use the project number, not the project ID, in the member identifier.</span></aside>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>Service account impersonation</strong></p>
+<ol> <li>
+<p>To create a service account for the external workload, do the following:</p> <ol> <li>
+
+<p> Enable the IAM, Security Token Service, and Service Account Credentials APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p> </li> <li><p><a href="creating-managing-service-accounts#creating">Create a service account</a> that represents the workload. We recommend that you <a href="best-practices-for-using-workload-identity-federation#use-dedicated-service-accounts">use a dedicated service account for each workload</a>. The service account doesn't need to be in the same project as the workload identity pool, but you must refer to the project that contains the service account.</p></li> <li><p><a href="granting-changing-revoking-access">Grant the service account access</a> to resources that you want external identities to access.</p></li> </ol>
+</li> <li><p>To let the federated identity impersonate the service account, do the following:</p></li> </ol> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To use the Google Cloud console to grant IAM roles to a federated identity with service account, do the following:</p>  <div> <section><p class="_code-tab"><strong>Service Account in the same project</strong></p>
+<ol> <li>
+<p>To grant access using service account impersonation for a service account in the same project, do the following:</p> <ol> <li>
+<p>Go to the <strong>Workload Identity Pools</strong> page.</p> <p><a href="https://console.cloud.google.com/iam-admin/workload-identity-pools" class="button button-primary" target="console" track-name="consoleLink" track-type="tasks" track-metadata-position="body" track-metadata-end-goal="listWorkloadIdentityPools">Go to Workload Identity Pools</a></p>
+</li> <li><p>Select <strong>Grant access</strong>.</p></li> <li><p>In the <strong>Grant access to service account</strong> dialog, select <strong>Grant access using Service Account impersonation</strong>.</p></li> <li><p>In the <strong>Service accounts</strong> list, select the service account for the external identities to impersonate, and do the following:</p></li> <li>
+<p>To choose which identities in the pool can impersonate the service account, perform one of the following actions:</p> <ul> <li><p>To allow only specific identities of the workload identity pool to impersonate the service account, select <strong>Only identities matching the filter</strong>.</p></li> <li><p>In the <strong>Attribute name</strong> list, select the attribute that you want to filter on.</p></li> <li><p>In the <strong>Attribute value</strong> field, enter the expected value of the attribute; for example, if you use an attribute mapping <code translate="no" dir="ltr">google.subject=assertion.sub</code>, set <strong>Attribute</strong> name to <code translate="no" dir="ltr">subject</code> and <strong>Attribute value</strong> to the value of the <code translate="no" dir="ltr">sub</code> claim in tokens that are issued by your external identity provider.</p></li> </ul>
+</li> <li><p>To save the configuration, click <strong>Save</strong> and then <strong>Dismiss</strong>.</p></li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>Service account in a different project</strong></p>
+<aside class="note"><strong>Note:</strong><span> Service accounts from different projects won't appear in the "CONNECTED SERVICE ACCOUNTS" section of your <strong>Workload Identity Pool</strong>.</span></aside><ol> <li>
+<p>To grant access using service account impersonation for a service account in a different project, do the following:</p> <ol> <li>
+<p>Go to the <strong>Service Accounts</strong> page.</p> <p><a href="https://console.cloud.google.com/iam-admin/serviceaccounts" class="button button-primary" target="console" track-name="consoleLink" track-type="tasks" track-metadata-position="body" track-metadata-end-goal="listServiceAccounts">Go to Service Accounts</a></p>
+</li> <li><p>Select the service account that you want to impersonate.</p></li> <li><p>Click <strong>Manage access</strong>.</p></li> <li><p>Click <strong>Add principal</strong>.</p></li> <li>
+<p>In the <strong>New principal</strong> field, enter one of the following <a href="workload-identity-federation#principal-types">principal identifiers</a> for the identities in your pool that will impersonate the service account.</p> <div> <section><p class="_code-tab"><strong>By subject</strong></p>
+
+<pre data-language="">principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the individual subject mapped from your IdP—for example, <code translate="no" dir="ltr">administrator@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By group</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the group mapped from your IdP—for example: <code translate="no" dir="ltr">administrator-group@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By attribute</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: one of the attributes that was mapped from your IdP</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the attribute</li> </ul></section> <section><p class="_code-tab"><strong>By pool</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/*
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> </ul></section> </div>
+</li> <li><p>In <strong>Select a role</strong>, select the Workload Identity User role (<code translate="no" dir="ltr">roles/iam.workloadIdentityUser</code>).</p></li> <li><p>To save the configuration, click <strong>Save</strong>.</p></li> </ol>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> To grant the Workload Identity User role (<code translate="no" dir="ltr">roles/iam.workloadIdentityUser</code>) to a federated principal or principal set, run the following command. To learn more about Workload Identity Federation principal identifiers, see <a href="workload-identity-federation#principal-types">Principal types</a>. </p>  <section> <p class="_code-tab"><strong>By subject</strong></p> 
+<pre data-language="">gcloud iam service-accounts add-iam-policy-binding SERVICE_ACCOUNT_EMAIL \
+    --role=roles/iam.workloadIdentityUser \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT"</pre> </section> <section> <p class="_code-tab"><strong>By group</strong></p> 
+<pre data-language="">gcloud iam service-accounts add-iam-policy-binding SERVICE_ACCOUNT_EMAIL \
+    --role=roles/iam.workloadIdentityUser \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP"</pre> </section> <section> <p class="_code-tab"><strong>By attribute</strong></p> 
+<pre data-language="">gcloud iam service-accounts add-iam-policy-binding SERVICE_ACCOUNT_EMAIL \
+    --role=roles/iam.workloadIdentityUser \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE"</pre> </section>  <p>Replace the following:</p> <ul>
+<li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>: the email address of the service account</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a>. of the project that contains the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the pool ID of the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.subject</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.groups</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: the name of a custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> </ul> <aside class="note"><strong>Note:</strong><span> You must use the project number, not the project ID, in the member identifier.</span></aside></section> </div></section> </div> <h3 id="create_a_credential_configuration">Create a credential configuration</h3> <p>You can let <a href="https://docs.cloud.google.com/apis/docs/cloud-client-libraries">Cloud Client Libraries</a> and tools such as the gcloud CLI and Terraform use Active Directory credentials to authenticate to Google Cloud by using the <a href="https://github.com/GoogleCloudPlatform/iam-windows-authenticator/releases/latest/download/wwauth.exe">Workload Authenticator for Windows</a>.</p> <p>Workload Authenticator for Windows is an open-source tool that acts as a plugin for the Cloud Client Libraries and tools such as the gcloud CLI:</p> <ol> <li>When the tool or library needs a new credential, it launches the Workload Authenticator in the background.</li> <li>The Workload Authenticator uses OIDC, SAML, or WS-Trust to obtain a new token or SAML assertion from AD FS and passes it back to the tool or library.</li> <li>The tool or library then uses exchanges the token or SAML assertion against short-lived Google Cloud credentials by using Workload Identity Federation.</li> </ol> <p>To use the Workload Authenticator for Windows, you must create a credential configuration file. This file defines the following:</p> <ul> <li>Where to find the Workload Authenticator for Windows executable (<code translate="no" dir="ltr">wwauth.exe</code>), and which parameters to run it with</li> <li>Which workload identity pool and provider to use</li> <li>Which service account to impersonate</li> </ul> <p>To create a credential configuration file, do the following on the Windows Server that runs your workload:</p> <ol> <li>Right-click the <strong>Start</strong> button (or press <strong>Win+X</strong>) and click <strong>Windows PowerShell</strong>.</li> <li>
+<p>Download the <a href="https://github.com/GoogleCloudPlatform/iam-windows-authenticator/releases/latest/download/wwauth.exe">Workload Authenticator for Windows</a> and save it to a location that's accessible by your workload:</p> 
+<pre>
+(New-Object Net.WebClient).DownloadFile(
+  "https://github.com/GoogleCloudPlatform/iam-windows-authenticator/releases/latest/download/wwauth.exe",
+  "${env:ProgramData}\wwauth.exe")
+</pre> <p>If you create a credential configuration file by using the Workload Authenticator for Windows, the file contains the path to its executable. If you later delete or move the executable, workloads won't be able to find and use the executable.</p>
+</li> <li>
+<p>Launch <code translate="no" dir="ltr">wwauth.exe</code>:</p> 
+<pre>
+&amp; ${env:ProgramData}\wwauth.exe
+</pre> <p>A configuration dialog opens:</p> <p><img src="https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth.png" alt="Workload Authenticator" srcset="https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_36.png 36w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_48.png 48w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_72.png 72w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_96.png 96w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_480.png 480w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_720.png 720w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_856.png 856w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_960.png 960w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_1440.png 1440w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_1920.png 1920w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth_2880.png 2880w" sizes="(max-width: 840px) 100vw, 856px"></p>
+</li> <li>
+<p>Select the <strong>AD FS</strong> tab and enter the following settings:</p> <ul> <li>
+<p><strong>Issuer URI of AD FS server</strong>: Public URI of your AD FS server or farm.</p> 
+<pre>
+https://ADFS_DOMAIN/adfs/
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">ADFS_DOMAIN</var></code> with the public domain name of your AD FS server or server farm.</p>
+</li> </ul> <p>The next settings depend on the protocol you want to use:</p> <div> <section><p class="_code-tab"><strong>OIDC</strong></p>
+<ul> <li>
+<strong>Protocol</strong>: <strong>AdfsOidc</strong>
+</li> <li>
+<strong>Relying party ID</strong>: Keep the default.</li> <li>
+<strong>Client ID</strong> Client identifier (Client ID) of the <a href="#prepare">server application</a> in AD FS.</li> </ul></section> <section><p class="_code-tab"><strong>SAML</strong></p>
+<ul> <li>
+<strong>Protocol</strong>: <strong>AdfsSamlPost</strong>
+</li> <li>
+<strong>Assertion consumer service URL</strong>: <code translate="no" dir="ltr">https://sts.googleapis.com/v1/token</code>.</li> <li>
+<strong>Sign requests using certificate</strong>: <strong>disabled</strong>
+</li> </ul></section> <section><p class="_code-tab"><strong>WS-Trust</strong></p>
+<ul> <li>
+<strong>Protocol</strong>: <strong>AdfsWsTrust</strong>
+</li> </ul></section> </div>
+</li> <li>
+<p>Select the <strong>Workload identity</strong> tab and enter the following settings:</p> <ul> <li>
+<strong>Project number</strong>: Project number of the project that contains the workload identity pool</li> <li>
+<strong>Pool ID</strong>: ID of the workload identity pool</li> <li>
+<strong>Provider ID</strong>: ID of the workload identity pool provider</li> <li>
+<strong>Impersonate service account</strong>: <strong>enabled</strong>, if you use service account impersonation</li> <li>
+<strong>Email address</strong>: Email address of the service account, if you use service account impersonation</li> </ul>
+</li> <li><p>Select the <strong>AD FS</strong> tab and verify that the <strong>Relying Party ID</strong> field now contains the URL of your workload identity pool provider.</p></li> <li>
+<p>Click <strong>Apply</strong> and choose a file location to save the credential configuration file to.</p> <p>Unlike a <a href="creating-managing-service-account-keys#creating_service_account_keys">service account key</a>, a credential configuration file doesn't contain any secrets and doesn't need to be kept confidential. Details about the credential configuration file are available at <a href="https://google.aip.dev/auth/4117">https://google.aip.dev/auth/4117</a>.</p>
+</li> </ol> <p>You're now ready to test your configuration:</p> <ol> <li><p>Select an Active Directory user to test with. This can be the Active Directory user of the workload or the user you're currently logged in with.</p></li> <li>
+<p>To test the configuration with your current user, click <strong>Test</strong>.</p> <p>To test with a different user, select <strong>Test &gt; Test configuration as user</strong> and enter the credentials for the user.</p> <p>The tool now tries to authenticate to Google Cloud by performing the following steps:</p> <ol> <li>Acquire an OIDC token or SAML assertion from AD FS.</li> <li>Obtain a Google Security Token Service token.</li> <li>Impersonate the service account, if you use service account impersonation.</li> </ol> <p>If the authentication succeeds, you see the message <em>Test completed successfully</em>:</p> <p><img src="https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test.png" alt="Test result" srcset="https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_36.png 36w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_48.png 48w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_72.png 72w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_96.png 96w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_480.png 480w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_720.png 720w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_856.png 856w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_960.png 960w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_1440.png 1440w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_1920.png 1920w,https://docs.cloud.google.com/static/iam/img/workload-identity-federation-wwauth-test_2880.png 2880w" sizes="(max-width: 840px) 100vw, 856px"></p>
+</li> </ol> <h3 id="use-credential-configuration">Use the credential configuration to access Google Cloud</h3> <p>To let tools and client libraries use your credential configuration, do the following on the Windows Server that runs your workload:</p> <ol> <li>Right-click the <strong>Start</strong> button and click <strong>Run</strong>.</li> <li>Enter <code translate="no" dir="ltr">sysdm.cpl</code> and click <strong>OK</strong>.</li> <li>On the <strong>Advanced</strong> tab, click <strong>Environment variables</strong>.</li> <li>
+<p>In the <strong>System variables</strong> section, add two new variables:</p> <table> <tr> <th>Name</th> <th>Value</th> </tr> <tr> <td><code translate="no" dir="ltr">GOOGLE_APPLICATION_CREDENTIALS</code></td> <td>Path to the credential configuration file</td> </tr> <tr> <td><code translate="no" dir="ltr">GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES</code></td> <td><code translate="no" dir="ltr">1</code></td> </tr> </table> <p>We highly recommended that you edit the credential configuration file, and use a <a href="best-practices-for-using-workload-identity-federation#sts-regional-endpoints">regional Security Token Service endpoint</a>, if it is available.</p>
+</li> <li><p>Click <strong>OK</strong>.</p></li> <li>
+<p>Use a client library or tool that supports Workload Identity Federation and can <a href="https://docs.cloud.google.com/docs/authentication/client-libraries">find credentials automatically</a>:</p> <div> <section><p class="_code-tab"><strong>C++</strong></p>
+<p>The <a href="https://docs.cloud.google.com/cpp/docs">Google Cloud Client Libraries for C++</a> support Workload Identity Federation since version <a href="https://github.com/googleapis/google-cloud-cpp/releases/tag/v2.6.0">v2.6.0</a>. To use Workload Identity Federation, you must build the client libraries with version 1.36.0 or later of gRPC.</p></section> <section><p class="_code-tab"><strong>Go</strong></p>
+<p>Client libraries for Go support Workload Identity Federation if they use version v0.0.0-20210218202405-ba52d332ba99 or later of the <code translate="no" dir="ltr">golang.org/x/oauth2</code> module.</p> <p>To check which version of this module your client library uses, run the following commands:</p> 
+<pre data-language="go">cd $GOPATH/src/cloud.google.com/go
+go list -m golang.org/x/oauth2
+</pre></section> <section><p class="_code-tab"><strong>Java</strong></p>
+<p>Client libraries for Java support Workload Identity Federation if they use version 0.24.0 or later of the <a href="https://search.maven.org/artifact/com.google.auth/google-auth-library-oauth2-http"><code translate="no" dir="ltr">com.google.auth:google-auth-library-oauth2-http</code> artifact</a>.</p> <p>To check which version of this artifact your client library uses, run the following Maven command in your application directory:</p> 
+<pre data-language="java">mvn dependency:list -DincludeArtifactIds=google-auth-library-oauth2-http
+</pre></section> <section><p class="_code-tab"><strong>Node.js</strong></p>
+<p>Client libraries for Node.js support Workload Identity Federation if they use version 7.0.2 or later of the <a href="https://github.com/googleapis/google-auth-library-nodejs"><code translate="no" dir="ltr">google-auth-library</code> package</a>.</p> <p>To check which version of this package your client library uses, run the following command in your application directory:</p> 
+<pre data-language="javascript">npm list google-auth-library
+</pre> <p>When you create a <code translate="no" dir="ltr">GoogleAuth</code> object, you can specify a project ID, or you can allow <code translate="no" dir="ltr">GoogleAuth</code> to find the project ID automatically. To find the project ID automatically, the service account in the configuration file must have the Browser role (<code translate="no" dir="ltr">roles/browser</code>), or a role with equivalent permissions, on your project. For details, see the <a href="https://github.com/googleapis/google-auth-library-nodejs#using-external-identities"><code translate="no" dir="ltr">README</code> for the <code translate="no" dir="ltr">google-auth-library</code> package</a>.</p></section> <section><p class="_code-tab"><strong>Python</strong></p>
+<p>Client libraries for Python support Workload Identity Federation if they use version 1.27.0 or later of the <a href="https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth"><code translate="no" dir="ltr">google-auth</code> package</a>.</p> <p>To check which version of this package your client library uses, run the following command in the environment where the package is installed:</p> 
+<pre data-language="python">pip show google-auth
+</pre> <p>To specify a project ID for the authentication client, you can set the <code translate="no" dir="ltr">GOOGLE_CLOUD_PROJECT</code> environment variable, or you can allow the client to find the project ID automatically. To find the project ID automatically, the service account in the configuration file must have the Browser role (<code translate="no" dir="ltr">roles/browser</code>), or a role with equivalent permissions, on your project. For details, see the <a href="https://github.com/googleapis/google-cloud-python/blob/main/packages/google-auth/docs/user-guide.rst#using-external-identities">user guide for the <code translate="no" dir="ltr">google-auth</code> package</a>.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To authenticate using Workload Identity Federation, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> command:</p> 
+<pre data-language="bash">
+gcloud auth login --cred-file=FILEPATH.json
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the path to the credential configuration file.</p> <p>Support for Workload Identity Federation in gcloud CLI is available in <a href="https://docs.cloud.google.com/sdk/docs/components#updating_components">version 363.0.0 and later versions of the gcloud CLI</a>.</p></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>The <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs">Google Cloud provider</a> supports Workload Identity Federation if you use version 3.61.0 or later:</p> 
+<pre data-language="">
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~&gt; 3.61.0"
+    }
+  }
+}
+</pre></section> <section><p class="_code-tab"><strong>bq</strong></p>
+<p> To authenticate using Workload Identity Federation, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> command, as follows:</p> 
+<pre data-language="">
+gcloud auth login --cred-file=FILEPATH.json
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the path to the credential configuration file.</p> <p>Support for Workload Identity Federation in bq is available in <a href="https://docs.cloud.google.com/sdk/docs/components#updating_components">version 390.0.0 and later versions of the gcloud CLI</a>.</p></section> </div>
+</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>Read more about <a href="workload-identity-federation">Workload Identity Federation</a>.</li> <li>Learn about <a href="best-practices-for-using-workload-identity-federation">best practices for using Workload Identity Federation</a>.</li> <li>See how you can <a href="manage-workload-identity-pools-providers">manage workload identity pools and providers</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-active-directory" class="_attribution-link">https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-active-directory</a>
+  </p>
+</div>

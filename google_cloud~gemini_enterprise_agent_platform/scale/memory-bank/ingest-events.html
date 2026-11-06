@@ -1,0 +1,383 @@
+<h1>Ingest events</h1> <p>The <code translate="no" dir="ltr">IngestEvents</code> API decouples event ingestion from memory generation in Memory Bank. You can continuously stream content to Memory Bank, and generation will automatically run when your triggering criteria are satisfied.</p> <p>To complete the steps demonstrated in this guide, you must first follow the steps in <a href="setup">Set up for Memory Bank</a>.</p> <p>The examples on this page use the <code translate="no" dir="ltr">agentplatform</code> SDK, which provides the latest <code translate="no" dir="ltr">IngestEvents</code> configuration options. Initialize the client with <code translate="no" dir="ltr">agentplatform</code>:</p> 
+<pre>import agentplatform
+
+client = agentplatform.Client(
+    project="PROJECT_ID",
+    location="LOCATION",
+)
+</pre> <h2 id="understanding-event-ingestion">Understanding event ingestion</h2> <p>With the <code translate="no" dir="ltr">GenerateMemories</code> API, memory generation is triggered immediately. This method provides you with direct control over when memory generation occurs. <code translate="no" dir="ltr">IngestEvents</code> offers a streaming pattern that decouples event ingestion from memory generation:</p> <ul> <li>
+<strong>Continuous ingestion</strong>: You can continuously stream context to Memory Bank whenever new data is available.</li> <li>
+<strong>Deduplication</strong>: Memory Bank automatically detects and ignores overlapping conversation history based on shared event IDs.</li> <li>
+<strong>Automated triggers</strong>: Generation is automatically triggered only when specific conditions are met, like event count thresholds or idle time.</li> <li>
+<strong>Asynchronous generation</strong>: Events are processed in the background. The API immediately returns a long-running operation (LRO), which you can poll or monitor until the trigger condition is met and memories are generated.</li> </ul> <h3 id="streams_and_long-running_operations_lros">Streams and long-running operations (LROs)</h3> <p>Streams act as isolated buffers that accumulate events across multiple requests. Each stream is uniquely defined by the combination of its <code translate="no" dir="ltr">scope</code> and <code translate="no" dir="ltr">stream_id</code>. If you don't provide a stream ID, Memory Bank uses <code translate="no" dir="ltr">default</code> as the ID. Events are only staged and "flushed" together if they share the exact same scope and ID, ensuring strict isolation during memory generation.</p> <p>Multiple ingestion calls to the same stream return the same LRO until memory generation is triggered and finished. After completion, this <code translate="no" dir="ltr">IngestEvents</code> LRO contains the downstream LRO for the <code translate="no" dir="ltr">GenerateMemories</code> API call. Any subsequent ingestion requests to the stream will return a new LRO.</p> <h2 id="triggering-generation">Triggering memory generation</h2> <p>If no trigger conditions are met, all pending events in a stream are automatically flushed out 24 hours after the last event is ingested. This limit ensures Memory Bank processes all events, including ones that have been abandoned.</p> <p>The <code translate="no" dir="ltr">generation_trigger_config</code> determines when the collected events are flushed and processed for memory generation. You can configure the following trigger conditions:</p> <ul> <li>
+<strong>Event count</strong> (<code translate="no" dir="ltr">event_count</code>): Generation triggers once the number of unique events accumulated reaches the limit.</li> <li>
+<strong>Inactive time</strong> (<code translate="no" dir="ltr">idle_duration</code>, in seconds with minute granularity, meaning you must specify a multiple of 60): Generation is triggered when the stream hasn't received new events after the specified duration (for example, <code translate="no" dir="ltr">"300s"</code>).</li> <li>
+<strong>Fixed interval</strong> (<code translate="no" dir="ltr">fixed_interval</code>, in seconds with minute granularity, meaning you must specify a multiple of 60): Generation executes on a fixed rhythm, polling for delta events after every specified duration (for example, <code translate="no" dir="ltr">"300s"</code>).</li> <li>
+<strong>Force flush</strong> (<code translate="no" dir="ltr">force_flush</code>): Flush all the pending events immediately.</li> </ul> <p>You can combine an event-count rule with a time-based rule in the same <code translate="no" dir="ltr">generation_rule</code>. For example, you can set <code translate="no" dir="ltr">event_count</code> together with <code translate="no" dir="ltr">idle_duration</code>. When more than one condition is configured, generation is triggered as soon as any one of them is met, whichever occurs first. The two time-based conditions are mutually exclusive: a single rule can specify either <code translate="no" dir="ltr">idle_duration</code> or <code translate="no" dir="ltr">fixed_interval</code>, but not both. The <code translate="no" dir="ltr">force_flush</code> field is independent of these rules and always flushes pending events immediately.</p> <p>The API uses the <code translate="no" dir="ltr">event_id</code> to deduplicate data automatically. By providing a unique ID for each event, only new events are added to the buffer.</p> <h3 id="overlap-events">Carry over context between generation windows</h3> <p>By default, each generation window only processes the events that accumulated since the previous flush. To keep memories coherent across consecutive generation windows, you can carry context over from one window into the next by setting <code translate="no" dir="ltr">overlap_event_count</code> in the <code translate="no" dir="ltr">generation_rule</code>. This re-includes the last <em>N</em> already-processed events at the start of the next window.</p> <p>Carried-over events don't count toward the trigger condition. The <code translate="no" dir="ltr">overlap_event_count</code> value must be a positive integer that is less than <code translate="no" dir="ltr">event_count</code>, and it requires either <code translate="no" dir="ltr">event_count</code> or a time-based rule (<code translate="no" dir="ltr">idle_duration</code> or <code translate="no" dir="ltr">fixed_interval</code>).</p> <h2 id="data-source">Data source</h2> <p>With <code translate="no" dir="ltr">IngestEvents</code>, you provide content by submitting events directly within your application request using <a href="generate-memories#direct-contents-source">direct_contents_source</a> in a direct payload.</p> <p>The following examples showcase different triggers.</p> <h4 id="example_event_count_trigger">Example: Event count trigger</h4> <p>This example uses a custom stream and triggers generation when 10 unique events have been accumulated in the stream.</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "My favorite color is blue."}]
+                },
+                "event_id": "event-1" # Optional, used for deduplication.
+            }
+        ]
+    },
+    generation_trigger_config={
+        "generation_rule": {
+            "event_count": 10
+        }
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="My favorite color is blue.")]
+                ),
+                event_id="event-1" # Optional, used for deduplication.
+            )
+        ]
+    ),
+    generation_trigger_config=types.MemoryGenerationTriggerConfig(
+        generation_rule=types.MemoryGenerationTriggerConfigGenerationTriggerRule(
+            event_count=10
+        )
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h4 id="example_time-based_idle_duration_trigger">Example: Time-based idle duration trigger</h4> <p>This example triggers generation when the stream has not received a new event for 5 minutes (<code translate="no" dir="ltr">300s</code>). It also sets a custom <code translate="no" dir="ltr">stream_id</code>.</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "I will be back in a bit."}]
+                },
+                "event_id": "event-2" # Optional, used for deduplication.
+            }
+        ]
+    },
+    generation_trigger_config={
+        "generation_rule": {
+            "idle_duration": "300s"
+        }
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="I will be back in a bit.")]
+                ),
+                event_id="event-2" # Optional, used for deduplication.
+            )
+        ]
+    ),
+    generation_trigger_config=types.MemoryGenerationTriggerConfig(
+        generation_rule=types.MemoryGenerationTriggerConfigGenerationTriggerRule(
+            idle_duration="300s"
+        )
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h4 id="example_combine_event-based_and_time-based_triggers">Example: Combine event-based and time-based triggers</h4> <p>This example configures two trigger conditions in the same request. Generation runs when either 10 unique events accumulate or the stream is idle for 5 minutes (<code translate="no" dir="ltr">300s</code>), whichever occurs first.</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "Let's keep this conversation going."}]
+                },
+                "event_id": "event-3" # Optional, used for deduplication.
+            }
+        ]
+    },
+    generation_trigger_config={
+        "generation_rule": {
+            "event_count": 10,
+            "idle_duration": "300s"
+        }
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="Let's keep this conversation going.")]
+                ),
+                event_id="event-3" # Optional, used for deduplication.
+            )
+        ]
+    ),
+    generation_trigger_config=types.MemoryGenerationTriggerConfig(
+        generation_rule=types.MemoryGenerationTriggerConfigGenerationTriggerRule(
+            event_count=10,
+            idle_duration="300s"
+        )
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h4 id="example_force_flush_events">Example: Force flush events</h4> <p>This example unconditionally bypasses any trigger conditions and immediately forces all pending events in the stream to be flushed and processed.</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "That's all for today!"}]
+                },
+            }
+        ]
+    },
+    config={
+        "force_flush": True
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="That's all for today!")]
+                ),
+            )
+        ]
+    ),
+    config=types.IngestEventsConfig(
+        force_flush=True
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h4 id="example_carry_over_context_between_windows">Example: Carry over context between windows</h4> <p>This example triggers generation every 10 unique events and re-includes the last 2 already-processed events in the next window so that memories stay coherent across windows.</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "Let's continue where we left off."}]
+                },
+            }
+        ]
+    },
+    generation_trigger_config={
+        "generation_rule": {
+            "event_count": 10,
+            "overlap_event_count": 2
+        }
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="Let's continue where we left off.")]
+                ),
+            )
+        ]
+    ),
+    generation_trigger_config=types.MemoryGenerationTriggerConfig(
+        generation_rule=types.MemoryGenerationTriggerConfigGenerationTriggerRule(
+            event_count=10,
+            overlap_event_count=2
+        )
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h2 id="configure-revisions">Configure memory revisions</h2> <p>Like <code translate="no" dir="ltr">GenerateMemories</code>, <code translate="no" dir="ltr">IngestEvents</code> creates <a href="revisions">memory revisions</a> for the memories that it generates. You can configure the revisions that result from an ingestion request by setting the following fields in the <code translate="no" dir="ltr">config</code>:</p> <ul> <li>
+<strong>Revision labels</strong> (<code translate="no" dir="ltr">revision_labels</code>): Key-value pairs that are applied to the generated memory revisions. For example, you can label a revision with its data source and later <a href="revisions#list-memory-revisions">filter revisions</a> by that label.</li> <li>
+<strong>Revision expiration</strong> (<code translate="no" dir="ltr">revision_expire_time</code> or <code translate="no" dir="ltr">revision_ttl</code>): Controls when the generated memory revisions <a href="revisions#revision-expiration">expire</a>. If you don't set an expiration, Memory Bank uses the instance configuration or the default time to live (TTL) of 365 days.</li> <li>
+<strong>Disable revisions</strong> (<code translate="no" dir="ltr">disable_memory_revisions</code>): If <code translate="no" dir="ltr">True</code>, Memory Bank <a href="revisions#disable-memory-revisions">doesn't create revisions</a> for the memories that are generated from this request.</li> </ul> <p>The following example labels the generated revisions with a data source and keeps them for 30 days:</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "My favorite color is blue."}]
+                },
+            }
+        ]
+    },
+    generation_trigger_config={
+        "generation_rule": {
+            "event_count": 10
+        }
+    },
+    config={
+        "revision_labels": {"data_source": "321"},
+        # Persist memory revisions for 30 days after they're created.
+        "revision_ttl": f"{30 * 60 * 60 * 24}s"
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="My favorite color is blue.")]
+                ),
+            )
+        ]
+    ),
+    generation_trigger_config=types.MemoryGenerationTriggerConfig(
+        generation_rule=types.MemoryGenerationTriggerConfigGenerationTriggerRule(
+            event_count=10
+        )
+    ),
+    config=types.IngestEventsConfig(
+        revision_labels={"data_source": "321"},
+        # Persist memory revisions for 30 days after they're created.
+        revision_ttl=f"{30 * 60 * 60 * 24}s"
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h2 id="metadata">Attach metadata to generated memories</h2> <p>You can attach <a href="generate-memories#metadata">metadata</a> to the memories that are generated from ingested events. Metadata lets you store structured information (strings, doubles, booleans, or timestamps) alongside a memory fact, which is useful for <a href="fetch-memories#metadata-filter">filtering</a> or managing the lifecycles of your memories.</p> <p>Use <code translate="no" dir="ltr">metadata_merge_strategy</code> to control how the metadata interacts with existing memories during consolidation. You can set it to <code translate="no" dir="ltr">OVERWRITE</code> (the default when unset), <code translate="no" dir="ltr">MERGE</code>, or <code translate="no" dir="ltr">REQUIRE_EXACT_MATCH</code>. For more information, see <a href="generate-memories#metadata">Using metadata during consolidation</a>.</p> <div> <section><p class="_code-tab"><strong>Dictionary</strong></p>
+
+<pre data-language="">client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source={
+        "events": [
+            {
+                "content": {
+                    "role": "user",
+                    "parts": [{"text": "My favorite color is blue."}]
+                },
+            }
+        ]
+    },
+    generation_trigger_config={
+        "generation_rule": {
+            "event_count": 10
+        }
+    },
+    config={
+        "metadata": {
+            "my_string_key": {"string_value": "my_string_value"},
+            "my_boolean_key": {"bool_value": True}
+        },
+        "metadata_merge_strategy": "MERGE"
+    },
+    scope={"user_id": "123"}
+)
+</pre></section> <section><p class="_code-tab"><strong>Class-based</strong></p>
+
+<pre data-language="">from google import genai
+from agentplatform import types
+
+client.memory_banks.ingest_events(
+    name=memory_bank.name,
+    stream_id="my-custom-stream",
+    direct_contents_source=types.IngestionDirectContentsSource(
+        events=[
+            types.IngestionDirectContentsSourceEvent(
+                content=genai.types.Content(
+                    role="user",
+                    parts=[genai.types.Part.from_text(text="My favorite color is blue.")]
+                ),
+            )
+        ]
+    ),
+    generation_trigger_config=types.MemoryGenerationTriggerConfig(
+        generation_rule=types.MemoryGenerationTriggerConfigGenerationTriggerRule(
+            event_count=10
+        )
+    ),
+    config=types.IngestEventsConfig(
+        metadata={
+            "my_string_key": types.MemoryMetadataValue(string_value="my_string_value"),
+            "my_boolean_key": types.MemoryMetadataValue(bool_value=True)
+        },
+        metadata_merge_strategy=types.MemoryMetadataMergeStrategy.MERGE
+    ),
+    scope={"user_id": "123"}
+)
+</pre></section> </div> <h2 id="whats-next">What's next</h2> <ul> <li><a href="fetch-memories">Fetch generated memories</a></li> <li><a href="revisions">Inspect memory revisions</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/ingest-events" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/ingest-events</a>
+  </p>
+</div>

@@ -1,0 +1,197 @@
+<h1>Secure data access for users and groups</h1> <h1 class="devsite-page-title" id="secure-data-access-for-users-and-groups">Secure data access for users and groups</h1> <p>Many collaborative apps allow users to read and write different pieces of data based on a set of permissions. In a document editing app, for example, users may want to allow a few users to read and write their documents while blocking unwanted access.</p> <aside class="note clear"><b>Note:</b> The server client libraries bypass all Firestore Security Rules and instead authenticate through <a href="https://cloud.google.com/docs/authentication/production">Google Application Default Credentials</a>. If you're using the server client libraries or the REST or RPC APIs, make sure to set up <a href="https://cloud.google.com/firestore/docs/security/iam">Identity and Access Management (IAM) for Firestore</a>. </aside> <h2 id="solution_role-based_access_control">Solution: Role-Based Access Control</h2> <p>You can take advantage of Cloud Firestore's data model as well as custom <a href="../security/get-started">security rules</a> to implement role-based access control in your app.</p> <p>Suppose you are building a collaborative writing application in which users can create "stories" and "comments" with the following security requirements:</p> <ul> <li>Each story has one owner and can be shared with "writers", "commenters", and "readers".</li> <li>
+<em>Readers</em> can only see stories and comments. They cannot edit anything.</li> <li>
+<em>Commenters</em> have all the access of readers, and they can also add comments to a story.</li> <li>
+<em>Writers</em> have all the access of commenters, and they can also edit story content.</li> <li>
+<em>Owners</em> can edit any part of a story as well as control the access of other users.</li> </ul> <h3 id="data_structure">Data Structure</h3> <p>Assume your app has a <code translate="no" dir="ltr">stories</code> collection where each document represents a story. Each story also has a <code translate="no" dir="ltr">comments</code> subcollection where each document is a comment on that story.</p> <p>To keep track of access roles, add a <code translate="no" dir="ltr">roles</code> field which is a map of user IDs to roles:</p> <p><strong>/stories/{storyid}</strong></p> 
+<pre>{
+  title: "A Great Story",
+  content: "Once upon a time ...",
+  roles: {
+    alice: "owner",
+    bob: "reader",
+    david: "writer",
+    jane: "commenter"
+    // ...
+  }
+}
+</pre> <p>Comments contain only two fields, the author's user ID and some content:</p> <p><strong>/stories/{storyid}/comments/{commentid}</strong></p> 
+<pre>{
+  user: "alice",
+  content: "I think this is a great story!"
+}
+</pre> <h3 id="rules">Rules</h3> <p>Now that you have users' roles recorded in the database, you need to write Security Rules to validate them. These rules assume the app uses <a href="https://firebase.google.com/docs/auth/">Firebase Auth</a> so that the <code translate="no" dir="ltr">request.auth.uid</code> variable is the user's ID.</p> <p><strong>Step 1</strong>: Start with a basic rules file, which includes empty rules for stories and comments:</p> 
+<pre>service cloud.firestore {
+   match /databases/{database}/documents {
+     match /stories/{story} {
+         // TODO: Story rules go here...
+
+         match /comments/{comment} {
+            // TODO: Comment rules go here...
+         }
+     }
+   }
+}
+</pre> <p><strong>Step 2</strong>: Add a simple <code translate="no" dir="ltr">write</code> rule that gives owners complete control over stories. The functions defined help determine a user's roles and if new documents are valid:</p> 
+<pre>service cloud.firestore {
+   match /databases/{database}/documents {
+     match /stories/{story} {
+        function isSignedIn() {
+          return request.auth != null;
+        }
+
+        function getRole(rsc) {
+          // Read from the "roles" map in the resource (rsc).
+          return rsc.data.roles[request.auth.uid];
+        }
+
+        function isOneOfRoles(rsc, array) {
+          // Determine if the user is one of an array of roles
+          return isSignedIn() &amp;&amp; (getRole(rsc) in array);
+        }
+
+        function isValidNewStory() {
+          // Valid if story does not exist and the new story has the correct owner.
+          return resource == null &amp;&amp; isOneOfRoles(request.resource, ['owner']);
+        }
+
+        // Owners can read, write, and delete stories
+        allow write: if isValidNewStory() || isOneOfRoles(resource, ['owner']);
+
+         match /comments/{comment} {
+            // ...
+         }
+     }
+   }
+}
+</pre> <p><strong>Step 3</strong>: Write rules that allow a user of any role to read stories and comments. Using the functions defined in the previous step keeps the rules concise and readable:</p> 
+<pre>service cloud.firestore {
+   match /databases/{database}/documents {
+     match /stories/{story} {
+        function isSignedIn() {
+          return request.auth != null;
+        }
+
+        function getRole(rsc) {
+          return rsc.data.roles[request.auth.uid];
+        }
+
+        function isOneOfRoles(rsc, array) {
+          return isSignedIn() &amp;&amp; (getRole(rsc) in array);
+        }
+
+        function isValidNewStory() {
+          return resource == null
+            &amp;&amp; request.resource.data.roles[request.auth.uid] == 'owner';
+        }
+
+        allow write: if isValidNewStory() || isOneOfRoles(resource, ['owner']);
+
+        // Any role can read stories.
+        allow read: if isOneOfRoles(resource, ['owner', 'writer', 'commenter', 'reader']);
+
+        match /comments/{comment} {
+          // Any role can read comments.
+          allow read: if isOneOfRoles(get(/databases/$(database)/documents/stories/$(story)),
+                                      ['owner', 'writer', 'commenter', 'reader']);
+        }
+     }
+   }
+}
+</pre> <p><strong>Step 4</strong>: Allow story writers, commenters, and owners to post comments. Note that this rule also validates that the <code translate="no" dir="ltr">owner</code> of the comment matches the requesting user, which prevents users from writing over each other's comments:</p> 
+<pre>service cloud.firestore {
+   match /databases/{database}/documents {
+     match /stories/{story} {
+        function isSignedIn() {
+          return request.auth != null;
+        }
+
+        function getRole(rsc) {
+          return rsc.data.roles[request.auth.uid];
+        }
+
+        function isOneOfRoles(rsc, array) {
+          return isSignedIn() &amp;&amp; (getRole(rsc) in array);
+        }
+
+        function isValidNewStory() {
+          return resource == null
+            &amp;&amp; request.resource.data.roles[request.auth.uid] == 'owner';
+        }
+
+        allow write: if isValidNewStory() || isOneOfRoles(resource, ['owner'])
+        allow read: if isOneOfRoles(resource, ['owner', 'writer', 'commenter', 'reader']);
+
+        match /comments/{comment} {
+          allow read: if isOneOfRoles(get(/databases/$(database)/documents/stories/$(story)),
+                                      ['owner', 'writer', 'commenter', 'reader']);
+
+          // Owners, writers, and commenters can create comments. The
+          // user id in the comment document must match the requesting
+          // user's id.
+          //
+          // Note: we have to use get() here to retrieve the story
+          // document so that we can check the user's role.
+          allow create: if isOneOfRoles(get(/databases/$(database)/documents/stories/$(story)),
+                                        ['owner', 'writer', 'commenter'])
+                        &amp;&amp; request.resource.data.user == request.auth.uid;
+        }
+     }
+   }
+}
+
+</pre> <p><strong>Step 5</strong>: Give writers the ability to edit story content, but not to edit story roles or change any other properties of the document. This requires splitting the stories <code translate="no" dir="ltr">write</code> rule into separate rules for <code translate="no" dir="ltr">create</code>, <code translate="no" dir="ltr">update</code>, and <code translate="no" dir="ltr">delete</code> since writers can only update stories:</p> 
+<pre>service cloud.firestore {
+   match /databases/{database}/documents {
+     match /stories/{story} {
+        function isSignedIn() {
+          return request.auth != null;
+        }
+
+        function getRole(rsc) {
+          return rsc.data.roles[request.auth.uid];
+        }
+
+        function isOneOfRoles(rsc, array) {
+          return isSignedIn() &amp;&amp; (getRole(rsc) in array);
+        }
+
+        function isValidNewStory() {
+          return request.resource.data.roles[request.auth.uid] == 'owner';
+        }
+
+        function onlyContentChanged() {
+          // Ensure that title and roles are unchanged and that no new
+          // fields are added to the document.
+          return request.resource.data.title == resource.data.title
+            &amp;&amp; request.resource.data.roles == resource.data.roles
+            &amp;&amp; request.resource.data.keys() == resource.data.keys();
+        }
+
+        // Split writing into creation, deletion, and updating. Only an
+        // owner can create or delete a story but a writer can update
+        // story content.
+        allow create: if isValidNewStory();
+        allow delete: if isOneOfRoles(resource, ['owner']);
+        allow update: if isOneOfRoles(resource, ['owner'])
+                      || (isOneOfRoles(resource, ['writer']) &amp;&amp; onlyContentChanged());
+        allow read: if isOneOfRoles(resource, ['owner', 'writer', 'commenter', 'reader']);
+
+        match /comments/{comment} {
+          allow read: if isOneOfRoles(get(/databases/$(database)/documents/stories/$(story)),
+                                      ['owner', 'writer', 'commenter', 'reader']);
+          allow create: if isOneOfRoles(get(/databases/$(database)/documents/stories/$(story)),
+                                        ['owner', 'writer', 'commenter'])
+                        &amp;&amp; request.resource.data.user == request.auth.uid;
+        }
+     }
+   }
+}
+
+</pre> <h2 id="limitations">Limitations</h2> <p>The solution shown above demonstrates securing user data using Security Rules, but you should be aware of the following limitations:</p> <ul> <li>
+<strong>Granularity</strong>: In the example above, multiple roles (writer and owner) have write access to the same document but with different limitations. This can become hard to manage with more complex documents and it may be better to split single documents into multiple documents each owned by a single role.</li> <li>
+<strong>Large Groups</strong>: If you need to share with very large or complex groups, consider a system where roles are stored in their own collection rather than as a field on the target document.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/firestore/native/docs/solutions/role-based-access" class="_attribution-link">https://docs.cloud.google.com/firestore/native/docs/solutions/role-based-access</a>
+  </p>
+</div>

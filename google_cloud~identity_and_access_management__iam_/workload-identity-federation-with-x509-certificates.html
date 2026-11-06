@@ -1,0 +1,412 @@
+<h1>Configure Workload Identity Federation with X.509 certificates</h1> <p>This guide describes how to use Workload Identity Federation with X.509 certificates that are issued by your certificate authority (CA) to authenticate to Google Cloud and access Google Cloud resources.</p> <p>If your workloads possess an mTLS client certificate, you can authenticate to Google Cloud by registering one or more CAs with Workload Identity Federation as trust anchors. You can also register intermediate CAs.</p> <p>By using Workload Identity Federation, you can let these workloads obtain short-lived Google Cloud credentials through a mutual TLS (mTLS) connection. Workloads can use these short-lived credentials to access Google Cloud APIs.</p> <h2 id="concepts">Concepts</h2> <p>The X.509 certificate-based federation concepts include the following:</p> <ul> <li><p>A <em>trust anchor</em> is a CA certificate that is considered as the root of trust. Any client certificate chains should be chained up to one of the trust anchors.</p></li> <li><p>An <em>intermediate CA</em> is an optional CA certificate that helps build the client certificate chain.</p></li> <li>
+<p>A <em>trust store</em> contains the trust anchor certificates and intermediate CA certificates that are used to validate the client certificate chain. A CA issues trusted certificates for the client.</p> <p>You can upload the following types of client certificates to the trust store:</p> <ul> <li>Certificates issued by third-party CAs of your choice</li> <li>Certificates issued by your private CAs</li> <li>Signed certificates, as described in <a href="#create-self-signed-certificate">Create self-signed certificates</a>
+</li> </ul>
+</li> </ul> <h2 id="before-you-begin">Before you begin</h2> <p>To start configuring Workload Identity Federation, do the following:</p> <ol> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> We recommend that you <a href="best-practices-for-using-workload-identity-federation#dedicated-project"> use a dedicated project to manage workload identity pools and providers</a>. <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <p> Enable the IAM, Resource Manager, Service Account Credentials, and Security Token Service APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p> </ol> <h2 id="required-roles">Required roles</h2> <p> To get the permissions that you need to configure Workload Identity Federation, ask your administrator to grant you the following IAM roles on the project: </p> <ul> <li>
+<a href="roles-permissions/iam#iam.workloadIdentityPoolAdmin">Workload Identity Pool Admin </a> (<code translate="no" dir="ltr">roles/iam.workloadIdentityPoolAdmin</code>)</li> <li>
+<a href="roles-permissions/iam#iam.serviceAccountAdmin">Service Account Admin </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>)</li> </ul> <p> For more information about granting roles, see <a href="granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="creating-custom-roles">custom roles</a> or other <a href="roles-overview#predefined">predefined roles</a>. </p> <p>Alternatively, the IAM Owner (<code translate="no" dir="ltr">roles/owner</code>) basic role also includes permissions to configure identity federation. You should not grant basic roles in a production environment, but you can grant them in a development or test environment. </p> <h2 id="create-trust-store">Create a trust store</h2> <p>This section shows you how to create a trust store. At a high level, the steps are as follows:</p> <ul> <li><a href="#create-self-signed-certificate">Generate self-signed certificates</a></li> <li><a href="#formatting">Format the certificates</a></li> <li><a href="#truststore">Create the trust store</a></li> </ul> <h3 id="create-self-signed-certificate">Generate self-signed certificates</h3> <p>This section shows you how to generate keys and create signed certificates. If you have already created certificates, you can skip this section and continue with <a href="#formatting">Format the certificates</a>.</p> <p>This section uses <code translate="no" dir="ltr">openssl</code> commands to create root and intermediate certificates.</p> <p>To generate a root certificate and a signed intermediate certificate with valid <code translate="no" dir="ltr">keyUsage</code> and <code translate="no" dir="ltr">extendedKeyUsage</code> fields, do the following:</p> <ol> <li>
+<p>Create an <code translate="no" dir="ltr">openssl</code> configuration file to create your signing certificates. At minimum, the file is similar to the following, but you can set additional fields as needed.</p> 
+<pre>cat &gt; example.cnf &lt;&lt; EOF
+[req]
+distinguished_name = empty_distinguished_name
+[empty_distinguished_name]
+# Kept empty to allow setting via -subj command-line argument.
+[ca_exts]
+basicConstraints=critical,CA:TRUE
+keyUsage=keyCertSign
+extendedKeyUsage=clientAuth
+[leaf_exts]
+keyUsage=critical,Digital Signature, Key Encipherment
+basicConstraints=critical, CA:FALSE
+EOF
+</pre>
+</li> <li>
+<p>Create the root certificate.</p> 
+<pre>openssl req -x509 \
+    -new -sha256 -newkey rsa:2048 -nodes \
+    -days 3650 -subj '/CN=root' \
+    -config example.cnf \
+    -extensions ca_exts \
+    -keyout root.key -out root.cert
+</pre>
+</li> <li>
+<p>Create the signing request for the intermediate certificate.</p> 
+<pre>openssl req \
+    -new -sha256 -newkey rsa:2048 -nodes \
+    -subj '/CN=int' \
+    -config example.cnf \
+    -extensions ca_exts \
+    -keyout int.key -out int.req
+</pre>
+</li> <li>
+<p>Create the intermediate certificate.</p> 
+<pre>openssl x509 -req \
+    -CAkey root.key -CA root.cert \
+    -set_serial 1 \
+    -days 3650 \
+    -extfile example.cnf \
+    -extensions ca_exts \
+    -in int.req -out int.cert
+</pre>
+</li> <li>
+<p>Create the signing request for leaf certificate.</p> 
+<pre>openssl req -new -sha256 -newkey rsa:2048 -nodes \
+    -subj '/CN=example' \
+    -config example.cnf \
+    -extensions leaf_exts \
+    -keyout leaf.key -out leaf.req
+</pre>
+</li> <li>
+<p>Create the leaf certificate issued by the intermediate.</p> 
+<pre>openssl x509 -req \
+    -CAkey int.key -CA int.cert \
+    -set_serial 1 -days 1 \
+    -extfile example.cnf \
+    -extensions leaf_exts \
+    -in leaf.req -out leaf.cert
+</pre>
+</li> </ol> <h3 id="formatting">Format the certificates</h3> <p>To include new or existing certificates in a trust store, format the certificates into a one-line string, and store them in environment variables. The certificates must be PEM formatted. To format the certificates and store them in environment variables, do the following:</p> <ol> <li>
+<p>Save the root certificate as a one-line string.</p> 
+<pre>export ROOT_CERT=$(cat root.cert | sed 's/^[ ]*//g' | sed -z '$ s/\n$//' | tr '\n' $ | sed 's/\$/\\n/g')
+</pre>
+</li> <li>
+<p>Save an intermediate certificate as a one-line string.</p> 
+<pre>export INTERMEDIATE_CERT=$(cat int.cert | sed 's/^[ ]*//g' | sed -z '$ s/\n$//' | tr '\n' $ | sed 's/\$/\\n/g')
+</pre>
+</li> </ol> <h3 id="truststore">Create the trust store</h3> <p>In this section, you create a trust store using a YAML-formatted file that contains your trust anchors and intermediate CAs.</p> <p>This file contains the certificate content from the environment variables that you created in <a href="#formatting">Format the certificates</a>. To add additional trust anchors, add additional <code translate="no" dir="ltr">trustAnchors</code> entries under <code translate="no" dir="ltr">trustStore</code>. To add additional intermediate CA certificates, add additional <code translate="no" dir="ltr">intermediateCas</code> entries under <code translate="no" dir="ltr">trustStore</code>.</p> <p>To create the trust store file, run the following command:</p> 
+<pre>cat &lt;&lt; EOF &gt; trust_store.yaml
+trustStore:
+  trustAnchors:
+  - pemCertificate: "${ROOT_CERT}"
+  intermediateCas:
+  - pemCertificate: "${INTERMEDIATE_CERT}"
+EOF
+</pre> <h2 id="mappings-and-conditions">Define an attribute mapping and condition</h2> <p>The client X.509 certificate can contain multiple attributes. You must select which attribute you want to use as the subject identifier by mapping <code translate="no" dir="ltr">google.subject</code> in Google Cloud to the attribute from your certificate. For example, if the attribute in the certificate is the subject common name, then the mapping would be as follows: <code translate="no" dir="ltr">google.subject=assertion.subject.dn.cn</code></p> <p>Optionally, you can <a href="workload-identity-federation#mapping">map additional attributes</a>. You can then refer to these attributes when granting access to resources.</p> <p>Your attribute mappings can use the attributes within the client certificate, including the following:</p> <ul> <li>
+<code translate="no" dir="ltr">serialNumberHex</code>: the serial number</li> <li>
+<code translate="no" dir="ltr">subject.dn.cn</code>: the subject common name</li> <li>
+<code translate="no" dir="ltr">subject.dn.o</code>: the subject organization name</li> <li>
+<code translate="no" dir="ltr">subject.dn.ou</code>: the subject last organization unit</li> <li>
+<code translate="no" dir="ltr">issuer.dn.cn</code>: the issuer common name</li> <li>
+<code translate="no" dir="ltr">issuer.dn.o</code>: the issuer organization name</li> <li>
+<code translate="no" dir="ltr">issuer.dn.ou</code>: the issuer last organization unit</li> <li>
+<code translate="no" dir="ltr">san.dns</code>: the subject alternative name's first DNS name</li> <li>
+<code translate="no" dir="ltr">san.uri</code>: the subject alternative name's first URI</li> <li>
+<code translate="no" dir="ltr">sha256Fingerprint</code>: SHA256 leaf certificate hash (Base64)</li> </ul> <p>You must map one of these attributes to <code translate="no" dir="ltr">google.subject</code> to uniquely identify the subject. To protect against spoofing threats, choose an attribute with a unique value that can't be changed. By default, the <code translate="no" dir="ltr">google.subject</code> identifier is set to the client certificate subject common name, <code translate="no" dir="ltr">assertion.subject.dn.cn</code>.</p> <p>Optionally, you can define an <a href="workload-identity-federation#conditions">attribute condition</a>. Attribute conditions are CEL expressions that can check assertion attributes and target attributes. If the attribute condition evaluates to <code translate="no" dir="ltr">true</code> for a given credential, the credential is accepted. Otherwise, the credential is rejected.</p> <aside class="warning"><strong>Warning:</strong><span> Although you can grant access to all of the identities in a workload identity pool, doing so can incur risk, especially when the trust anchors contain a well-known public root CA. We recommend that you limit access using <a href="workload-identity-federation#conditions">attribute condition</a>.</span></aside> <p>You can use an attribute condition to restrict which subjects can use Workload Identity Federation to obtain short-lived Google Cloud tokens.</p> <p>For example, the following condition restricts access to client certificates containing SPIFFE ID <code translate="no" dir="ltr">spiffe://example/path</code>:</p> 
+<pre>
+assertion.san.uri=="spiffe://example/path"
+</pre> <h2 id="configure">Configure Workload Identity Federation</h2> <p>This section shows you how to configure a workload identity pool and a workload identity pool provider. You need only perform these steps once for each trust store. You can then use the same workload identity pool and provider for multiple workloads and across multiple Google Cloud projects.</p> <h3 id="create-pool-provider">Create the workload identity pool and provider</h3> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>New workload provider and pool</strong> page.</p> <p><a href="https://console.cloud.google.com/iam-admin/workload-identity-pools/create" class="button button-primary" target="console" track-name="consoleLink" track-type="tasks" track-metadata-position="body" track-metadata-end-goal="createWorkloadIdentityPool">Go to New workload provider and pool</a></p>
+</li> <li>
+<p>In the <strong>Create an identity pool</strong> section, enter the following:</p> <ul> <li>
+<strong>Name</strong>: Name for the pool. The name is also used as the pool ID. You can't change the pool ID later.</li> <li>
+<strong>Description</strong>: Text that describes the purpose of the pool.</li> </ul>
+</li> <li><p>Click <strong>Continue</strong>.</p></li> <li>
+<p>In the <strong>Add a provider to pool</strong> section, do the following:</p> <ol> <li>In <strong>Select a provider</strong>, select <strong>X509</strong>.</li> <li>In <strong>Provider name</strong>, enter a name for the provider. The name is also used as the provider ID. You can't change the provider ID after the provider is created.</li> <li>In <strong>Trust anchors</strong>, enter your trusted CA certificates in <a href="#formatting">PEM format</a>. These are used to validate the client certificate chain.</li> <li>Optional: In <strong>Intermediate certificates</strong>, enter any intermediate CA certificates in PEM format to help build the full trust chain.</li> <li>Click <strong>Continue</strong>.</li> </ol>
+</li> <li><p>In the <strong>Configure provider attributes</strong> section, add the <a href="#mappings-and-conditions">attribute mappings and conditions</a> that you've identified previously.</p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>To create a new workload identity pool, execute the following command:</p> 
+<pre data-language="bash">
+gcloud iam workload-identity-pools create POOL_ID \
+    --location="global" \
+    --description="DESCRIPTION" \
+    --display-name="DISPLAY_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISPLAY_NAME</var></code>: The name of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DESCRIPTION</var></code>: A description of the pool that you choose. This description appears when you grant access to pool identities.</li> </ul>
+</li> <li>
+<p>To add an X.509 workload identity pool provider, run the following command:</p> 
+<pre data-language="bash">
+gcloud iam workload-identity-pools providers create-x509 PROVIDER_ID \
+    --location=global \
+    --workload-identity-pool="POOL_ID" \
+    --trust-store-config-path="TRUST_STORE_CONFIG" \
+    --attribute-mapping="MAPPINGS" \
+    --attribute-condition="CONDITIONS"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROVIDER_ID</var></code>: A unique workload identity pool provider ID of your choice.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The workload identity pool ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_STORE_CONFIG</var></code>: The trust store YAML file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPINGS</var></code>: A comma-separated list of <a href="#mappings-and-conditions">attribute mappings</a> that you created earlier in this document. For example, <code translate="no" dir="ltr">google.subject=assertion.subject.dn.cn</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONDITIONS</var></code>: Optional. An <a href="#mappings-and-conditions">attribute condition</a> that you created earlier in this document. Remove the parameter if you don't have an attribute condition.</li> </ul>
+</li> </ol></section> </div> <h2 id="caa">Configure Context-Aware Access Policy Enforcement for Workload Identity Federation</h2> <p>You can strengthen resource security against token replay attacks by <a href="https://docs.cloud.google.com/chrome-enterprise-premium/docs/configure_cba_for_workloads">enabling Context-Aware Access</a>, which enforces mTLS validation for access requests. In this process, an mTLS binding incorporates policies based on the transport context and uses the state of the client's certificate within the TLS session to make authorization decisions. For X.509 workload identity federation, an mTLS binding ensures that the entire authentication flow is securely tied to a trusted workload. This mitigates the risk of credential theft, because the authentication is bound to a specific, trusted endpoint.</p> <h2 id="authenticate">Authenticate a workload</h2> <p>You must perform these steps once for each workload.</p> <h3 id="access">Allow your external workload to access Google Cloud resources</h3> <p>To provide your workload with access to Google Cloud resources, we recommend that you grant direct resource access to the principal. In this case, the principal is the federated user. Some Google Cloud products have <a href="federated-identity-supported-services">Google Cloud API limitations</a>. If your workload calls an API endpoint that has a limitation, you can instead use service account impersonation. In this case, the principal is the Google Cloud service account, which acts as the identity. You grant access to the service account on the resource.</p> <div> <section><p class="_code-tab"><strong>Direct resource access</strong></p>
+<p>You can grant access to a federated identity directly on resources by using the Google Cloud console or the gcloud CLI.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To use the Google Cloud console to grant IAM roles directly on a resource, you must go to the resource's page, and then grant the role. The following example shows you how to go to the Cloud Storage page and grant the role Storage Object Viewer (<code translate="no" dir="ltr">roles/storage.objectViewer</code>) to a federated identity directly on a Cloud Storage bucket.</p> <ol> <li>In the Google Cloud console, go to the Cloud Storage <b>Buckets</b> page.<br> <p><a class="button button-primary" href="https://console.cloud.google.com/storage/browser" target="console">Go to Buckets</a></p>
+</li> <li><p>In the list of buckets, click the name of the bucket for which you want to grant the role.</p></li> <li><p>Select the <strong>Permissions</strong> tab near the top of the page.</p></li> <li>
+<p>Click the <i class="material-icons" aria-hidden="true" translate="no">add_box</i> <strong>Grant access</strong> button.</p> <p>The <strong>Add principals</strong> dialog appears.</p>
+</li> <li>
+<p>In the <strong>New principals</strong> field, enter one or more identities that need access to your bucket.</p> <div> <section><p class="_code-tab"><strong>By subject</strong></p>
+
+<pre data-language="">principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the individual subject mapped from your IdP—for example, <code translate="no" dir="ltr">administrator@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By group</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the group mapped from your IdP—for example: <code translate="no" dir="ltr">administrator-group@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By attribute</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: one of the attributes that was mapped from your IdP</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the attribute</li> </ul></section> </div>
+</li> <li><p>Select a role (or roles) from the <strong>Select a role</strong> drop-down menu. The roles you select appear in the pane with a short description of the permissions they grant.</p></li> <li><p>Click <strong>Save</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To use the gcloud CLI to grant IAM roles on a resource in a project, do the following:</p> <ol> <li>
+<p>Obtain the project number of the project in which the resource is defined.</p> 
+<pre data-language="bash">
+gcloud projects describe $(gcloud config get-value core/project) --format=value\(projectNumber\)
+</pre>
+</li> <li>
+<p>Grant access to the resource.</p> 
+<p> To use the gcloud CLI to grant the role Storage Object Viewer (<code translate="no" dir="ltr">roles/storage.objectViewer</code>) to external identities that meet certain criteria, run the following command. </p>  <section> <p class="_code-tab"><strong>By subject</strong></p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding BUCKET_ID \
+    --role=roles/storage.objectViewer \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT"</pre> </section> <section> <p class="_code-tab"><strong>By group</strong></p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding BUCKET_ID \
+    --role=roles/storage.objectViewer \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP"</pre> </section> <section> <p class="_code-tab"><strong>By attribute</strong></p> 
+<pre data-language="">gcloud storage buckets add-iam-policy-binding BUCKET_ID \
+    --role=roles/storage.objectViewer \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE"</pre> </section>  <p>Replace the following:</p> <ul>
+<li>
+<code translate="no" dir="ltr"><var translate="no">BUCKET_ID</var></code>: the bucket on which to grant access</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a>. of the project that contains the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the pool ID of the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.subject</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.groups</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: the name of a custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> </ul> <p>You can grant roles on any Google Cloud resource that supports IAM allow policies.</p> <aside class="note"><strong>Note:</strong><span> You must use the project number, not the project ID, in the member identifier.</span></aside>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>Service account impersonation</strong></p>
+<ol> <li>
+<p>To create a service account for the external workload, do the following:</p> <ol> <li>
+
+<p> Enable the IAM, Security Token Service, and Service Account Credentials APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p> </li> <li><p><a href="creating-managing-service-accounts#creating">Create a service account</a> that represents the workload. We recommend that you <a href="best-practices-for-using-workload-identity-federation#use-dedicated-service-accounts">use a dedicated service account for each workload</a>. The service account doesn't need to be in the same project as the workload identity pool, but you must refer to the project that contains the service account.</p></li> <li><p><a href="granting-changing-revoking-access">Grant the service account access</a> to resources that you want external identities to access.</p></li> </ol>
+</li> <li><p>To let the federated identity impersonate the service account, do the following:</p></li> </ol> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>To use the Google Cloud console to grant IAM roles to a federated identity with service account, do the following:</p>  <div> <section><p class="_code-tab"><strong>Service Account in the same project</strong></p>
+<ol> <li>
+<p>To grant access using service account impersonation for a service account in the same project, do the following:</p> <ol> <li>
+<p>Go to the <strong>Workload Identity Pools</strong> page.</p> <p><a href="https://console.cloud.google.com/iam-admin/workload-identity-pools" class="button button-primary" target="console" track-name="consoleLink" track-type="tasks" track-metadata-position="body" track-metadata-end-goal="listWorkloadIdentityPools">Go to Workload Identity Pools</a></p>
+</li> <li><p>Select <strong>Grant access</strong>.</p></li> <li><p>In the <strong>Grant access to service account</strong> dialog, select <strong>Grant access using Service Account impersonation</strong>.</p></li> <li><p>In the <strong>Service accounts</strong> list, select the service account for the external identities to impersonate, and do the following:</p></li> <li>
+<p>To choose which identities in the pool can impersonate the service account, perform one of the following actions:</p> <ul> <li><p>To allow only specific identities of the workload identity pool to impersonate the service account, select <strong>Only identities matching the filter</strong>.</p></li> <li><p>In the <strong>Attribute name</strong> list, select the attribute that you want to filter on.</p></li> <li><p>In the <strong>Attribute value</strong> field, enter the expected value of the attribute; for example, if you use an attribute mapping <code translate="no" dir="ltr">google.subject=assertion.sub</code>, set <strong>Attribute</strong> name to <code translate="no" dir="ltr">subject</code> and <strong>Attribute value</strong> to the value of the <code translate="no" dir="ltr">sub</code> claim in tokens that are issued by your external identity provider.</p></li> </ul>
+</li> <li><p>To save the configuration, click <strong>Save</strong> and then <strong>Dismiss</strong>.</p></li> </ol>
+</li> </ol></section> <section><p class="_code-tab"><strong>Service account in a different project</strong></p>
+<aside class="note"><strong>Note:</strong><span> Service accounts from different projects won't appear in the "CONNECTED SERVICE ACCOUNTS" section of your <strong>Workload Identity Pool</strong>.</span></aside><ol> <li>
+<p>To grant access using service account impersonation for a service account in a different project, do the following:</p> <ol> <li>
+<p>Go to the <strong>Service Accounts</strong> page.</p> <p><a href="https://console.cloud.google.com/iam-admin/serviceaccounts" class="button button-primary" target="console" track-name="consoleLink" track-type="tasks" track-metadata-position="body" track-metadata-end-goal="listServiceAccounts">Go to Service Accounts</a></p>
+</li> <li><p>Select the service account that you want to impersonate.</p></li> <li><p>Click <strong>Manage access</strong>.</p></li> <li><p>Click <strong>Add principal</strong>.</p></li> <li>
+<p>In the <strong>New principal</strong> field, enter one of the following <a href="workload-identity-federation#principal-types">principal identifiers</a> for the identities in your pool that will impersonate the service account.</p> <div> <section><p class="_code-tab"><strong>By subject</strong></p>
+
+<pre data-language="">principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the individual subject mapped from your IdP—for example, <code translate="no" dir="ltr">administrator@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By group</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the group mapped from your IdP—for example: <code translate="no" dir="ltr">administrator-group@example.com</code>
+</li> </ul></section> <section><p class="_code-tab"><strong>By attribute</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: one of the attributes that was mapped from your IdP</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the attribute</li> </ul></section> <section><p class="_code-tab"><strong>By pool</strong></p>
+
+<pre data-language="">principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/*
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the project number</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_POOL_ID</var></code>: the workload pool ID</li> </ul></section> </div>
+</li> <li><p>In <strong>Select a role</strong>, select the Workload Identity User role (<code translate="no" dir="ltr">roles/iam.workloadIdentityUser</code>).</p></li> <li><p>To save the configuration, click <strong>Save</strong>.</p></li> </ol>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> To grant the Workload Identity User role (<code translate="no" dir="ltr">roles/iam.workloadIdentityUser</code>) to a federated principal or principal set, run the following command. To learn more about Workload Identity Federation principal identifiers, see <a href="workload-identity-federation#principal-types">Principal types</a>. </p>  <section> <p class="_code-tab"><strong>By subject</strong></p> 
+<pre data-language="">gcloud iam service-accounts add-iam-policy-binding SERVICE_ACCOUNT_EMAIL \
+    --role=roles/iam.workloadIdentityUser \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/SUBJECT"</pre> </section> <section> <p class="_code-tab"><strong>By group</strong></p> 
+<pre data-language="">gcloud iam service-accounts add-iam-policy-binding SERVICE_ACCOUNT_EMAIL \
+    --role=roles/iam.workloadIdentityUser \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/group/GROUP"</pre> </section> <section> <p class="_code-tab"><strong>By attribute</strong></p> 
+<pre data-language="">gcloud iam service-accounts add-iam-policy-binding SERVICE_ACCOUNT_EMAIL \
+    --role=roles/iam.workloadIdentityUser \
+    --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.ATTRIBUTE_NAME/ATTRIBUTE_VALUE"</pre> </section>  <p>Replace the following:</p> <ul>
+<li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>: the email address of the service account</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a>. of the project that contains the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the pool ID of the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBJECT</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.subject</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GROUP</var></code>: the expected value for the attribute that <a href="#mappings-and-conditions">you've mapped</a> to <code translate="no" dir="ltr">google.groups</code>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_NAME</var></code>: the name of a custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTRIBUTE_VALUE</var></code>: the value of the custom attribute in <a href="#mappings-and-conditions">your attribute mapping</a>
+</li> </ul> <aside class="note"><strong>Note:</strong><span> You must use the project number, not the project ID, in the member identifier.</span></aside></section> </div></section> </div> <h3 id="create-cred-config">Download or create a credential configuration</h3> <p>The <a href="https://docs.cloud.google.com/apis/docs/cloud-client-libraries">Cloud Client Libraries</a> and the gcloud CLI can automatically obtain external credentials and use these credentials to impersonate a service account. To let libraries and tools complete this process, you must provide a credential configuration file.</p> <p>Additionally, for X.509 certificate federation, a certificate configuration file is required.</p> <p>The configuration files include the following:</p> <ul> <li>
+<strong>Credential Configuration</strong>: A JSON file that defines how the client library interacts with the Security Token Service (STS).</li> <li>
+<strong>Certificate Configuration</strong>: A JSON file that specifies the local paths for the client certificate and private key on your workload.</li> </ul> <aside class="note"><strong>Note:</strong><span> Unlike a <a href="creating-managing-service-account-keys#creating_service_account_keys">service account key</a>, a credential configuration file doesn't contain a private key and doesn't need to be kept confidential. For the credential configuration file details, see <a href="https://google.aip.dev/auth/4117">AIP-4117: External Account Credentials (Workload Identity Federation)</a>.</span></aside> <p>Create credential and certificate configuration files that let the library obtain access tokens using X.509 certificates.</p> <div> <section><p class="_code-tab"><strong>Direct resource access</strong></p>
+<p>To create credential and certificate configuration files for direct resource access, do the following:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Workload Identity Pools</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/iam-admin/workload-identity-pools/">Go to Workload Identity Pools</a></p>
+</li> <li><p>Click the name of the pool that contains the provider you want to use.</p></li> <li><p>Click <strong><span class="material-icons" aria-hidden="true" translate="no">add_box</span> Grant access</strong>.</p></li> <li><p>In the <strong>Grant access to service account</strong> panel, select <strong>Grant access using federated identities (Recommended)</strong>.</p></li> <li><p>Click <strong>Download config</strong>.</p></li> <li>
+<p>In the <strong>Configure your application</strong> section, select the provider that contains the external identities and provide the following settings:</p> <ul> <li>
+<strong>Client certificate path</strong>: The local path to your client certificate file.</li> <li>
+<strong>Client private key path</strong>: The local path to your client private key file.</li> <li>
+<strong>Trust chain path</strong>: (Optional) The path of the trust chain file that contains the client certificate and any intermediate certificates that are required for certificate lookup but are not configured in the X.509 provider.</li> </ul>
+</li> <li><p>To download a ZIP archive containing the <strong>Credential Configuration</strong> and <strong>Certificate Configuration</strong> files, click <strong>Download config</strong>.</p></li> <li><p>Click <strong>Dismiss</strong>.</p></li> </ol> <p>If you want to use the Security Token Service regional endpoints—for example, <code translate="no" dir="ltr">https://sts.us-central1.rep.mtls.googleapis.com</code>, see <a href="best-practices-for-using-workload-identity-federation#sts-regional-endpoints">Using regional Security Token Service endpoints for better reliability</a>.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>To create credential and certificate configuration files for direct resource access by using <a href="https://docs.cloud.google.com/sdk/gcloud/reference/iam/workload-identity-pools/create-cred-config"><code translate="no" dir="ltr">gcloud iam workload-identity-pools create-cred-config</code></a>, run the following command:</p> 
+<pre data-language="bash">
+gcloud iam workload-identity-pools create-cred-config \
+  projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID \
+    --credential-cert-path=CLIENT_CERT_PATH \
+    --credential-cert-private-key-path=CLIENT_PRIVATE_KEY_PATH \
+    --credential-cert-trust-chain-path=TRUST_CHAIN_PATH \
+    --sts-location=REGION \
+    --output-file=FILEPATH.json
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: The project number of the project that contains the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The ID of the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROVIDER_ID</var></code>: The ID of the workload identity pool provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLIENT_CERT_PATH</var></code>: The path of the client certificate file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLIENT_PRIVATE_KEY_PATH</var></code>: The path of the client certificate private key file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_CHAIN_PATH</var></code>: Optional. The path of the trust chain file that contains the client certificate and any intermediate certificates that are required for certificate lookup but are not configured in the X.509 provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: Optional. Specify the region of the <a href="best-practices-for-using-workload-identity-federation#sts-regional-endpoints">regional Security Token Service endpoints</a>, if they are available.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code>: The file to save the configuration to.</li> </ul> <p>Running this command will also create a certificate configuration file and store it at the default gcloud CLI location:</p> <ul> <li><p>Linux and macOS: <code translate="no" dir="ltr">~/.config/gcloud/certificate_config.json</code></p></li> <li><p>Windows: <code translate="no" dir="ltr">%APPDATA%\gcloud\certificate_config.json</code></p></li> </ul>
+</li> </ol></section> </div></section> <section><p class="_code-tab"><strong>Service account impersonation</strong></p>
+<p>To create credential and certificate configuration files with service account impersonation, do the following:</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<ol> <li>
+<p>In the Google Cloud console, go to the <strong>Workload Identity Pools</strong> page.</p> <p><a class="button button-primary" href="https://console.cloud.google.com/iam-admin/workload-identity-pools/">Go to Workload Identity Pools</a></p>
+</li> <li><p>Click the name of the pool that contains the provider you want to use.</p></li> <li><p>Click <strong><span class="material-icons" aria-hidden="true" translate="no">add</span> Grant access</strong>.</p></li> <li><p>Select <strong>Grant access using service account impersonation</strong>.</p></li> <li><p>Select the service account that you want to impersonate.</p></li> <li><p>Click <strong>Download config</strong>.</p></li> <li>
+<p>In the <strong>Configure your application</strong> dialog, provide the following settings:</p> <ul> <li>
+<strong>Client certificate path</strong>: The local path to your client certificate file.</li> <li>
+<strong>Client private key path</strong>: The local path to your client private key file.</li> <li>
+<strong>Trust chain path</strong>: (Optional) The path of the trust chain file that contains the client certificate and any intermediate certificates that are required for certificate lookup but are not configured in the X.509 provider.</li> </ul>
+</li> <li><p>To download a ZIP archive containing the <strong>Credential Configuration</strong> and <strong>Certificate Configuration</strong> files, click <strong>Download config</strong>.</p></li> <li><p>Click <strong>Dismiss</strong>.</p></li> </ol> <p>If you want to use the Security Token Service regional endpoints—for example, <code translate="no" dir="ltr">https://sts.us-central1.rep.mtls.googleapis.com</code>, see <a href="best-practices-for-using-workload-identity-federation#sts-regional-endpoints">Using regional Security Token Service endpoints for better reliability</a>.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<ol> <li>
+<p>To create credential and certificate configuration files with service account impersonation by using <a href="https://docs.cloud.google.com/sdk/gcloud/reference/iam/workload-identity-pools/create-cred-config"><code translate="no" dir="ltr">gcloud iam workload-identity-pools create-cred-config</code></a>, run the following command:</p> 
+<pre data-language="bash">
+gcloud iam workload-identity-pools create-cred-config \
+  projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID \
+    --service-account=SERVICE_ACCOUNT_EMAIL \
+    --service-account-token-lifetime-seconds=SERVICE_ACCOUNT_TOKEN_LIFETIME \
+    --credential-cert-path=CLIENT_CERT_PATH \
+    --credential-cert-private-key-path=CLIENT_PRIVATE_KEY_PATH \
+    --credential-cert-trust-chain-path=TRUST_CHAIN_PATH \
+    --sts-location=REGION \
+    --output-file=FILEPATH.json
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: The project number of the project that contains the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The ID of the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROVIDER_ID</var></code>: The ID of the workload identity pool provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>: If you use service account impersonation, replace <var translate="no">SERVICE_ACCOUNT_EMAIL</var> with the email address of the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_TOKEN_LIFETIME</var></code>: The lifetime of the service account access token, in seconds, if you use service account impersonation. If omitted, this lifetime defaults to one hour. Omit this flag if you don't use service account impersonation. To specify a lifetime longer than one hour, you must configure the <code translate="no" dir="ltr">constraints/iam.allowServiceAccountCredentialLifetimeExtension</code> <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/creating-managing-policies">organizational policy constraint</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLIENT_CERT_PATH</var></code>: The path of the client certificate file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLIENT_PRIVATE_KEY_PATH</var></code>: The path of the client certificate private key file.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_CHAIN_PATH</var></code>: Optional. The path of the trust chain file that contains the client certificate and any intermediate certificates that are required for certificate lookup but are not configured in the X.509 provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: Optional. Specify the region of the <a href="best-practices-for-using-workload-identity-federation#sts-regional-endpoints">regional Security Token Service endpoints</a>, if they are available.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code>: The file to save configuration to.</li> </ul> <p>Running this command will also create a certificate configuration file and store it at the default Google Cloud CLI location:</p> <ul> <li><p>Linux and macOS: <code translate="no" dir="ltr">~/.config/gcloud/certificate_config.json</code></p></li> <li><p>Windows: <code translate="no" dir="ltr">%APPDATA%\gcloud\certificate_config.json</code></p></li> </ul>
+</li> </ol></section> </div></section> </div> <h3 id="client-library-usage">Use the credential configuration to access Google Cloud</h3> <p>To let tools and client libraries use your credential configuration, do the following. To learn more about Application Default Credentials, see <a href="https://docs.cloud.google.com/docs/authentication/application-default-credentials">How Application Default Credentials works</a>.</p> <ol> <li><p>If you downloaded a ZIP archive from the Google Cloud console, extract the archive on your external workload.</p></li> <li>
+<p>Update the <strong>Certificate Configuration</strong> file with the actual local file paths for your client certificate and private key for the following fields:</p> <ul> <li>
+<code translate="no" dir="ltr">cert_path</code>: Path to your client certificate.</li> <li>
+<code translate="no" dir="ltr">key_path</code>: Path to your private key.</li> </ul>
+</li> <li>
+<p>Initialize an environment variable <code translate="no" dir="ltr">GOOGLE_APPLICATION_CREDENTIALS</code> and set it to the credential configuration file:</p> <div>  <h4 class="showalways" id="bash">Bash</h4> <div> 
+<pre>
+  export GOOGLE_APPLICATION_CREDENTIALS=`pwd`/FILEPATH.json
+  </pre> Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the relative path to the credential configuration file. </div>  </div> <div>  <h4 class="showalways" id="powershell">PowerShell</h4> <div> 
+<pre>
+  $env:GOOGLE_APPLICATION_CREDENTIALS = Resolve-Path 'FILEPATH.json'
+  </pre> Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the relative path to the credential configuration file. </div>  </div>
+</li> <li>
+<p>Ensure that the client library can find the certificate configuration file. The certificate configuration file is located at one of the following paths:</p> <ul> <li><p>The path where you extract the ZIP archive. (if you downloaded the configuration from the Google Cloud console).</p></li> <li>
+<p>The default gcloud CLI path:</p> <ul> <li><p>Linux and macOS: <code translate="no" dir="ltr">~/.config/gcloud/certificate_config.json</code></p></li> <li><p>Windows: <code translate="no" dir="ltr">%APPDATA%\gcloud\certificate_config.json</code></p></li> </ul>
+</li> <li><p>The path set in the <code translate="no" dir="ltr">GOOGLE_API_CERTIFICATE_CONFIG</code> environment variable.</p></li> </ul>
+</li> <li>
+<p>Use the following Cloud Client Libraries that support Workload Identity Federation with X.509 certificates.</p> <div> <section><p class="_code-tab"><strong>Go</strong></p>
+<p>Client libraries for Go support X.509 Workload Identity Federation if they use version 0.16.0 or later of the <a href="https://pkg.go.dev/cloud.google.com/go/auth"><code translate="no" dir="ltr">cloud.google.com/go/auth</code> module</a> and version 0.189.0 of the <a href="https://pkg.go.dev/google.golang.org/api"><code translate="no" dir="ltr">google.golang.org/api</code> module</a>.</p> <p>To check which version of these modules your client library uses, run the following command while in the directory containing the go.mod file for your module:</p> 
+<pre data-language="go">  go list -m cloud.google.com/go/auth
+  go list -m cloud.google.com/api
+</pre></section> <section><p class="_code-tab"><strong>Python</strong></p>
+<p>Client libraries for Python support X.509 Workload Identity Federation if they use version 2.39.0 or later of the <a href="https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth"><code translate="no" dir="ltr">google-auth</code> package</a></p> <p>To check which version of this package your client library uses, run the following command in the environment where the package is installed:</p> 
+<pre data-language="python">  pip show google-auth
+</pre> <p>To specify a project ID for the authentication client, you can set the <code translate="no" dir="ltr">GOOGLE_CLOUD_PROJECT</code> environment variable, or you can allow the client to find the project ID automatically. To find the project ID automatically, the service account in the configuration file must have the Browser role (<code translate="no" dir="ltr">roles/browser</code>), or a role with equivalent permissions, on your project. For details, see the <a href="https://github.com/googleapis/google-cloud-python/blob/main/packages/google-auth/docs/user-guide.rst#using-external-identities">user guide for the <code translate="no" dir="ltr">google-auth</code> package</a>.</p></section> </div>
+</li> <li><p>If your workload runs on macOS, set <code translate="no" dir="ltr">CLOUDSDK_PYTHON_SITEPACKAGES=1</code> to configure gcloud CLI to use Python libraries outside of its installation directory.</p></li> <li>
+<p>To authenticate using the gcloud CLI, run the following command:</p> 
+<pre>
+gcloud auth login --cred-file=FILEPATH.json
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the path to the credential configuration file.</p> <p>Support for X.509 Workload Identity Federation in gcloud CLI is available in <a href="https://docs.cloud.google.com/sdk/docs/components#updating_components">version 538.0 and later versions of the gcloud CLI</a>.</p>
+</li> </ol> <h3 id="cred-config-access">Obtain an access token using plain request to access Google Cloud</h3>  <h4 id="create-trust-chain">Create the trust chain</h4> <p>This step shows you how to create the trust chain. You pass the trust chain in the <code translate="no" dir="ltr">subject_token</code> field when calling Security Token Service in plain request.</p> <p>Format the certificates that need to be included in the chain as a JSON-formatted list as specified in <a href="https://www.rfc-editor.org/rfc/rfc7515#section-4.1.6">RFC 7515</a>. The leaf certificate used for the mTLS handshake must be specified as the first item. Each certificate in the bundle should be a base64-encoded string.</p> <ol> <li>
+<p>Save the leaf certificate and the intermediate certificate to base64-encoded strings.</p> 
+<pre>export LEAF_CERT=$(openssl x509 -in leaf.cert -out leaf.der -outform DER &amp;&amp; cat leaf.der | openssl enc -base64 -A)
+</pre>
+
+<pre>export INTERMEDIATE_CERT=$(openssl x509 -in int.cert -out int.der -outform DER &amp;&amp; cat int.der | openssl enc -base64 -A)
+</pre>
+</li> <li>
+<p>Create a JSON-formatted list of strings that can be passed as <code translate="no" dir="ltr">subject_token</code> in the call to Security Token Service, later in this guide.</p> 
+<pre>export TRUST_CHAIN="[\\\"${LEAF_CERT}\\\", \\\"${INTERMEDIATE_CERT}\\\"]"
+</pre>
+</li> </ol> <h4 id="obtain_access_token">Obtain access token</h4> <p>To obtain the access token, do the following:</p> <ol> <li>
+<p>Perform token exchange with mTLS and the client certificate:</p> 
+<pre>
+curl --key CLIENT_CERT_KEY \
+--cert CLIENT_CERT \
+--request POST 'https://sts.mtls.googleapis.com/v1/token' \
+--header "Content-Type: application/json" \
+--data-raw '{
+    "subject_token_type": "urn:ietf:params:oauth:token-type:mtls",
+    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+    "audience": "WORKLOAD_IDENTITY_POOL_URI",
+    "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    "scope": "https://www.googleapis.com/auth/cloud-platform",
+    "subject_token": "TRUST_CHAIN"
+}'
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLIENT_CERT_KEY</var></code>: The client certificate private key</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLIENT_CERT</var></code>: The client certificate</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">WORKLOAD_IDENTITY_POOL_URI</var></code>: The URL of the workload identity pool provider in the following format:</p> <p><code translate="no" dir="ltr">//iam.googleapis.com/projects/<var translate="no">PROJECT_NUMBER</var>/locations/global/workloadIdentityPools/<var translate="no">POOL_ID</var>/providers/<var translate="no">PROVIDER_ID</var></code></p>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">TRUST_CHAIN</var></code>: The trust chain needed to verify the leaf certificate, must at least include <code translate="no" dir="ltr"><var translate="no">CLIENT_CERT</var></code> as the first item. If you followed instructions in <a href="#formatting">Format the certificates</a> section, replace <code translate="no" dir="ltr"><var translate="no">TRUST_CHAIN</var></code> with <code translate="no" dir="ltr">'"${TRUST_CHAIN}"'</code></p></li> </ul> <p>To use regional Security Token Service endpoints, replace <code translate="no" dir="ltr">https://sts.mtls.googleapis.com/v1/token</code> with the following:</p> 
+<pre> https://sts.REGION.rep.mtls.googleapis.com/v1/token </pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> with a <a href="https://cloud.google.com/about/locations">Google Cloud location</a>, for example, <code translate="no" dir="ltr">us-central1</code> or <code translate="no" dir="ltr">europe-west4</code>.</p>
+</li> <li>
+<p>Optional: If you use service account impersonation, call the <a href="https://docs.cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken"><code translate="no" dir="ltr">generateAccessToken</code> method</a> of the <a href="https://docs.cloud.google.com/iam/docs/reference/credentials/rest">IAM Service Account Credentials API</a> with the token from Security Token Service to get an access token.</p> 
+<pre>
+curl -X POST 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/SERVICE_ACCOUNT_EMAIL:generateAccessToken' \
+    -H "Content-Type: application/json; charset=utf-8" \
+    -H "Authorization: Bearer STS_TOKEN" \
+    -d '{"scope": ["https://www.googleapis.com/auth/cloud-platform"]}'
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>: the email address of the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">STS_TOKEN</var></code>: The access token generated by the Security Token Service in the previous step.</li> </ul>
+</li> <li>
+<p>Use the bearer access token to access Google Cloud resources—for example:</p> 
+<pre>curl -X GET 'https://storage.googleapis.com/my_object' -H "Authorization: Bearer $ACCESS_TOKEN"
+</pre>
+</li> </ol> <h2 id="limits">Limits</h2> <p>The following table lists limits.</p> <table> <tr> <th width="25%">Item</th> <th width="20%">Limit</th> <th width="55%">Notes</th> </tr> <tr> <td>Number of trust anchors</td> <td>3</td> <td>Each certificate must not exceed 32 KB.</td> </tr> <tr> <td>Number of intermediate certificates</td> <td>10</td> <td>Each certificate shouldn't exceed 32 KB.</td> </tr> <tr> <td>Number of name constraints allowed during validation of root and intermediate certificates</td> <td>10</td> <td></td> </tr> <tr> <td>Intermediate certificates that share the same Subject and Subject Public Key information</td> <td>5</td> <td>This limit is for each trust store.</td> </tr> <tr> <td>Certificate chain depth</td> <td>5</td> <td>The maximum depth for a certificate chain, including the root and client certificates.</td> </tr> <tr> <td>Number of times intermediate certificates can be evaluated when attempting to build the chain of trust</td> <td>100</td> <td></td> </tr> <tr> <td>Keys of certificates uploaded and passed from the client</td> <td>
+<p>RSA keys can be from 2048 to 4096 bits.</p> <p>ECDSA certificates must use either P-256 or P-384 curves.</p>
+</td> <td>RSA-2048 and P-256 are recommended for normal use cases, use others for best security practice.</td> </tr> <tr> <td>Maximum leaf certificate lifetime</td> <td>390 days.</td> <td>Certificates with a validity period that's more than 390 days will stop working after they've been valid for more than 390 days.</td> </tr> </table> <h2 id="whats-next">What's next</h2> <ul> <li>Read more about <a href="workload-identity-federation">Workload Identity Federation</a>.</li> <li>Learn about <a href="best-practices-for-using-workload-identity-federation">best practices for using Workload Identity Federation</a>.</li> <li>See how you can <a href="manage-workload-identity-pools-providers">manage workload identity pools and providers</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-x509-certificates" class="_attribution-link">https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-x509-certificates</a>
+  </p>
+</div>

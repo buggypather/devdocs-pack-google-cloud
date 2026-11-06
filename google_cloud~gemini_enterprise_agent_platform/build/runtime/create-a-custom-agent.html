@@ -1,0 +1,488 @@
+<h1>Create a custom agent</h1> When you develop a custom agent using Agent Runtime, you define the agent's logic and capabilities as a Python class. This class-based approach gives you the flexibility to integrate with any Python-compatible library or service, while letting Agent Platform handle the deployment, scaling, and management of your agent instances. <p>The following steps show you how to create a custom template for instantiating agents that are deployable on Agent Platform:</p> <ol> <li><a href="#basic-example">Basic example</a></li> <li>Optional: <a href="#streaming-responses">Stream responses</a>
+</li> <li>Optional: <a href="#custom-methods">Register custom methods</a>
+</li> <li>Optional: <a href="#type-annotations">Provide type annotations</a>
+</li> <li>Optional: <a href="#tracing">Send traces to Cloud Trace</a>
+</li> <li>Optional: <a href="#environment-variables">Work with environment variables</a>
+</li> <li>Optional: <a href="#secret-manager">Integrate with Secret Manager</a>
+</li> <li>Optional: <a href="#handling-credentials">Handle credentials</a>
+</li> <li>Optional: <a href="#handling-errors">Handle errors</a>
+</li> </ol> <h2 id="basic-example">Basic example</h2> <p>To give a basic example, the following Python class is a template for instantiating agents that are deployable on Agent Platform (you can give the <code translate="no" dir="ltr">CLASS_NAME</code> variable a value such as <code translate="no" dir="ltr">MyAgent</code>):</p> 
+<pre>from typing import Callable, Sequence
+
+class CLASS_NAME:
+    def __init__(
+        self,
+        model: str,
+        tools: Sequence[Callable],
+        project: str,
+        location: str,
+    ):
+        self.model_name = model
+        self.tools = tools
+        self.project = project
+        self.location = location
+
+    def set_up(self):
+        import vertexai
+        from langchain_google_vertexai import ChatVertexAI
+        from langgraph.prebuilt import create_react_agent
+
+        vertexai.init(project=self.project, location=self.location)
+
+        model = ChatVertexAI(model_name=self.model_name)
+        self.graph = create_react_agent(model, tools=self.tools)
+
+    def query(self, **kwargs):
+        return self.graph.invoke(**kwargs)
+</pre> <h3 id="deployment-considerations">Deployment considerations</h3> <p>When writing your Python class, the following three methods are important:</p> <ol> <li>
+<code translate="no" dir="ltr">__init__()</code>: <ul> <li>Use this method for only agent configuration parameters. For example, you can use this method to collect the model parameters and <a href="../../models/capabilities/configure-safety-filters">safety attributes</a> as input arguments from your users. You can also use this method to collect parameters such as the project ID, the region, application credentials, and API keys.</li> <li>The constructor returns an object that must be "pickle-able" for it to be deployable to Agent Runtime. Therefore, you should initialize service clients and establish connections to databases in the <code translate="no" dir="ltr">.set_up</code> method instead of the <code translate="no" dir="ltr">__init__</code> method.</li> <li>This method is optional. If it's not specified, Agent Runtime uses the default Python constructor for the class.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">set_up()</code>: <ul> <li>You must use this method to define agent initialization logic. For example, you use this method to establish connections to databases or dependent services, import dependent packages, or precompute data that's used for serving queries.</li> <li>This method is optional. If it's not specified, Agent Runtime assumes that the agent doesn't need to call a <code translate="no" dir="ltr">.set_up</code> method before serving user queries.</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr">query()</code> / <code translate="no" dir="ltr">stream_query()</code>: <ul> <li>Use <code translate="no" dir="ltr">query()</code> to return the complete response as a single result.</li> <li>Use <code translate="no" dir="ltr">stream_query()</code> to return the response in chunks as it becomes available, enabling a streaming experience. The <code translate="no" dir="ltr">stream_query</code> method must return an iterable object (for example a generator) to enable streaming.</li> <li>You can implement both methods if you want to support both single-response and streaming interactions with your agent.</li> <li>You should give this method a clear docstring that defines what it does, documents its attributes, and provides type annotations for its inputs. Avoid variable arguments in the <code translate="no" dir="ltr">query</code> and <code translate="no" dir="ltr">stream_query</code> method.</li> </ul>
+</li> </ol> <h3 id="instantiate-locally">Instantiate the agent locally</h3> <p>You can create a local instance of your agent using the following code:</p> 
+<pre>agent = CLASS_NAME(
+    model=model,  # Required.
+    tools=[get_exchange_rate],  # Optional.
+    project="PROJECT_ID",
+    location="LOCATION",
+)
+agent.set_up()
+</pre> <h3 id="test-query">Test the <code translate="no" dir="ltr">query</code> method</h3> <p>You can test the agent by sending queries to the local instance:</p> 
+<pre>response = agent.query(
+    input="What is the exchange rate from US dollars to Swedish currency?"
+)
+
+print(response)
+</pre> <p>The response is a dictionary that's similar to the following:</p> 
+<pre>{"input": "What is the exchange rate from US dollars to Swedish currency?",
+ # ...
+ "output": "For 1 US dollar you will get 10.7345 Swedish Krona."}
+</pre> <h2 id="async-query">Querying asynchronously</h2> <p>To respond to queries asynchronously, you can define a method (such as <code translate="no" dir="ltr">async_query</code>) that returns a <a href="https://peps.python.org/pep-0492/">Python Coroutine</a>. As an example, the following template extends the basic example to respond asynchronously and is deployable on Agent Platform:</p> 
+<pre>class AsyncAgent(CLASS_NAME):
+
+    async def async_query(self, **kwargs):
+        from langchain.load.dump import dumpd
+
+        for chunk in self.graph.ainvoke(**kwargs):
+            yield dumpd(chunk)
+
+agent = AsyncAgent(
+    model=model,                # Required.
+    tools=[get_exchange_rate],  # Optional.
+    project="PROJECT_ID",
+    location="LOCATION",
+)
+agent.set_up()
+</pre> <h3 id="test-async-query">Test the <code translate="no" dir="ltr">async_query</code> method</h3> <p>You can test the agent locally by calling the <code translate="no" dir="ltr">async_query</code> method. Here's an example:</p> 
+<pre>response = await agent.async_query(
+    input="What is the exchange rate from US dollars to Swedish Krona today?"
+)
+print(response)
+</pre> <p>The response is a dictionary that's similar to the following:</p> 
+<pre>{"input": "What is the exchange rate from US dollars to Swedish currency?",
+ # ...
+ "output": "For 1 US dollar you will get 10.7345 Swedish Krona."}
+</pre> <h2 id="streaming-responses">Streaming responses</h2> <p>To stream responses to queries, you can define a method named <code translate="no" dir="ltr">stream_query</code> that yields responses. As an example, the following template extends the basic example to stream responses and is deployable on Agent Platform:</p> 
+<pre>from typing import Iterable
+
+class StreamingAgent(CLASS_NAME):
+
+    def stream_query(self, **kwargs) -&gt; Iterable:
+        from langchain.load.dump import dumpd
+
+        for chunk in self.graph.stream(**kwargs):
+            yield dumpd(chunk)
+
+agent = StreamingAgent(
+    model=model,                # Required.
+    tools=[get_exchange_rate],  # Optional.
+    project="PROJECT_ID",
+    location="LOCATION",
+)
+agent.set_up()
+</pre> <p>Here are some key things to keep in mind when using the streaming API:</p> <ul> <li>
+<strong>Maximum timeout</strong>: The maximum timeout for streaming responses is 15 minutes. If your agent requires longer processing times, consider breaking down the task into smaller chunks.</li> <li>
+<strong>Streaming models and chains</strong>: LangChain's Runnable interface <a href="https://python.langchain.com/docs/how_to/lcel_cheatsheet/#stream-a-runnable">supports streaming</a>, so you can stream responses from not only agents, but also models and chains.</li> <li>
+<strong>LangChain compatibility</strong>: Note that asynchronous methods such as LangChain's <code translate="no" dir="ltr">astream_event</code> method isn't supported at the moment.</li> <li>
+<strong>Throttle content generation</strong>: If you encounter backpressure issues (where the producer generates data faster than the consumer can process it), you should throttle your content generation rate. This can help prevent buffer overflows and ensure a smooth streaming experience.</li> </ul> <h3 id="test-stream-query">Test the <code translate="no" dir="ltr">stream_query</code> method</h3> <p>You can test the streaming query locally by calling the <code translate="no" dir="ltr">stream_query</code> method and iterating through the results. Here's an example:</p> 
+<pre>import pprint
+
+for chunk in agent.stream_query(
+    input="What is the exchange rate from US dollars to Swedish currency?"
+):
+    # Use pprint with depth=1 for a more concise, high-level view of the
+    # streamed output.
+    # To see the full content of the chunk, use:
+    # print(chunk)
+    pprint.pprint(chunk, depth=1)
+</pre> <p>This code prints each chunk of the response as it's generated. The output might look something like this:</p> 
+<pre>{'actions': [...], 'messages': [...]}
+{'messages': [...], 'steps': [...]}
+{'messages': [...],
+ 'output': 'The exchange rate from US dollars to Swedish currency is 1 USD to '
+           '10.5751 SEK. \n'}
+</pre> <p>In this example, each chunk contains different information about the response, such as the actions taken by the agent, the messages exchanged, and the final output.</p> <h2 id="async-stream-responses">Streaming responses asynchronously</h2> <p>To stream responses asynchronously, you can define a method (such as <code translate="no" dir="ltr">async_stream_query</code>) that returns an <a href="https://peps.python.org/pep-0525/">asynchronous generator</a>. As an example, the following template extends the basic example to stream responses asynchronously and is deployable on Agent Platform:</p> 
+<pre>class AsyncStreamingAgent(CLASS_NAME):
+
+    async def async_stream_query(self, **kwargs):
+        from langchain.load.dump import dumpd
+
+        for chunk in self.graph.astream(**kwargs):
+            yield dumpd(chunk)
+
+agent = AsyncStreamingAgent(
+    model=model,                # Required.
+    tools=[get_exchange_rate],  # Optional.
+    project="PROJECT_ID",
+    location="LOCATION",
+)
+agent.set_up()
+</pre> <h3 id="test-async-stream-query">Test the <code translate="no" dir="ltr">async_stream_query</code> method</h3> <p>Similar to the code for testing <a href="#test-stream-query">streaming queries</a>, you can test the agent locally by calling the <code translate="no" dir="ltr">async_stream_query</code> method and iterating through the results. Here's an example:</p> 
+<pre>import pprint
+
+async for chunk in agent.async_stream_query(
+    input="What is the exchange rate from US dollars to Swedish currency?"
+):
+    # Use pprint with depth=1 for a more concise, high-level view of the
+    # streamed output.
+    # To see the full content of the chunk, use:
+    # print(chunk)
+    pprint.pprint(chunk, depth=1)
+</pre> <p>This code prints each chunk of the response as it's generated. The output might look something like this:</p> 
+<pre>{'actions': [...], 'messages': [...]}
+{'messages': [...], 'steps': [...]}
+{'messages': [...],
+ 'output': 'The exchange rate from US dollars to Swedish currency is 1 USD to '
+           '10.5751 SEK. \n'}
+</pre> <h2 id="custom-methods">Registering custom methods</h2> <p>By default, the methods <code translate="no" dir="ltr">query</code> and <code translate="no" dir="ltr">stream_query</code> are registered as operations in the deployed agent. You can override the default behavior and define the set of operations to be registered using the <code translate="no" dir="ltr">register_operations</code> method. Operations can be registered as either standard (represented by an empty string <code translate="no" dir="ltr">""</code>) or streaming (<code translate="no" dir="ltr">"stream"</code>) execution modes.</p> <p>To register multiple operations, you can define a method named <code translate="no" dir="ltr">register_operations</code> that lists the methods to be made available to users when the agent is deployed. In the following example code, the <code translate="no" dir="ltr">register_operations</code> method will result in the deployed agent registering <code translate="no" dir="ltr">query</code> and <code translate="no" dir="ltr">get_state</code> as operations that run synchronously, and <code translate="no" dir="ltr">stream_query</code> and <code translate="no" dir="ltr">get_state_history</code> as operations that streams the responses:</p> 
+<pre>from typing import Iterable
+
+class CustomAgent(StreamingAgent):
+
+    def get_state(self) -&gt; dict: # new synchronous method
+        return self.graph.get_state(**kwargs)._asdict()
+
+    def get_state_history(self) -&gt; Iterable: # new streaming operation
+        for state_snapshot in self.graph.get_state_history(**kwargs):
+            yield state_snapshot._asdict()
+
+    def register_operations(self):
+        return {
+            # The list of synchronous operations to be registered
+            "": ["query", "get_state"],
+            # The list of streaming operations to be registered
+            "stream": ["stream_query", "get_state_history"],
+        }
+</pre>
+<aside class="note"><strong>Note:</strong><span> You don't need to register methods for both standard and streaming operations. For example, to support only standard operations, you can return <code translate="no" dir="ltr">{"": ["query", "get_state"]}</code> in the <code translate="no" dir="ltr">register_operations</code> method without specifying a corresponding list of methods for <code translate="no" dir="ltr">"stream"</code>.</span></aside> <p>You can test the custom methods by calling them directly on the local instance of the agent, similarly to how you would test the <a href="#test-query"><code translate="no" dir="ltr">query</code></a> and <a href="#test-stream-query"><code translate="no" dir="ltr">stream_query</code></a> methods.</p> <h2 id="type-annotations">Providing Type Annotations</h2> <p>You can use type annotations to specify the expected input and output types of your agent methods. When the agent is deployed, only JSON-serializable types are supported in the input and output of the operations supported by the agent. The schemas of the inputs and outputs can be annotated using <code translate="no" dir="ltr">TypedDict</code> or Pydantic models.</p> <p>In the following example, we annotate the input as a <code translate="no" dir="ltr">TypedDict</code>, and convert the raw output from <code translate="no" dir="ltr">.get_state</code> (which is a <code translate="no" dir="ltr">NamedTuple</code>) into a serializable dictionary using its <code translate="no" dir="ltr">._asdict()</code> method:</p> 
+<pre>from typing import Any, Dict, TypedDict
+
+# schemas.py
+class RunnableConfig(TypedDict, total=False):
+    metadata: Dict[str, Any]
+    configurable: Dict[str, Any]
+
+# agents.py
+class AnnotatedAgent(CLASS_NAME):
+
+    def get_state(self, config: RunnableConfig) -&gt; dict:
+        return self.graph.get_state(config=config)._asdict()
+
+    def register_operations(self):
+        return {"": ["query", "get_state"]}
+</pre> <h2 id="tracing">Sending Traces to Cloud Trace</h2> <p>To send traces to Cloud Trace with instrumentation libraries that support OpenTelemetry, you can import and initialize them in the <code translate="no" dir="ltr">.set_up</code> method. For common agent frameworks, you might be able to use <a href="https://docs.cloud.google.com/trace/docs/setup/python-ot">Open Telemetry Google Cloud Integration</a> in combination with an instrumentation framework such as <a href="https://arize-ai.github.io/openinference/">OpenInference</a> or <a href="https://www.traceloop.com/docs/openllmetry/tracing/without-sdk">OpenLLMetry</a>.</p> <p>As an example, the following template is a modification of the <a href="#basic-example">basic example</a> to export traces to Cloud Trace:</p> <div> <section><p class="_code-tab"><strong>OpenInference</strong></p>
+<p>First, install the <a href="http://pypi.org/project/openinference-instrumentation-langchain">required package</a> using <code translate="no" dir="ltr">pip</code> by running</p> 
+<pre data-language="">pip install openinference-instrumentation-langchain==0.1.34</pre> <p>Next, import and initialize the instrumentor:</p> 
+<pre data-language="">from typing import Callable, Sequence
+
+class CLASS_NAME:
+    def __init__(
+        self,
+        model: str,
+        tools: Sequence[Callable],
+        project: str,
+        location: str,
+    ):
+        self.model_name = model
+        self.tools = tools
+        self.project = project
+        self.location = location
+
+    def set_up(self):
+        # The additional code required for tracing instrumentation.
+        from opentelemetry import trace
+        from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from openinference.instrumentation.langchain import LangChainInstrumentor
+        import google.cloud.trace_v2 as cloud_trace_v2
+        import google.auth
+
+        credentials, _ = google.auth.default()
+
+        trace.set_tracer_provider(TracerProvider())
+        cloud_trace_exporter = CloudTraceSpanExporter(
+            project_id=self.project,
+            client=cloud_trace_v2.TraceServiceClient(
+                credentials=credentials.with_quota_project(self.project),
+            ),
+        )
+        trace.get_tracer_provider().add_span_processor(
+            SimpleSpanProcessor(cloud_trace_exporter)
+        )
+        LangChainInstrumentor().instrument()
+        # end of additional code required
+
+        import vertexai
+        from langchain_google_vertexai import ChatVertexAI
+        from langgraph.prebuilt import create_react_agent
+
+        vertexai.init(project=self.project, location=self.location)
+
+        model = ChatVertexAI(model_name=self.model_name)
+        self.graph = create_react_agent(model, tools=self.tools)
+
+    def query(self, **kwargs):
+        return self.graph.invoke(**kwargs)
+</pre></section> <section><p class="_code-tab"><strong>OpenLLMetry</strong></p>
+<p>First, install the <a href="http://pypi.org/project/opentelemetry-instrumentation-langchain">required package</a> using <code translate="no" dir="ltr">pip</code> by running</p> 
+<pre data-language="">pip install opentelemetry-instrumentation-langchain==0.38.10</pre> <p>Next, import and initialize the instrumentor:</p> 
+<pre data-language="">from typing import Callable, Sequence
+
+class CLASS_NAME:
+    def __init__(
+        self,
+        model: str,
+        tools: Sequence[Callable],
+        project: str,
+        location: str,
+    ):
+        self.model_name = model
+        self.tools = tools
+        self.project = project
+        self.location = location
+
+    def set_up(self):
+        # The additional code required for tracing instrumentation.
+        from opentelemetry import trace
+        from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+        import google.cloud.trace_v2 as cloud_trace_v2
+        import google.auth
+
+        credentials, _ = google.auth.default()
+
+        trace.set_tracer_provider(TracerProvider())
+        cloud_trace_exporter = CloudTraceSpanExporter(
+            project_id=self.project,
+            client=cloud_trace_v2.TraceServiceClient(
+                credentials=credentials.with_quota_project(self.project),
+            ),
+        )
+        trace.get_tracer_provider().add_span_processor(
+            SimpleSpanProcessor(cloud_trace_exporter)
+        )
+        LangchainInstrumentor().instrument()
+        # end of additional code required
+
+        import vertexai
+        from langchain_google_vertexai import ChatVertexAI
+        from langgraph.prebuilt import create_react_agent
+
+        vertexai.init(project=self.project, location=self.location)
+
+        model = ChatVertexAI(model_name=self.model_name)
+        self.graph = create_react_agent(model, tools=self.tools)
+
+    def query(self, **kwargs):
+        return self.graph.invoke(**kwargs)
+</pre></section> </div> <h2 id="environment-variables">Working with Environment Variables</h2> <p>To set environment variables, ensure that they are available through <code translate="no" dir="ltr">os.environ</code> during development and follow the instructions in <a href="../../scale/runtime/deploy-an-agent#environment-variables">Define environment variables</a> when deploying the agent.</p> <h2 id="secret-manager">Integrating with Secret Manager</h2> <p>To integrate with Secret Manager:</p> <ol> <li>
+<p>Install the <a href="https://docs.cloud.google.com/python/docs/reference/secretmanager">client library</a> by running</p> 
+<pre>pip install google-cloud-secret-manager</pre>
+</li> <li><p>Follow the instructions in <a href="../../scale/runtime/manage-agent-access#grant-role">Grant roles for a deployed agent</a> to grant the <a href="setup#identity-and-permissions">service account</a> the "Secret Manager Secret Accessor" role (<code translate="no" dir="ltr">roles/secretmanager.secretAccessor</code>) through the Google Cloud console.</p></li> <li><p>Import and initialize the client in the <code translate="no" dir="ltr">.set_up</code> method and get the corresponding secret when needed. As an example, the following template is a modification of the <a href="#basic-example">basic example</a> to use an API key for <code translate="no" dir="ltr">ChatAnthropic</code> that was <a href="../../scale/runtime/manage-agent-access#create-secret">stored in Secret Manager</a>:</p></li> </ol> 
+<pre>from typing import Callable, Sequence
+
+class CLASS_NAME:
+    def __init__(
+        self,
+        model: str,
+        tools: Sequence[Callable],
+        project: str,
+    ):
+        self.model_name = model
+        self.tools = tools
+        self.project = project
+        self.secret_id = secret_id # &lt;- new
+
+    def set_up(self):
+        from google.cloud import secretmanager
+        from langchain_anthropic import ChatAnthropic
+        from langgraph.prebuilt import create_react_agent
+
+        # Get the API Key from Secret Manager here.
+        self.secret_manager_client = secretmanager.SecretManagerServiceClient()
+        secret_version = self.secret_manager_client.access_secret_version(request={
+            "name": "projects/PROJECT_ID/secrets/SECRET_ID/versions/SECRET_VERSION",
+        })
+        # Use the API Key from Secret Manager here.
+        model = ChatAnthropic(
+            model_name=self.model_name,
+            model_kwargs={"api_key": secret_version.payload.data.decode()},  # &lt;- new
+        )
+        self.graph = create_react_agent(model, tools=self.tools)
+
+    def query(self, **kwargs):
+        return self.graph.invoke(**kwargs)
+</pre> <h2 id="handling-credentials">Handling credentials</h2> <p>When the agent is deployed, it might need to handle different types of credentials:</p> <ol> <li>
+<a href="#application-default-credentials">Application default credentials (ADC)</a> commonly arising from service accounts,</li> <li>
+<a href="#oauth">OAuth</a> commonly arising from user accounts, and</li> <li>
+<a href="#identity-provider">Identity providers</a> for credentials from external accounts (workload identity federation).</li> </ol> <h3 id="application-default-credentials">Application default credentials</h3> 
+<pre>import google.auth
+
+credentials, project = google.auth.default(
+    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+)
+</pre> <p>It can be used in code in the following way:</p> 
+<pre>from typing import Callable, Sequence
+
+class CLASS_NAME:
+    def __init__(
+        self,
+        model: str = "meta/llama3-405b-instruct-maas",
+        tools: Sequence[Callable],
+        location: str,
+        project: str,
+    ):
+        self.model_name = model
+        self.tools = tools
+        self.project = project
+        self.endpoint = f"https://{location}-aiplatform.googleapis.com"
+        self.base_url = f'{self.endpoint}/v1beta1/projects/{project}/locations/{location}/endpoints/openapi'
+
+    def query(self, **kwargs):
+        import google.auth
+        from langchain_openai import ChatOpenAI
+        from langgraph.prebuilt import create_react_agent
+
+        # Note: the credential lives for 1 hour by default.
+        # After expiration, it must be refreshed.
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(google.auth.transport.requests.Request())
+
+        model = ChatOpenAI(
+            model=self.model_name,
+            base_url=self.base_url,
+            api_key=creds.token,  # Use the token from the credentials here.
+        )
+        graph = create_react_agent(model, tools=self.tools)
+        return graph.invoke(**kwargs)
+</pre> <p>For details, visit <a href="https://cloud.google.com/docs/authentication/application-default-credentials">How Application Default Credentials works</a>.</p> <h3 id="oauth">OAuth</h3> <p>User credentials are typically obtained using <a href="https://developers.google.com/identity/protocols/OAuth2">OAuth 2.0</a>.</p> <p>If you have an access token (such as from <a href="https://oauthlib.readthedocs.io/en/latest/"><code translate="no" dir="ltr">oauthlib</code></a>), you can create a <code translate="no" dir="ltr">google.oauth2.credentials.Credentials</code> instance. In addition, if you obtain a refresh token, you can also specify the refresh token and token URI to allow the credentials to be automatically refreshed:</p> 
+<pre>credentials = google.oauth2.credentials.Credentials(
+    token="ACCESS_TOKEN",
+    refresh_token="REFRESH_TOKEN",  # Optional
+    token_uri="TOKEN_URI",          # E.g. "https://oauth2.googleapis.com/token"
+    client_id="CLIENT_ID",          # Optional
+    client_secret="CLIENT_SECRET"   # Optional
+)
+</pre> <p>Here, the <code translate="no" dir="ltr"><var translate="no">TOKEN_URI</var></code>, <code translate="no" dir="ltr"><var translate="no">CLIENT_ID</var></code> and <code translate="no" dir="ltr"><var translate="no">CLIENT_SECRET</var></code> are based on <a href="../../scale/runtime/manage-agent-access#create-oauth-client-credential">Create an OAuth client credential</a>.</p> <p>If you don't have an access token, you can use <code translate="no" dir="ltr">google_auth_oauthlib.flow</code> to perform the <a href="https://developers.google.com/identity/protocols/oauth2/web-server">OAuth 2.0 Authorization Grant Flow</a> to obtain a corresponding <code translate="no" dir="ltr">google.oauth2.credentials.Credentials</code> instance:</p> 
+<pre>from google.cloud import secretmanager
+from google_auth_oauthlib.flow import InstalledAppFlow
+import json
+
+# Get the client config from Secret Manager here.
+secret_manager_client = secretmanager.SecretManagerServiceClient()
+secret_version = client.access_secret_version(request={
+    "name": "projects/PROJECT_ID/secrets/SECRET_ID/versions/SECRET_VERSION",
+})
+client_config = json.loads(secret_version.payload.data.decode())
+
+# Create flow instance to manage the OAuth 2.0 Authorization Grant Flow steps.
+flow = InstalledAppFlow.from_client_config(
+    client_config,
+    scopes=['https://www.googleapis.com/auth/cloud-platform'],
+    state="OAUTH_FLOW_STATE"  # from flow.authorization_url(...)
+)
+
+# You can get the credentials from the flow object.
+credentials: google.oauth2.credentials.Credentials = flow.credentials
+
+# After obtaining the credentials, you can then authorize API requests on behalf
+# of the given user or service account. For example, to authorize API requests
+# to vertexai services, you'll specify it in vertexai.init(credentials=)
+import vertexai
+
+vertexai.init(
+    project="PROJECT_ID",
+    location="LOCATION",
+    credentials=credentials, # specify the credentials here
+)
+</pre> <p>For details, visit the <a href="https://google-auth-oauthlib.readthedocs.io/en/latest/reference/google_auth_oauthlib.flow.html">documentation for the <code translate="no" dir="ltr">google_auth_oauthlib.flow</code> module</a>.</p> <h3 id="identity-provider">Identity Provider</h3> <p>If you want to authenticate users using email/password, phone number, social providers like Google, Facebook or GitHub, or a custom authentication mechanism, you can use <a href="https://cloud.google.com/identity-platform/docs">Identity Platform</a> or <a href="https://firebase.google.com/docs/auth">Firebase Authentication</a>, or any identity provider that supports OpenID Connect (OIDC).</p> <p>For details, visit <a href="https://googleapis.dev/python/google-auth/latest/user-guide.html#accessing-resources-from-an-oidc-identity-provider">Accessing resources from an OIDC identity provider</a>.</p> <h2 id="handling-errors">Handling errors</h2> <p>To ensure API errors are returned in a structured JSON format, we recommend implementing error handling within your agent code using a <code translate="no" dir="ltr">try...except</code> block, which can be abstracted into a decorator.</p> <p>While Agent Platform can handle various status codes internally, Python lacks a standardized way to represent errors with associated HTTP status codes across all exception types. Attempting to map all possible Python exceptions to HTTP statuses within the underlying service would be complex and difficult to maintain.</p> <p>A more scalable approach is to explicitly catch relevant exceptions within your agent methods, or by using a reusable decorator like <code translate="no" dir="ltr">error_wrapper</code>. You can then associate appropriate status codes (for example, by adding <code translate="no" dir="ltr">code</code> and <code translate="no" dir="ltr">error</code> attributes to custom exceptions or handling standard exceptions specifically) and format the error as a JSON dictionary for the return value. This requires minimal code change within the agent methods themselves, often only requiring you to add the decorator.</p> <p>The following is an example of how you can implement error handling in your agent:</p> 
+<pre>from functools import wraps
+import json
+
+def error_wrapper(func):
+    @wraps(func)  # Preserve original function metadata
+    def wrapper(*args, **kwargs):
+        try:
+            # Execute the original function with its arguments
+            return func(*args, **kwargs)
+        except Exception as err:
+            error_code = getattr(err, 'code')
+            error_message = getattr(err, 'error')
+
+            # Construct the error response dictionary
+            error_response = {
+                "error": {
+                    "code": error_code,
+                    "message": f"'{func.__name__}': {error_message}"
+                }
+            }
+            # Return the Python dictionary directly.
+            return error_response
+
+    return wrapper
+
+# Example exception
+class SessionNotFoundError(Exception):
+    def __init__(self, session_id, message="Session not found"):
+        self.code = 404
+        self.error = f"{message}: {session_id}"
+        super().__init__(self.error)
+
+# Example Agent Class
+class MyAgent:
+    @error_wrapper
+    def get_session(self, session_id: str):
+        # Simulate the condition where the session isn't found
+        raise SessionNotFoundError(session_id=session_id)
+
+
+# Example Usage: Session Not Found
+agent = MyAgent()
+error_result = agent.get_session(session_id="nonexistent_session_123")
+print(json.dumps(error_result, indent=2))
+</pre> <p>The preceding code results in the following output: <code translate="no" dir="ltr">json
+{
+ "error": {
+   "code": 404,
+   "message": "Invocation error in 'get_session': Session not found: nonexistent_session_123"
+  }
+}</code></p> <h2 id="whats_next">What's next</h2> <div class="devsite-card-group">             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="deploy-agents"> <a href="../../scale/runtime/deploy-an-agent" track-metadata-eventdetail="/gemini-enterprise-agent-platform/scale/runtime/deploy-an-agent" track-type="card" track-name="
+  Deploy agents
+" track-metadata-child_headline="Deploy agents" track-metadata-child_chip_label="Guide"> Deploy agents </a> </h3> <p class="devsite-card-summary"> Learn the five ways to deploy an agent on Agent Platform Runtime based on your development needs. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="use-an-agent"> <a href="../../scale/runtime/use-an-agent" track-metadata-eventdetail="/gemini-enterprise-agent-platform/scale/runtime/use-an-agent" track-type="card" track-name="
+  Use an agent
+" track-metadata-child_headline="Use an agent" track-metadata-child_chip_label="Guide"> Use an agent </a> </h3> <p class="devsite-card-summary"> Use an agent with Agent Platform Runtime. </p> </div> </div> </div> </div>             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="evaluate-your-agents"> <a href="../../optimize/evaluation/evaluate-agents" track-metadata-eventdetail="/gemini-enterprise-agent-platform/optimize/evaluation/evaluate-agents" track-type="card" track-name="
+  Evaluate your agents
+" track-metadata-child_headline="Evaluate your agents" track-metadata-child_chip_label="Guide"> Evaluate your agents </a> </h3> <p class="devsite-card-summary"> Create and deploy a basic agent and use the Gen AI evaluation service to evaluate the agent </p> </div> </div> </div> </div>             <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Troubleshooting </span> <h3 class="hide-from-toc no-link" id="troubleshoot-agent-creation"> <a href="../../troubleshooting/agent-creation" track-metadata-eventdetail="/gemini-enterprise-agent-platform/troubleshooting/agent-creation" track-type="card" track-name="
+  Troubleshoot agent creation
+" track-metadata-child_headline="Troubleshoot agent creation" track-metadata-child_chip_label="Troubleshooting"> Troubleshoot agent creation </a> </h3> <p class="devsite-card-summary"> Learn how to resolve common errors when creating custom agents. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Resource </span> <h3 class="hide-from-toc no-link" id="get-support"> <a href="../../resources/agent-support" track-metadata-eventdetail="/gemini-enterprise-agent-platform/resources/agent-support" track-type="card" track-name="
+  Get support
+" track-metadata-child_headline="Get support" track-metadata-child_chip_label="Resource"> Get support </a> </h3> <p class="devsite-card-summary"> Find resources and support for Google Agent Platform. </p> </div> </div> </div> </div>    </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/create-a-custom-agent" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/runtime/create-a-custom-agent</a>
+  </p>
+</div>

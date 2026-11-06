@@ -1,0 +1,112 @@
+<h1>Retry strategy</h1> <p>The Google Gen AI SDK client libraries include automatic retry logic with exponential backoff for handling transient errors like timeouts, network issues, and rate limits (HTTP <code translate="no" dir="ltr">429</code> and <code translate="no" dir="ltr">5xx</code> status codes). For example, the Python SDK automatically retries transient errors up to four times with an initial delay of approximately 1 second and a maximum delay of 60 seconds. While the SDK handles this by default, you can configure this behavior to better suit your specific workload.</p> <h2 id="when-to-retry">Determining when to retry</h2> <p>Before implementing a custom retry strategy, consider how your endpoint selection, payment model, and workload affect your needs.</p> <h3 id="endpoint">Choose the right endpoint</h3> <ul> <li>
+<strong>Global endpoint</strong>: Recommended for availability. The global endpoint routes traffic dynamically, which can reduce the need for client-side retries caused by regional capacity issues.</li> <li>
+<strong>Regional endpoints</strong>: Restricted to a specific location. If a region is overloaded, immediate retries may fail; consider failover strategies instead.</li> </ul> <h3 id="payment-model">Adjust for your payment model</h3> <ul> <li>
+<a href="standard-paygo"><strong>Standard pay-as-you-go</strong></a>: Uses shared resources. Use exponential backoff to handle transient rate limit errors (429s) caused by traffic spikes.</li> <li>
+<a href="flex-paygo"><strong>Flex pay-as-you-go</strong></a>: Designed for lower-priority, slower processing. <strong>Do not</strong> retry aggressively; instead, increase your request timeout (for example, to 30 minutes) to give the system time to complete the task.</li> <li>
+<a href="priority-paygo"><strong>Priority pay-as-you-go</strong></a>: Designed for latency-sensitive, high-reliability workloads without the upfront commitment of Provisioned Throughput. If you receive a 429 error in this tier, retry with exponential backoff, but ensure you are not exceeding your quota.</li> <li>
+<a href="provisioned-throughput"><strong>Provisioned Throughput</strong></a>: Uses reserved capacity. Frequent errors usually indicate you have exceeded your purchased capacity, so adding retries may not solve the underlying issue.</li> </ul> <h3 id="latency-tolerance">Define latency tolerance</h3> <ul> <li>
+<strong>Real-time</strong> (for example, chat): Fail fast. Limit the number of retry attempts so users are not left waiting indefinitely for a response.</li> <li>
+<strong>Batch Inference</strong>: <strong>Do not retry individual items.</strong> The Batch service automatically handles retries for individual requests within the job to strive for a high completion rate. Your only responsibility is to successfully <em>submit</em> the job once. For more information, see <a href="capabilities/batch-prediction-gemini">Batch prediction</a>.</li> </ul> <h2 id="identifying-errors">Identifying retryable errors</h2> <p>There are two primary factors that determine whether a request is safe to retry:</p> <h3 id="response">Response</h3> <p>The error code or response received indicates whether the problem is transient or permanent. Responses related to transient problems are generally retryable. These include:</p> <ul> <li>
+<strong>HTTP Codes</strong>: <code translate="no" dir="ltr">408</code> (Request Timeout), <code translate="no" dir="ltr">429</code> (Too Many Requests), and <code translate="no" dir="ltr">5xx</code> (Server Errors).</li> <li>
+<strong>Network Issues</strong>: Socket timeouts and TCP disconnects.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/api-errors">API errors</a>.</p> <aside class="note"><strong>Note:</strong><span> Permanent errors (e.g., <code translate="no" dir="ltr">401</code> Authorization, <code translate="no" dir="ltr">400</code> Bad Request) indicate issues with the request itself and shouldn't be retried without changes. <code translate="no" dir="ltr">499</code> (Client Closed Request) typically means the client closed the connection before the server could respond. Check logs and increase client-side timeout.</span></aside> <h3 id="idempotency">Idempotency</h3> <p>Idempotent requests can be executed repeatedly without changing the final state of the resource. Consider the following when determining idempotency:</p> <ul> <li>
+<strong>Always idempotent</strong>: List operations (they don't modify resources), get requests, token count requests, and embeddings requests.</li> <li>
+<strong>Never idempotent</strong>: Operations that create unique resources each time they succeed, such as creating a new tuned model.</li> <li>
+<strong>Generative AI nuance</strong>: While <code translate="no" dir="ltr">generateContent</code> is not strictly idempotent due to the stochastic nature of generative models, it is generally safe to retry for transient errors as it does not modify server-side state.</li> </ul> <h2 id="configuring-retries">Configuring retries</h2> <p>The Google Gen AI SDK lets you configure retry behavior through client parameters or <code translate="no" dir="ltr">HttpRetryOptions</code>.</p> <h3 id="parameters">Key parameters</h3> <ul> <li>
+<strong><code translate="no" dir="ltr">initial_delay</code></strong>: The initial delay in seconds before the first retry (Default: <code translate="no" dir="ltr">1.0</code>).</li> <li>
+<strong><code translate="no" dir="ltr">attempts</code></strong>: The maximum number of retry attempts (Default: <code translate="no" dir="ltr">5</code>).</li> <li>
+<strong><code translate="no" dir="ltr">exp_base</code></strong>: The base for the exponential backoff calculation (Default: <code translate="no" dir="ltr">2</code>).</li> <li>
+<strong><code translate="no" dir="ltr">max_delay</code></strong>: The maximum delay in seconds between retries (Default: <code translate="no" dir="ltr">60</code>).</li> <li>
+<strong><code translate="no" dir="ltr">jitter</code></strong>: A factor to add a random delay to the backoff (Default: <code translate="no" dir="ltr">1</code>).</li> <li>
+<strong><code translate="no" dir="ltr">http_status_codes</code></strong>: A list of status codes that trigger a retry.</li> </ul> <h3 id="examples">Examples</h3> <div> <section><p class="_code-tab"><strong>Client-level configuration</strong></p>
+<p>You can set options globally when initializing the client.</p> <div> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google import genai
+from google.genai import types
+
+client = genai.Client(
+    vertexai=True,
+    project=PROJECT_ID,
+    location="global",
+    http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(
+            initial_delay=1.0,
+            attempts=5,
+            http_status_codes=[408, 429, 500, 502, 503, 504],
+        ),
+        timeout=120 * 1000,
+    ),
+)
+</pre></section> <section><p class="_code-tab"><strong>Java</strong></p>
+
+<pre data-language="java">import com.google.genai.Client;
+import com.google.genai.types.HttpOptions;
+import com.google.genai.types.HttpRetryOptions;
+
+HttpOptions httpOptions = HttpOptions.builder()
+  .retryOptions(
+      HttpRetryOptions.builder()
+          .attempts(5)
+          .httpStatusCodes(408, 429, 500, 502, 503, 504).build())
+  .build();
+
+Client client = Client.builder()
+  .project(PROJECT_ID)
+  .location("global")
+  .vertexAI(true)
+  .httpOptions(httpOptions)
+  .build();
+</pre></section> </div></section> <section><p class="_code-tab"><strong>Request-level configuration</strong></p>
+<p>You can also override settings for a single request using the <code translate="no" dir="ltr">config</code> parameter.</p> <div> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google import genai
+from google.genai import types
+
+client = genai.Client(vertexai=True, project=PROJECT_ID, location="global")
+
+response = client.models.generate_content(
+    model="gemini-3-flash-preview",
+    contents="Tell me a joke about a rabbit.",
+    config=types.GenerateContentConfig(
+        http_options=types.HttpOptions(
+            retry_options=types.HttpRetryOptions(
+                initial_delay=1.0,
+                attempts=10,
+                http_status_codes=[408, 429, 500, 502, 503, 504],
+            ),
+            timeout=120 * 1000,
+        )
+    )
+)
+</pre></section> </div></section> <section><p class="_code-tab"><strong>Flex PayGo</strong></p>
+<p>For Flex PayGo, the default timeout is 10 minutes due to slower processing and transparent retry. Users can increase this to 30 minutes for a better success rate.</p> <div> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google import genai
+from google.genai import types
+
+client = genai.Client(
+  vertexai=True, project=PROJECT_ID, location='global',
+  http_options=types.HttpOptions(
+    api_version="v1",
+      headers={
+        "X-Vertex-AI-LLM-Request-Type": "shared",
+        "X-Vertex-AI-LLM-Shared-Request-Type": "flex" # Use Flex PayGo
+      },
+      timeout = 30 * 60 * 1000 # Increase to 30 minutes
+  )
+)
+</pre></section> </div></section> </div> <h2 id="best-practices">Best practices and anti-patterns</h2> <p>Whether you are using the default retry mechanisms, customizing them, or implementing your own retry logic, follow these best practices and avoid common anti-patterns.</p> <h3 id="best-practices-list">Best practices</h3> <ul> <li>
+<strong>Use exponential backoff</strong>: Wait a short time before the first retry (for example, 1 second), then increase the delay exponentially (for example, 2s, 4s, 8s).</li> <li>
+<strong>Add jitter</strong>: Adding random "jitter" to the delay helps prevent all clients from retrying at the exact same time.</li> <li>
+<strong>Retry on specific errors</strong>: Only retry on transient errors (<code translate="no" dir="ltr">429</code>, <code translate="no" dir="ltr">408</code>, <code translate="no" dir="ltr">5xx</code>).</li> <li>
+<strong>Set maximum retries</strong>: Define a maximum number of retry attempts to prevent infinite loops.</li> <li>
+<strong>Monitor and log</strong>: Log details about retry attempts, error types, and response times to debug your strategy.</li> </ul> <h3 id="anti-patterns">Retry anti-patterns</h3> <ul> <li>
+<strong>Retrying without backoff</strong>: Retrying immediately can lead to cascading failures and overwhelm the service.</li> <li>
+<strong>Retrying unretryable errors</strong>: Do not retry client errors (<code translate="no" dir="ltr">4xx</code> other than <code translate="no" dir="ltr">429</code>/<code translate="no" dir="ltr">408</code>) as they indicate issues like invalid API keys or bad syntax.</li> <li>
+<strong>Unconditionally retrying non-idempotent operations</strong>: Repeatedly executing operations that are not idempotent can lead to side effects, such as duplicate resources.</li> <li>
+<strong>Ignoring retry limits</strong>: Retrying indefinitely can lead to resource exhaustion; always set a maximum number of attempts.</li> </ul> <h2 id="whats-next">What's next</h2> <ul> <li>
+<a href="https://github.com/GoogleCloudPlatform/generative-ai/blob/main/sdk/retries/configure_retries.ipynb">Configure retry options in a Colab</a>.</li> <li>Learn more about <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/api-errors">API errors</a>.</li> <li>Learn about <a href="quotas">Quotas and system limits</a>.</li> <li>Learn about <a href="../resources/locations">Deployments and endpoints</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/retry-strategy" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/retry-strategy</a>
+  </p>
+</div>

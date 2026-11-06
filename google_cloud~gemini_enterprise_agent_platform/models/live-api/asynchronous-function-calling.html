@@ -1,0 +1,181 @@
+<h1>Asynchronous function calling with Gemini Live API</h1> <p>When building real-time voice agents, some function calls can block the model's execution, which causes the audio stream to go quiet and the user to be left waiting in silence. With Gemini Live API, all function calls are non-blocking by default, which lets you <a href="../tools/function-calling">execute functions</a> in parallel with the main conversation flow. This process is called <em>asynchronous function calling</em>. Your backend can process heavy tasks like searching live flight prices or querying complex external APIs in the background, while the model continues to listen, speak, and converse naturally with the user. Gemini Live API lets function calls process in the background without interrupting the user's interaction with the model, enabling more fluid and real-time interactions.</p> <p>Asynchronous function calling lets you complete tasks like booking appointments, setting reminders, or fetching data without pausing the conversation. For example, a user can request to book a flight and immediately ask for weather information while the booking is processed in the background.</p> <p> <aside class="objective"><p>To learn more, run the "Asynchronous Function Calling" notebook in one of the following environments: </p>
+<p><a href="https://colab.research.google.com/github/GoogleCloudPlatform/generative-ai/blob/main/gemini/multimodal-live-api/intro_async_function_calling.ipynb" track-type="notebookTutorial" track-name="colabLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/colab-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">Open in Colab</a> | <a href="https://console.cloud.google.com/agent-platform/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2FGoogleCloudPlatform%2Fgenerative-ai%2Fmain%2Fgemini%2Fmultimodal-live-api%2Fintro_async_function_calling.ipynb" track-type="notebookTutorial" track-name="colabEnterpriseLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/colab-enterprise-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">Open in Colab Enterprise</a> | <a href="https://console.cloud.google.com/agent-platform/workbench/deploy-notebook" track-type="notebookTutorial" track-name="workbenchLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/vertex-ai-workbench-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">Open in Agent Platform Workbench</a> | <a href="https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/multimodal-live-api/intro_async_function_calling.ipynb" track-type="notebookTutorial" track-name="gitHubLink"><img src="https://docs.cloud.google.com/static/vertex-ai/images/github-logo-32px.png" alt="" width="24px" height="24px" class="material-icons" style="margin-right: 5px;" aria-hidden="true" translate="no">View on GitHub</a></p></aside> </p>
+<h2 id="example">Example of asynchronous function calling</h2> <p>This example demonstrates a user booking a flight and asking for the time in New York while the <code translate="no" dir="ltr">book_ticket</code> function runs asynchronously in the background:</p> 
+<pre>User: Please book the 2:00 PM flight to New York for me.
+
+Model: function_call: {name: "book_ticket"}
+//(The "book_ticket" function call is sent to the client.)
+//(Right after the "book_ticket" function call is received, the client sends a text message to the model: "repeat this sentence 'I'm booking your ticket now, please wait.'")
+//(The client runs the function call asynchronously in the background.)
+Model: I'm booking your ticket now, please wait.
+
+User: What is the current time in New York?
+
+Model: The current time in New York is 12:00pm.
+
+//(Once the book_ticket function finishes, the client sends the result.)
+Function_response: {name: "book_ticket", response: {booking_status: "booked"}}
+
+Model: Your flight has been booked. Expect a confirmation text on your phone within 5 minutes.
+</pre> <h2 id="implement-asynchronous-function-calling">Implement asynchronous function calling</h2> <p>This section provides a series of examples using the Python version of the Agent Platform SDK to build a highly responsive, concurrent architecture that uses Gemini Live API's asynchronous function calling capability. The examples are broken down into the following tasks:</p> <ul> <li><a href="#define-tools">Define your tools</a></li> <li><a href="#handle-function-calls">Handle function calls from the message stream</a></li> <li><a href="#manage-expectations">Manage user expectations</a></li> </ul> <h3 id="define-tools">Define your tools</h3> <p>You control how each tool executes by setting the <code translate="no" dir="ltr">behavior</code> field of its <code translate="no" dir="ltr">FunctionDeclaration</code>:</p> <ul> <li>
+<code translate="no" dir="ltr">NON_BLOCKING</code> (default when <code translate="no" dir="ltr">behavior</code> is unset): the model continues conversing while your tool executes. Use this setting for read-only lookups or background tasks whose results can be delivered later.</li> <li>
+<code translate="no" dir="ltr">BLOCKING</code>: the model pauses and waits for your <code translate="no" dir="ltr">FunctionResponse</code> before generating further output. Use this setting for state-changing or irreversible operations (such as payments, bookings, or account updates) where the model must not confirm an outcome before knowing the result. If new user input arrives while a blocking call is running, the server cancels the call, requiring backend idempotency.</li> </ul> <p>If you use a framework on top of Gemini Live API, verify that the framework transmits <code translate="no" dir="ltr">behavior</code> in the session setup message; if omitted, tools run as <code translate="no" dir="ltr">NON_BLOCKING</code> by default.</p> <p>The following Python sample shows how to declare both non-blocking and blocking tools:</p> 
+<pre>from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+# 1. A read-only lookup: safe to run in the background
+search_live_flights = types.FunctionDeclaration(
+    name="search_live_flights",
+    description="Searches airlines for current flight prices. Can take up to 10 seconds.",
+    behavior=types.Behavior.NON_BLOCKING,
+)
+
+# 2. A state-changing operation: the model waits for the result before continuing
+book_flight = types.FunctionDeclaration(
+    name="book_flight",
+    description="Books a flight ticket. Irreversible.",
+    behavior=types.Behavior.BLOCKING,
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "flight_id": types.Schema(type=types.Type.STRING),
+        },
+        required=["flight_id"],
+    ),
+)
+
+tools = [types.Tool(function_declarations=[search_live_flights, book_flight])]
+</pre> <h3 id="handle-function-calls">Handle function calls from the message stream</h3> <p>When one or more functions should be called by the model, Gemini Live API sends a <code translate="no" dir="ltr">tool_call</code> event through the real-time message stream.</p> <p>Your backend must not block the stream because the model expects to keep running. When you receive a call for a slow function (like <code translate="no" dir="ltr">search_live_flights</code>), you must pass it to a background worker. If you use an <code translate="no" dir="ltr">await</code> directly in your main message loop for a 10-second task, you will freeze the connection. Fast tasks (like <code translate="no" dir="ltr">get_current_weather</code>) can be safely awaited.</p> 
+<pre>import asyncio
+
+async def handle_stream(session):
+    async for response in session.receive():
+        # Check if the model is asking to use a tool
+        if response.tool_call is not None:
+            for fc in response.tool_call.function_calls:
+
+                if fc.name == "search_live_flights":
+                    # Pass to a background task so we don't block the receive loop!
+                    asyncio.create_task(background_flight_search(fc.id, fc.args, session))
+
+                elif fc.name == "get_current_weather":
+                    # Instant lookups can be safely awaited directly
+                    await instant_weather_lookup(fc.id, fc.args, session)
+</pre> <h3 id="manage-expectations">Manage user expectations</h3> <p>To manage expectations during long-running asynchronous function calls, send a text message from the client that prompts the system to inform the user that the request is being processed and requests their patience. For example, after a function call is received by the client, the client can send a text message to the model such as: "repeat this sentence: 'I'm booking your ticket now, please wait.'".</p> <p>The following example dialog shows this exchange:</p> 
+<pre>User: Please book the 2:00 PM flight to New York for me.
+Model: function_call: {name: "book_ticket"}
+//(The "book_ticket" function call is sent to the client.)
+//(Right after the "book_ticket" function call is received, the client sends a text message to the model: "repeat this sentence 'I'm booking your ticket now, please wait.'")
+//(The client runs the function call asynchronously in the background.)
+Model: I'm booking your ticket now, please wait.
+User: What is the current time in New York?
+Model: The current time in New York is 12:00pm.
+//(Once the "book_ticket" function call finishes, the client sends in the response.)
+Function_response: {name: "book_ticket", response: {booking_status: "booked"}}
+Model: Your flight has been booked. Expect a confirmation text on your phone within 5 minutes.
+</pre> <p>This proactive messaging strategy has the following benefits:</p> <ul> <li>Informs the user of current system operations, which manages expectations during long-running function calls.</li> <li>Reduces the frequency of redundant short user prompts, such as "<em>hello?</em>" or "<em>are you there?</em>". These often occur during long periods of system silence while asynchronous function calls are being processed. This can minimize the risk of duplicated function calls triggered by these repeated user inquiries.</li> <li>Providing an extra system prompt can lower the probability of creating duplicate calls in subsequent interactions.</li> </ul> <h2 id="duplicate-calls">Handle duplicate function calls</h2> <p>There is a small chance that the model generates duplicated function calls before receiving a response for the first call. If your use case allows it, your application can ignore duplicate function calls if a response for the same function call is still pending.</p> <p>The following example shows how a client can ignore a duplicate function call:</p> 
+<pre>User: Please book the 2:00 PM flight to New York for me.
+
+Model: function_call: {name: "book_ticket"}
+//(The "book_ticket" function call is sent to the client. It is running asynchronously in the background.)
+
+User: What is the current time in New York?
+Model: The current time in New York is 12:00pm. + function_call: {name: "book_ticket"}
+//(The duplicated "book_ticket" can be ignored by the client since the response for the first "book_ticket" has not been sent to the model yet.)
+
+//(The first "book_ticket" function call finishes, and client sends in the response.)
+Function_response: {name: "book_ticket", response: {booking_status: "booked"}}
+
+Model: Your flight has been booked. Expect a confirmation text on your phone within 5 minutes.
+</pre> <h2 id="handle-responses">Handle asynchronous function responses</h2> <aside class="note"><strong>Note:</strong><span> Gemini Live API on Agent Platform doesn't support streaming <code translate="no" dir="ltr">FunctionResponse</code> payloads (such as the <code translate="no" dir="ltr">will_continue</code> parameter). If your tool produces streaming output when using the Google Gen AI SDK directly, combine all chunks into a single <code translate="no" dir="ltr">function_response</code> payload before sending it back to the model.</span></aside> <p>When an asynchronous function call is complete, your application sends the result to the model in a <code translate="no" dir="ltr">function_response</code>. While your backend is processing a function call, like searching for flights, the user might ask the model a completely different question, such as, "<em>What's the weather like in London?</em>". The model responds to the request in real-time, in parallel with the function call execution. As the user might be in an ongoing interaction with the model when function execution completes, you can specify a policy that defines how the model should handle this incoming response. You can specify one of the following policies:</p> <ul> <li><a href="#silent-policy"><code translate="no" dir="ltr">SILENT</code></a></li> <li><a href="#when-idle-policy"><code translate="no" dir="ltr">WHEN_IDLE</code></a></li> <li><a href="#interrupt-policy"><code translate="no" dir="ltr">INTERRUPT</code></a></li> </ul> <p>To specify a policy, include the <code translate="no" dir="ltr">scheduling</code> field in your <code translate="no" dir="ltr">function_response</code> payload:</p> 
+<pre>{
+  "name": "book_ticket",
+  "scheduling": "WHEN_IDLE",
+  "response": {
+    "booking_status": "booked"
+  }
+}
+</pre> <p>Model support for <code translate="no" dir="ltr">FunctionResponse.scheduling</code> varies by model:</p> <ul> <li>
+<code translate="no" dir="ltr">Gemini 3.8 Live</code>: supports <code translate="no" dir="ltr">scheduling</code> (<code translate="no" dir="ltr">SILENT</code>, <code translate="no" dir="ltr">WHEN_IDLE</code>, and <code translate="no" dir="ltr">INTERRUPT</code>).</li> <li>
+<code translate="no" dir="ltr">gemini-3.8-live-extended-thinking-preview</code>: does not support explicit scheduling configurations. Sending <code translate="no" dir="ltr">scheduling</code> causes the session to close with WebSocket error 1007. For this model, omit the <code translate="no" dir="ltr">scheduling</code> field.</li> </ul> <p>When <code translate="no" dir="ltr">scheduling</code> is omitted on supported models, Gemini Live API defaults to <code translate="no" dir="ltr">WHEN_IDLE</code>. Each incoming function response triggers a new model turn after the user finishes speaking.</p> <p>The following Python example shows how to format and send a <code translate="no" dir="ltr">function_response</code> with <code translate="no" dir="ltr">scheduling="WHEN_IDLE"</code> to wait for a natural pause in conversation before announcing results:</p> 
+<pre>async def background_flight_search(call_id, args, session):
+    # 1. Simulate a slow API call taking 5 seconds
+    await asyncio.sleep(5)
+    flight_data = ["Air Canada AC758: $350", "WestJet WS12: $290"]
+
+    # 2. Format the response
+    function_response = types.FunctionResponse(
+        id=call_id,
+        name="search_live_flights",
+        response={ "status": "success", "flights": flight_data },
+        scheduling="WHEN_IDLE" # Wait for a moment to tell the user
+    )
+
+    # 3. Send it back into the live session
+    await session.send_tool_response(function_responses=[function_response])
+</pre> <p>The following policies can be specified in the <code translate="no" dir="ltr">scheduling</code> field for managing function responses:</p> <h3 id="silent-policy">SILENT response policy</h3> <p>With the <code translate="no" dir="ltr">SILENT</code> policy, the function response is added to the model's context, but the model doesn't generate a response for it, and any ongoing user interaction is not interrupted.</p> 
+<pre>User: Please book the 2:00 PM flight to New York for me.
+
+Model: function_call: {name: "book_ticket"}
+//(The book_ticket function call is sent to the client and starts running asynchronously in the background.)
+
+User: What is the current time in New York?
+Model: The current time in New York is 12:00pm.
+
+//(The book_ticket function finishes, and client sends the result with scheduling: "SILENT".)
+Function_response: {name: "book_ticket", scheduling: "SILENT", response: {booking_status: "booked"}}
+//(The model doesn't generate a response for the function response.)
+
+User: Is my flight ticket booked?
+Model: Yes. Your flight has been booked.
+</pre> <h3 id="when-idle-policy">WHEN_IDLE response policy</h3> <p>With the <code translate="no" dir="ltr">WHEN_IDLE</code> policy, the model generates a response to the function response only when there is no active user interaction. If a user interaction is in progress, the model waits for it to complete before generating a response to avoid interruption.</p> 
+<pre>User: Please book the 2:00 PM flight to New York for me.
+
+Model: function_call: {name: "book_ticket"}
+//(The book_ticket function call is sent to the client and starts running asynchronously in the background.)
+
+User: What is the current time in New York?
+
+//(The book_ticket function finishes, and client sends the result with scheduling: "WHEN_IDLE".)
+Function_response: {name: "book_ticket", scheduling: "WHEN_IDLE", response: {booking_status: "booked"}}
+//(The ongoing interaction about the time is not interrupted.)
+
+Model: The current time in New York is 12:00pm.
+//(After responding to the user's time query, the model issues the response for the book_ticket function.)
+Model: Your flight has been booked. Expect a confirmation text on your phone within 5 minutes.
+</pre> <h3 id="interrupt-policy">INTERRUPT response policy</h3> <p>With the <code translate="no" dir="ltr">INTERRUPT</code> policy, the model generates a response to the function response immediately, interrupting any ongoing user interaction.</p> 
+<pre>User: Please book the 2:00 PM flight to New York for me.
+
+Model: function_call: {name: "book_ticket"}
+//(The book_ticket function call is sent to the client and starts running asynchronously in the background.)
+
+User: What is the current time in New York?
+
+//(The book_ticket function finishes, and client sends the result with scheduling: "INTERRUPT".)
+Function_response: {name: "book_ticket", scheduling: "INTERRUPT", response: {booking_status: "booked"}}
+//(The ongoing interaction about the time is interrupted, and model skips responding to it.)
+
+Model: Your flight has been booked. Expect a confirmation text on your phone within 5 minutes.
+</pre> <h3 id="aggregate-responses">Aggregate multiple non-blocking responses</h3> <p>When the model calls multiple non-blocking tools concurrently (such as parallel data lookups), sending each result individually with <code translate="no" dir="ltr">WHEN_IDLE</code> causes the model to generate multiple separate spoken turns. To deliver a single consolidated response, apply one of the following patterns:</p> <ul> <li>
+<strong>Use SILENT for intermediate results</strong>: Send all intermediate tool responses with <code translate="no" dir="ltr">scheduling="SILENT"</code>. Send the final response with <code translate="no" dir="ltr">scheduling="WHEN_IDLE"</code> so the model summarizes all collected data in one turn.</li> <li>
+<strong>Batch responses</strong>: Wait for all concurrent tool tasks to complete and deliver them together in a single <code translate="no" dir="ltr">send_tool_response</code> call with <code translate="no" dir="ltr">function_responses=[...]</code>.</li> </ul> <h2 id="best-practices">Best practices</h2> <ul> <li>
+<strong>Declare tool behavior explicitly</strong>: Set state-changing or irreversible tools to <code translate="no" dir="ltr">BLOCKING</code>, and set read-only or background lookups to <code translate="no" dir="ltr">NON_BLOCKING</code>.</li> <li>
+<strong>Design for concurrency</strong>: Always offload slow tools (like querying external APIs or running RAG pipelines) to background tasks in your backend. Let the model keep handling the active audio stream.</li> <li>
+<strong>Schedule non-blocking responses deliberately</strong>: Use <code translate="no" dir="ltr">SILENT</code> for intermediate responses, <code translate="no" dir="ltr">WHEN_IDLE</code> for the final result that should trigger spoken output, and <code translate="no" dir="ltr">INTERRUPT</code> only for critical alerts. Leaving <code translate="no" dir="ltr">scheduling</code> unset defaults to <code translate="no" dir="ltr">WHEN_IDLE</code> and initiates a model turn for each response.</li> <li>
+<strong>Independent chat turns</strong>: In Gemini Live API, tool execution is completely independent of chat turns. The conversation can branch, continue, and flow naturally while your tool processes in the background.</li> <li>
+<strong>The "Silent" caveat</strong>: The model might still occasionally try to verbally narrate a tool's execution even if scheduled as <code translate="no" dir="ltr">SILENT</code>. To enforce true silence, add explicit guardrails to your System Instructions (for example, "When using [Tool Name], perform a SILENT EXECUTION and say nothing"), or use a "fire-and-forget" backend pattern where you don't send a <code translate="no" dir="ltr">FunctionResponse</code> back to the model at all.</li> </ul> <h2 id="whats-next">What's next</h2> <div class="devsite-card-group">                   <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Overview </span> <h3 class="hide-from-toc no-link" id="live-api-overview"> <a href="../live-api" track-metadata-eventdetail="/gemini-enterprise-agent-platform/models/live-api/" track-type="card" track-name="
+  Live API overview
+" track-metadata-child_headline="Live API overview" track-metadata-child_chip_label="Overview"> Live API overview </a> </h3> <p class="devsite-card-summary"> Get an overview of Live API. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-red"> Reference </span> <h3 class="hide-from-toc no-link" id="live-api-reference-guide"> <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/live-api" track-metadata-eventdetail="/gemini-enterprise-agent-platform/reference/models/live-api" track-type="card" track-name="
+  Live API reference guide
+" track-metadata-child_headline="Live API reference guide" track-metadata-child_chip_label="Reference"> Live API reference guide </a> </h3> <p class="devsite-card-summary"> Reference guide for Live API. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="start-and-manage-live-sessions"> <a href="start-manage-session" track-metadata-eventdetail="/gemini-enterprise-agent-platform/models/live-api/start-manage-session" track-type="card" track-name="
+  Start and manage live sessions
+" track-metadata-child_headline="Start and manage live sessions" track-metadata-child_chip_label="Guide"> Start and manage live sessions </a> </h3> <p class="devsite-card-summary"> Learn how to start and manage live sessions with Live API. </p> </div> </div> </div> </div> <div class="devsite-card-wrapper"> <div class="devsite-card"> <div class="devsite-card-content-wrapper"> <div class="devsite-card-content"> <span class="devsite-label" background="google-blue"> Guide </span> <h3 class="hide-from-toc no-link" id="configure-gemini-capabilities"> <a href="configure-gemini-capabilities" track-metadata-eventdetail="/gemini-enterprise-agent-platform/models/live-api/configure-gemini-capabilities" track-type="card" track-name="
+  Configure Gemini capabilities
+" track-metadata-child_headline="Configure Gemini capabilities" track-metadata-child_chip_label="Guide"> Configure Gemini capabilities </a> </h3> <p class="devsite-card-summary"> Learn how to configure Gemini capabilities for Live API. </p> </div> </div> </div> </div>                      </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/asynchronous-function-calling" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/asynchronous-function-calling</a>
+  </p>
+</div>

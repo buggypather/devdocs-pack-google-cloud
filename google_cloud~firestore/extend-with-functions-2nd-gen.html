@@ -1,0 +1,673 @@
+<h1>Extend Cloud Run with event triggers using Cloud Run functions</h1> <h1 class="devsite-page-title" id="extend-cloud-run-with-event-triggers-using-cloud-run-functions">Extend Cloud Run with event triggers using Cloud Run functions</h1>  <p>With Cloud Run functions, you can deploy code to handle events triggered by changes in your Cloud Run database. This lets you add server-side functionality without running your own servers.</p> <aside class="note"><strong>Note:</strong><span> This feature is also available through Cloud Functions for Firebase (2nd gen). To see examples that use the Firebase SDK, see <a href="https://firebase.google.com/docs/firestore/extend-with-functions-2nd-gen">Extend Cloud Run with Cloud Functions for Firebase (2nd gen)</a>.</span></aside> <p>This guide describes how to create triggers for Cloud Run functions from Firestore events.</p> <p>You can trigger your Cloud Run functions from events in a Firestore database. When triggered, your function reads and updates a Firestore database in response to these events through the <a href="https://docs.cloud.google.com/firestore/docs/apis">Firestore APIs and client libraries</a>.</p> <p>The process of Firestore events triggering a Cloud Run function consists of the following steps:</p> <ol> <li><p>The service waits for changes to a particular document.</p></li> <li><p>When a change occurs, the service is triggered and performs its tasks.</p></li> <li><p>The service receives a data object with a snapshot of the affected document. For <code translate="no" dir="ltr">write</code> or <code translate="no" dir="ltr">update</code> events, the data object contains snapshots representing document state before and after the triggering event.</p></li> </ol> <h2 id="before_you_begin">Before you begin</h2> <ol> <li>Make sure you have set up a new project for Cloud Run as described in the <a href="https://docs.cloud.google.com/run/docs/setup">setup</a> page.</li> <li>
+<p>Enable the Artifact Registry, Cloud Build, Cloud Run Admin API, Eventarc, Firestore Cloud Logging, and Pub/Sub APIs:</p> 
+<p><a class="button button-primary" href="https://console.cloud.google.com/flows/enableapi" target="console" track-name="consoleLink" track-type="task" track-metadata-position="body" track-metadata-event-detail="flows/enableapi?apiid=cloudbuild.googleapis.com,artifactregistry.googleapis.com,eventarc.googleapis.com,run.googleapis.com,logging.googleapis.com,pubsub.googleapis.com,firestore.googleapis.com">Enable the APIs</a> </p>
+</li> </ol> <h3 id="required-roles">Required roles</h3> <p>You or your administrator must grant the deployer account and the trigger identity. Optionally, grant the Pub/Sub service agent the following IAM roles.</p> <div>  <h4 class="showalways" id="required-roles-for-the-deployer-account">Required roles for the deployer account</h4> <p> To get the permissions that you need to trigger from Firestore events, ask your administrator to grant you the following IAM roles on your project: </p> <ul> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudbuild#cloudbuild.builds.editor">Cloud Build Editor </a> (<code translate="no" dir="ltr">roles/cloudbuild.builds.editor</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run#run.admin">Cloud Run Admin </a> (<code translate="no" dir="ltr">roles/run.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/firestore#datastore.owner">Datastore Owner </a> (<code translate="no" dir="ltr">roles/datastore.owner</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/eventarc#eventarc.admin">Eventarc Admin </a> (<code translate="no" dir="ltr">roles/eventarc.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/logging#logging.viewAccessor">Logs View Accessor </a> (<code translate="no" dir="ltr">roles/logging.viewAccessor</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/resourcemanager#resourcemanager.projectIamAdmin">Project IAM Admin </a> (<code translate="no" dir="ltr">roles/resourcemanager.projectIamAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountAdmin">Service Account Admin </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountUser">Service Account User </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountUser</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/serviceusage#serviceusage.serviceUsageAdmin">Service Usage Admin </a> (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>)</li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <p>Note that by default, <a href="https://docs.cloud.google.com/artifact-registry/docs/access-control#gcp">Cloud Build permissions include permissions to upload and download Artifact Registry artifacts</a>.</p>  </div> <div>  <h4 class="showalways" id="required-roles-for-the-trigger-identity">Required roles for the trigger identity</h4> <ol> <li>
+<p>Make note of the <a href="https://docs.cloud.google.com/iam/docs/service-account-types#default">Compute Engine default service account</a> as you will attach it to an Eventarc trigger to represent the identity of the trigger for testing purposes. This service account is automatically created after enabling or using a Google Cloud service that uses Compute Engine, and with the following email format:</p> <div>
+
+<pre>PROJECT_NUMBER-compute@developer.gserviceaccount.com</pre>
+</div> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> with your Google Cloud project number. You can find your project number on the <a target="console" track-name="consoleLink" track-type="quickstart" href="https://console.cloud.google.com/welcome">Welcome</a> page of the Google Cloud console or by running the following command:</p> 
+<pre>gcloud projects describe PROJECT_ID --format='value(projectNumber)'</pre> <p>For production environments, we strongly recommend <a href="https://docs.cloud.google.com/iam/docs/service-accounts-create">creating a new service account</a> and granting it one or more IAM roles that contain the <a href="https://docs.cloud.google.com/iam/docs/best-practices-service-accounts#limit-service-account-privileges">minimum permissions required</a> and follow the principle of <a href="https://docs.cloud.google.com/iam/docs/using-iam-securely#least_privilege">least privilege</a>.</p> <aside class="note"> <b>Note:</b> <p> The <a href="https://docs.cloud.google.com/resource-manager/docs/organization-policy/restricting-service-accounts#disable_service_account_default_grants"> <code translate="no" dir="ltr">iam.automaticIamGrantsForDefaultServiceAccounts</code> organization policy constraint</a> prevents the Editor role from being automatically granted to default service accounts. If you created your organization after May 3, 2024, this constraint is enforced by default. </p> <p> We strongly recommend that you enforce this constraint to disable the automatic role grant. If you disable the automatic role grant, you must decide which roles to grant to the default service accounts, and then <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">grant these roles</a> yourself. </p> <p> If the default service account already has the Editor role, we recommend that you replace the Editor role with less permissive roles.To safely modify the service account's roles, use <a href="https://docs.cloud.google.com/policy-intelligence/docs/simulate-iam-policies">Policy Simulator</a> to see the impact of the change, and then <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">grant and revoke the appropriate roles</a>.</p> </aside> </li> <li>By default, Cloud Run services are only callable by Project Owners, Project Editors, and Cloud Run Admins and Invokers. You can <a href="https://docs.cloud.google.com/run/docs/securing/managing-access#control-service-or-job-access">control access on a per-service basis</a>; however, for testing purposes, grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run#run.invoker">Cloud Run Invoker role</a> (<code translate="no" dir="ltr">run.invoker</code>) on the Google Cloud project to the Compute Engine service account. This grants the role on all Cloud Run services and jobs in a project. 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member=serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+    --role=roles/run.invoker</pre> <p> Note that if you create a trigger for an authenticated Cloud Run service without granting the Cloud Run Invoker role, the trigger is created successfully and is active. However, the trigger will not work as expected and a message similar to the following appears in the logs:</p> <code translate="no" dir="ltr">The request was not authenticated. Either allow public access or set the proper Authorization
+    header.</code> </li> <li>Grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/eventarc#eventarc.eventReceiver">Eventarc Event Receiver role</a> (<code translate="no" dir="ltr">roles/eventarc.eventReceiver</code>) on the project to the Compute Engine default service account so that the Eventarc trigger can receive events from event providers. 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member=serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+    --role=roles/eventarc.eventReceiver</pre> </li> </ol>  </div> <div>  <h4 class="showalways" id="optional-role-for-the-pubsub-service-agent">Optional role for the Pub/Sub service agent</h4> <ul> <li>If you enabled the Cloud Pub/Sub service agent on or before April 8, 2021, to support authenticated Pub/Sub push requests, grant the <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountTokenCreator">Service Account Token Creator role</a> (<code translate="no" dir="ltr">roles/iam.serviceAccountTokenCreator</code>) to the service agent. Otherwise, this role is granted by default: 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member=serviceAccount:service-PROJECT_NUMBER@gcp-sa-pubsub.iam.gserviceaccount.com \
+    --role=roles/iam.serviceAccountTokenCreator</pre> </li> </ul>  </div> <h2 id="set_up_your_database">Set up your Firestore database</h2> <p>Before you deploy your service, you must create a Firestore database:</p> <ol> <li><p>Go to the <a href="https://console.cloud.google.com/firestore/databases">Firestore page</a>.</p></li> <li><p>Select <strong>Create a Firestore database</strong>.</p></li> <li><p>In the <strong>Name your database</strong> field, enter a <em>Database ID</em>, such as <code translate="no" dir="ltr">firestore-db</code>.</p></li> <li><p>In the <strong>Configuration options</strong> section, <strong>Firestore native</strong> is selected by default along with the applicable security rules.</p></li> <li><p>In <strong>Location type</strong>, select <strong>Region</strong> and choose the region for where your database is to reside. This choice is permanent.</p></li> <li><p>Click <strong>Create database</strong>.</p></li> </ol> <p>The <a href="https://docs.cloud.google.com/firestore/docs/data-model">Firestore data model</a> consists of collections that contain documents. A document contains a set of key-value pairs.</p> <h2 id="write-a-firestore-function">Write a Firestore-triggered function</h2> <p>To write a function that responds to Firestore events, prepare to specify the following during deployment:</p> <ul> <li><a href="#event_types">a trigger event type</a></li> <li><a href="#trigger_event_filters">a trigger event filter to select the documents associated with the function</a></li> <li><a href="#function_code">the function code to run</a></li> </ul> <h3 id="event_types">Event types</h3> <p>Firestore supports <code translate="no" dir="ltr">create</code>, <code translate="no" dir="ltr">update</code>, <code translate="no" dir="ltr">delete</code>, and <code translate="no" dir="ltr">write</code> events. The <code translate="no" dir="ltr">write</code> event encompasses all modifications to a document.</p> <table> <thead> <tr> <th>Event type</th> <th>Trigger</th> </tr> </thead> <tbody> <tr> <td nowrap>
+<code translate="no" dir="ltr">google.cloud.firestore.document.v1.created</code> (default)</td> <td>Triggered when a document is written to for the first time.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.updated</code></td> <td>Triggered when a document already exists and has any value changed.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.deleted</code></td> <td>Triggered when a document with data is deleted.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.written</code></td> <td>Triggered when a document is created, updated or deleted.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.created.withAuthContext</code></td> <td>Same as <code translate="no" dir="ltr">created</code> but adds authentication information.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.updated.withAuthContext</code></td> <td>Same as <code translate="no" dir="ltr">updated</code> but adds authentication information.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.deleted.withAuthContext</code></td> <td>Same as <code translate="no" dir="ltr">deleted</code> but adds authentication information.</td> </tr> <tr> <td><code translate="no" dir="ltr">google.cloud.firestore.document.v1.written.withAuthContext</code></td> <td>Same as <code translate="no" dir="ltr">written</code> but adds authentication information.</td> </tr> </tbody> </table> <aside class="note"><strong>Note:</strong><span> You set triggers at the document level. It is not possible to create a trigger activated by changes to a specific field or collection.</span></aside> <p>Wildcards are written in triggers using curly braces, for example: <code translate="no" dir="ltr">projects/<var translate="no">YOUR_PROJECT_ID</var>/databases/(default)/documents/collection/{document_wildcard}</code></p> <h3 id="trigger_event_filters">Trigger event filters</h3> <p>To trigger your service, specify a document path to listen to. The document path must be in the same Google Cloud project as the service.</p> <p>Here are a few examples of valid document paths:</p> <ul> <li><p><code translate="no" dir="ltr">users/marie</code>: Monitors a single document, <code translate="no" dir="ltr">/users/marie</code>.</p></li> <li><p><code translate="no" dir="ltr">users/{username}</code>: Monitors all user documents. Wildcards are used to monitor all documents in the collection.</p></li> <li><p><code translate="no" dir="ltr">users/{username}/addresses/home</code>: Monitors the home address document for all users.</p></li> <li><p><code translate="no" dir="ltr">users/{username}/addresses/{addressId}</code>: Monitors all address documents.</p></li> <li><p><code translate="no" dir="ltr">users/{user=**}</code>: Monitors all user documents and any documents in subcollections under each user document such as <code translate="no" dir="ltr">/users/userID/address/home</code> or <code translate="no" dir="ltr">/users/userID/phone/work</code>.</p></li> <li><p><code translate="no" dir="ltr">users/{username}/addresses</code>: <em>invalid</em> address path. Refers to the subcollection <code translate="no" dir="ltr">addresses</code>, not a document.</p></li> </ul> <h4 id="wildcards_and_parameters">Wildcards and parameters</h4> <p>If you don't know the specific document you want to monitor, use a <code translate="no" dir="ltr">{wildcard}</code> instead of the document ID:</p> <ul> <li>
+<code translate="no" dir="ltr">users/{username}</code> listens for changes to all user documents.</li> </ul> <p>In this example, when any field on any document in <code translate="no" dir="ltr">users</code> is changed, it matches a wildcard called <code translate="no" dir="ltr">{username}</code>.</p> <p>If a document in <code translate="no" dir="ltr">users</code> has <a href="https://docs.cloud.google.com/firestore/docs/concepts/structure-data#subcollections">subcollections</a>, and a field in one of those subcollections' documents is changed, the <code translate="no" dir="ltr">{username}</code> wildcard is <em>not</em> triggered. If your goal is to respond to events in subcollections also, use the multi-segment wildcard <code translate="no" dir="ltr">{username=**}</code>.</p> <p>Wildcard matches are extracted from document paths. You can define as many wildcards as you like to substitute explicit collection or document IDs. You can use up to <em>one</em> multi-segment wildcard like <code translate="no" dir="ltr">{username=**}</code>.</p> <h3 id="function_code">Function code</h3> <p>See <a href="#examples">examples</a> for how to use Firestore in Native Mode events to trigger a Cloud Run function.</p> <h4 id="include_the_proto_dependencies_in_your_source">Include the proto dependencies in your source</h4> <p>You must include the <a href="https://github.com/googleapis/google-cloudevents/blob/main/proto/google/events/cloud/firestore/v1/data.proto">Cloud Run <code translate="no" dir="ltr">data.proto</code></a> file in the source directory for your function. This file imports the following protos which you must also include in your source directory:</p> <ul> <li><a href="https://github.com/protocolbuffers/protobuf/blob/main/src/google/protobuf/struct.proto"><code translate="no" dir="ltr">google/protobuf/struct.proto</code></a></li> <li><a href="https://github.com/protocolbuffers/protobuf/blob/main/src/google/protobuf/timestamp.proto"><code translate="no" dir="ltr">google/protobuf/timestamp.proto</code></a></li> <li><a href="https://github.com/googleapis/googleapis/blob/master/google/type/latlng.proto"><code translate="no" dir="ltr">google/type/latlng.proto</code></a></li> </ul> <p>Use the same directory structure for the dependencies. For example, place <code translate="no" dir="ltr">struct.proto</code> within <code translate="no" dir="ltr">google/protobuf</code>.</p> <p>These files are required to decode event data. If your function source does not include these files, it returns an error when it runs.</p> <h4 id="event_attributes">Event attributes</h4> <p>Each event includes <a href="https://docs.cloud.google.com/eventarc/docs/workflows/cloudevents#payload-format">data attributes</a> that include information about the event such as the time the event triggered. Cloud Run adds additional data about the database and document involved in the event. You can access these attributes as follows:</p> <div class="ds-selector-tabs" data-ds-scope="lang"> <section> <p class="_code-tab"><strong>Java</strong></p> 
+<pre data-language="java">logger.info("Function triggered by event on: " + event.getSource());
+logger.info("Event type: " + event.getType());
+logger.info("Event time " + event.getTime());
+logger.info("Event project: " + event.getExtension("project"));
+logger.info("Event location: " + event.getExtension("location"));
+logger.info("Database name: " + event.getExtension("database"));
+logger.info("Database document: " + event.getExtension("document"));
+// For withAuthContext events
+logger.info("Auth information: " + event.getExtension("authid"));
+logger.info("Auth information: " + event.getExtension("authtype"));</pre> </section> <section> <p class="_code-tab"><strong>Node.js</strong></p> 
+<pre data-language="javascript">console.log(`Function triggered by event on: ${cloudEvent.source}`);
+console.log(`Event type: ${cloudEvent.type}`);
+console.log(`Event time: ${cloudEvent.time}`);
+console.log(`Event project: ${cloudEvent.project}`);
+console.log(`Event location: ${cloudEvent.location}`);
+console.log(`Database name: ${cloudEvent.database}`);
+console.log(`Document name: ${cloudEvent.document}`);
+// For withAuthContext events
+console.log(`Auth information: ${cloudEvent.authid}`);
+console.log(`Auth information: ${cloudEvent.authtype}`);</pre> </section> <section> <p class="_code-tab"><strong>Python</strong></p> 
+<pre data-language="python">print(f"Function triggered by change to: {cloud_event['source']}")
+print(f"Event type: {cloud_event['type']}")
+print(f"Event time: {cloud_event['time']}")
+print(f"Event project: {cloud_event['project']}")
+print(f"Location: {cloud_event['location']}")
+print(f"Database name: {cloud_event['database']}")
+print(f"Document: {cloud_event['document']}")
+// For withAuthContext events
+print(f"Auth information: {cloud_event['authid']}")
+print(f"Auth information: {cloud_event['authtype']}")</pre> </section> </div> <h2 id="event_structures">Event structures</h2> <p>This trigger invokes your service with an event similar to: </p>
+
+<pre>{
+    "oldValue": { // Update and Delete operations only
+        A Document object containing a pre-operation document snapshot
+    },
+    "updateMask": { // Update operations only
+        A DocumentMask object that lists changed fields.
+    },
+    "value": {
+        // A Document object containing a post-operation document snapshot
+    }
+}</pre> <p>Each <code translate="no" dir="ltr">Document</code> object contains one or more <code translate="no" dir="ltr">Value</code> objects. See the <a href="https://docs.cloud.google.com/firestore/docs/reference/rest/v1/Value"><code translate="no" dir="ltr">Value</code> documentation</a> for type references.</p> <h2 id="trigger-functions">Create triggers for functions</h2> <p>After deploying a function, you can configure a trigger using the Google Cloud console, Google Cloud CLI, or Terraform.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>When you use the Google Cloud console to create a function, you can also add a trigger to your function. Follow these steps to create a trigger for your function:</p> <ol> <li>
+<p>In the Google Cloud console, go to Cloud Run:</p> <p><a href="https://console.cloud.google.com/run/services" track-type="quickstart" track-name="consoleLink" track-metadata-end-goal="createService" target="console" class="button button-blue">Go to Cloud Run</a> </p>
+</li> <li><p>Click <strong>Write a function</strong>, and enter the function details. For more information about configuring functions during deployment, see <a href="https://docs.cloud.google.com/run/docs/deploy-functions#console">Deploy functions</a>.</p></li> <li><p>In the <strong>Trigger</strong> section, click <strong>Add trigger</strong>.</p></li> <li><p>Select <b>Firestore trigger</b>.</p></li> <li>
+<p>In the <strong>Eventarc trigger</strong> pane, modify the trigger details as follows:</p> <ol> <li><p>Enter a name for the trigger in the <strong>Trigger name</strong> field, or use the default name.</p></li> <li>
+<p>Select a <strong>Trigger type</strong> from the list:</p> <ul> <li><p><strong>Google Sources</strong> to specify triggers for Pub/Sub, Cloud Storage, Firestore, and other Google event providers.</p></li> <li><p><strong>Third-party</strong> to integrate with non-Google providers that offer an Eventarc source. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/third-parties/third-parties-overview">Third-party events in Eventarc</a>.</p></li> </ul>
+</li> <li><p>Select <b>Firestore</b> from the <strong>Event provider</strong> list, to select a product that provides the type of event for triggering your function. For the list of event providers, see <a href="https://docs.cloud.google.com/eventarc/docs/event-providers-targets">Event providers and destinations</a>.</p></li> <li>
+<p>Select <b>type=google.cloud.firestore.document.v1.created</b> from the <strong>Event type</strong> list. Your trigger configuration varies depending on the supported event type. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/event-types">Event types</a>.</p> </li> <li><p>In the Filters section, select a database, operation and attribute values, or use the default selections. </p></li> <li><p>If the <strong>Region</strong> field is enabled, select a <a href="https://docs.cloud.google.com/eventarc/docs/overview#trigger-location">location</a> for the Eventarc trigger. In general, the location of an Eventarc trigger should match the location of the Google Cloud resource that you want to monitor for events. In most scenarios, you should also deploy your function in the same region. See <a href="https://docs.cloud.google.com/eventarc/docs/understand-locations">Understand Eventarc locations</a> for more details about Eventarc trigger locations.</p></li> <li><p>In the <strong>Service account</strong> field, select a service account. Eventarc triggers are linked to service accounts to use as an identity when invoking your function. Your Eventarc trigger's service account must have the permission to invoke your function. By default, Cloud Run uses the <a href="https://docs.cloud.google.com/compute/docs/access/service-accounts#default_service_account">Compute Engine default service account</a>.</p></li> <li><p>Optionally, specify the <strong>Service URL path</strong> to send the incoming request to. This is the relative path on the destination service to which the events for the trigger should be sent. For example: <code translate="no" dir="ltr">/</code>, <code translate="no" dir="ltr">/route</code>, <code translate="no" dir="ltr">route</code>, and <code translate="no" dir="ltr">route/subroute</code>.</p></li> <li><p>Optionally, to enable retries if the delivery attempt fails, select the <strong>Enable retry on failure</strong> checkbox; otherwise, the default behavior is a single delivery attempt with no retries. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/retry-events">Retry events</a>.</p></li> </ol>
+</li> <li><p>Once you've completed the required fields, click <strong>Save trigger</strong>.</p></li> <li><p>Click <strong>Create</strong>.</p></li> <li><p>In the <strong>Source</strong> tab, edit the source code if needed, then select <strong>Save and redeploy</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>When you create a function using the gcloud CLI, you must first <a href="https://docs.cloud.google.com/run/docs/deploy-functions">deploy</a> your function, and then create a trigger. Follow these steps to create a trigger for your function:</p> <ol> <li>
+<p>Run the following command in the directory that contains the sample code to deploy your function:</p> 
+<pre data-language="bash">gcloud run deploy FUNCTION \
+    --source . \
+    --function FUNCTION_ENTRYPOINT \
+    --base-image BASE_IMAGE_ID \
+    --region REGION
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">FUNCTION</var></code>: the name of the function you are deploying. You can omit this parameter entirely, but you will be prompted for the name if you omit it.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">FUNCTION_ENTRYPOINT</var></code>: the entry point to your function in your source code. This is the code Cloud Run executes when your function runs. The value of this flag must be a function name or fully-qualified class name that exists in your source code.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">BASE_IMAGE_ID</var></code>: the base image environment for your function. For more details about base images and the packages included in each image, see <a href="https://docs.cloud.google.com/run/docs/configuring/services/runtime-base-images#how_to_obtain_base_images">Runtimes base images</a>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud <a href="https://docs.cloud.google.com/run/docs/locations">region</a> where you want to deploy your function. For example, <code translate="no" dir="ltr">europe-west1</code>.</p></li> </ul>
+</li> <li>
+<p>Run the following command to create a trigger that filters and routes events:</p> 
+
+<pre data-language="bash">gcloud eventarc triggers create TRIGGER_NAME  \
+    --location=EVENTARC_TRIGGER_LOCATION \
+    --destination-run-service=FUNCTION  \
+    --destination-run-region=REGION \
+    --event-filters="type=google.cloud.firestore.document.v1.created" \
+    --service-account=PROJECT_NUMBER-compute@developer.gserviceaccount.com
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRIGGER_NAME</var></code>: the ID of the trigger or a fully qualified identifier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of the Eventarc trigger. Alternatively, you can set the <code translate="no" dir="ltr">eventarc/location</code> property; for example, <code translate="no" dir="ltr">gcloud config set eventarc/location us-central1</code>. <p>To avoid any performance and data residency issues, the location must match the location of the Google Cloud service that is generating events. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/locations">Eventarc locations</a>.</p> </li> <li> <code translate="no" dir="ltr"><var translate="no">FUNCTION</var></code>: the name of the deployed Cloud Run function that receives the events for the trigger. </li> <li> <code translate="no" dir="ltr"><var translate="no">DESTINATION_RUN_REGION</var></code>: (optional) the <a href="https://docs.cloud.google.com/run/docs/locations">Cloud Run location</a> in which the destination Cloud Run function can be found. If not specified, it is assumed that the function is in the same region as the trigger. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">EVENT_FILTER_TYPE</var></code>: the identifier of the event. An event is generated when an API call for the method succeeds. For long-running operations, the event is only generated at the end of the operation, and only if the action is performed successfully. For a list of supported event types, see <a href="https://docs.cloud.google.com/eventarc/docs/reference/supported-events#directly-from-a-google-cloud-source">Google event types supported by Eventarc</a>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_NAME</var></code>: the name of your user-managed service account. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID. </li> </ul> <p>Notes:</p> <ul> <li>After a trigger is created, the event filter type can't be changed. For a different event type, you must create a new trigger. </li> <li>
+<code translate="no" dir="ltr">--event-filters=type=google.cloud.firestore.document.v1.written</code> specifies that the function is triggered when a document is created, updated or deleted, per the <a href="https://docs.cloud.google.com/run/docs/triggering/firestore-triggers#event_types">event type</a>.</li> <li>
+<code translate="no" dir="ltr">--event-filters=database='(default)'</code> specifies the Firebase database. For the default database name, use <code translate="no" dir="ltr">(default)</code>.</li> <li>
+<code translate="no" dir="ltr">--event-filters-path-pattern=document='users/{username}'</code> provides the path pattern of the documents that should be monitored for relevant changes. This path pattern states that all documents in the <code translate="no" dir="ltr">users</code> collection should be monitored. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/path-patterns">Understand path patterns</a>.</li> <li>Optionally, to specify a single event delivery attempt with no retries, use the <code translate="no" dir="ltr">--max-retry-attempts</code> flag. The only valid value is <code translate="no" dir="ltr">1</code>. If you omit the flag, the standard retry behavior applies. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/retry-events">Retry events</a>. </li> <li>Other flags are available. For more information, see <a href="https://docs.cloud.google.com/sdk/gcloud/reference/eventarc/triggers/create"><code translate="no" dir="ltr">gcloud eventarc triggers create</code></a>. </li> </ul>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>To create an Eventarc trigger for a Cloud Run function, see <a href="https://docs.cloud.google.com/eventarc/docs/creating-triggers-terraform">Create a trigger using Terraform</a>.</p></section> </div> <h2 id="examples">Examples</h2> <p>The following examples describe how to use Firestore in Native Mode events to trigger a Cloud Run function.</p> <h3 id="hello_firestore_function">Example 1: Hello Firestore function</h3> <p>The following sample prints the fields of a triggering Firestore event:</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">/**
+ * Cloud Event Function triggered by a change to a Firestore document.
+ */
+const functions = require('@google-cloud/functions-framework');
+const protobuf = require('protobufjs');
+
+functions.cloudEvent('helloFirestore', async cloudEvent =&gt; {
+  console.log(`Function triggered by event on: ${cloudEvent.source}`);
+  console.log(`Event type: ${cloudEvent.type}`);
+
+  console.log('Loading protos...');
+  const root = await protobuf.load('data.proto');
+  const DocumentEventData = root.lookupType(
+    'google.events.cloud.firestore.v1.DocumentEventData'
+  );
+
+  console.log('Decoding data...');
+  const firestoreReceived = DocumentEventData.decode(cloudEvent.data);
+
+  console.log('\nOld value:');
+  console.log(JSON.stringify(firestoreReceived.oldValue, null, 2));
+
+  console.log('\nNew value:');
+  console.log(JSON.stringify(firestoreReceived.value, null, 2));
+});
+</pre> </div> </section> <section><p class="_code-tab"><strong>Python</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">from cloudevents.http import CloudEvent
+import functions_framework
+from google.events.cloud import firestore
+
+
+@functions_framework.cloud_event
+def hello_firestore(cloud_event: CloudEvent) -&gt; None:
+    """Triggers by a change to a Firestore document.
+
+    Args:
+        cloud_event: cloud event with information on the firestore event trigger
+    """
+    firestore_payload = firestore.DocumentEventData()
+    firestore_payload._pb.ParseFromString(cloud_event.data)
+
+    print(f"Function triggered by change to: {cloud_event['source']}")
+
+    print("\nOld value:")
+    print(firestore_payload.old_value)
+
+    print("\nNew value:")
+    print(firestore_payload.value)
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+// Package hellofirestore contains a Cloud Event Function triggered by a Cloud Firestore event.
+package hellofirestore
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
+	"github.com/cloudevents/sdk-go/v2/event"
+	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
+	"google.golang.org/protobuf/proto"
+)
+
+func init() {
+	functions.CloudEvent("helloFirestore", HelloFirestore)
+}
+
+// HelloFirestore is triggered by a change to a Firestore document.
+func HelloFirestore(ctx context.Context, event event.Event) error {
+	var data firestoredata.DocumentEventData
+
+	// If you omit `DiscardUnknown`, protojson.Unmarshal returns an error
+	// when encountering a new or unknown field.
+	options := proto.UnmarshalOptions{
+		DiscardUnknown: true,
+	}
+	err := options.Unmarshal(event.Data(), &amp;data)
+
+	if err != nil {
+		return fmt.Errorf("proto.Unmarshal: %w", err)
+	}
+
+	fmt.Printf("Function triggered by change to: %v\n", event.Source())
+	fmt.Printf("Old value: %+v\n", data.GetOldValue())
+	fmt.Printf("New value: %+v\n", data.GetValue())
+	return nil
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Java</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">import com.google.cloud.functions.CloudEventsFunction;
+import com.google.events.cloud.firestore.v1.DocumentEventData;
+import com.google.protobuf.InvalidProtocolBufferException;
+import io.cloudevents.CloudEvent;
+import java.util.logging.Logger;
+
+public class FirebaseFirestore implements CloudEventsFunction {
+  private static final Logger logger = Logger.getLogger(FirebaseFirestore.class.getName());
+
+  @Override
+  public void accept(CloudEvent event) throws InvalidProtocolBufferException {
+    DocumentEventData firestoreEventData = DocumentEventData
+        .parseFrom(event.getData().toBytes());
+
+    logger.info("Function triggered by event on: " + event.getSource());
+    logger.info("Event type: " + event.getType());
+
+    logger.info("Old value:");
+    logger.info(firestoreEventData.getOldValue().toString());
+
+    logger.info("New value:");
+    logger.info(firestoreEventData.getValue().toString());
+  }
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>C#</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="csharp">using CloudNative.CloudEvents;
+using Google.Cloud.Functions.Framework;
+using Google.Events.Protobuf.Cloud.Firestore.V1;
+using Microsoft.Extensions.Logging;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace FirebaseFirestore;
+
+public class Function : ICloudEventFunction&lt;DocumentEventData&gt;
+{
+    private readonly ILogger _logger;
+
+    public Function(ILogger&lt;Function&gt; logger) =&gt;
+        _logger = logger;
+
+    public Task HandleAsync(CloudEvent cloudEvent, DocumentEventData data, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Function triggered by event on {subject}", cloudEvent.Subject);
+        _logger.LogInformation("Event type: {type}", cloudEvent.Type);
+        MaybeLogDocument("Old value", data.OldValue);
+        MaybeLogDocument("New value", data.Value);
+
+        // In this example, we don't need to perform any asynchronous operations, so the
+        // method doesn't need to be declared async.
+        return Task.CompletedTask;
+    }
+
+    /// &lt;summary&gt;
+    /// Logs the names and values of the fields in a document in a very simplistic way.
+    /// &lt;/summary&gt;
+    private void MaybeLogDocument(string message, Document document)
+    {
+        if (document is null)
+        {
+            return;
+        }
+
+        // ConvertFields converts the Firestore representation into a .NET-friendly
+        // representation.
+        IReadOnlyDictionary&lt;string, object&gt; fields = document.ConvertFields();
+        var fieldNamesAndTypes = fields
+            .OrderBy(pair =&gt; pair.Key)
+            .Select(pair =&gt; $"{pair.Key}: {pair.Value}");
+        _logger.LogInformation(message + ": {fields}", string.Join(", ", fieldNamesAndTypes));
+    }
+}</pre> </div> </section> </div> <h4 id="deploy_hello_firestore_function">Deploy the function</h4> <p>If you haven't already done so, set up your <a href="#set_up_your_database">Firestore database</a>.</p> <p>After deploying a function, you can configure a trigger using the Google Cloud console, Google Cloud CLI, or Terraform.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>When you use the Google Cloud console to create a function, you can also add a trigger to your function. Follow these steps to create a trigger for your function:</p> <ol> <li>
+<p>In the Google Cloud console, go to Cloud Run:</p> <p><a href="https://console.cloud.google.com/run/services" track-type="quickstart" track-name="consoleLink" track-metadata-end-goal="createService" target="console" class="button button-blue">Go to Cloud Run</a> </p>
+</li> <li><p>Click <strong>Write a function</strong>, and enter the function details. For more information about configuring functions during deployment, see <a href="https://docs.cloud.google.com/run/docs/deploy-functions#console">Deploy functions</a>.</p></li> <li><p>In the <strong>Trigger</strong> section, click <strong>Add trigger</strong>.</p></li> <li><p>Select <b>Firestore trigger</b>.</p></li> <li>
+<p>In the <strong>Eventarc trigger</strong> pane, modify the trigger details as follows:</p> <ol> <li><p>Enter a name for the trigger in the <strong>Trigger name</strong> field, or use the default name.</p></li> <li>
+<p>Select a <strong>Trigger type</strong> from the list:</p> <ul> <li><p><strong>Google Sources</strong> to specify triggers for Pub/Sub, Cloud Storage, Firestore, and other Google event providers.</p></li> <li><p><strong>Third-party</strong> to integrate with non-Google providers that offer an Eventarc source. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/third-parties/third-parties-overview">Third-party events in Eventarc</a>.</p></li> </ul>
+</li> <li><p>Select <b>Firestore</b> from the <strong>Event provider</strong> list, to select a product that provides the type of event for triggering your function. For the list of event providers, see <a href="https://docs.cloud.google.com/eventarc/docs/event-providers-targets">Event providers and destinations</a>.</p></li> <li>
+<p>Select <b>type=google.cloud.firestore.document.v1.written</b> from the <strong>Event type</strong> list. Your trigger configuration varies depending on the supported event type. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/event-types">Event types</a>.</p> </li> <li><p>In the Filters section, select a database, operation and attribute values, or use the default selections. </p></li> <li><p>If the <strong>Region</strong> field is enabled, select a <a href="https://docs.cloud.google.com/eventarc/docs/overview#trigger-location">location</a> for the Eventarc trigger. In general, the location of an Eventarc trigger should match the location of the Google Cloud resource that you want to monitor for events. In most scenarios, you should also deploy your function in the same region. See <a href="https://docs.cloud.google.com/eventarc/docs/understand-locations">Understand Eventarc locations</a> for more details about Eventarc trigger locations.</p></li> <li><p>In the <strong>Service account</strong> field, select a service account. Eventarc triggers are linked to service accounts to use as an identity when invoking your function. Your Eventarc trigger's service account must have the permission to invoke your function. By default, Cloud Run uses the <a href="https://docs.cloud.google.com/compute/docs/access/service-accounts#default_service_account">Compute Engine default service account</a>.</p></li> <li><p>Optionally, specify the <strong>Service URL path</strong> to send the incoming request to. This is the relative path on the destination service to which the events for the trigger should be sent. For example: <code translate="no" dir="ltr">/</code>, <code translate="no" dir="ltr">/route</code>, <code translate="no" dir="ltr">route</code>, and <code translate="no" dir="ltr">route/subroute</code>.</p></li> <li><p>Optionally, to enable retries if the delivery attempt fails, select the <strong>Enable retry on failure</strong> checkbox; otherwise, the default behavior is a single delivery attempt with no retries. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/retry-events">Retry events</a>.</p></li> </ol>
+</li> <li><p>Once you've completed the required fields, click <strong>Save trigger</strong>.</p></li> <li><p>Click <strong>Create</strong>.</p></li> <li><p>In the <strong>Source</strong> tab, edit the source code if needed, then select <strong>Save and redeploy</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>When you create a function using the gcloud CLI, you must first <a href="https://docs.cloud.google.com/run/docs/deploy-functions">deploy</a> your function, and then create a trigger. Follow these steps to create a trigger for your function:</p> <ol> <li>
+<p>Run the following command in the directory that contains the sample code to deploy your function:</p> 
+<pre data-language="bash">gcloud run deploy FUNCTION \
+    --source . \
+    --function FUNCTION_ENTRYPOINT \
+    --base-image BASE_IMAGE_ID \
+    --region REGION
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">FUNCTION</var></code>: the name of the function you are deploying. You can omit this parameter entirely, but you will be prompted for the name if you omit it.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">FUNCTION_ENTRYPOINT</var></code>: the entry point to your function in your source code. This is the code Cloud Run executes when your function runs. The value of this flag must be a function name or fully-qualified class name that exists in your source code.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">BASE_IMAGE_ID</var></code>: the base image environment for your function. For more details about base images and the packages included in each image, see <a href="https://docs.cloud.google.com/run/docs/configuring/services/runtime-base-images#how_to_obtain_base_images">Runtimes base images</a>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud <a href="https://docs.cloud.google.com/run/docs/locations">region</a> where you want to deploy your function. For example, <code translate="no" dir="ltr">europe-west1</code>.</p></li> </ul>
+</li> <li>
+<p>Run the following command to create a trigger that filters and routes events:</p> <p> <code translate="no" dir="ltr">none
+gcloud eventarc triggers create <var translate="no">TRIGGER_NAME</var>  \
+    --location=<var translate="no">EVENTARC_TRIGGER_LOCATION</var> \
+    --destination-run-service=<var translate="no">FUNCTION</var>  \
+    --destination-run-region=<var translate="no">REGION</var> \
+    --event-filters=type=google.cloud.firestore.document.v1.written \
+    --event-filters=database='(default)' \
+    --event-data-content-type=application/protobuf \
+    --event-filters-path-pattern=document='users/{username}' \
+    --service-account=<var translate="no">PROJECT_NUMBER</var>-compute@developer.gserviceaccount.com</code> </p> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRIGGER_NAME</var></code>: the ID of the trigger or a fully qualified identifier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of the Eventarc trigger. Alternatively, you can set the <code translate="no" dir="ltr">eventarc/location</code> property; for example, <code translate="no" dir="ltr">gcloud config set eventarc/location us-central1</code>. <p>To avoid any performance and data residency issues, the location must match the location of the Google Cloud service that is generating events. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/locations">Eventarc locations</a>.</p> </li> <li> <code translate="no" dir="ltr"><var translate="no">FUNCTION</var></code>: the name of the deployed Cloud Run function that receives the events for the trigger. </li> <li> <code translate="no" dir="ltr"><var translate="no">DESTINATION_RUN_REGION</var></code>: (optional) the <a href="https://docs.cloud.google.com/run/docs/locations">Cloud Run location</a> in which the destination Cloud Run function can be found. If not specified, it is assumed that the function is in the same region as the trigger. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">EVENT_FILTER_TYPE</var></code>: the identifier of the event. An event is generated when an API call for the method succeeds. For long-running operations, the event is only generated at the end of the operation, and only if the action is performed successfully. For a list of supported event types, see <a href="https://docs.cloud.google.com/eventarc/docs/reference/supported-events#directly-from-a-google-cloud-source">Google event types supported by Eventarc</a>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_NAME</var></code>: the name of your user-managed service account. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID. </li> </ul> <p>Notes:</p> <ul> <li>After a trigger is created, the event filter type can't be changed. For a different event type, you must create a new trigger. </li> <li>
+<code translate="no" dir="ltr">--event-filters=type=google.cloud.firestore.document.v1.written</code> specifies that the function is triggered when a document is created, updated or deleted, per the <a href="https://docs.cloud.google.com/run/docs/triggering/firestore-triggers#event_types">event type</a>.</li> <li>
+<code translate="no" dir="ltr">--event-filters=database='(default)'</code> specifies the Firebase database. For the default database name, use <code translate="no" dir="ltr">(default)</code>.</li> <li>
+<code translate="no" dir="ltr">--event-filters-path-pattern=document='users/{username}'</code> provides the path pattern of the documents that should be monitored for relevant changes. This path pattern states that all documents in the <code translate="no" dir="ltr">users</code> collection should be monitored. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/path-patterns">Understand path patterns</a>.</li> <li>Optionally, to specify a single event delivery attempt with no retries, use the <code translate="no" dir="ltr">--max-retry-attempts</code> flag. The only valid value is <code translate="no" dir="ltr">1</code>. If you omit the flag, the standard retry behavior applies. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/retry-events">Retry events</a>. </li> <li>Other flags are available. For more information, see <a href="https://docs.cloud.google.com/sdk/gcloud/reference/eventarc/triggers/create"><code translate="no" dir="ltr">gcloud eventarc triggers create</code></a>. </li> </ul>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>To create an Eventarc trigger for a Cloud Run function, see <a href="https://docs.cloud.google.com/eventarc/docs/creating-triggers-terraform">Create a trigger using Terraform</a>.</p></section> </div> <h4 id="test_firestore_function">Test the function</h4> <p>To test the <code translate="no" dir="ltr">Hello Firestore</code> function, set up a collection called <code translate="no" dir="ltr">users</code> in your <a href="#set_up_your_database">Firestore database</a>:</p> <ol> <li>
+<p>In the Google Cloud console, go to the Firestore databases page:</p> <p><a href="https://console.cloud.google.com/firestore/data" track-type="quickstart" track-name="consoleLink" track-metadata-end-goal="createService" target="console" class="button button-blue">Go to Firestore</a> </p>
+</li> <li><p>Click <strong>Start a collection</strong>.</p></li> <li><p>Specify <code translate="no" dir="ltr">users</code> as the collection ID.</p></li> <li><p>To start adding the collection's first document, under <strong>Add its first document</strong> accept the auto-generated <strong>Document ID</strong>.</p></li> <li><p>Add at least one field for the document, specifying a name and value. For example, in <strong>Field name</strong>, enter <code translate="no" dir="ltr">username</code>, and in <strong>Field value</strong>, enter <code translate="no" dir="ltr">rowan</code>.</p></li> <li>
+<p>When you're done, click <strong>Save</strong>.</p> <p>This action creates a new document, thereby triggering your function.</p>
+</li> <li><p>To confirm that your function was triggered, click the linked name of the function in the Google Cloud console <a href="https://console.cloud.google.com/run">Cloud Run Overview page</a> to open the <strong>Service details</strong> page.</p></li> <li><p>Select the <strong>Logs</strong> tab and look for this string:</p></li> </ol> 
+<pre>Function triggered by change to: //firestore.googleapis.com/projects/your-project-id/databases/(default)'</pre> <h3 id="convert_to_uppercase_function">Example 2: Convert to Uppercase function</h3> <p>The following example retrieves the value added by the user, converts the string at that location to uppercase, and replaces the value with the uppercase string:</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+<p>Use <a href="https://www.npmjs.com/package/protobufjs">protobufjs</a> to decode the event data. Include the <code translate="no" dir="ltr">google.events.cloud.firestore.v1</code> <a href="https://github.com/GoogleCloudPlatform/nodejs-docs-samples/tree/main/functions/v2/firebase/firestore/helloFirestore"><code translate="no" dir="ltr">data.proto</code></a> in your source.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="javascript">const functions = require('@google-cloud/functions-framework');
+const Firestore = require('@google-cloud/firestore');
+const protobuf = require('protobufjs');
+
+const firestore = new Firestore({
+  projectId: process.env.GOOGLE_CLOUD_PROJECT,
+});
+
+// Converts strings added to /messages/{pushId}/original to uppercase
+functions.cloudEvent('makeUpperCase', async cloudEvent =&gt; {
+  console.log('Loading protos...');
+  const root = await protobuf.load('data.proto');
+  const DocumentEventData = root.lookupType(
+    'google.events.cloud.firestore.v1.DocumentEventData'
+  );
+
+  console.log('Decoding data...');
+  const firestoreReceived = DocumentEventData.decode(cloudEvent.data);
+
+  const resource = firestoreReceived.value.name;
+  const affectedDoc = firestore.doc(resource.split('/documents/')[1]);
+
+  const curValue = firestoreReceived.value.fields.original.stringValue;
+  const newValue = curValue.toUpperCase();
+
+  if (curValue === newValue) {
+    // Value is already upper-case
+    // Don't perform a(nother) write to avoid infinite loops
+    console.log('Value is already upper-case.');
+    return;
+  }
+
+  console.log(`Replacing value: ${curValue} --&gt; ${newValue}`);
+  affectedDoc.set({
+    original: newValue,
+  });
+});</pre> </div> </section> <section><p class="_code-tab"><strong>Python</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="python">from cloudevents.http import CloudEvent
+import functions_framework
+from google.cloud import firestore
+from google.events.cloud import firestore as firestoredata
+
+client = firestore.Client()
+
+
+# Converts strings added to /messages/{pushId}/original to uppercase
+@functions_framework.cloud_event
+def make_upper_case(cloud_event: CloudEvent) -&gt; None:
+    firestore_payload = firestoredata.DocumentEventData()
+    firestore_payload._pb.ParseFromString(cloud_event.data)
+
+    path_parts = firestore_payload.value.name.split("/")
+    separator_idx = path_parts.index("documents")
+    collection_path = path_parts[separator_idx + 1]
+    document_path = "/".join(path_parts[(separator_idx + 2) :])
+
+    print(f"Collection path: {collection_path}")
+    print(f"Document path: {document_path}")
+
+    affected_doc = client.collection(collection_path).document(document_path)
+
+    cur_value = firestore_payload.value.fields["original"].string_value
+    new_value = cur_value.upper()
+
+    if cur_value != new_value:
+        print(f"Replacing value: {cur_value} --&gt; {new_value}")
+        affected_doc.set({"original": new_value})
+    else:
+        # Value is already upper-case
+        # Don't perform a second write (which can trigger an infinite loop)
+        print("Value is already upper-case.")
+
+</pre> </div> </section> <section><p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+// Package upper contains a Firestore Cloud Function.
+package upper
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	"cloud.google.com/go/firestore"
+	firebase "firebase.google.com/go/v4"
+	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
+	"github.com/cloudevents/sdk-go/v2/event"
+	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
+	"google.golang.org/protobuf/proto"
+)
+
+// set the GOOGLE_CLOUD_PROJECT environment variable when deploying.
+var projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
+
+// client is a Firestore client, reused between function invocations.
+var client *firestore.Client
+
+func init() {
+	// Use the application default credentials.
+	conf := &amp;firebase.Config{ProjectID: projectID}
+
+	// Use context.Background() because the app/client should persist across
+	// invocations.
+	ctx := context.Background()
+
+	app, err := firebase.NewApp(ctx, conf)
+	if err != nil {
+		log.Fatalf("firebase.NewApp: %v", err)
+	}
+
+	client, err = app.Firestore(ctx)
+	if err != nil {
+		log.Fatalf("app.Firestore: %v", err)
+	}
+
+	// Register cloud event function
+	functions.CloudEvent("MakeUpperCase", MakeUpperCase)
+}
+
+// MakeUpperCase is triggered by a change to a Firestore document. It updates
+// the `original` value of the document to upper case.
+func MakeUpperCase(ctx context.Context, e event.Event) error {
+	var data firestoredata.DocumentEventData
+
+	// If you omit `DiscardUnknown`, protojson.Unmarshal returns an error
+	// when encountering a new or unknown field.
+	options := proto.UnmarshalOptions{
+		DiscardUnknown: true,
+	}
+	err := options.Unmarshal(e.Data(), &amp;data)
+
+	if err != nil {
+		return fmt.Errorf("proto.Unmarshal: %w", err)
+	}
+
+	if data.GetValue() == nil {
+		return errors.New("Invalid message: 'Value' not present")
+	}
+
+	fullPath := strings.Split(data.GetValue().GetName(), "/documents/")[1]
+	pathParts := strings.Split(fullPath, "/")
+	collection := pathParts[0]
+	doc := strings.Join(pathParts[1:], "/")
+
+	var originalStringValue string
+	if v, ok := data.GetValue().GetFields()["original"]; ok {
+		originalStringValue = v.GetStringValue()
+	} else {
+		return errors.New("Document did not contain field \"original\"")
+	}
+
+	newValue := strings.ToUpper(originalStringValue)
+	if originalStringValue == newValue {
+		log.Printf("%q is already upper case: skipping", originalStringValue)
+		return nil
+	}
+	log.Printf("Replacing value: %q -&gt; %q", originalStringValue, newValue)
+
+	newDocumentEntry := map[string]string{"original": newValue}
+	_, err = client.Collection(collection).Doc(doc).Set(ctx, newDocumentEntry)
+	if err != nil {
+		return fmt.Errorf("Set: %w", err)
+	}
+	return nil
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>Java</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="java">import com.google.cloud.firestore.Firestore;
+import com.google.cloud.firestore.FirestoreOptions;
+import com.google.cloud.firestore.SetOptions;
+import com.google.cloud.functions.CloudEventsFunction;
+import com.google.events.cloud.firestore.v1.DocumentEventData;
+import com.google.events.cloud.firestore.v1.Value;
+import com.google.protobuf.InvalidProtocolBufferException;
+import io.cloudevents.CloudEvent;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.logging.Logger;
+
+public class FirebaseFirestoreReactive implements CloudEventsFunction {
+  private static final Logger logger = Logger.getLogger(FirebaseFirestoreReactive.class.getName());
+  private final Firestore firestore;
+
+  private static final String FIELD_KEY = "original";
+  private static final String APPLICATION_PROTOBUF = "application/protobuf";
+
+  public FirebaseFirestoreReactive() {
+    this(FirestoreOptions.getDefaultInstance().getService());
+  }
+
+  public FirebaseFirestoreReactive(Firestore firestore) {
+    this.firestore = firestore;
+  }
+
+  @Override
+  public void accept(CloudEvent event)
+      throws InvalidProtocolBufferException, InterruptedException, ExecutionException {
+    if (event.getData() == null) {
+      logger.warning("No data found in event!");
+      return;
+    }
+
+    if (!event.getDataContentType().equals(APPLICATION_PROTOBUF)) {
+      logger.warning(String.format("Found unexpected content type %s, expected %s",
+          event.getDataContentType(),
+          APPLICATION_PROTOBUF));
+      return;
+    }
+
+    DocumentEventData firestoreEventData = DocumentEventData
+        .parseFrom(event.getData().toBytes());
+
+    // Get the fields from the post-operation document snapshot
+    // https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents#Document
+    Map&lt;String, Value&gt; fields = firestoreEventData.getValue().getFieldsMap();
+    if (!fields.containsKey(FIELD_KEY)) {
+      logger.warning("Document does not contain original field");
+      return;
+    }
+    String currValue = fields.get(FIELD_KEY).getStringValue();
+    String newValue = currValue.toUpperCase();
+
+    if (currValue.equals(newValue)) {
+      logger.info("Value is already upper-case");
+      return;
+    }
+
+    // Retrieve the document name from the resource path:
+    // projects/{project_id}/databases/{database_id}/documents/{document_path}
+    String affectedDoc = firestoreEventData.getValue()
+        .getName()
+        .split("/documents/")[1]
+        .replace("\"", "");
+
+    logger.info(String.format("Replacing values: %s --&gt; %s", currValue, newValue));
+
+    // Wait for the async call to complete
+    this.firestore
+        .document(affectedDoc)
+        .set(Map.of(FIELD_KEY, newValue), SetOptions.merge())
+        .get();
+  }
+}
+</pre> </div> </section> <section><p class="_code-tab"><strong>C#</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="csharp">using CloudNative.CloudEvents;
+using Google.Cloud.Firestore;
+using Google.Cloud.Functions.Framework;
+using Google.Cloud.Functions.Hosting;
+using Google.Events.Protobuf.Cloud.Firestore.V1;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace FirestoreReactive;
+
+public class Startup : FunctionsStartup
+{
+    public override void ConfigureServices(WebHostBuilderContext context, IServiceCollection services) =&gt;
+        services.AddSingleton(FirestoreDb.Create());
+}
+
+// Register the startup class to provide the Firestore dependency.
+[FunctionsStartup(typeof(Startup))]
+public class Function : ICloudEventFunction&lt;DocumentEventData&gt;
+{
+    private readonly ILogger _logger;
+    private readonly FirestoreDb _firestoreDb;
+
+    public Function(ILogger&lt;Function&gt; logger, FirestoreDb firestoreDb) =&gt;
+        (_logger, _firestoreDb) = (logger, firestoreDb);
+
+    public async Task HandleAsync(CloudEvent cloudEvent, DocumentEventData data, CancellationToken cancellationToken)
+    {
+        // Get the recently-written value. This expression will result in a null value
+        // if any of the following is true:
+        // - The event doesn't contain a "new" document
+        // - The value doesn't contain a field called "original"
+        // - The "original" field isn't a string
+        string currentValue = data.Value?.ConvertFields().GetValueOrDefault("original") as string;
+        if (currentValue is null)
+        {
+            _logger.LogWarning($"Event did not contain a suitable document");
+            return;
+        }
+
+        string newValue = currentValue.ToUpperInvariant();
+        if (newValue == currentValue)
+        {
+            _logger.LogInformation("Value is already upper-cased; no replacement necessary");
+            return;
+        }
+
+        // The CloudEvent subject is "documents/x/y/...".
+        // The Firestore SDK FirestoreDb.Document method expects a reference relative to
+        // "documents" (so just the "x/y/..." part). This may be simplified over time.
+        if (cloudEvent.Subject is null || !cloudEvent.Subject.StartsWith("documents/"))
+        {
+            _logger.LogWarning("CloudEvent subject is not a document reference.");
+            return;
+        }
+        string documentPath = cloudEvent.Subject.Substring("documents/".Length);
+
+        _logger.LogInformation("Replacing '{current}' with '{new}' in '{path}'", currentValue, newValue, documentPath);
+        await _firestoreDb.Document(documentPath).UpdateAsync("original", newValue, cancellationToken: cancellationToken);
+    }
+}</pre> </div> </section> </div>
+<aside class="note"><strong>Note:</strong><span> Updating the function-triggering Firestore document might create subsequent <code translate="no" dir="ltr">updated</code> events, which might cascade into an infinite loop within your function. To solve this problem, use trigger types that ignore updates (such as <code translate="no" dir="ltr">created</code>), or configure your function to only write to Firestore if the underlying value has changed.</span></aside> <h4 id="deploy_to_uppercase_function">Deploy the function</h4> <p>If you haven't already done so, set up your <a href="#set_up_your_database">Firestore database</a>.</p> <p>After deploying a function, you can configure a trigger using the Google Cloud console, Google Cloud CLI, or Terraform.</p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
+<p>When you use the Google Cloud console to create a function, you can also add a trigger to your function. Follow these steps to create a trigger for your function:</p> <ol> <li>
+<p>In the Google Cloud console, go to Cloud Run:</p> <p><a href="https://console.cloud.google.com/run/services" track-type="quickstart" track-name="consoleLink" track-metadata-end-goal="createService" target="console" class="button button-blue">Go to Cloud Run</a> </p>
+</li> <li><p>Click <strong>Write a function</strong>, and enter the function details. For more information about configuring functions during deployment, see <a href="https://docs.cloud.google.com/run/docs/deploy-functions#console">Deploy functions</a>.</p></li> <li><p>In the <strong>Trigger</strong> section, click <strong>Add trigger</strong>.</p></li> <li><p>Select <b>Firestore trigger</b>.</p></li> <li>
+<p>In the <strong>Eventarc trigger</strong> pane, modify the trigger details as follows:</p> <ol> <li><p>Enter a name for the trigger in the <strong>Trigger name</strong> field, or use the default name.</p></li> <li>
+<p>Select a <strong>Trigger type</strong> from the list:</p> <ul> <li><p><strong>Google Sources</strong> to specify triggers for Pub/Sub, Cloud Storage, Firestore, and other Google event providers.</p></li> <li><p><strong>Third-party</strong> to integrate with non-Google providers that offer an Eventarc source. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/third-parties/third-parties-overview">Third-party events in Eventarc</a>.</p></li> </ul>
+</li> <li><p>Select <b>Firestore</b> from the <strong>Event provider</strong> list, to select a product that provides the type of event for triggering your function. For the list of event providers, see <a href="https://docs.cloud.google.com/eventarc/docs/event-providers-targets">Event providers and destinations</a>.</p></li> <li>
+<p>Select <b>type=google.cloud.firestore.document.v1.written</b> from the <strong>Event type</strong> list. Your trigger configuration varies depending on the supported event type. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/event-types">Event types</a>.</p> </li> <li><p>In the Filters section, select a database, operation and attribute values, or use the default selections. </p></li> <li><p>If the <strong>Region</strong> field is enabled, select a <a href="https://docs.cloud.google.com/eventarc/docs/overview#trigger-location">location</a> for the Eventarc trigger. In general, the location of an Eventarc trigger should match the location of the Google Cloud resource that you want to monitor for events. In most scenarios, you should also deploy your function in the same region. See <a href="https://docs.cloud.google.com/eventarc/docs/understand-locations">Understand Eventarc locations</a> for more details about Eventarc trigger locations.</p></li> <li><p>In the <strong>Service account</strong> field, select a service account. Eventarc triggers are linked to service accounts to use as an identity when invoking your function. Your Eventarc trigger's service account must have the permission to invoke your function. By default, Cloud Run uses the <a href="https://docs.cloud.google.com/compute/docs/access/service-accounts#default_service_account">Compute Engine default service account</a>.</p></li> <li><p>Optionally, specify the <strong>Service URL path</strong> to send the incoming request to. This is the relative path on the destination service to which the events for the trigger should be sent. For example: <code translate="no" dir="ltr">/</code>, <code translate="no" dir="ltr">/route</code>, <code translate="no" dir="ltr">route</code>, and <code translate="no" dir="ltr">route/subroute</code>.</p></li> <li><p>Optionally, to enable retries if the delivery attempt fails, select the <strong>Enable retry on failure</strong> checkbox; otherwise, the default behavior is a single delivery attempt with no retries. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/retry-events">Retry events</a>.</p></li> </ol>
+</li> <li><p>Once you've completed the required fields, click <strong>Save trigger</strong>.</p></li> <li><p>Click <strong>Create</strong>.</p></li> <li><p>In the <strong>Source</strong> tab, edit the source code if needed, then select <strong>Save and redeploy</strong>.</p></li> </ol></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>When you create a function using the gcloud CLI, you must first <a href="https://docs.cloud.google.com/run/docs/deploy-functions">deploy</a> your function, and then create a trigger. Follow these steps to create a trigger for your function:</p> <ol> <li>
+<p>Run the following command in the directory that contains the sample code to deploy your function:</p> 
+<pre data-language="bash">gcloud run deploy FUNCTION \
+    --source . \
+    --function FUNCTION_ENTRYPOINT \
+    --base-image BASE_IMAGE_ID \
+    --region REGION
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">FUNCTION</var></code>: the name of the function you are deploying. You can omit this parameter entirely, but you will be prompted for the name if you omit it.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">FUNCTION_ENTRYPOINT</var></code>: the entry point to your function in your source code. This is the code Cloud Run executes when your function runs. The value of this flag must be a function name or fully-qualified class name that exists in your source code.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">BASE_IMAGE_ID</var></code>: the base image environment for your function. For more details about base images and the packages included in each image, see <a href="https://docs.cloud.google.com/run/docs/configuring/services/runtime-base-images#how_to_obtain_base_images">Runtimes base images</a>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud <a href="https://docs.cloud.google.com/run/docs/locations">region</a> where you want to deploy your function. For example, <code translate="no" dir="ltr">europe-west1</code>.</p></li> </ul>
+</li> <li>
+<p>Run the following command to create a trigger that filters and routes events:</p> 
+
+<pre data-language="bash">gcloud eventarc triggers create TRIGGER_NAME  \
+    --location=EVENTARC_TRIGGER_LOCATION \
+    --destination-run-service=FUNCTION  \
+    --destination-run-region=REGION \
+    --event-filters=type=google.cloud.firestore.document.v1.written \
+    --event-filters=database='(default)' \
+    --event-data-content-type=application/protobuf \
+    --event-filters-path-pattern=document='messages/{pushId}' \
+    --service-account=PROJECT_NUMBER-compute@developer.gserviceaccount.com
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRIGGER_NAME</var></code>: the ID of the trigger or a fully qualified identifier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the location of the Eventarc trigger. Alternatively, you can set the <code translate="no" dir="ltr">eventarc/location</code> property; for example, <code translate="no" dir="ltr">gcloud config set eventarc/location us-central1</code>. <p>To avoid any performance and data residency issues, the location must match the location of the Google Cloud service that is generating events. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/locations">Eventarc locations</a>.</p> </li> <li> <code translate="no" dir="ltr"><var translate="no">FUNCTION</var></code>: the name of the deployed Cloud Run function that receives the events for the trigger. </li> <li> <code translate="no" dir="ltr"><var translate="no">DESTINATION_RUN_REGION</var></code>: (optional) the <a href="https://docs.cloud.google.com/run/docs/locations">Cloud Run location</a> in which the destination Cloud Run function can be found. If not specified, it is assumed that the function is in the same region as the trigger. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">EVENT_FILTER_TYPE</var></code>: the identifier of the event. An event is generated when an API call for the method succeeds. For long-running operations, the event is only generated at the end of the operation, and only if the action is performed successfully. For a list of supported event types, see <a href="https://docs.cloud.google.com/eventarc/docs/reference/supported-events#directly-from-a-google-cloud-source">Google event types supported by Eventarc</a>. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_NAME</var></code>: the name of your user-managed service account. </li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID. </li> </ul> <p>Notes:</p> <ul> <li>After a trigger is created, the event filter type can't be changed. For a different event type, you must create a new trigger. </li> <li>
+<code translate="no" dir="ltr">--event-filters=type=google.cloud.firestore.document.v1.written</code> specifies that the function is triggered when a document is created, updated or deleted, per the <a href="https://docs.cloud.google.com/run/docs/triggering/firestore-triggers#event_types">event type</a>.</li> <li>
+<code translate="no" dir="ltr">--event-filters=database='(default)'</code> specifies the Firebase database. For the default database name, use <code translate="no" dir="ltr">(default)</code>.</li> <li>
+<code translate="no" dir="ltr">--event-filters-path-pattern=document='users/{username}'</code> provides the path pattern of the documents that should be monitored for relevant changes. This path pattern states that all documents in the <code translate="no" dir="ltr">users</code> collection should be monitored. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/path-patterns">Understand path patterns</a>.</li> <li>Optionally, to specify a single event delivery attempt with no retries, use the <code translate="no" dir="ltr">--max-retry-attempts</code> flag. The only valid value is <code translate="no" dir="ltr">1</code>. If you omit the flag, the standard retry behavior applies. For more information, see <a href="https://docs.cloud.google.com/eventarc/docs/retry-events">Retry events</a>. </li> <li>Other flags are available. For more information, see <a href="https://docs.cloud.google.com/sdk/gcloud/reference/eventarc/triggers/create"><code translate="no" dir="ltr">gcloud eventarc triggers create</code></a>. </li> </ul>
+</li> </ol></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>To create an Eventarc trigger for a Cloud Run function, see <a href="https://docs.cloud.google.com/eventarc/docs/creating-triggers-terraform">Create a trigger using Terraform</a>.</p></section> </div> <h4 id="test_uppercase_function">Test the function</h4> <p>To test the <code translate="no" dir="ltr">Convert to Uppercase</code> function you just deployed, set up a collection called <code translate="no" dir="ltr">messages</code> in your <a href="#set_up_your_database">Firestore database</a>:</p> <ol> <li>
+<p>In the Google Cloud console, go to the Firestore databases page:</p> <p><a href="https://console.cloud.google.com/firestore/data" track-type="quickstart" track-name="consoleLink" track-metadata-end-goal="createService" target="console" class="button button-blue">Go to Firestore</a> </p>
+</li> <li><p>Click <strong>Start a collection</strong>.</p></li> <li><p>Specify <code translate="no" dir="ltr">messages</code> as the collection ID.</p></li> <li><p>To start adding the collection's first document, under <strong>Add its first document</strong> accept the auto-generated <strong>Document ID</strong>.</p></li> <li><p>To trigger your deployed function, add a document where the <strong>Field name</strong> is <code translate="no" dir="ltr">original</code> and the <strong>Field value</strong> is <code translate="no" dir="ltr">minka</code>.</p></li> <li>
+<p>When you save the document, you can see the lowercase word in the value field convert to uppercase.</p> <p>If you subsequently edit the field value to contain lowercase letters, that triggers the function again, converting all lowercase letters to uppercase.</p>
+</li> </ol> <h2 id="limitations_for_functions">Limitations for functions</h2> <ul> <li>Ordering is not guaranteed. Rapid changes can trigger function invocations in an unexpected order.</li> <li>Events are delivered at least once, but a single event might result in multiple function invocations. Avoid depending on exactly-once mechanics, and write <a href="https://docs.cloud.google.com/blog/products/serverless/cloud-functions-pro-tips-building-idempotent-functions">idempotent functions</a>.</li> <li>A trigger is associated with a single database. You can't create a trigger that matches multiple databases.</li> <li>Deleting a database doesn't automatically delete any triggers for that database. The trigger stops delivering events but continues to exist until you <a href="https://docs.cloud.google.com/eventarc/docs/managing-triggers#trigger-delete">delete the trigger</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/firestore/native/docs/extend-with-functions-2nd-gen" class="_attribution-link">https://docs.cloud.google.com/firestore/native/docs/extend-with-functions-2nd-gen</a>
+  </p>
+</div>

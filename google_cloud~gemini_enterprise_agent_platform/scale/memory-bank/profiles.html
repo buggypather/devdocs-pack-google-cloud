@@ -1,0 +1,224 @@
+<h1>Memory Profiles</h1> <p>You can use Memory Bank to generate structured profiles, which are data structures with static schemas populated and updated using LLMs. By defining a fixed schema, you ensure your agents have immediate, low-latency access to evolving information without the need for expensive search operations during a session.</p> <p>To complete the steps demonstrated in this guide, you must first follow the steps in <a href="setup">Set up for Memory Bank</a>.</p> <h2 id="overview">Overview</h2> <p>Using structured profiles with your agent ensures that extracted information—like a user's technical stacks or preferences—is available quickly, succinctly, and with a consistent format. For example, you can retrieve profiles that include content like:</p> 
+<pre>MemoryProfile(
+    profile={
+        "technical_stacks": "ADK, Python",
+        "preferred_language": "Python",
+        "tone_preference": "Succinct"
+    },
+    schema_id="user-profile"
+)
+</pre> <p>Structured profiles are optimized for low-latency retrieval, because the hard work of curating the information is done at generation-time. They are great for initializing an interaction between an agent and user.</p> <h3 id="understanding_structured_memory_profiles">Understanding structured memory profiles</h3> <p>Structured profiles are generated through the same methods (<a href="generate-memories#triggering-memory-generation"><code translate="no" dir="ltr">GenerateMemories</code> and <code translate="no" dir="ltr">IngestEvents</code></a>) that you use for natural language memories. Once you define a <a href="#schema">schema</a>, Memory Bank will automatically try to generate profiles that align with your schema using the provided data sources.</p> <p>When using structured profiles, Memory Bank performs the following operations during memory generation:</p> <ul> <li>
+<strong>Extraction</strong>: Extracts information and context that fits the schema from the data source. Only information that aligns with the schema will be extracted. You can inspect what information and context was extracted using <a href="revisions">memory revisions</a>.</li> <li>
+<strong>Consolidation</strong>: Updates (if necessary) existing fields in the profile. An <a href="setup#generation-config">LLM</a> will judge how to update the existing content based on the newly extracted information and context. If the field does not already exist in the profile, consolidation will be skipped, and the field will be updated directly with the extracted information.</li> </ul> <p>Profiles are isolated based on the <code translate="no" dir="ltr">scope</code> (like <code translate="no" dir="ltr">{"user_id": "123"}</code>) that you provided when ingesting data to Memory Bank. For each schema and scope, Memory Bank maintains a single profile as the source-of-truth. A generated profile is composed of one or more <code translate="no" dir="ltr">Memory</code> instances. Each <code translate="no" dir="ltr">Memory</code> instance represents a single field within the profile that you can use to inspect the field's metadata and revision history, like:</p> 
+<pre>Memory(
+     create_time=datetime.datetime(...),
+     memory_type=&lt;MemoryType.STRUCTURED_PROFILE: 'STRUCTURED_PROFILE'&gt;,
+     name='projects/.../locations/.../reasoningEngines/.../memories/...',
+     scope={
+       'user_id': '123'
+     },
+     structured_content=MemoryStructuredContent(
+       data={
+         'language_preference': 'Java'
+       },
+       schema_id='user-profile'
+     ),
+     update_time=datetime.datetime(...),
+     expire_time=datetime.datetime(...),
+     metadata={...}
+)
+</pre> <h2 id="schema">Schema definition</h2> <p>The profiles that Memory Bank generate align with the schema that was defined when the <a href="setup#create-update">Agent Platform instance was created or updated</a>. You can use a <code translate="no" dir="ltr">pydantic</code> model to define the fields you want Memory Bank to extract and maintain. For example:</p> 
+<pre>from pydantic import BaseModel, Field
+from typing import Literal
+
+class UserProfile(BaseModel):
+    name: str = Field(
+      description="Name of the user.")
+    technical_stack: str = Field(
+      description="Comma-separated list tools or languages used by the user.")
+    primary_goal: str = Field(
+      description="The main objective the user is pursuing.")
+    expertise_level: str = Field(
+      description="Current skill level (e.g., Junior, Senior).")
+    job_status: Literal['unemployed', 'part_time', 'full_time', 'student'] = Field(
+      description="The job status of the individual")
+</pre> <p>Upload the schema to Memory Bank when you create or update your Agent Platform instance. You can define multiple independent profile schemas; each schema must be identified by a unique ID:</p> 
+<pre>schema_config = {
+  "id": "user-profile",
+  "memory_schema": UserProfile.model_json_schema()
+}
+
+memory_bank = client.memory_banks.create(
+    managed_semantic_memory_config={
+        "structured_memory_configs": [
+            {
+                "schema_configs": [schema_config]
+            }
+        ]
+    }
+)
+</pre> <p>By default, Memory Bank will always try to extract natural language memories. You can disable natural language memory generation if you only want Memory Bank to generate profiles:</p> 
+<pre>memory_bank = client.memory_banks.create(
+    managed_semantic_memory_config={
+        "structured_memory_configs": [
+            {
+                "schema_configs": [schema_config]
+            }
+        ],
+        # Optional: Disable natural language memories.
+        "unstructured_memory_configs": [
+            {"disable_natural_language_memories": True}
+        ]
+    }
+)
+</pre> <h2 id="profile_generation">Profile generation</h2> <p>You <a href="generate-memories#triggering-memory-generation">trigger</a> the generation of structured memories by providing a conversation history (events) to the <code translate="no" dir="ltr">GenerateMemories</code> or <code translate="no" dir="ltr">IngestEvents</code> methods. Like with natural language memories, Memory Bank uses LLMs to extract meaningful information from the data sources and consolidate it with existing memories.</p> <p><strong>Example</strong></p> <p>The following example walks through memory profile generation using the <a href="#schema">previously defined schema</a>.</p> <p>In the first set of events sent to Memory Bank for scope <code translate="no" dir="ltr">{"user_id": "123"}</code>, the user indicates that they work with ADK agents:</p> 
+<pre>client.memory_banks.memories.generate(
+  name=memory_bank.name,
+  scope={"user_id": "123"},
+  direct_contents_source={
+    "events": [
+      {"content": {
+        "parts": [{
+          "text": "Can you help me build an ADK agent that organizes my daily tasks?"}]}}]
+  }
+)
+</pre> <p>Memory Bank extracts "ADK" for the <code translate="no" dir="ltr">technical_stack</code> field in the schema. No other fields are populated because the ingested event does not contain relevant information for the rest of the schema. Since this is the first interaction for this scope, consolidation is skipped and the profile is initialized with this initial value.</p> 
+<pre>result = client.memory_banks.memories.retrieve_profiles(
+    name=memory_bank.name,
+    scope={"user_id": "123"},
+)
+
+"""
+Returns:
+
+RetrieveProfilesResponse(
+  profiles={
+    'user-profile': MemoryProfile(
+      profile={
+        'technical_stack': 'ADK'
+      },
+      schema_id='user-profile'
+    )
+  }
+)
+"""
+</pre> <p>In the next set of events sent to Memory Bank, the user indicates that they are a student and primarily code in Python:</p> 
+<pre>client.memory_banks.memories.generate(
+  name=memory_bank.name,
+  scope={"user_id": "123"},
+  direct_contents_source={
+    "events": [
+      {"content": {
+        "parts": [
+          {"text": "Do you have any career recommendations for students that specialize in Python?"}]}}]
+  }
+)
+</pre> <p>Memory Bank extracts both "Python" and the "student" status from the interaction. The <code translate="no" dir="ltr">technical_stack</code> fragment is consolidated, appending "Python" to the existing "ADK" entry. The system populates the previously empty <code translate="no" dir="ltr">job_status</code> field with the "student" enum and skips the consolidation step.</p> 
+<pre>result = client.memory_banks.memories.retrieve_profiles(
+    name=memory_bank.name,
+    scope=scope
+)
+
+"""
+Returns:
+
+RetrieveProfilesResponse(
+  profiles={
+    'user-profile': MemoryProfile(
+      profile={
+        'technical_stack': 'ADK, Python',
+        'job_status': 'student'
+      },
+      schema_id='user-profile'
+    )
+  }
+)
+"""
+</pre> <h2 id="retrieve-profiles">Profile retrieval</h2> <p>Once generated, you can retrieve the consolidated profile for a specific scope using the <code translate="no" dir="ltr">RetrieveProfiles</code> method. This returns the most up-to-date data mapped to your schema.</p> 
+<pre>result = client.memory_banks.memories.retrieve_profiles(
+  name=memory_bank.name,
+  scope={"user_id": "123"},
+)
+
+# Accessing the data
+for profile in result.profiles.values():
+  print(profile)
+  # Output: {'technical_stack': 'ADK, Python', 'job_status': 'student', ...}
+</pre> <h2 id="profile_inspection">Profile inspection</h2> <p>Under the hood, a profile is composed of individual memories of type <code translate="no" dir="ltr">STRUCTURED_PROFILE</code>. Each field in your schema maps to a single memory per scope, allowing for granular observability.</p> <p>While <a href="#retrieve-profiles"><code translate="no" dir="ltr">RetrieveProfiles</code></a> is the primary method for production retrieval of profiles, you can inspect individual memories to audit the profile's evolution. This provides access to:</p> <ul> <li>Field-Level Metadata: View and update specific time to live (TTL) and <code translate="no" dir="ltr">Memory.metadata</code> for individual fields in the profile.</li> <li>Revision History: Trace the lineage of a field to see historical values and the specific conversation context that triggered each change.</li> </ul> <p>For example, you can use <code translate="no" dir="ltr">RetrieveMemories</code> to retrieve all memories containing fragments of a user's profile. By default, <code translate="no" dir="ltr">RetrieveMemories</code> only retrieves natural language memories, so you need to explicitly request <code translate="no" dir="ltr">STRUCTURED_PROFILE</code> memories:</p> 
+<pre>client.memory_banks.memories.retrieve(
+  name="...",
+  scope={"user_id": "123"},
+  config={
+    "memory_types": ["STRUCTURED_PROFILE"]
+  }
+)
+
+"""
+Returns:
+
+[RetrieveMemoriesResponseRetrievedMemory(
+   memory=Memory(
+     create_time=datetime.datetime(...),
+     memory_type=&lt;MemoryType.STRUCTURED_PROFILE: 'STRUCTURED_PROFILE'&gt;,
+     name='projects/.../locations/.../reasoningEngines/.../memories/...',
+     scope={
+       'user_id': '123'
+     },
+     structured_content=MemoryStructuredContent(
+       data={
+         'technical_stack': 'ADK, Python'
+       },
+       schema_id='user'
+     ),
+     update_time=datetime.datetime(...)
+   )
+ )]
+"""
+</pre> <p>Then, you can retrieve the revision history of this structured profile fragment to inspect how the profile field changed over time and the context around each of those changes:</p> 
+<pre>for retrieved_memory in list(results):
+    list(client.memory_banks.memories.revisions.list(
+        name=retrieved_memory.memory.name
+    ))
+
+"""
+Returns:
+
+[MemoryRevision(
+   create_time=datetime.datetime(...),
+   expire_time=datetime.datetime(...),
+   extracted_memories=[
+     IntermediateExtractedMemory(
+       context='The user indicated that they have expertise in Python when asking about career options.',
+       structured_data={
+         'technical_stack': 'Python'
+       }
+     ),
+   ],
+   name='projects/.../locations/.../reasoningEngines/.../memories/.../revisions/...',
+   structured_data={
+     'technical_stack': 'ADK, Python'
+   }
+ ),
+ MemoryRevision(
+   create_time=datetime.datetime(...),
+   expire_time=datetime.datetime(...),
+   extracted_memories=[
+     IntermediateExtractedMemory(
+       context='The user indicated that they need help building an ADK agent',
+       structured_data={
+         'technical_stack': 'ADK'
+       }
+     ),
+   ],
+   name='projects/.../locations/.../reasoningEngines/.../memories/.../revisions/...',
+   structured_data={
+     'technical_stack': 'ADK'
+   }
+ )]
+"""
+</pre><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/profiles" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/memory-bank/profiles</a>
+  </p>
+</div>

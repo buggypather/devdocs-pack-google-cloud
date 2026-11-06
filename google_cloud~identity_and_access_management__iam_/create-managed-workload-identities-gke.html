@@ -1,0 +1,333 @@
+<h1>Configure managed workload identity authentication for GKE</h1> <p>This document describes how to configure <a href="managed-workload-identity">managed workload identities</a> for Google Kubernetes Engine (GKE) in your GKE fleet-managed clusters. It also describes how to deploy a workload and verify the workload's identity and certificate.</p> <p>To set up and use managed workload identities for GKE, complete the following steps:</p> <ol> <li><p><a href="#choose-ca">Choose a certificate authority (CA) option</a></p></li> <li><p><a href="#configure-ca-options">Configure your certificate authority</a></p></li> <li><p><a href="#deploy-workloads">Deploy workloads with managed workload identities</a></p></li> <li><p><a href="#enable-trust-federation">Optional: Enable trust federation between workload identity pools</a></p></li> </ol> <h3 id="google-managed-workload-identity-pool">Google-managed workload identity pool</h3> <p>When you add clusters to GKE fleets, GKE automatically creates a Google-managed workload identity pool, which serves as the root of trust, also known as the SPIFFE trust domain for your workloads. All workloads within the trust domain receive certificates and trust anchors that enable authentication by default within the trust domain. If you have multiple trust domains, you can <a href="#enable-trust-federation">enable trust federation</a> between them to enable cross-trust domain communication.</p> <p>The Google-managed workload identity pool has the following characteristics:</p> <ul> <li><p><strong>Identity management:</strong> Google fully manages the pool. You cannot create any subresources, such as namespaces, identities, or identity providers.</p></li> <li><p><strong>Workload support:</strong> You can use the pool only for GKE workloads. You cannot add other types of workloads, such as Compute Engine VMs, to the pool.</p></li> <li><p><strong>Fleet integration:</strong> All clusters in the pool are subject to the standard Kubernetes namespace sameness model. This means that all clusters in the pool are equivalently privileged, and workloads on any cluster in the pool can use any identity within that pool.</p></li> </ul> <h3 id="self-managed-workload-identity-pool">Self-managed workload identity pool</h3> <p>In mixed-trust environments, such as multi-tenant fleets, you can configure a separate self-managed workload identity pool for a subset of your workloads and clusters. A self-managed workload identity pool has the following characteristics:</p> <ul> <li><p><strong>Identity management:</strong> By defining your own workload identity pool, you gain full control of identity management in the pool. Under the pool, you can define your own identity hierarchy, such as namespaces and identities. You can define attestation policies to specify which workloads can attest identities under the pool or namespaces.</p></li> <li><p><strong>Workload support:</strong> Any workload (for example, VMs, containers, and serverless workloads) can be placed under the pool.</p></li> <li><p><strong>Fleet integration:</strong> For workloads managed by GKE fleets, fleets provide an integrated interface to manage identities. You can configure your workload identity pool as the fleet scope-tenancy pool. Fleets automatically create workload identity pool namespaces corresponding to the fleet namespaces, and assign identities to the workloads.</p></li> </ul> <p>To use a self-managed workload identity pool, you must configure fleet team management features like team scopes and fleet namespaces, and set up the self-managed pool as the scope-tenancy pool. For instructions about creating and configuring a self-managed pool, see <a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/authenticate-mixed-trust-workloads">Authenticate to Google Cloud APIs from mixed-trust fleet workloads</a>.</p> <h3 id="multi-project-configuration">Multi-project configuration</h3> <p>Google Cloud resources that you use in this document, such as GKE clusters, the root CA, and subordinate CAs, can exist in separate projects. When you refer to these resources, use the <code translate="no" dir="ltr">--project</code> flag to specify the correct project for each resource.</p> <h2 id="before-begin">Before you begin</h2> <ol> <li>
+
+<p><a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">Create or select a Google Cloud project</a>.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <ul> <li> <p>Create a Google Cloud project:</p> 
+<pre>gcloud projects create PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with a name for the Google Cloud project you are creating.</p> </li> <li> <p>Select the Google Cloud project that you created:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your Google Cloud project name.</p> </li> </ul> </li> <li><p>Understand <a href="managed-workload-identity">managed workload identities</a>.</p></li> <li><p>Ensure your clusters run version 1.33.0-gke.2248000 or later.</p></li> <li>
+<p>Add your clusters to GKE fleets. If your cluster is an Autopilot cluster, omit the <code translate="no" dir="ltr">--enable-workload-identity</code> flag. Fleets automatically creates a Google-managed workload identity pool, which serves as a <em>trust domain</em>.</p> <p>Enable GKE fleets by running the following command:</p> 
+<pre>
+gcloud container clusters update CLUSTER_NAME \
+--workload-pool=PROJECT_ID.svc.id.goog \
+--enable-fleet \
+--fleet-project=PROJECT_ID
+</pre> <p>Replace these values:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the GKE cluster to register with the GKE fleet</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the GKE fleet host project ID</li> </ul>
+</li> <li>
+ 
+<p> Enable the IAM and Certificate Authority Service APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p> </li> <li>
+<p>Configure the Google Cloud CLI to use your billing and quota project.</p> 
+<pre>
+gcloud config set billing/quota_project PROJECT_ID
+</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of the fleet project.</p>
+</li> </ol> <h2 id="required-roles">Required roles</h2> <p> To get the permissions that you need to create managed workload identities and provision managed workload identity certificates, ask your administrator to grant you the following IAM roles on the project: </p> <ul> <li> To create and configure managed workload identities: <a href="roles-permissions/iam#iam.workloadIdentityPoolAdmin">IAM Workload Identity Pool Admin </a> (<code translate="no" dir="ltr">roles/iam.workloadIdentityPoolAdmin</code>) </li> <li> To create and configure CA pools: <a href="roles-permissions/privateca#privateca.admin">CA Service Admin </a> (<code translate="no" dir="ltr">roles/privateca.admin</code>) </li> </ul> <p> For more information about granting roles, see <a href="granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="creating-custom-roles">custom roles</a> or other <a href="roles-overview#predefined">predefined roles</a>. </p> <h2 id="choose-ca">Choose a CA option</h2> <p>To sign your workload certificates, choose the certificate authority (CA) option that best fits your use case:</p> <ul> <li><p><strong>Google-managed default CA</strong>: Use this option for a fully managed, no-cost solution. The default CA provides a shared root of trust for all Google Cloud users.</p></li> <li><p><strong>Custom CA</strong>: Use this option to configure your own public key infrastructure (PKI) through Certificate Authority Service. This option is appropriate if you require a custom root of trust or if you must store signing keys in a hardware security module (HSM) to meet compliance requirements. Certificate Authority Service is charged separately from managed workload identity. For more information, see <a href="https://cloud.google.com/certificate-authority-service/pricing">CA Service pricing</a>.</p></li> </ul> <h2 id="configure-ca-options">Configure a CA</h2> <div>  <section> <p class="_code-tab"><strong>Default CA</strong></p> <p>To bind the default CA to the workload identity pool, update the workload identity pool with the <code translate="no" dir="ltr">use-default-shared-ca</code> flag.</p> 
+<pre data-language="">
+  gcloud iam workload-identity-pools update TRUST_DOMAIN_NAME \
+      --location="global" \
+      --use-default-shared-ca \
+      --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN_NAME</var></code>: <p>The name of the trust domain. Depending on your pool type, format the name as follows:</p> <ul> <li>
+<strong>Google-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var>.svc.id.goog</code>
+</li> <li>
+<strong>Self-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">POOL_NAME</var>.global.<var translate="no">POOL_HOST_PROJECT_NUMBER</var>.workload.id.goog</code>
+</li> </ul> </li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: The project ID of your fleet host project. </li> </ul> </section> <section> <p class="_code-tab"><strong>Custom CA</strong></p> <ol> <li>
+<a href="#configure_ca">Configure CA Service to issue certificates for managed workload identities</a>.</li> <li>
+<a href="#bind-cas">Bind the CAs to the workload identity pool</a>.</li> <li>
+<a href="#authorize">Authorize managed workload identities to request certificates from the CA pool</a>.</li> </ol> <h3 id="configure_ca">Configure CA Service to issue certificates for managed workload identities</h3> <p>To configure managed workload identities for GKE, you first need to configure a certificate authority (CA) and one or more subordinate CAs. This configuration is known as a <em>CA hierarchy</em>.</p> <p>You can use <a href="https://docs.cloud.google.com/certificate-authority-service/docs/ca-pool">CA Service pools</a> to set up this hierarchy. With this hierarchy, the subordinate CA pool issues the X.509 workload identity certificates to your workloads.</p> <p>The CA pools configured to issue certificates for workloads using managed workload identities must reside in the same region as the workload. If you want to design a <a href="https://docs.cloud.google.com/architecture/framework/reliability/design-scale-high-availability#design_a_multi-region_architecture_for_resilience_to_regional_outages">multi-region architecture for resilience to regional outages</a>, we recommend that you configure a subordinate Certificate Authority Service CA pool for each region where you run workloads. By doing this, each of your workloads can reference an in-region subordinate Certificate Authority Service CA pool.</p> <aside class="caution"><strong>Caution:</strong><span> If you also <a href="https://docs.cloud.google.com/certificate-authority-service/docs/use-issuance-policy">attach certificate issuance policies to your CA pools</a>, the issuance policy must <a href="https://docs.cloud.google.com/load-balancing/docs/mtls#certificate-requirements">comply with certificate requirements for mTLS</a> to ensure that the provisioned certificates can be used for mTLS. Otherwise, the certificates might be provisioned successfully but fail when used for mTLS connections.</span></aside><aside class="note"><strong>Note:</strong><span> When you update or rotate a self-managed CA, there is a propagation latency of approximately 5 minutes before the updates take effect on the GKE clusters. This is because the <code translate="no" dir="ltr">gke-spiffe-controller</code> checks membership and fetches trust bundles every five minutes. This latency does not occur if you use the Google-managed CA.</span></aside> <h4 id="create_root_ca_pool">Configure your root CA pool</h4> <p>To create the root CA pool, do the following:</p> <aside class="special"><strong>Important:</strong><span> You <a href="https://docs.cloud.google.com/certificate-authority-service/docs/locations#choosing-best-location">cannot move or export a CA pool after it has been created</a>.</span></aside> <p>Create the root CA pool in the <em>Enterprise</em> tier using <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/pools/create"><code translate="no" dir="ltr">gcloud privateca pools create</code></a>. This tier is meant for long-lived, low-volume certificate issuance.</p> 
+<pre data-language="">
+gcloud privateca pools create ROOT_CA_POOL_ID \
+    --location=REGION \
+    --project=CA_PROJECT_ID \
+    --tier=enterprise
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">ROOT_CA_POOL_ID</var></code>: A unique ID for the root CA pool. The ID can be up to 64 characters in length and must contain only lower and uppercase alphanumeric characters, underscores, or hyphens. The pool ID must be unique within the region.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region where the root CA pool is located.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">CA_PROJECT_ID</var></code>: The project ID that you want to create the root CA in.</p></li> </ul> <p>To learn more about CA pools, tiers, and regions, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">Creating CA pools</a>.</p> <h4 id="create_root_ca">Configure your root CA</h4> <p>Create a root CA in the root CA pool using <a href="https://docs.cloud.google.com/sdk/gcloud/reference/privateca/roots/create"><code translate="no" dir="ltr">gcloud privateca roots create</code></a>. You might be prompted to <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-certificate-authorities#enable-root">enable the root CA</a> if this is the only CA in the root CA Pool.</p> <p>To create a root CA, run the following command:</p> 
+<pre data-language="">
+gcloud privateca roots create ROOT_CA_ID \
+    --pool=ROOT_CA_POOL_ID \
+    --subject="CN=ROOT_CA_CN, O=ROOT_CA_ORGANIZATION" \
+    --key-algorithm="KEY_ALGORITHM" \
+    --max-chain-length=1 \
+    --location=REGION \
+    --project=CA_PROJECT_ID \
+    --auto-enable
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_ID</var></code>: A unique name for the root CA. The CA name can be up to 64 characters in length and must contain only lower and uppercase alphanumeric characters, underscores, or hyphens. The CA name must be unique within the region.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_POOL_ID</var></code>: The ID of the root CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_CN</var></code>: The common name of the root CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_ORGANIZATION</var></code>: The organization of the root CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_ALGORITHM</var></code>: The key algorithm—for example, <code translate="no" dir="ltr">ec-p256-sha256</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region where the root CA pool is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_PROJECT_ID</var></code>: The project ID where you created the root CA.</li> </ul> <p>For more information about the <code translate="no" dir="ltr">subject</code> fields for the CA, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/using-cel#subject">Subject</a>.</p> <p>Optionally, you create additional root CAs in your root CA pool. Doing so can be useful for <a href="https://docs.cloud.google.com/certificate-authority-service/docs/managing-ca-rotation">root CA rotation</a>.</p> <h4 id="create_sub_ca_pools">Configure subordinate CAs</h4> <p>Optionally, you can configure subordinate CAs. Configuring subordinate CAs can help with the following:</p> <ul> <li><p>Multiple certificate issuance scenarios: If you have multiple certificate issuance scenarios, then you can create a subordinate CA for each scenario.</p></li> <li><p>Better load balancing: Adding multiple subordinate CAs in a CA pool helps you achieve better load balancing of certificate requests.</p></li> </ul> <p>To create a subordinate CA pool and subordinate CA, do the following:</p> <ol> <li>
+<p>Create the subordinate CA pool in the <em>DevOps</em> tier, which is meant for high volume, short-lived certificate issuance.</p> 
+<pre data-language="">
+gcloud privateca pools create SUBORDINATE_CA_POOL_ID \
+    --location=REGION \
+    --project=CA_PROJECT_ID \
+    --tier=devops
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_POOL_ID</var></code>: A unique ID for the subordinate CA pool. The ID can be up to 64 characters in length and must contain only lowercase and uppercase alphanumeric characters, underscores, or hyphens. The pool ID must be unique within the region.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region in which to create the subordinate CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_PROJECT_ID</var></code>: The ID of the project where you created the subordinate CA.</li> </ul> <p>For more information, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">Creating CA pools</a>.</p>
+</li> <li>
+<p>Create a subordinate CA in the subordinate CA pool. Don't change the default <a href="https://docs.cloud.google.com/certificate-authority-service/docs/reference/rest/v1/projects.locations.caPools#issuancemodes">config-based issuance mode</a>.</p> 
+<pre data-language="">
+gcloud privateca subordinates create SUBORDINATE_CA_ID \
+    --pool=SUBORDINATE_CA_POOL_ID \
+    --location=REGION \
+    --issuer-pool=ROOT_CA_POOL_ID \
+    --issuer-location=REGION \
+    --subject="CN=SUBORDINATE_CA_CN, O=SUBORDINATE_CA_ORGANIZATION" \
+    --key-algorithm="KEY_ALGORITHM" \
+    --use-preset-profile=subordinate_mtls_pathlen_0 \
+    --project=CA_PROJECT_ID \
+    --auto-enable
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_ID</var></code>: A unique name for the subordinate CA. The name can be up to 64 characters in length and must contain only lowercase and uppercase alphanumeric characters, underscores, or hyphens. The pool name must be unique within the region.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_POOL_ID</var></code>: The name of the subordinate CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region where the subordinate CA pool is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_POOL_ID</var></code>: The ID of the root CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region of the root CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_CN</var></code>: The common name of the subordinate CA.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_ORGANIZATION</var></code>: The name of the subordinate CA issuing organization.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">KEY_ALGORITHM</var></code>: The key algorithm—for example, <code translate="no" dir="ltr">ec-p256-sha256</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_PROJECT_ID</var></code>: The ID of the project where you created the subordinate CA.</li> </ul> <p>For more information about the <code translate="no" dir="ltr">subject</code> fields for the CA, see <a href="https://docs.cloud.google.com/certificate-authority-service/docs/using-cel#subject">Subject</a>.</p>
+</li> </ol> <h4 id="create-certificate-issuance-config">Create a certificate issuance configuration file</h4> <p>Binding CAs to workload identity pools requires a <a href="https://docs.cloud.google.com/certificate-manager/docs/core-components#issuance-configs">certificate issuance config</a>. If you need your workloads to authenticate across multiple trust domains, see <a href="#enable-trust-federation">Enable trust federation between workload identity pools (Optional)</a>.</p> <p>To configure the <a href="https://docs.cloud.google.com/certificate-manager/docs/how-it-works#issuance-configs">certificate issuance config</a>, you create a certificate issuance config file named <code translate="no" dir="ltr">cic.json</code>. The format of the file is similar to the following:</p> 
+<pre data-language="">
+{
+  "inlineCertificateIssuanceConfig": {
+      "caPools": {
+        "REGION1": "projects/CA_PROJECT_NUMBER1/locations/REGION1/caPools/SUBORDINATE_CA_POOL_ID1",
+        "REGION2": "projects/CA_PROJECT_NUMBER2/locations/REGION2/caPools/SUBORDINATE_CA_POOL_ID2"
+      },
+      "lifetime": "DURATION",
+      "rotationWindowPercentage": ROTATION_WINDOW_PERCENTAGE,
+      "keyAlgorithm": "ALGORITHM"
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The regions where the CAs are located.</p></li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">CA_PROJECT_NUMBER</var></code>: The project number of the project that in which you created the subordinate CA pool. To get the project number from <var translate="no">CA_PROJECT_ID</var> project, run the following command:</p> 
+<pre data-language="">
+gcloud projects describe CA_PROJECT_ID --format="value(projectNumber)"
+</pre>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_POOL_ID</var></code>: The name of the subordinate CA pool.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">ALGORITHM</var></code>: Optional. The encryption algorithm used to generate the private key. Valid values are <code translate="no" dir="ltr">ECDSA_P256</code>, <code translate="no" dir="ltr">ECDSA_P384</code>, <code translate="no" dir="ltr">RSA_2048</code>, <code translate="no" dir="ltr">RSA_3072</code>, <code translate="no" dir="ltr">RSA_4096</code>. If not specified, <code translate="no" dir="ltr">ECDSA_P256</code> is used as the default algorithm.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">DURATION</var></code>: Optional. The leaf certificate validity duration, in seconds. The value must be between 86400 (1 day) and 2592000 (30 days). If not specified, the default value of 86400 (1 day) is used. The actual validity of the issued certificate also depends on the issuing CA, because it can restrict the lifetime of the issued certificate.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">ROTATION_WINDOW_PERCENTAGE</var></code>: Optional: The percentage of the certificate's lifetime at which a renewal triggers. The value must be between 50 and 80. If not specified, 50 is used as the default value.</p></li> </ul> <h3 id="bind-cas">Bind the CAs to the workload identity pool</h3> <p>After you create your CA hierarchy and create certificate issuance configs for each CA, you bind the CAs to the workload identity pool. To bind a CA to the workload identity pool, you update the workload identity pool with the CA's certificate issuance config. Then, you can verify that the pool was updated.</p> <h4 id="update-pool-cas">Update the workload identity pool</h4> <p>To update the pool, run the following command:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools update TRUST_DOMAIN_NAME \
+    --location="global" \
+    --inline-certificate-issuance-config-file=CIC_JSON_FILE_PATH \
+    --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<p><code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN_NAME</var></code>: The name of the trust domain. Depending on your pool type, format the name as follows:</p> <ul> <li>
+<strong>Google-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var>.svc.id.goog</code>
+</li> <li>
+<strong>Self-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">POOL_NAME</var>.global.<var translate="no">POOL_HOST_PROJECT_NUMBER</var>.workload.id.goog</code>
+</li> </ul>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">CIC_JSON_FILE_PATH</var></code>: The path to the JSON-formatted certificate issuance config file (<code translate="no" dir="ltr">cic.json</code>) that you created earlier.</p></li> </ul> <h4 id="verify-wip-updated">Verify that the workload identity pool was updated</h4> <p>To verify that your workload identity pool was updated with the certificate issuance config, run the following command:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools describe TRUST_DOMAIN_NAME \
+    --location="global" \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN_NAME</var></code> with the trust domain name that you used to <a href="#update-pool-cas">update the workload identity pool</a> earlier in this document.</p> <p>The command output is similar to the following:</p> 
+<pre data-language="">
+inlineCertificateIssuanceConfig:
+    caPools:
+      REGION1: projects/PROJECT_NUMBER1/locations/REGION1/caPools/SUBORDINATE_CA_POOL_ID1,
+      REGION2: projects/PROJECT_NUMBER2/locations/REGION2/caPools/SUBORDINATE_CA_POOL_ID2
+    keyAlgorithm: ALGORITHM
+    lifetime: DURATION
+    rotationWindowPercentage: ROTATION_WINDOW_PERCENTAGE
+mode: TRUST_DOMAIN
+name: TRUST_DOMAIN_NAME
+state: ACTIVE
+</pre> <p>If <code translate="no" dir="ltr">inlineCertificateIssuanceConfig</code> isn't present in the command output, verify that you've correctly configured your gcloud CLI to use the correct project for billing and quota. You might need to update to a newer version of the gcloud CLI.</p> <h2 id="authorize">Authorize managed workload identities to request certificates from the CA pool</h2> <p>After you bind the CAs to the workload identity pool, authorize managed workload identities to request certificates from the CA pool. To authorize these identities:</p> <ol> <li>
+<p>Grant the <a href="roles-permissions/privateca#privateca.workloadCertificateRequester"><strong>CA Service Workload Certificate Requester</strong> (<code translate="no" dir="ltr">roles/privateca.workloadCertificateRequester</code>)</a> IAM role on each subordinate CA pool to the trust domain. The following <code translate="no" dir="ltr">gcloud privateca pools add-iam-policy-binding</code> command authorizes the trust domain to request certificates from the CA Service certificate chains.</p> 
+<pre data-language="">
+gcloud privateca pools add-iam-policy-binding SUBORDINATE_CA_POOL_ID \
+    --location=REGION \
+    --role=roles/privateca.workloadCertificateRequester \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/name/locations/global/workloadIdentityPools/TRUST_DOMAIN_NAME" \
+    --project=CA_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_POOL_ID</var></code>: The ID of the subordinate CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region of the subordinate CA pool.</li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: The project number of the project that contains the GKE workload identity pool.</p> <p>To get <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> from your workload identity pool project, run the following command.</p> 
+<pre data-language="">
+gcloud projects describe WORKLOAD_IDENTITY_POOL_PROJECT_ID --format="value(projectNumber)"
+</pre>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">WORKLOAD_IDENTITY_POOL_PROJECT_ID</var></code>: The project ID containing the workload identity pool.</p></li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN_NAME</var></code>: The name of the trust domain. Depending on your pool type, format the name as follows:</p> <ul> <li>
+<strong>Google-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var>.svc.id.goog</code>
+</li> <li>
+<strong>Self-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">POOL_NAME</var>.global.<var translate="no">POOL_HOST_PROJECT_NUMBER</var>.workload.id.goog</code>
+</li> </ul>
+</li> <li><p><code translate="no" dir="ltr"><var translate="no">CA_PROJECT_ID</var></code>: The ID of the project where you created the subordinate CA.</p></li> </ul>
+</li> <li>
+<p>Grant the <a href="roles-permissions/privateca#privateca.poolReader">CA Service Pool Reader (<code translate="no" dir="ltr">roles/privateca.poolReader</code>)</a> role on the subordinate CA pools to the managed workload identity. Doing so authorizes the managed workload identity to get the signed X.509 certificates from the CA's certificate chains.</p> 
+<pre data-language="">
+gcloud privateca pools add-iam-policy-binding SUBORDINATE_CA_POOL_ID \
+    --location=REGION \
+    --role=roles/privateca.poolReader \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/name/locations/global/workloadIdentityPools/TRUST_DOMAIN_NAME" \
+    --project=CA_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBORDINATE_CA_POOL_ID</var></code>: The ID of the subordinate CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region of the subordinate CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: The project number of the project that contains the GKE workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN_NAME</var></code>: The name of the trust domain. Depending on your pool type, format the name as follows: <ul> <li>
+<strong>Google-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var>.svc.id.goog</code>
+</li> <li>
+<strong>Self-managed pool:</strong> <code translate="no" dir="ltr"><var translate="no">POOL_NAME</var>.global.<var translate="no">POOL_HOST_PROJECT_NUMBER</var>.workload.id.goog</code>
+</li> </ul>
+</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_PROJECT_ID</var></code>: The ID of the project where you created the subordinate CA.</li> </ul>
+</li> </ol> </section>  </div> <h2 id="deploy-workloads">Deploy workloads with managed workload identities</h2> <p>After you configure your CA pools to issue certificates for managed workload identities, you can deploy workloads that have managed workload identities.</p> <p>This section shows you how to deploy a test workload that has a managed workload identity. To do this, you deploy a Pod, check that credentials were generated, and view the certificate and the SPIFFE ID.</p> <h3 id="deploy-pod">Deploy a Pod</h3> <p>You can deploy a Pod that gets its managed workload identity from a Google-managed workload identity pool or a self-managed workload identity pool.</p> <div>  <section> <p class="_code-tab"><strong>Google-managed pool</strong></p> <p>To deploy a test Pod in your cluster, do the following:</p> <ol> <li>
+<p>Get the cluster credentials.</p> 
+<pre data-language="">gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=CLUSTER_ZONE \
+    --project=CLUSTER_PROJECT_ID
+</pre>
+</li> <li>
+<p>Create the Kubernetes namespace.</p> 
+<pre data-language="">kubectl create namespace KUBERNETES_NAMESPACE
+</pre>
+</li> <li>
+<p>Deploy a test PodSpec.</p> <aside class="note"><strong>Note:</strong><span> If you use an Autopilot cluster, you can omit the <code translate="no" dir="ltr">nodeSelector</code> from your PodSpec.</span></aside>
+<pre data-language="">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: KUBERNETES_NAMESPACE
+  name: example-pod
+spec:
+  containers:
+  - name: main
+    image: debian
+    command: ['sleep', 'infinity']
+    volumeMounts:
+    - name: fleet-spiffe-credentials
+      mountPath: /var/run/secrets/workload-spiffe-credentials
+      readOnly: true
+  nodeSelector:
+    iam.gke.io/gke-metadata-server-enabled: "true"
+  volumes:
+  - name: fleet-spiffe-credentials
+    csi:
+      driver: podcertificate.gke.io
+      volumeAttributes:
+        signerName: spiffe.gke.io/fleet-svid
+        trustDomain: fleet-project/svc.id.goog
+EOF
+</pre>
+</li> </ol> </section> <section> <p class="_code-tab"><strong>Self-managed pool</strong></p> <p>To deploy a test Pod in your cluster using a self-managed workload identity pool, do the following:</p> <ol> <li><p><a href="https://docs.cloud.google.com/kubernetes-engine/fleet-management/docs/authenticate-mixed-trust-workloads">Set up a self-managed workload identity pool and configure the fleet clusters to use this pool</a>.</p></li> <li>
+<p>Get the cluster credentials.</p> 
+<pre data-language="">gcloud container clusters get-credentials CLUSTER_NAME \
+    --location=CLUSTER_ZONE \
+    --project=CLUSTER_PROJECT_ID
+</pre>
+</li> <li>
+<p>Create the Kubernetes namespace.</p> <aside class="note"><strong>Note:</strong><span> The Kubernetes namespace must match the fleet namespace in the team scope that you created when configuring the self-managed pool.</span></aside>
+<pre data-language="">kubectl create namespace KUBERNETES_NAMESPACE
+</pre>
+</li> <li>
+<p>Deploy a test PodSpec.</p> <p>The following PodSpec configures the <code translate="no" dir="ltr">trustDomain</code> volume attribute for a self-managed workload identity pool:</p> <aside class="note"><strong>Note:</strong><span> If you use an Autopilot cluster, you can omit the <code translate="no" dir="ltr">nodeSelector</code> from your PodSpec.</span></aside>
+<pre data-language="">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: KUBERNETES_NAMESPACE
+  name: example-pod
+spec:
+  containers:
+  - name: main
+    image: debian
+    command: ['sleep', 'infinity']
+    volumeMounts:
+    - name: fleet-spiffe-credentials
+      mountPath: /var/run/secrets/workload-spiffe-credentials
+      readOnly: true
+  nodeSelector:
+    iam.gke.io/gke-metadata-server-enabled: "true"
+  volumes:
+  - name: fleet-spiffe-credentials
+    csi:
+      driver: podcertificate.gke.io
+      volumeAttributes:
+        signerName: spiffe.gke.io/fleet-svid
+        trustDomain: fleet-project/tenancy-scope
+EOF
+</pre>
+</li> </ol> </section>  </div> <h3 id="list-workload-credentials">List the workload credentials</h3> <p>To list the workload credentials, run the following command. It can take a few minutes to create the credentials.</p> 
+<pre>kubectl exec -it example-pod -n KUBERNETES_NAMESPACE -- ls  /var/run/secrets/workload-spiffe-credentials
+</pre> <p>The command output lists the following files:</p> <ul> <li>
+<code translate="no" dir="ltr">ca_certificates.pem</code>: Contains the root CA certificate that signs the workload certificate.</li> <li>
+<code translate="no" dir="ltr">certificates.pem</code>: Contains the workload's X.509 certificate.</li> <li>
+<code translate="no" dir="ltr">private_key.pem</code>: Contains the workload's private key.</li> <li>
+<code translate="no" dir="ltr">trust_bundles.json</code>: Contains a map of trust domains and CA certificates to trust for the given workload. Each entry contains the trust domain string as a key, and the CA certificates corresponding to that trust domain.</li> <li>
+<code translate="no" dir="ltr">credential-bundle.pem</code>: Contains the private key and certificate concatenated, providing a single file for mTLS credentials. This file is only available in GKE versions after 1.35.2-gke.1291000.</li> </ul> <h3 id="view-certificate">View the certificate</h3> <p>To view the certificate, do the following:</p> <ol> <li>
+<p>Export the certificate to a certificate file.</p> 
+<pre>kubectl exec -it example-pod --namespace=KUBERNETES_NAMESPACE -- cat /var/run/secrets/workload-spiffe-credentials/certificates.pem | openssl x509 -noout -text &gt; certfile
+</pre>
+</li> <li>
+<p>View the certificate file.</p> 
+<pre>cat certfile
+</pre> <p>In the certificate, in the <code translate="no" dir="ltr">X509v3 Subject Alternative Name</code> attribute, you see the SPIFFE ID, with a format similar to the following depending on your workload identity pool type:</p> <ul> <li>
+<strong>Google-managed pool:</strong> <code translate="no" dir="ltr">spiffe://<var translate="no">PROJECT_ID</var>.svc.id.goog/ns/<var translate="no">KUBERNETES_NAMESPACE</var>/sa/default</code>
+</li> <li>
+<strong>Self-managed pool:</strong> <code translate="no" dir="ltr">spiffe://<var translate="no">POOL_NAME</var>.global.<var translate="no">POOL_HOST_PROJECT_NUMBER</var>.workload.id.goog/ns/<var translate="no">KUBERNETES_NAMESPACE</var>/sa/default</code>
+</li> </ul> <p><code translate="no" dir="ltr">default</code> refers to the default Kubernetes ServiceAccount.</p>
+</li> </ol> <h3 id="test-w2w-auth">Test workload-to-workload authentication</h3> <p>To test workload-to-workload authentication, see <a href="https://github.com/grpc/grpc-go/tree/master/examples/features/encryption#readme">Test mTLS authentication using Go</a>.</p> <p>The sample code in the repository creates <em>client</em> and <em>server</em> workloads. You can test mutual authentication between the workloads using the certificates that you generated earlier in this document.</p> <h2 id="enable-trust-federation">Enable trust federation between workload identity pools (Optional)</h2> <p>To enable mutual authentication for workloads in different trust domains, you must configure trust federation between the workload identity pools. This step is only required if your workloads need to authenticate with workloads in a different workload identity pool.</p> <p>To enable trust federation, complete the following steps:</p> <ol> <li>
+<a href="#create-trust-config">Create the trust configuration file</a>.</li> <li>
+<a href="#update-trust-config">Update the workload identity pool with trust configuration</a>.</li> </ol> <h3 id="create-trust-config">Create the trust configuration file</h3> <p>Create the trust configuration file with an <code translate="no" dir="ltr">inlineTrustConfig</code> section that specifies the certificates for each domain.</p> <p>The trust config file contains a set of trust anchors that managed workload identity uses to validate peer certificates. The trust config file maps the SPIFFE trust domain to CA certificates.</p> <ol> <li>
+<p>For custom CA, download the certificates for a trust domain that uses a custom CA.</p> 
+<pre>
+gcloud privateca pools get-ca-certs ROOT_CA_POOL_ID \
+    --output-file=CERTIFICATE_PATH \
+    --location=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_POOL_ID</var></code>: The ID of the root CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_PATH</var></code>: The output path for the PEM-encoded certificate.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region of the root CA pool.</li> </ul>
+</li> <li>
+<p>Create a file named <code translate="no" dir="ltr">tc.json</code> that contains your inline trust configuration. If a domain uses the Google-managed default CA, use the <code translate="no" dir="ltr">trustDefaultSharedCa</code> field. If a domain uses a custom CA, use the PEM-encoded certificates that you previously downloaded.</p> <p>The file looks similar to the following:</p> <p>In this example, <var translate="no">TRUST_DOMAIN_A</var> uses the Google-managed default CA, and <var translate="no">TRUSTED_DOMAIN_B</var> uses a custom CA with the downloaded root certificates.</p> 
+<pre>
+{
+  "inlineTrustConfig": {
+    "additionalTrustBundles": {
+      "TRUST_DOMAIN_A": {
+        "trustDefaultSharedCa": true
+      },
+      "TRUSTED_DOMAIN_B": {
+        "trustAnchors": [
+          {
+              "pemCertificate": "-----BEGIN CERTIFICATE-----\nCERTIFICATE_MATERIAL1\n-----END CERTIFICATE-----"
+          },
+          {
+              "pemCertificate": "-----BEGIN CERTIFICATE-----\nCERTIFICATE_MATERIAL2\n-----END CERTIFICATE-----"
+          }
+        ]
+      }
+    }
+  }
+}
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">TRUST_DOMAIN_A</var>: The name of the trust domain that uses the Google-managed default CA.</li> <li>
+<var translate="no">TRUST_DOMAIN_B</var>: The name of the trust domain that uses a custom CA.</li> <li>
+<var translate="no">CERTIFICATE_MATERIAL</var>: A set of PEM-formatted CA certificates trusted to issue certificates in the trust domain.</li> </ul>
+</li> </ol> <h3 id="update-trust-config">Update the workload identity pool with trust configuration</h3> 
+<pre>
+gcloud iam workload-identity-pools update TRUST_DOMAIN_NAME \
+    --location="global" \
+    --inline-trust-config-file=TC_JSON_FILE_PATH \
+    --project=PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">TRUST_DOMAIN_NAME</var>: The name of the trust domain.</li> <li>
+<var translate="no">TC_JSON_FILE_PATH</var>: The path to the JSON-formatted trust config file (<code translate="no" dir="ltr">tc.json</code>) that you created.</li> <li>
+<var translate="no">PROJECT_ID</var>: The project ID.</li> </ul> <h2 id="what-next">What's next</h2> <ul> <li>
+<a href="troubleshoot-managed-workload-identities-gke">Troubleshoot managed workload identity for GKE</a>.</li> <li>Learn more about <a href="https://docs.cloud.google.com/certificate-authority-service/docs/creating-ca-pool">creating CA pools</a>.</li> </ul> <cloud-free-trial> <div class="eligible"> <div> <h2 class="hide-from-toc" id="try-it-for-yourself"> Try it for yourself </h2> <p> If you're new to Google Cloud, create an account to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </p> <a href="https://console.cloud.google.com/freetrial" class="button button-primary" track-type="button" track-metadata-modifier="primary" track-name="Get started for free" track-metadata-anchor_text="Get started for free" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-href="https://console.cloud.google.com/freetrial"> Get started for free </a> </div> </div> </cloud-free-trial><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/iam/docs/create-managed-workload-identities-gke" class="_attribution-link">https://docs.cloud.google.com/iam/docs/create-managed-workload-identities-gke</a>
+  </p>
+</div>

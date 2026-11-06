@@ -1,0 +1,417 @@
+<h1>Perform joins with subqueries</h1> <h1 class="devsite-page-title" id="perform-joins-with-subqueries">Perform joins with subqueries</h1> <h2 id="overview">Overview</h2> <p>Firestore Enterprise edition supports relational-style joins through <strong>correlated subqueries</strong>. Unlike many NoSQL databases that often require denormalizing data or performing multiple client-side requests, subqueries allow you to combine and aggregate data from related collections or subcollections directly on the server.</p> <p>Subqueries are expressions that execute a nested pipeline for every document processed by the outer query. This enables complex data retrieval patterns, such as fetching a document alongside its related subcollection items or joining logically linked data across disparate root collections.</p> <h2 id="concepts">Concepts</h2> <p>This section introduces the core concepts behind using subqueries for performing joins in Pipeline operations.</p> <h3 id="subqueries_as_expressions">Subqueries as expressions</h3> <p>A subquery is not a top-level stage; instead, it is an <strong>expression</strong> that can be used in any stage that accepts expressions, such as <a href="stages/transformation/select"><code translate="no" dir="ltr">select(...)</code></a>, <a href="stages/transformation/add_fields"><code translate="no" dir="ltr">add_fields(...)</code></a>, <a href="stages/transformation/where"><code translate="no" dir="ltr">where(...)</code></a>, or <a href="stages/transformation/sort"><code translate="no" dir="ltr">sort(...)</code></a>.</p> <p>Firestore supports three types of subqueries:</p> <ul> <li>
+<strong>Array Subqueries:</strong> Materialize the entire result set of the subquery as an array of documents.</li> <li>
+<strong>Scalar Subqueries:</strong> Evaluate to a single value, such as a count, an average, or a specific field from a related document.</li> <li>
+<strong><code translate="no" dir="ltr">subcollection(...)</code> Subqueries:</strong> simplified joins for a one-to-many parent-child relation.</li> </ul> <h3 id="scope_and_variables">Scope and variables</h3> <p>When writing a join, the nested subquery often needs to reference fields from the "outer" document (the parent). To bridge these scopes, you use the <a href="stages/transformation/let"><code translate="no" dir="ltr">let(...)</code></a> stage (referred to as <code translate="no" dir="ltr">define(...)</code> in some SDKs) to define variables in the parent scope that can then be referenced in the subquery using the <code translate="no" dir="ltr">variable(...)</code> function.</p> <h2 id="syntax">Syntax</h2> <p>The following sections give an overview of the syntax for performing joins.</p> <h3 id="the_let_stage">The <code translate="no" dir="ltr">let(...)</code> stage</h3> <p>The <a href="stages/transformation/let"><code translate="no" dir="ltr">let(...)</code></a> stage (referred to as <code translate="no" dir="ltr">define(...)</code> in some SDKs) is a non-filtering stage that explicitly brings data from the parent scope into a named variable for use in subsequent nested scopes.</p> <h3 id="array_subqueries">Array Subqueries</h3> <p>An Array subquery is a special case of expression subquery that materializes the entire result set of the subquery into an array. If the subquery returns zero rows, it evaluates to an empty array. It never returns a <code translate="no" dir="ltr">null</code> array. Such queries are useful when the full results are required in the final result, such as when materializing a nested or correlated collection.</p> <p>Queries can filter, sort, &amp; aggregate in the subquery to also reduce the amount of data that needs to be fetched and returned to help reduce the cost of the query. The order of the subquery is respected, meaning that a <code translate="no" dir="ltr">sort(...)</code> stage in the subquery controls the order of results in the final array.</p> <p>Use the <code translate="no" dir="ltr">toArrayExpression()</code> SDK wrapper to convert a query into an array.</p> <h3 id="scalar_subqueries">Scalar Subqueries</h3> <p>Scalar subqueries are often used in a <a href="stages/transformation/select"><code translate="no" dir="ltr">select(...)</code></a> or <a href="stages/transformation/where"><code translate="no" dir="ltr">where(...)</code></a> stage as allow filtering or resulting the result of a subquery without materializing the full query directly.</p> <p>A scalar subquery which produce zero results will evaluate to <code translate="no" dir="ltr">null</code> itself, while a subquery which evaluates to multiple elements will result in a runtime error.</p> <p>When a scalar subquery produces only a single field per-result, the field is <em>elevated</em> to be the top-level result for the subquery. This is most commonly seen when the subquery ends with a <code translate="no" dir="ltr">select(field("user_name"))</code> or <code translate="no" dir="ltr">aggregate(countAll().as("total"))</code> where the schema of the subquery is just a single field. Otherwise when a subquery can produce multiple fields they are wrapped in a map.</p> <p>Use the <code translate="no" dir="ltr">toScalarExpression()</code> SDK wrapper to convert a query into a scalar expression.</p> <h3 id="subcollection_subqueries">
+<code translate="no" dir="ltr">subcollection(...)</code> Subqueries</h3> <p>While offered as a stage, the <a href="stages/input/subcollection"><code translate="no" dir="ltr">subcollection(...)</code></a> input stage allows performing joins over Firestore's hierarchical data model. In a hierarchical model, queries often need to retrieve a document alongside data from its own subcollections. While you can achieve this using a <a href="stages/input/collection_group"><code translate="no" dir="ltr">collection_group(...)</code></a> input stage followed by a filter on the parent reference, <code translate="no" dir="ltr">subcollection(...)</code> provides a much more concise syntax.</p> <p>Other than the implicit join condition, this acts similarly to an array subquery, returning an empty result if no documents are matched, even if the nested collection does not exist.</p> <p>It is fundamentally <strong>syntactic sugar</strong>: it automatically uses the <code translate="no" dir="ltr">__name__</code> of the document in the outer scope as the join key to resolve the hierarchical relationship. This makes it the preferred way to perform lookups across collections linked in a parent-child relationship.</p> <h2 id="examples">Examples</h2> <h3 id="example_data">Example data</h3> <p>The following loads a set of test data to use in all following examples.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">// Load set of cities.
+const cities = db.collection("cities");
+
+await cities.doc("SF").set({
+  name: "San Francisco",
+  state: "CA",
+  country: "USA",
+});
+await cities.doc("LA").set({
+  name: "Los Angeles",
+  state: "CA",
+  country: "USA"
+});
+await cities.doc("DC").set({
+  name: "Washington, D.C.",
+  state: null,
+  country: "USA"
+});
+await cities.doc("TOK").set({
+  name: "Tokyo",
+  state: null,
+  country: "Japan"
+});
+
+// Load restaurants in various cities.
+const sfRestaurants = db.collection("cities/SF/restaurants");
+const laRestaurants = db.collection("cities/LA/restaurants");
+const dcRestaurants = db.collection("cities/DC/restaurants");
+
+const rest1 = await sfRestaurants.add({
+  name: "Golden Gate Pizza",
+  type: "pizza",
+  owner_id: "Mario Rossi"
+});
+const rest2 = await sfRestaurants.add({
+  name: "Bay Area Burger",
+  type: "burger",
+  owner_id: "Sarah Jenkins"
+});
+const rest3 = await sfRestaurants.add({
+  name: "Sunset Taco",
+  type: "mexican",
+  owner_id: "Edward"
+});
+
+const rest4 = await laRestaurants.add({
+  name: "Hollywood Sushi",
+  type: "sushi",
+  owner_id: "Ken Kenji"
+});
+const rest5 = await laRestaurants.add({
+  name: "Venice Pizza",
+  type: "pizza",
+  owner_id: "Luigi Romano"
+});
+
+const rest6 = await dcRestaurants.add({
+  name: "Capitol Tacos",
+  type: "mexican",
+  owner_id: "Maria Garcia"
+});
+const rest7 = await dcRestaurants.add({
+  name: "Georgetown Coffee",
+  type: "cafe",
+  owner_id: "David Kim"
+});
+
+// Load collection of reviews.
+const reviews = db.collection("reviews");
+
+await reviews.add({ restaurant: rest1, rating: 5, reviewer_id: "Alice" });
+await reviews.add({ restaurant: rest1, rating: 4, reviewer_id: "Bob" });
+await reviews.add({ restaurant: rest2, rating: 4, reviewer_id: "Charlie" });
+await reviews.add({ restaurant: rest3, rating: 5, reviewer_id: "Diana" });
+await reviews.add({ restaurant: rest3, rating: 4, reviewer_id: "Edward" });
+await reviews.add({ restaurant: rest3, rating: 4, reviewer_id: "Fiona" });
+// rest4 has 0 reviews
+await reviews.add({ restaurant: rest5, rating: 3, reviewer_id: "George" });
+await reviews.add({ restaurant: rest6, rating: 5, reviewer_id: "Hannah" });
+await reviews.add({ restaurant: rest6, rating: 4, reviewer_id: "Ian" });
+await reviews.add({ restaurant: rest7, rating: 5, reviewer_id: "Julia" });
+</pre></section> </div> <h3 id="lookup_a_document_in_another_collection">Lookup a Document in Another Collection</h3> <p>The following query on the <code translate="no" dir="ltr">reviews</code> collection group performs a lookup into the <code translate="no" dir="ltr">restaurant</code> collection group using a primary key reference.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("reviews")
+  .define(field("restaurant").as("restaurant_name"))
+  .addFields(db.pipeline()
+    .collectionGroup("restaurant")
+    .where(field("__name__").equal(variable("restaurant_name")))
+    .select("name", "type")
+    .toScalarExpression()
+    .as("restaurant"))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  rating: 5,
+  reviewer_id "Alice",
+  restaurant: { name: "Golden Gate Pizza", type: "pizza" }
+},
+{
+  rating: 4,
+  reviewer_id "Bob",
+  restaurant: { name: "Golden Gate Pizza", type: "pizza" }
+},
+{
+  rating: 4,
+  reviewer_id "Charlie",
+  restaurant: { name: "Bay Area Burger", type: "burger" }
+},
+{
+  rating: 5,
+  reviewer_id "Diana",
+  restaurant: { name: "Sunset Taco", type: "mexican" }
+},
+{
+  rating: 4,
+  reviewer_id "Edward",
+  restaurant: { name: "Sunset Taco", type: "mexican" }
+},
+{
+  rating: 4,
+  reviewer_id "Fiona",
+  restaurant: { name: "Sunset Taco", type: "mexican" }
+},
+{
+  rating: 3,
+  reviewer_id "George",
+  restaurant: { name: "Venice Pizza", type: "pizza" }
+},
+{
+  rating: 5,
+  reviewer_id "Hannah",
+  restaurant: { name: "Capitol Tacos", type: "mexican" }
+},
+{
+  rating: 4,
+  reviewer_id "Ian",
+  restaurant: { name: "Capitol Tacos", type: "mexican" }
+},
+{
+  rating: 5,
+  reviewer_id "Julia",
+  restaurant: { name: "Georgetown Coffee", type: "cafe" }
+}
+</pre> <h3 id="combine_multiple_collections">Combine Multiple Collections</h3> <p>The following query fetches all pizza places from the <code translate="no" dir="ltr">restaurants</code> collection group, and uses an array subquery to fetch and embed their associated reviews directly into the response.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("restaurants")
+  .where(field("type").equal("pizza"))
+  .define(field("__name__").as("restaurant_name"))
+  .select(
+    field("name"),
+    db.pipeline()
+      .collectionGroup("reviews")
+      .where(field("restaurant").equal(variable("restaurant_name")))
+      .select("rating", "reviewer_id")
+      .toArrayExpression()
+      .as("reviews"))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  name: "Golden Gate Pizza",
+  reviews: [
+    { rating: 5, reviewer_id "Alice" },
+    { rating: 4, reviewer_id "Bob" }
+  ]
+},
+{
+  name: "Venice Pizza",
+  type: "pizza",
+  owner_id: "Luigi Romano",
+  reviews: [
+    { rating: 3, reviewer_id "George" }
+  ]
+}
+</pre> <h3 id="aggregate_across_multiple_collections">Aggregate Across Multiple Collections</h3> <p>The following query on the <code translate="no" dir="ltr">restaurants</code> collection group uses a correlated subquery to get the average rating for each restaurant from the <code translate="no" dir="ltr">reviews</code> collection group.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("restaurants")
+  .where(field("type").equal("pizza"))
+  .define(field("__name__").as("restaurant_name"))
+  .select(
+    field("name"),
+    db.pipeline()
+      .collectionGroup("reviews")
+      .where(field("restaurant").equal(variable("restaurant_name")))
+      .aggregate(average("rating").as("avg_rating"))
+      .toScalarExpression()
+      .as("avg_rating"))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  name: "Golden Gate Pizza",
+  avg_rating: 4.5
+},
+{
+  name: "Venice Pizza",
+  avg_rating: 3.0
+}
+</pre> <h3 id="top-n_per_group_subquery_with_limit">Top-N Per Group (Subquery with Limit)</h3> <p>The following query fetches all documents from the <code translate="no" dir="ltr">restaurants</code> collection group, and uses a correlated subquery to fetch the top 2 highest-rated reviews for each restaurant.</p> <p>This ensures that the array of reviews does not grow too large and hits the query's memory limit.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("restaurants")
+  .define(field("__name__").as("restaurant_name"))
+  .select(
+    field("name"),
+    db.pipeline()
+      .collectionGroup("reviews")
+      .where(field("restaurant").equal(variable("restaurant_name")))
+      .sort(field("rating").descending())
+      .limit(2)
+      .select("rating", "reviewer_id")
+      .toArrayExpression()
+      .as("top_reviews"))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  name: "Golden Gate Pizza",
+  top_reviews: [
+    { rating: 5, reviewer_id "Alice" },
+    { rating: 4, reviewer_id "Bob" }
+  ]
+},
+{
+  name: "Bay Area Burger",
+  top_reviews: [
+    { rating: 4, reviewer_id "Charlie" }
+  ]
+},
+{
+  name: "Sunset Taco",
+  top_reviews: [
+    { rating: 5, reviewer_id "Diana" },
+    { rating: 4, reviewer_id "Edward" }
+  ]
+},
+{
+  name: "Hollywood Sushi",
+  top_reviews: []
+},
+{
+  name: "Venice Pizza",
+  top_reviews: [
+    { rating: 3, reviewer_id "George" }
+  ]
+},
+{
+  name: "Capitol Tacos",
+  top_reviews: [
+    { rating: 5, reviewer_id "Hannah" },
+    { rating: 4, reviewer_id "Ian" }
+  ]
+},
+{
+  name: "Georgetown Coffee",
+  top_reviews: [
+    { rating: 5, reviewer_id "Julia" }
+  ]
+}
+</pre> <h3 id="join_subcollections">Join Subcollections</h3> <p>The following query scans the <code translate="no" dir="ltr">cities</code> collection and uses the <a href="stages/input/subcollection"><code translate="no" dir="ltr">subcollection(...)</code></a> stage to implicitly join over documents from a nested collection to find the number of restaurants per city.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collection("cities")
+  .addFields(subcollection("restaurants")
+    .toArrayExpression()
+    .length()
+    .as("restaurant_count"))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  __name__: cities/SF,
+  name: "San Francisco",
+  state: "CA",
+  country: "USA",
+  restaurant_count: 3
+},
+{
+  __name__: cities/LA,
+  name: "Los Angeles",
+  state: "CA",
+  country: "USA",
+  restaurant_count: 2
+},
+{
+  __name__: cities/DC,
+  name: "Washington, D.C.",
+  state: null,
+  country: "USA",
+  restaurant_count: 2
+},
+{
+  __name__: cities/TOK,
+  name: "Tokyo",
+  state: null,
+  country: "Japan",
+  restaurant_count: 0
+}
+</pre> <h3 id="express_multiple_join_conditions">Express Multiple Join Conditions</h3> <p>The following query scans the <code translate="no" dir="ltr">restaurants</code> collection group and performs a multi-field join with the <code translate="no" dir="ltr">reviews</code> collection group to find owners reviewing their own restaurants.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("restaurants")
+  .define(field("owner_id"), field("__name__"))
+  .where(db.pipeline()
+    .collectionGroup("reviews")
+    .where(field("restaurant").equal(variable("__name__")))
+    .where(field("author").equal(variable("owner_id")))
+    .aggregate(count().as("c"))
+    .toScalarExpression()
+    .greaterThan(0))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  __name__: cities/SF/restaurants/X9An0HIlx29A9GPuRthS,
+  name: "Sunset Taco",
+  type: "mexican",
+  owner_id: "Edward"
+}
+</pre> <h3 id="anti-join_not_exists">Anti-Join (<code translate="no" dir="ltr">NOT EXISTS</code>)</h3> <p>The following query scans the <code translate="no" dir="ltr">restaurants</code> collection group and finds all restaurants that have no reviews yet.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("restaurants")
+  .define(field("__name__").as("restaurant_name"))
+  .where(db.pipeline()
+    .collectionGroup("reviews")
+    .where(field("restaurant").equal(variable("restaurant_name")))
+    .aggregate(count().as("review_count"))
+    .toScalarExpression()
+    .equal(0))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  __name__: "cities/LA/restaurants/X9An0HIlx29A9GPuRthS",
+  name: "Hollywood Sushi",
+  type: "sushi",
+  owner_id: "Ken Kenji"
+}
+</pre> <h3 id="subquery_as_join">Subquery as Join</h3> <p>The following query flattens the relationship between each pizza place and its reviews. By placing the subquery inside an <a href="stages/transformation/unnest"><code translate="no" dir="ltr">unnest(...)</code></a> stage, the server duplicates the outer restaurant document for each matching review, producing flat, joined documents (similar to a SQL <code translate="no" dir="ltr">INNER JOIN</code>).</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collectionGroup("restaurants")
+  .where(field("type").equal("pizza"))
+  .define(field("__name__").as("restaurant_name"))
+  .unnest(
+    db.pipeline()
+      .collectionGroup("reviews")
+      .where(field("restaurant").equal(variable("restaurant_name")))
+      .select("rating", "reviewer_id")
+      .toArrayExpression()
+      .as("review"))
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  __name__: "cities/SF/restaurants/xU4pu8nFpnJDPZOwcSPP",
+  name: "Golden Gate Pizza",
+  type: "pizza",
+  owner_id: "Mario Rossi"
+  review: { rating: 5, reviewer_id "Alice" }
+},
+{
+  __name__: "cities/SF/restaurants/xU4pu8nFpnJDPZOwcSPP",
+  name: "Golden Gate Pizza",
+  type: "pizza",
+  owner_id: "Mario Rossi",
+  review: { rating: 4, reviewer_id "Bob" }
+},
+{
+  __name__: "cities/LA/restaurants/6CYntvNgbYzgaW652Gq1",
+  name: "Venice Pizza",
+  type: "pizza",
+  owner_id: "Luigi Romano",
+  review: { rating: 3, reviewer_id "George" }
+}
+</pre> <h3 id="uncorrelated_subquery_as_filter">Uncorrelated Subquery as Filter</h3> <p>The following query on the <code translate="no" dir="ltr">reviews</code> collection performs filters using a uncorrelated subquery on itself to find reviews greater than the average rating.</p> <div> <section><p class="_code-tab"><strong>Node.js</strong></p>
+
+<pre data-language="javascript">let results = await db.pipeline()
+  .collection("reviews")
+  // Average review rating is 4.3
+  .where(field("rating").greaterThan(db.pipeline()
+    .collection("reviews")
+    .aggregate(average("rating").as("avg"))
+    .toScalarExpression()))
+  .select("rating", "reviewer_id")
+  .execute();
+</pre></section> </div> <p><strong>Response</strong></p> 
+<pre>{
+  rating: 5,
+  reviewer_id "Alice"
+},
+{
+  rating: 5,
+  reviewer_id "Diana"
+},
+{
+  rating: 5,
+  reviewer_id "Hannah"
+},
+{
+  rating: 5,
+  reviewer_id "Julia"
+}
+</pre> <h2 id="best_practices">Best practices</h2> <ul> <li>
+<strong>Manage memory with <code translate="no" dir="ltr">toArrayExpression()</code>:</strong> Be cautious with <code translate="no" dir="ltr">toArrayExpression()</code> subqueries, since materializing a large number of documents can exhaust the query memory limit (128 MiB). To mitigate this, use <a href="stages/transformation/select"><code translate="no" dir="ltr">select(...)</code></a> within the subquery to return only the necessary fields and apply <a href="stages/transformation/where"><code translate="no" dir="ltr">where(...)</code></a> filters to limit the number of documents returned. Consider using <a href="stages/transformation/limit"><code translate="no" dir="ltr">limit(...)</code></a> if appropriate to cap the number of documents returned by the subquery.</li> <li>
+<strong>Indexing:</strong> Ensure that fields used in the <a href="stages/transformation/where"><code translate="no" dir="ltr">where(...)</code></a> clause of a subquery are indexed. Performant joins rely on the ability to perform index seeks rather than full table scans.</li> </ul> <p>For more query best practices, refer to our <a href="../enterprise-optimize-query-performance">guide covering query optimization</a>.</p> <h2 id="limitations">Limitations</h2> <ul> <li>
+<strong><a href="stages/input/subcollection"><code translate="no" dir="ltr">subcollection(...)</code></a> scope:</strong> The <a href="stages/input/subcollection"><code translate="no" dir="ltr">subcollection(...)</code></a> input stage is only supported within subqueries, as it requires the context of a parent document to resolve the hierarchical relationship and perform the join.</li> <li>
+<strong>Nesting Depth:</strong> Subqueries can be nested up to 20 layers deep.</li> <li>
+<strong>Memory Usage:</strong> The 128 MiB limit on materialized data applies across the entire query, including all joined documents.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/firestore/native/docs/pipeline/perform-joins-with-sub-pipelines" class="_attribution-link">https://docs.cloud.google.com/firestore/native/docs/pipeline/perform-joins-with-sub-pipelines</a>
+  </p>
+</div>

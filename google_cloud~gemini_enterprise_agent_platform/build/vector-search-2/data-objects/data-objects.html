@@ -1,0 +1,1196 @@
+<h1>Data Objects</h1> <p>In Agent Retrieval (formerly Vector Search 2.0), Collections store data as individual JSON objects called Data Objects. This page describes the validation rules a Data Object must satisfy, and how to create, read, update, import, export, and delete Data Objects either individually or in batch.</p> <h2 id="data_validation">Data validation</h2> <p>Agent Retrieval (formerly Vector Search 2.0) validates every Data Object before storing it. Validation happens in two contexts that enforce the same core rules but differ in how failures are reported:</p> <table> <thead> <tr> <th>Context</th> <th>Applies to</th> <th>Behavior on failure</th> </tr> </thead> <tbody> <tr> <td><strong>Data Object validation</strong></td> <td>Individual and batch writes: <a href="#create"><code translate="no" dir="ltr">create</code></a>, <a href="#batch-create"><code translate="no" dir="ltr">batchCreate</code></a>, <a href="#update"><code translate="no" dir="ltr">update</code></a>, and <a href="#batch-update"><code translate="no" dir="ltr">batchUpdate</code></a>
+</td> <td>The request fails immediately with <code translate="no" dir="ltr">INVALID_ARGUMENT</code>. Batch writes are atomic: if any record is invalid, no record in the request is written.</td> </tr> <tr> <td><strong>Import validation</strong></td> <td>
+<a href="#import"><code translate="no" dir="ltr">import</code></a> from Cloud Storage</td> <td>Each record is validated independently. An invalid record is written to the error sink with <code translate="no" dir="ltr">code = INVALID_ARGUMENT</code> and skipped, and the rest of the import continues. Once a record fails a check, later checks do <em>not</em> run for it.</td> </tr> </tbody> </table> <p>Both contexts enforce the same core rules: <a href="#id-rules">ID rules</a>, <a href="#data-field-rules">data field rules</a> (when the Collection declares a <code translate="no" dir="ltr">dataSchema</code>), and <a href="#embedding-rules">embedding rules</a>. Import additionally <a href="#parsing-import-only">parses each record</a> and <a href="#searchable-fields-import-only">extracts searchable fields</a>, because its input is raw files rather than structured API requests.</p> <p>To avoid a "fix one error, re-ingest, hit the next error" loop, validate your dataset against <strong>all</strong> of the rules that follow before you start an import or an index build.</p> <h3 id="parsing-import-only">Parsing (import only)</h3> <p>Parsing applies only to <a href="#import">import</a>, which turns each raw input line or record into an internal Data Object. Individual and batch API writes skip this step because their input is already structured. Parsing handles both supported JSON shapes: the <strong>default</strong> format (with a top-level <code translate="no" dir="ltr">vectors</code>/<code translate="no" dir="ltr">data</code> object) and the <strong>v1</strong> format (with <code translate="no" dir="ltr">embedding</code>, <code translate="no" dir="ltr">sparse_embedding</code>, <code translate="no" dir="ltr">restricts</code>, or <code translate="no" dir="ltr">numeric_restricts</code>). The format is auto-detected per record.</p> <ul> <li>
+<strong>JSON must be parseable.</strong> Each line must parse as a JSON object. A line whose top-level keys match neither the default nor v1 format is rejected with <code translate="no" dir="ltr">Unknown JSON format for string: &lt;line&gt;</code>.</li> <li>
+<strong><code translate="no" dir="ltr">id</code> is required.</strong> Every record must contain a non-null <code translate="no" dir="ltr">id</code>. Otherwise: <code translate="no" dir="ltr">'id' field is missing or null</code>.</li> <li>
+<strong>Embeddings must be present (v1 format only).</strong> A v1-format record must contain at least one of <code translate="no" dir="ltr">embedding</code> or <code translate="no" dir="ltr">sparse_embedding</code>. Otherwise: <code translate="no" dir="ltr">'embedding' or 'sparse_embedding' fields are missing</code>.</li> <li>
+<strong>Dense embedding type checks.</strong> The dense embedding field (<code translate="no" dir="ltr">embedding</code> in v1, or any array value under <code translate="no" dir="ltr">vectors</code> in the default format) must be a JSON array of numbers. A value that cannot be coerced to a <code translate="no" dir="ltr">float</code> is rejected with <code translate="no" dir="ltr">'&lt;field&gt;' field contains non-float values</code>.</li> <li>
+<strong>Sparse embedding structure checks.</strong> For every sparse vector: <ul> <li>Must be a JSON object.</li> <li>Must contain both arrays: <code translate="no" dir="ltr">values</code> (floats) and <code translate="no" dir="ltr">indices</code> (longs); in v1 these are <code translate="no" dir="ltr">values</code> and <code translate="no" dir="ltr">dimensions</code>.</li> <li>
+<code translate="no" dir="ltr">values</code> must not be empty.</li> <li>Indexes must be non-negative.</li> <li>
+<code translate="no" dir="ltr">values.length</code> must equal <code translate="no" dir="ltr">indices.length</code> (or v1 <code translate="no" dir="ltr">dimensions.length</code>).</li> </ul>
+</li> <li>
+<strong><code translate="no" dir="ltr">data</code> field type.</strong> If present, <code translate="no" dir="ltr">data</code> must be a JSON object, not an array, string, or scalar. Otherwise: <code translate="no" dir="ltr">'data' field is not a JSON object</code>.</li> <li>
+<strong><code translate="no" dir="ltr">numeric_restricts</code> shape (v1 format).</strong> <code translate="no" dir="ltr">numeric_restricts</code> must be a JSON array of objects. Each entry must have a string <code translate="no" dir="ltr">namespace</code> and must set <strong>exactly one</strong> of <code translate="no" dir="ltr">value_int</code>, <code translate="no" dir="ltr">value_float</code>, or <code translate="no" dir="ltr">value_double</code>.</li> </ul> <p>Most "first failure" issues come from this stage. Common errors include a stringified number in an embedding array, a missing <code translate="no" dir="ltr">id</code>, or <code translate="no" dir="ltr">values</code>/<code translate="no" dir="ltr">indices</code> of different lengths.</p> <h3 id="id-rules">ID rules</h3> <p>A Data Object ID must be <strong>between 1 and 63 characters long</strong>. Length is the only constraint Agent Retrieval enforces on an ID; all characters are accepted.</p> <p>The following table shows common examples:</p> <table> <thead> <tr> <th>ID</th> <th>Valid?</th> <th>Why</th> </tr> </thead> <tbody> <tr> <td><code translate="no" dir="ltr">movie-789</code></td> <td>Yes</td> <td>Between 1 and 63 characters</td> </tr> <tr> <td><code translate="no" dir="ltr">a</code></td> <td>Yes</td> <td>A single character is the minimum</td> </tr> <tr> <td><code translate="no" dir="ltr">Doc_123</code></td> <td>Yes</td> <td>Uppercase letters and underscores are allowed</td> </tr> <tr> <td><code translate="no" dir="ltr">my doc</code></td> <td>Yes</td> <td>Any character is accepted, within the length limit</td> </tr> <tr> <td><em>(empty string)</em></td> <td>No</td> <td>At least one character is required</td> </tr> <tr> <td>64 characters or more</td> <td>No</td> <td>The maximum length is 63</td> </tr> </tbody> </table> <aside class="note"><strong>Note:</strong><span> Agent Retrieval does not enforce the <a href="https://www.ietf.org/rfc/rfc1035.txt">RFC 1035</a> (DNS label) format on Data Object IDs. Even so, restricting IDs to lowercase letters, digits, and hyphens -- matching the pattern <code translate="no" dir="ltr">[a-z]([-a-z0-9]{0,61}[a-z0-9])?</code> -- remains a good practice, because IDs in that form round-trip safely through URLs, filenames, logs, and CLIs without escaping.</span></aside> <h3 id="data-field-rules">Data field rules (JSON Schema)</h3> <p>Data field validation runs only if the Collection declares a <code translate="no" dir="ltr">dataSchema</code> in its <code translate="no" dir="ltr">CollectionConfig</code>. If no schema is configured, this check is skipped.</p> <ul> <li>
+<strong>Schema compliance.</strong> The Data Object's <code translate="no" dir="ltr">data</code> payload is serialized to JSON and validated against the configured JSON Schema (Draft 7). The validator reports <strong>one error per schema violation</strong>, so a record with three bad fields produces three error messages. <ul> <li>Message: <code translate="no" dir="ltr">DataObject with id &lt;id&gt; failed schema validation: &lt;error&gt;</code>.</li> </ul>
+</li> <li>
+<strong>Schema processing errors.</strong> If the schema validator itself throws (for example, unsupported draft features), the record is rejected with <code translate="no" dir="ltr">DataObject with id &lt;id&gt; failed schema validation processing: &lt;exception&gt;</code>.</li> </ul> <h3 id="embedding-rules">Embedding rules</h3> <p>Embedding validation iterates first over dense vectors and then sparse vectors. A single shared set of seen vector names spans <strong>both</strong> lists, so a name cannot be used twice -- even across the dense and sparse boundary.</p> <h4 id="shared_rules_apply_to_both_dense_and_sparse">Shared rules (apply to both dense and sparse)</h4> <table> <thead> <tr> <th>Rule</th> <th>Why it matters</th> <th>Error message</th> </tr> </thead> <tbody> <tr> <td>
+<strong>No duplicate vector names</strong> across dense and sparse for the same Data Object</td> <td>Two entries with the same vector name would target the same storage key, producing undefined last-write-wins behavior</td> <td><code translate="no" dir="ltr">... has duplicate embedding field '&lt;name&gt;' across its dense/sparse vectors; each vector name must appear at most once</code></td> </tr> <tr> <td>
+<strong>Vector name must be declared</strong> in the <code translate="no" dir="ltr">CollectionConfig</code> vector schema</td> <td>An unknown vector name cannot be routed to a column</td> <td><code translate="no" dir="ltr">... has dense/sparse embedding field '&lt;name&gt;' but this field is not defined in CollectionConfig vector schema</code></td> </tr> </tbody> </table> <h4 id="dense-vector-only_rules">Dense-vector-only rules</h4> <table> <thead> <tr> <th>Rule</th> <th>Error message</th> </tr> </thead> <tbody> <tr> <td>The field must be configured as <strong>dense</strong> in the Collection schema.</td> <td><code translate="no" dir="ltr">... has dense embedding field '&lt;name&gt;' but CollectionConfig defines it as non-dense</code></td> </tr> <tr> <td>
+<strong>Dimension must match</strong> the configured dimension.</td> <td><code translate="no" dir="ltr">... field '&lt;name&gt;': expected dense embedding dimension &lt;expected&gt;, but got &lt;actual&gt;</code></td> </tr> <tr> <td>
+<strong>All values must be finite</strong> -- no <code translate="no" dir="ltr">NaN</code>, <code translate="no" dir="ltr">+Infinity</code>, or <code translate="no" dir="ltr">-Infinity</code>. Non-finite values would corrupt distance computations.</td> <td><code translate="no" dir="ltr">... field '&lt;name&gt;': dense embedding contains non-finite value &lt;v&gt; at index &lt;i&gt; (NaN/Infinity values are not allowed)</code></td> </tr> </tbody> </table> <h4 id="sparse-vector-only_rules">Sparse-vector-only rules</h4> <table> <thead> <tr> <th>Rule</th> <th>Error message</th> </tr> </thead> <tbody> <tr> <td>The field must be configured as <strong>sparse</strong> in the Collection schema.</td> <td><code translate="no" dir="ltr">... has sparse embedding field '&lt;name&gt;' but CollectionConfig defines it as non-sparse</code></td> </tr> <tr> <td>
+<strong>Indices/values length parity</strong>: <code translate="no" dir="ltr">indicesCount == valuesCount</code>.</td> <td><code translate="no" dir="ltr">... field '&lt;name&gt;': sparse embedding has &lt;n&gt; indices but &lt;m&gt; values; indices and values must have the same length</code></td> </tr> <tr> <td>
+<strong>Non-negative indices</strong>: every index &gt;= 0.</td> <td><code translate="no" dir="ltr">... field '&lt;name&gt;': sparse embedding contains negative index &lt;i&gt; at position &lt;p&gt; (indices must be non-negative)</code></td> </tr> <tr> <td>
+<strong>Unique indices</strong> within the same sparse vector.</td> <td><code translate="no" dir="ltr">... field '&lt;name&gt;': sparse embedding contains duplicate index &lt;i&gt; (each index must appear at most once)</code></td> </tr> <tr> <td><strong>All values must be finite.</strong></td> <td><code translate="no" dir="ltr">... field '&lt;name&gt;': sparse embedding contains non-finite value &lt;v&gt; at position &lt;p&gt; (NaN/Infinity values are not allowed)</code></td> </tr> </tbody> </table> <h3 id="searchable-fields-import-only">Searchable-field extraction (import only)</h3> <p>During <a href="#import">import</a>, after embedding validation succeeds, the pipeline walks the <code translate="no" dir="ltr">data</code> payload using the Collection's <code translate="no" dir="ltr">dataSchema</code> and copies fields that the schema declares (string, integer/number, boolean, array of string, and nested objects) into a searchable-fields index. Two failure modes here will also reject a record:</p> <ul> <li>A path that should be a struct contains a scalar (for example, the schema says <code translate="no" dir="ltr">author.name</code> is a string but <code translate="no" dir="ltr">author</code> is itself a string in the document).</li> <li>An array-of-strings field contains a non-string element.</li> </ul> <p>These typically indicate that the document's shape has drifted from the declared schema and are not always caught at the JSON Schema stage.</p> <h3 id="pre-flight_checklist">Pre-flight checklist</h3> <p>Before kicking off an ingestion or index build, validate the entire dataset against the following rules. This is the same set of checks the pipeline applies, ordered so a single client-side pass surfaces every issue:</p> <ol> <li>
+<strong>Format</strong> -- every line parses as JSON and matches either the default or v1 shape.</li> <li>
+<strong>IDs</strong> -- are between 1 and 63 characters long and unique across the dataset.</li> <li>
+<strong>Embeddings present</strong> -- at least one vector per record; vector names are listed in your <code translate="no" dir="ltr">CollectionConfig</code> vector schema with the correct dense or sparse type.</li> <li>
+<strong>Dense vectors</strong> -- correct dimension; no <code translate="no" dir="ltr">NaN</code>, <code translate="no" dir="ltr">+Inf</code>, or <code translate="no" dir="ltr">-Inf</code> values.</li> <li>
+<strong>Sparse vectors</strong> -- <code translate="no" dir="ltr">values.length == indices.length</code>; all indexes greater or equal to 0 and unique. Non-finite values are not allowed.</li> <li>
+<strong>No duplicate vector names</strong> within a record across dense and sparse.</li> <li>
+<strong>Data schema</strong> -- if a <code translate="no" dir="ltr">dataSchema</code> is configured, your <code translate="no" dir="ltr">data</code> payload validates against it (Draft 7), and every field's actual JSON type matches the declared type (especially for nested objects and arrays of strings).</li> <li>
+<strong>v1 <code translate="no" dir="ltr">numeric_restricts</code></strong> -- every entry has a string <code translate="no" dir="ltr">namespace</code> and exactly one of <code translate="no" dir="ltr">value_int</code> / <code translate="no" dir="ltr">value_float</code> / <code translate="no" dir="ltr">value_double</code>.</li> </ol> <h2 id="create">Create a Data Object</h2> <p>The following example demonstrates adding a single Data Object to a Collection with the ID <code translate="no" dir="ltr"><var translate="no">COLLECTION_ID</var></code>.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects?dataObjectId=DATA_OBJECT_ID</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "data": {
+    "director": "Frank Darabont",
+    "genre": "Drama",
+    "title": "The Shawshank Redemption",
+    "year": 1994
+  },
+  "vectors":{
+    "genre_embedding": {
+      "dense": {
+        "values": [ 0.38638010860523064, 0.739343471733759, 0.16189056837017107, 0.5271366865924485 ]
+      }
+    },
+    "plot_embedding": {
+      "dense": {
+        "values": [ 0.4752082440607731, 0.09026746166854707, 0.8752307753619009 ]
+      }
+    },
+    "soundtrack_embedding": {
+      "dense": {
+        "values": [ 0.5920451749052875, 0.08301644173787519, 0.1264733498775969, 0.6196429624200321, 0.4925828581737443 ]
+      }
+    },
+    "sparse_embedding": {
+      "sparse": {
+        "indices": [ 4065, 13326, 17377, 25918, 28105, 32683, 42998 ],
+        "values": [ 1, 6, 3, 2, 8, 5, 2 ]
+      }
+    }
+  }
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects?dataObjectId=DATA_OBJECT_ID"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects?dataObjectId=DATA_OBJECT_ID" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID",
+  "data": {
+    "director": "Frank Darabont",
+    "title": "The Shawshank Redemption",
+    "year": 1994,
+    "genre": "Drama"
+  },
+  "vectors": {
+    "genre_embedding": {
+      "dense": {
+        "values": [
+          0.3863801,
+          0.73934346,
+          0.16189057,
+          0.5271367
+        ]
+      }
+    },
+    "plot_embedding": {
+      "dense": {
+        "values": [
+          0.47520825,
+          0.090267465,
+          0.8752308
+        ]
+      }
+    },
+    "soundtrack_embedding": {
+      "dense": {
+        "values": [
+          0.5920452,
+          0.08301644,
+          0.12647335,
+          0.619643,
+          0.49258286
+        ]
+      }
+    },
+    "sparse_embedding": {
+      "sparse": {
+        "values": [
+          1,
+          6,
+          3,
+          2,
+          8,
+          5,
+          2
+        ],
+        "indices": [
+          4065,
+          13326,
+          17377,
+          25918,
+          28105,
+          32683,
+          42998
+        ]
+      }
+    }
+  }
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">DATA_FILE</var>: The local path to a JSON file containing the data part of the data object. <p>Example file content:</p> 
+<pre data-language="bash">{
+  "director": "Frank Darabont",
+  "genre": "Drama",
+  "title": "The Shawshank Redemption",
+  "year": 1994
+}</pre> </li> <li> <var translate="no">VECTORS_FILE</var>: The local path to a JSON file containing the vectors part of the data object. <p>Example file content:</p> 
+<pre data-language="bash">{
+  "genre_embedding": {
+    "dense": {
+      "values": [ 0.38638010860523064, 0.739343471733759, 0.16189056837017107, 0.5271366865924485 ]
+    }
+  },
+  "plot_embedding": {
+    "dense": {
+      "values": [ 0.4752082440607731, 0.09026746166854707, 0.8752307753619009 ]
+    }
+  },
+  "soundtrack_embedding": {
+    "dense": {
+      "values": [ 0.5920451749052875, 0.08301644173787519, 0.1264733498775969, 0.6196429624200321, 0.4925828581737443 ]
+    }
+  },
+  "sparse_embedding": {
+    "sparse": {
+      "indices": [ 4065, 13326, 17377, 25918, 28105, 32683, 42998 ],
+      "values": [ 1, 6, 3, 2, 8, 5, 2 ]
+    }
+  }
+}</pre> </li> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects create DATA_OBJECT_ID \
+  --data=DATA_FILE \
+  --vectors=VECTORS_FILE \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID</pre>   <h4 class="showalways" id="windows-powershell">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects create DATA_OBJECT_ID `
+  --data=DATA_FILE `
+  --vectors=VECTORS_FILE `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID</pre>   <h4 class="showalways" id="windows-cmd.exe">Windows (cmd.exe)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects create DATA_OBJECT_ID ^
+  --data=DATA_FILE ^
+  --vectors=VECTORS_FILE ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID</pre>  <p>You should receive a response similar to the following:</p> <section> 
+<pre data-language="bash">
+Created dataObject [DATA_OBJECT_ID].
+</pre> </section> </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+# Initialize request
+data_object = vectorsearch_v1.DataObject(
+    data={
+        "title": "The Shawshank Redemption",
+        "genre": "Drama",
+        "year": 1994,
+        "director": "Frank Darabont",
+    },
+    vectors={
+        "plot_embedding": {
+            "dense": {"values": [0.1, 0.2, 0.3]}
+        },
+        "genre_embedding": {
+            "dense": {"values": [0.4, 0.5, 0.6, 0.7]}
+        },
+        "soundtrack_embedding": {
+            "dense": {"values": [0.8, 0.9, 1.0, 1.1, 1.2]}
+        },
+        "sparse_embedding": {
+            "sparse": {"values": [1.0, 2.0], "indices": [10, 20]}
+        },
+    },
+)
+request = vectorsearch_v1.CreateDataObjectRequest(
+    parent="projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+    data_object_id="DATA_OBJECT_ID",
+    data_object=data_object,
+)
+
+# Make the request
+response = data_object_service_client.create_data_object(request=request)
+
+# Handle the response
+print(response)
+</pre></section> </div> <p>Embedding fields that have an auto-embedding specified in the Collection Schema are automatically populated. You can also bring your own embeddings (BYOE) to set vector field values that are not automatically populated.</p> <aside class="note"><strong>Note:</strong><span> Creating Data Objects is an atomic operation. All Data Objects are created or, if there is an error, the entire request fails.</span></aside> <h2 id="batch-create">Batch create Data Objects</h2> <p>For efficient bulk ingestion of small numbers of records (up to <strong>1000 Data Objects per request</strong>), use <code translate="no" dir="ltr">batchCreate</code>. The whole batch is atomic: either all Data Objects are created, or the entire request fails. For larger datasets, prefer <a href="#import">importing Data Objects</a> from Cloud Storage.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchCreate</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "requests": [
+    {
+      "parent": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId": "movie-1",
+      "dataObject": {
+        "data": {
+          "title": "The Shawshank Redemption",
+          "year": 1994
+        },
+        "vectors": {
+          "plot_embedding": {
+            "dense": { "values": [0.47, 0.09, 0.87] }
+          }
+        }
+      }
+    },
+    {
+      "parent": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId": "movie-2",
+      "dataObject": {
+        "data": {
+          "title": "The Godfather",
+          "year": 1972
+        },
+        "vectors": {
+          "plot_embedding": {
+            "dense": { "values": [0.12, 0.55, 0.31] }
+          }
+        }
+      }
+    }
+  ]
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_1">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchCreate"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_1">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchCreate" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "dataObjects": [
+    {
+      "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1",
+      "data": {
+        "title": "The Shawshank Redemption",
+        "year": 1994
+      },
+      "vectors": {
+        "plot_embedding": {
+          "dense": { "values": [0.47, 0.09, 0.87] }
+        }
+      }
+    },
+    {
+      "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2",
+      "data": {
+        "title": "The Godfather",
+        "year": 1972
+      },
+      "vectors": {
+        "plot_embedding": {
+          "dense": { "values": [0.12, 0.55, 0.31] }
+        }
+      }
+    }
+  ]
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_1">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-create \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --requests='[
+    {
+      "parent":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId":"movie-1",
+      "dataObject":{"data":{"title":"The Shawshank Redemption","year":1994},"vectors":{"plot_embedding":{"dense":{"values":[0.47,0.09,0.87]}}}}
+    },
+    {
+      "parent":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId":"movie-2",
+      "dataObject":{"data":{"title":"The Godfather","year":1972},"vectors":{"plot_embedding":{"dense":{"values":[0.12,0.55,0.31]}}}}
+    }
+  ]'</pre>   <h4 class="showalways" id="windows-powershell_1">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-create `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --requests='[
+    {
+      "parent":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId":"movie-1",
+      "dataObject":{"data":{"title":"The Shawshank Redemption","year":1994},"vectors":{"plot_embedding":{"dense":{"values":[0.47,0.09,0.87]}}}}
+    },
+    {
+      "parent":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId":"movie-2",
+      "dataObject":{"data":{"title":"The Godfather","year":1972},"vectors":{"plot_embedding":{"dense":{"values":[0.12,0.55,0.31]}}}}
+    }
+  ]'</pre>   <h4 class="showalways" id="windows-cmd.exe_1">Windows (cmd.exe)</h4> <aside class="note"><b>Note:</b> If this command uses <code translate="no" dir="ltr">'</code> for quoting content, replace these single quotes with double quotes. If quoting is nested, use <code translate="no" dir="ltr">\"</code> to escape the inner quotes. </aside> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-create ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --requests='[
+    {
+      "parent":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId":"movie-1",
+      "dataObject":{"data":{"title":"The Shawshank Redemption","year":1994},"vectors":{"plot_embedding":{"dense":{"values":[0.47,0.09,0.87]}}}}
+    },
+    {
+      "parent":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+      "dataObjectId":"movie-2",
+      "dataObject":{"data":{"title":"The Godfather","year":1972},"vectors":{"plot_embedding":{"dense":{"values":[0.12,0.55,0.31]}}}}
+    }
+  ]'</pre>  </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+parent = "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID"
+
+# Build per-DataObject create requests.
+requests = [
+    vectorsearch_v1.CreateDataObjectRequest(
+        parent=parent,
+        data_object_id="movie-1",
+        data_object=vectorsearch_v1.DataObject(
+            data={"title": "The Shawshank Redemption", "year": 1994},
+            vectors={
+                "plot_embedding": {"dense": {"values": [0.47, 0.09, 0.87]}},
+            },
+        ),
+    ),
+    vectorsearch_v1.CreateDataObjectRequest(
+        parent=parent,
+        data_object_id="movie-2",
+        data_object=vectorsearch_v1.DataObject(
+            data={"title": "The Godfather", "year": 1972},
+            vectors={
+                "plot_embedding": {"dense": {"values": [0.12, 0.55, 0.31]}},
+            },
+        ),
+    ),
+]
+
+request = vectorsearch_v1.BatchCreateDataObjectsRequest(
+    parent=parent,
+    requests=requests,
+)
+
+# Make the request
+response = data_object_service_client.batch_create_data_objects(request=request)
+
+# Handle the response
+for data_object in response.data_objects:
+    print(data_object.name)
+</pre></section> </div> <h2 id="get">Get a Data Object</h2> <p>The following example demonstrates how to get a Data Object with the ID <code translate="no" dir="ltr"><var translate="no">DATA_OBJECT_ID</var></code> from a Collection with the ID <code translate="no" dir="ltr"><var translate="no">COLLECTION_ID</var></code>.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">GET https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_2">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Execute the following command: </p> <section>
+<pre data-language="">curl -X GET \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_2">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method GET `    -Headers $headers `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID",
+  "createTime": "2026-01-31T20:05:06Z",
+  "updateTime": "2026-01-31T20:05:06Z",
+  "data": {
+    "title": "The Shawshank Redemption",
+    "director": "Frank Darabont",
+    "year": 1994,
+    "genre": "Drama"
+  },
+  "vectors": {
+    "sparse_embedding": {
+      "sparse": {
+        "values": [
+          1,
+          6,
+          3,
+          2,
+          8,
+          5,
+          2
+        ],
+        "indices": [
+          4065,
+          13326,
+          17377,
+          25918,
+          28105,
+          32683,
+          42998
+        ]
+      }
+    },
+    "genre_embedding": {
+      "dense": {
+        "values": [
+          0.3863801,
+          0.73934346,
+          0.16189057,
+          0.5271367
+        ]
+      }
+    },
+    "plot_embedding": {
+      "dense": {
+        "values": [
+          0.47520825,
+          0.090267465,
+          0.8752308
+        ]
+      }
+    },
+    "soundtrack_embedding": {
+      "dense": {
+        "values": [
+          0.5920452,
+          0.08301644,
+          0.12647335,
+          0.619643,
+          0.49258286
+        ]
+      }
+    }
+  }
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_2">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects describe DATA_OBJECT_ID \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID</pre>   <h4 class="showalways" id="windows-powershell_2">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects describe DATA_OBJECT_ID `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID</pre>   <h4 class="showalways" id="windows-cmd.exe_2">Windows (cmd.exe)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects describe DATA_OBJECT_ID ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID</pre>  <p>You should receive a response similar to the following:</p> <section> 
+<pre data-language="bash">
+name: projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID
+data:
+  director: Frank Darabont
+  genre: Drama
+  title: The Shawshank Redemption
+  year: 1994
+vectors:
+  genre_embedding:
+    dense:
+      values:
+      - 0.3863801
+      - 0.73934346
+      - 0.16189057
+      - 0.5271367
+  plot_embedding:
+    dense:
+      values:
+      - 0.47520825
+      - 0.090267465
+      - 0.8752308
+  soundtrack_embedding:
+    dense:
+      values:
+      - 0.5920452
+      - 0.08301644
+      - 0.12647335
+      - 0.619643
+      - 0.49258286
+  sparse_embedding:
+    sparse:
+      indices:
+      - 4065
+      - 13326
+      - 17377
+      - 25918
+      - 28105
+      - 32683
+      - 42998
+      values:
+      - 1.0
+      - 6.0
+      - 3.0
+      - 2.0
+      - 8.0
+      - 5.0
+      - 2.0
+</pre> </section> </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+# Initialize request
+request = vectorsearch_v1.GetDataObjectRequest(
+    name="projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID",
+)
+
+# Make the request
+response = data_object_service_client.get_data_object(request=request)
+
+# Handle the response
+print(response)
+</pre></section> </div> <h2 id="update">Update a Data Object</h2> <p>The following example demonstrates how to update the <code translate="no" dir="ltr">title</code> data field and <code translate="no" dir="ltr">plot_embedding</code> vector values in the Data Object with the ID <code translate="no" dir="ltr"><var translate="no">DATA_OBJECT_ID</var></code> in a Collection with the ID <code translate="no" dir="ltr"><var translate="no">COLLECTION_ID</var></code>.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">PATCH https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "data": {
+    "title": "The Shawshank Redemption (updated)"
+  },
+  "vectors": {
+    "plot_embedding": {
+      "dense": {
+        "values": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    }
+  }
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_3">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X PATCH \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_3">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method PATCH `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID",
+  "data": {
+    "title": "The Shawshank Redemption (updated)"
+  },
+  "vectors": {
+    "plot_embedding": {
+      "dense": {
+        "values": [
+          1,
+          1,
+          1
+        ]
+      }
+    }
+  }
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_3">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects update DATA_OBJECT_ID \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --data='{"title": "The Shawshank Redemption (updated)"}' \
+  --update-vectors='{"plot_embedding": {"dense": {"values": [1.0, 1.0, 1.0]}}}'</pre>   <h4 class="showalways" id="windows-powershell_3">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects update DATA_OBJECT_ID `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --data='{"title": "The Shawshank Redemption (updated)"}' `
+  --update-vectors='{"plot_embedding": {"dense": {"values": [1.0, 1.0, 1.0]}}}'</pre>   <h4 class="showalways" id="windows-cmd.exe_3">Windows (cmd.exe)</h4> <aside class="note"><b>Note:</b> If this command uses <code translate="no" dir="ltr">'</code> for quoting content, replace these single quotes with double quotes. If quoting is nested, use <code translate="no" dir="ltr">\"</code> to escape the inner quotes. </aside> 
+<pre data-language="bash">gcloud vector-search collections data-objects update DATA_OBJECT_ID ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --data='{"title": "The Shawshank Redemption (updated)"}' ^
+  --update-vectors='{"plot_embedding": {"dense": {"values": [1.0, 1.0, 1.0]}}}'</pre>  <p>You should receive a response similar to the following:</p> <section> 
+<pre data-language="bash">
+Updated dataObject [DATA_OBJECT_ID].
+</pre> </section> </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+# Initialize request
+data_object = vectorsearch_v1.DataObject(
+    name="projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID",
+    data={"title": "The Shawshank Redemption (updated)"},
+    vectors={
+        "plot_embedding": {
+            "dense": {"values": [1., 1., 1.]}
+        },
+    },
+)
+request = vectorsearch_v1.UpdateDataObjectRequest(
+    data_object=data_object,
+)
+
+# Make the request
+response = data_object_service_client.update_data_object(request=request)
+
+# Handle the response
+print(response)
+</pre></section> </div> <h2 id="batch-update">Batch update Data Objects</h2> <p>To update many Data Objects at once, use <code translate="no" dir="ltr">batchUpdate</code>. A maximum of <strong>1000 Data Objects</strong> can be updated in a single batch. Each per-record request specifies the <code translate="no" dir="ltr">dataObject</code> (which must include its full resource <code translate="no" dir="ltr">name</code> plus the fields you want to change) and an <code translate="no" dir="ltr">updateMask</code> listing which fields to overwrite. Fields not listed in the mask are left unchanged.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchUpdate</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "requests": [
+    {
+      "dataObject": {
+        "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1",
+        "data": { "genre": "Thriller" }
+      },
+      "updateMask": "data.genre"
+    },
+    {
+      "dataObject": {
+        "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2",
+        "vectors": {
+          "plot_embedding": {
+            "dense": { "values": [0.21, 0.34, 0.55] }
+          }
+        }
+      },
+      "updateMask": "vectors.plot_embedding"
+    }
+  ]
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_4">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchUpdate"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_4">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchUpdate" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_4">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-update \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --requests='[
+    {
+      "dataObject":{"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1","data":{"genre":"Thriller"}},
+      "updateMask":"data.genre"
+    },
+    {
+      "dataObject":{"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2","vectors":{"plot_embedding":{"dense":{"values":[0.21,0.34,0.55]}}}},
+      "updateMask":"vectors.plot_embedding"
+    }
+  ]'</pre>   <h4 class="showalways" id="windows-powershell_4">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-update `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --requests='[
+    {
+      "dataObject":{"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1","data":{"genre":"Thriller"}},
+      "updateMask":"data.genre"
+    },
+    {
+      "dataObject":{"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2","vectors":{"plot_embedding":{"dense":{"values":[0.21,0.34,0.55]}}}},
+      "updateMask":"vectors.plot_embedding"
+    }
+  ]'</pre>   <h4 class="showalways" id="windows-cmd.exe_4">Windows (cmd.exe)</h4> <aside class="note"><b>Note:</b> If this command uses <code translate="no" dir="ltr">'</code> for quoting content, replace these single quotes with double quotes. If quoting is nested, use <code translate="no" dir="ltr">\"</code> to escape the inner quotes. </aside> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-update ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --requests='[
+    {
+      "dataObject":{"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1","data":{"genre":"Thriller"}},
+      "updateMask":"data.genre"
+    },
+    {
+      "dataObject":{"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2","vectors":{"plot_embedding":{"dense":{"values":[0.21,0.34,0.55]}}}},
+      "updateMask":"vectors.plot_embedding"
+    }
+  ]'</pre>  </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+from google.protobuf import field_mask_pb2
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+parent = "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID"
+
+# Each entry specifies the DataObject to update (with its full resource
+# name) and an update_mask listing the fields to overwrite. Fields not
+# listed in the mask are left unchanged.
+requests = [
+    vectorsearch_v1.UpdateDataObjectRequest(
+        data_object=vectorsearch_v1.DataObject(
+            name=f"{parent}/dataObjects/movie-1",
+            data={"genre": "Thriller"},
+        ),
+        update_mask=field_mask_pb2.FieldMask(paths=["data.genre"]),
+    ),
+    vectorsearch_v1.UpdateDataObjectRequest(
+        data_object=vectorsearch_v1.DataObject(
+            name=f"{parent}/dataObjects/movie-2",
+            vectors={
+                "plot_embedding": {"dense": {"values": [0.21, 0.34, 0.55]}},
+            },
+        ),
+        update_mask=field_mask_pb2.FieldMask(paths=["vectors.plot_embedding"]),
+    ),
+]
+
+request = vectorsearch_v1.BatchUpdateDataObjectsRequest(
+    parent=parent,
+    requests=requests,
+)
+
+# Make the request
+data_object_service_client.batch_update_data_objects(request=request)
+</pre></section> </div> <h2 id="import">Import Data Objects</h2> <p>The following example demonstrates how to import Data Objects from Cloud Storage into a Collection with the ID <code translate="no" dir="ltr"><var translate="no">COLLECTION_ID</var></code>. Use import for large datasets; for smaller bulk ingests (up to 1000 records) consider <a href="#batch-create">creating Data Objects in batch</a>.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID:importDataObjects</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "gcsImport": {
+    "contentsUri": "gs://your-bucket/path/to/your-data.json",
+    "errorUri": "gs://your-bucket/path/to/import-errors/",
+    "outputUri": "gs://your-bucket/path/to/import-output/"
+  }
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_5">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID:importDataObjects"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_5">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID:importDataObjects" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "name": "projects/PROJECT_ID/locations/LOCATION/operations/operation-1770039043815-649d75471f76e-08de3049-276a02be",
+  "metadata": {
+    "@type": "type.googleapis.com/google.cloud.vectorsearch.v1.ImportDataObjectsMetadata",
+    "createTime": "2026-02-02T13:30:43.874527852Z"
+  },
+  "done": false
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_5">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections import-data-objects COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --gcs-import-contents-uri="gs://your-bucket/path/to/your-data.json" \
+  --gcs-import-error-uri="gs://your-bucket/path/to/import-errors/" \
+  --gcs-import-output-uri="gs://your-bucket/path/to/import-output/" \
+  --async</pre>   <h4 class="showalways" id="windows-powershell_5">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections import-data-objects COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --gcs-import-contents-uri="gs://your-bucket/path/to/your-data.json" `
+  --gcs-import-error-uri="gs://your-bucket/path/to/import-errors/" `
+  --gcs-import-output-uri="gs://your-bucket/path/to/import-output/" `
+  --async</pre>   <h4 class="showalways" id="windows-cmd.exe_5">Windows (cmd.exe)</h4> 
+<pre data-language="bash">gcloud vector-search collections import-data-objects COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --gcs-import-contents-uri="gs://your-bucket/path/to/your-data.json" ^
+  --gcs-import-error-uri="gs://your-bucket/path/to/import-errors/" ^
+  --gcs-import-output-uri="gs://your-bucket/path/to/import-output/" ^
+  --async</pre>  </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+vector_search_service_client = vectorsearch_v1.VectorSearchServiceClient()
+
+# Initialize request
+request = vectorsearch_v1.ImportDataObjectsRequest(
+    name="projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+    gcs_import={
+      "contents_uri": "gs://your-bucket/path/to/your-data/",
+      "error_uri": "gs://your-bucket/path/to/import-errors/",
+    },
+)
+
+# Make the request
+operation = vector_search_service_client.import_data_objects(request=request)
+
+# Wait for the result (note this may take up to several minutes)
+operation.result()
+</pre></section> </div> <p>Folder <code translate="no" dir="ltr">gs://your-bucket/path/to/your-data/</code> can contain one or more files each containing multiple Data Objects. Use this structure for large datasets that are spread across multiple files. The following file formats are supported in Agent Retrieval:</p> <ul> <li>JSONL, where each line is a JSON object having three top level properties: <code translate="no" dir="ltr">id</code>, <code translate="no" dir="ltr">data</code>, and <code translate="no" dir="ltr">vectors</code>. Use this format for new Agent Retrieval datasets when you want human-readable input for inspecting and editing by hand.</li> <li>AVRO: Use this format for new Agent Retrieval datasets when you need a compact, schema-validated binary format -- typically for large datasets produced by data-pipeline tools such as Dataflow, Beam, or Spark.</li> <li>Vector Search JSON: Use this format only when you are migrating an existing Vector Search (Vector Search 1.0) JSON dataset and want to reuse it as-is.</li> <li>Vector Search AVRO: Use this format only when you are migrating an existing Vector Search (Vector Search 1.0) AVRO dataset and want to reuse it as-is.</li> </ul> <h3 id="jsonl">JSONL</h3> <p>The following example shows the JSONL format with the required properties. Each line in the input file is a single Data Object with the top-level <code translate="no" dir="ltr">id</code>, <code translate="no" dir="ltr">data</code>, and <code translate="no" dir="ltr">vectors</code> properties.</p> 
+<pre>{
+  "id": "movie-789",
+  "data": {
+    "title":"The Shawshank Redemption",
+    "plot": "...",
+    "year":1994,
+    "avg_rating": 8.5,
+    "movie_runtime_info": {
+        "hours": 2,
+        "minutes": 5
+    },
+  },
+  "vectors": {
+    "title_embedding": [-0.23, 0.88, 0.11, ...],
+    "sparse_embedding": {
+      "values": [0.01, -0.93, 0.27, ...],
+      "indices": [23, 83, 131, ...]
+    }
+  }
+}
+</pre> <h3 id="avro">AVRO</h3> <p>For AVRO files, each record must conform to the <code translate="no" dir="ltr">DataObject</code> Avro schema shown. The fields mirror the JSONL format:</p> <ul> <li>
+<code translate="no" dir="ltr">id</code> (required <code translate="no" dir="ltr">string</code>).</li> <li>
+<code translate="no" dir="ltr">vectors</code> (<code translate="no" dir="ltr">map</code>, default <code translate="no" dir="ltr">{}</code>). Each entry is keyed by the vector name and its value is either an <code translate="no" dir="ltr">array</code> of <code translate="no" dir="ltr">float</code> (dense vector) or a <code translate="no" dir="ltr">SparseVector</code> record with <code translate="no" dir="ltr">values</code> (array of <code translate="no" dir="ltr">float</code>) and <code translate="no" dir="ltr">indices</code> (array of <code translate="no" dir="ltr">long</code>).</li> <li>
+<code translate="no" dir="ltr">data</code> (nullable <code translate="no" dir="ltr">map</code>, default <code translate="no" dir="ltr">null</code>). Keys are data field names. Each value is a <code translate="no" dir="ltr">DataValue</code> record whose <code translate="no" dir="ltr">value</code> field is a union over the supported primitive types (<code translate="no" dir="ltr">boolean</code>, <code translate="no" dir="ltr">int</code>, <code translate="no" dir="ltr">long</code>, <code translate="no" dir="ltr">float</code>, <code translate="no" dir="ltr">double</code>, <code translate="no" dir="ltr">string</code>) plus <code translate="no" dir="ltr">array</code> of <code translate="no" dir="ltr">DataValue</code> and <code translate="no" dir="ltr">map</code> of <code translate="no" dir="ltr">string</code> to <code translate="no" dir="ltr">DataValue</code> for nested structures.</li> <li>
+<code translate="no" dir="ltr">etag</code> (nullable <code translate="no" dir="ltr">string</code>, default <code translate="no" dir="ltr">null</code>).</li> </ul> 
+<pre>{
+  "namespace": "com.google.cloud.ai.vectorsearch",
+  "type": "record",
+  "name": "DataObject",
+  "fields": [
+    {
+      "name": "id",
+      "type": "string"
+    },
+    {
+      "name": "vectors",
+      "type": {
+        "type": "map",
+        "values": [
+          {
+            "type": "array",
+            "items": "float"
+          },
+          {
+            "type": "record",
+            "name": "SparseVector",
+            "fields": [
+              {
+                "name": "values",
+                "type": { "type": "array", "items": "float" }
+              },
+              {
+                "name": "indices",
+                "type": { "type": "array", "items": "long" }
+              }
+            ]
+          }
+        ]
+      },
+      "default": {}
+    },
+    {
+      "name": "data",
+      "type": [
+        "null",
+        {
+          "type": "map",
+          "values": {
+            "type": "record",
+            "name": "DataValue",
+            "fields": [
+              {
+                "name": "value",
+                "type": [
+                  "boolean",
+                  "int",
+                  "long",
+                  "float",
+                  "double",
+                  "string",
+                  {
+                    "type": "array",
+                    "items": "DataValue"
+                  },
+                  {
+                    "type": "map",
+                    "values": "DataValue"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "default": null
+    },
+    {
+      "name": "etag",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    }
+  ]
+}
+</pre> <p>The following snippet shows the conceptual contents of a single AVRO record that matches the preceding JSONL example. Note that under this schema each entry in <code translate="no" dir="ltr">data</code> is wrapped in a <code translate="no" dir="ltr">DataValue</code> record (with a single <code translate="no" dir="ltr">value</code> field), which is how AVRO represents the heterogeneous types in <code translate="no" dir="ltr">data</code>:</p> 
+<pre>{
+  "id": "movie-789",
+  "vectors": {
+    "title_embedding": [-0.23, 0.88, 0.11],
+    "sparse_embedding": {
+      "values": [0.01, -0.93, 0.27],
+      "indices": [23, 83, 131]
+    }
+  },
+  "data": {
+    "title": { "value": "The Shawshank Redemption" },
+    "plot": { "value": "..." },
+    "year": { "value": 1994 },
+    "avg_rating": { "value": 8.5 },
+    "movie_runtime_info": {
+      "value": {
+        "hours":   { "value": 2 },
+        "minutes": { "value": 5 }
+      }
+    }
+  }
+}
+</pre>
+<aside class="note"><strong>Note:</strong><span> <code translate="no" dir="ltr">plot_embedding</code> is automatically populated and shouldn't be specified in the JSONL or AVRO file.</span></aside> <h2 id="export_data_objects">Export Data Objects</h2> <p>The following example demonstrates how to export every Data Object in a Collection to Cloud Storage in JSONL format. The destination bucket must be in the same region as the Collection. Export is a long-running operation.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID:exportDataObjects</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "gcsDestination": {
+    "exportUri": "gs://your-bucket/path/to/export-dir/",
+    "format": "JSONL"
+  }
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_6">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID:exportDataObjects"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_6">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID:exportDataObjects" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "name": "projects/PROJECT_ID/locations/LOCATION/operations/operation-1770039043815-649d75471f76e-08de3049-276a02be",
+  "metadata": {
+    "@type": "type.googleapis.com/google.cloud.vectorsearch.v1.ExportDataObjectsMetadata",
+    "createTime": "2026-02-02T13:30:43.874527852Z"
+  },
+  "done": false
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_6">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections export-data-objects COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --gcs-destination-export-uri="gs://your-bucket/path/to/export-dir/" \
+  --gcs-destination-format="jsonl" \
+  --async</pre>   <h4 class="showalways" id="windows-powershell_6">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections export-data-objects COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --gcs-destination-export-uri="gs://your-bucket/path/to/export-dir/" `
+  --gcs-destination-format="jsonl" `
+  --async</pre>   <h4 class="showalways" id="windows-cmd.exe_6">Windows (cmd.exe)</h4> 
+<pre data-language="bash">gcloud vector-search collections export-data-objects COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --gcs-destination-export-uri="gs://your-bucket/path/to/export-dir/" ^
+  --gcs-destination-format="jsonl" ^
+  --async</pre>  </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+vector_search_service_client = vectorsearch_v1.VectorSearchServiceClient()
+
+# Initialize request
+request = vectorsearch_v1.ExportDataObjectsRequest(
+    name="projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID",
+    gcs_destination={
+        "export_uri": "gs://your-bucket/path/to/export-dir/",
+        "format": vectorsearch_v1.ExportDataObjectsRequest.GcsExportDestination.Format.JSONL,
+    },
+)
+
+# Make the request
+operation = vector_search_service_client.export_data_objects(request=request)
+
+# Wait for the result (note this may take up to several minutes)
+operation.result()
+</pre></section> </div> <h2 id="delete_a_data_object">Delete a Data Object</h2> <p>The following example shows how to delete a single Data Object <code translate="no" dir="ltr"><var translate="no">DATA_OBJECT_ID</var></code> from a Collection with the ID <code translate="no" dir="ltr"><var translate="no">COLLECTION_ID</var></code>.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">DELETE https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_7">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Execute the following command: </p> <section>
+<pre data-language="">curl -X DELETE \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_7">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method DELETE `    -Headers $headers `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "name": "projects/PROJECT_ID/locations/LOCATION/operations/operation-1770039043815-649d75471f76e-08de3049-276a02be",
+  "metadata": {
+    "@type": "type.googleapis.com/google.cloud.vectorsearch.v1.ExportDataObjectsMetadata",
+    "createTime": "2026-02-02T13:30:43.874527852Z"
+  },
+  "done": false
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">DATA_OBJECT_ID</var>: The ID of the data object. </li> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_7">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects delete DATA_OBJECT_ID \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID</pre>   <h4 class="showalways" id="windows-powershell_7">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects delete DATA_OBJECT_ID `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID</pre>   <h4 class="showalways" id="windows-cmd.exe_7">Windows (cmd.exe)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects delete DATA_OBJECT_ID ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID</pre>  <p>You should receive a response similar to the following:</p> <section> 
+<pre data-language="bash">
+Deleted dataObject [DATA_OBJECT_ID].
+</pre> </section> </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+# Initialize request
+request = vectorsearch_v1.DeleteDataObjectRequest(
+    name="projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/DATA_OBJECT_ID",
+)
+
+# Make the request
+data_object_service_client.delete_data_object(request=request)
+</pre></section> </div> <h2 id="batch-delete">Batch delete Data Objects</h2> <p>To delete many Data Objects at once, use <code translate="no" dir="ltr">batchDelete</code> with a list of fully-qualified Data Object resource names. A maximum of <strong>1000 Data Objects</strong> can be deleted in a single batch.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchDelete</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "requests": [
+    { "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1" },
+    { "name": "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2" }
+  ]
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_8">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchDelete"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_8">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:batchDelete" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_8">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-delete \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --requests='[
+    {"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1"},
+    {"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2"}
+  ]'</pre>   <h4 class="showalways" id="windows-powershell_8">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-delete `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --requests='[
+    {"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1"},
+    {"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2"}
+  ]'</pre>   <h4 class="showalways" id="windows-cmd.exe_8">Windows (cmd.exe)</h4> <aside class="note"><b>Note:</b> If this command uses <code translate="no" dir="ltr">'</code> for quoting content, replace these single quotes with double quotes. If quoting is nested, use <code translate="no" dir="ltr">\"</code> to escape the inner quotes. </aside> 
+<pre data-language="bash">gcloud vector-search collections data-objects batch-delete ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --requests='[
+    {"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-1"},
+    {"name":"projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects/movie-2"}
+  ]'</pre>  </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+
+# Create the client
+data_object_service_client = vectorsearch_v1.DataObjectServiceClient()
+
+parent = "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID"
+
+requests = [
+    vectorsearch_v1.DeleteDataObjectRequest(
+        name=f"{parent}/dataObjects/movie-1",
+    ),
+    vectorsearch_v1.DeleteDataObjectRequest(
+        name=f"{parent}/dataObjects/movie-2",
+    ),
+]
+
+request = vectorsearch_v1.BatchDeleteDataObjectsRequest(
+    parent=parent,
+    requests=requests,
+)
+
+# Make the request
+data_object_service_client.batch_delete_data_objects(request=request)
+</pre></section> </div> <h2 id="count">Count Data Objects</h2> <p>To count how many Data Objects a Collection contains, use the <code translate="no" dir="ltr">aggregate</code> operation with the <code translate="no" dir="ltr">COUNT</code> aggregation method. The same call accepts an optional JSON filter expression so you can count only the Data Objects that match a predicate (for example, <code translate="no" dir="ltr">genre == "sci-fi"</code>).</p> <p>To count <strong>every</strong> Data Object in the Collection, omit the filter.</p> <div> <section><p class="_code-tab"><strong>REST</strong></p>
+
+<p> Before using any of the request data, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> HTTP method and URL: </p> <section> 
+<pre data-language="">POST https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:aggregate</pre> </section> <p> Request JSON body: </p> <section> 
+<pre data-language="">
+{
+  "aggregate": "COUNT",
+  "filter": { "genre": { "$eq": "sci-fi" } }
+}
+</pre> </section> <p>To send your request, expand one of these options:</p> <section class="expandable"> <h4 class="showalways" id="curl-linux,-macos,-or-cloud-shell_9">curl (Linux, macOS, or Cloud Shell)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> , or by using <a href="https://docs.cloud.google.com/shell/docs">Cloud Shell</a>, which automatically logs you into the <code translate="no" dir="ltr">gcloud</code> CLI . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">curl -X POST \     -H "Authorization: Bearer $(gcloud auth print-access-token)" \     -H "Content-Type: application/json; charset=utf-8" \     -d @request.json \     "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:aggregate"</pre></section> </section> <section class="expandable"> <h4 class="showalways" id="powershell-windows_9">PowerShell (Windows)</h4> <aside class="note"><b>Note:</b> The following command assumes that you have logged in to the <code translate="no" dir="ltr">gcloud</code> CLI with your user account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/init"><code translate="no" dir="ltr">gcloud init</code></a> or <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> . You can check the currently active account by running <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/list"><code translate="no" dir="ltr">gcloud auth list</code></a>. </aside> <p> Save the request body in a file named <code translate="no" dir="ltr">request.json</code>, and execute the following command: </p> <section>
+<pre data-language="">$cred = gcloud auth print-access-token$headers = @{ "Authorization" = "Bearer $cred" }Invoke-WebRequest `    -Method POST `    -Headers $headers `    -ContentType: "application/json; charset=utf-8" `    -InFile request.json `    -Uri "https://vectorsearch.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID/dataObjects:aggregate" | Select-Object -Expand Content</pre></section> </section> <p>You should receive a JSON response similar to the following:</p> <section> 
+<pre data-language="">
+{
+  "aggregateResults": [
+    { "count": "42" }
+  ]
+}
+</pre> </section> </section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+
+<p> Before using any of the command data below, make the following replacements: </p> <ul> <li> <var translate="no">COLLECTION_ID</var>: The ID of the collection. </li> <li> <var translate="no">LOCATION</var>: The region where you are using Agent Platform. </li> <li> <var translate="no">PROJECT_ID</var>: Your Google Cloud <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects#identifying_projects">project ID</a>. </li> </ul> <p> Execute the following command: </p>  <h4 class="showalways" id="linux,-macos,-or-cloud-shell_9">Linux, macOS, or Cloud Shell</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects aggregate \
+  --collection=COLLECTION_ID \
+  --location=LOCATION \
+  --project=PROJECT_ID \
+  --aggregation-method=count \
+  --json-filter='{"genre": {"$eq": "sci-fi"}}'</pre>   <h4 class="showalways" id="windows-powershell_9">Windows (PowerShell)</h4> 
+<pre data-language="bash">gcloud vector-search collections data-objects aggregate `
+  --collection=COLLECTION_ID `
+  --location=LOCATION `
+  --project=PROJECT_ID `
+  --aggregation-method=count `
+  --json-filter='{"genre": {"$eq": "sci-fi"}}'</pre>   <h4 class="showalways" id="windows-cmd.exe_9">Windows (cmd.exe)</h4> <aside class="note"><b>Note:</b> If this command uses <code translate="no" dir="ltr">'</code> for quoting content, replace these single quotes with double quotes. If quoting is nested, use <code translate="no" dir="ltr">\"</code> to escape the inner quotes. </aside> 
+<pre data-language="bash">gcloud vector-search collections data-objects aggregate ^
+  --collection=COLLECTION_ID ^
+  --location=LOCATION ^
+  --project=PROJECT_ID ^
+  --aggregation-method=count ^
+  --json-filter='{"genre": {"$eq": "sci-fi"}}'</pre>  </section> <section><p class="_code-tab"><strong>Python</strong></p>
+
+<pre data-language="python">from google.cloud import vectorsearch_v1
+from google.protobuf import struct_pb2
+from google.protobuf import json_format
+
+# Create the client
+search_client = vectorsearch_v1.DataObjectSearchServiceClient()
+
+parent = "projects/PROJECT_ID/locations/LOCATION/collections/COLLECTION_ID"
+
+# Optional: build a JSON filter. Omit `filter=` to count everything.
+filter_struct = json_format.ParseDict(
+    {"genre": {"$eq": "sci-fi"}}, struct_pb2.Struct()
+)
+
+request = vectorsearch_v1.AggregateDataObjectsRequest(
+    parent=parent,
+    aggregate=vectorsearch_v1.AggregationMethod.COUNT,
+    filter=filter_struct,
+)
+
+# Make the request
+response = search_client.aggregate_data_objects(request=request)
+
+# The count value is returned in aggregate_results[0].
+for result in response.aggregate_results:
+    print(result)
+</pre></section> </div> <h2 id="whats_next">What's next?</h2> <ul> <li>Discover how to <a href="using-etags-for-concurrency-control">use ETags for Data Object concurrency control</a>.</li> <li>Learn about <a href="../indexes/indexes">Collection Indexes</a>.</li> <li>See how to <a href="../query-search/query">query</a> and <a href="../query-search/search">search</a> for Data Objects.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/vector-search-2/data-objects/data-objects" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/vector-search-2/data-objects/data-objects</a>
+  </p>
+</div>

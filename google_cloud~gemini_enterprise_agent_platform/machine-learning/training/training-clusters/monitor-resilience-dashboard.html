@@ -1,0 +1,140 @@
+<h1>Monitor resilience events with a dashboard</h1> <div class="note"> If you're interested in Gemini Enterprise Agent Platform training clusters, contact your sales representative for access. </div> <p>Training clusters runs <a href="cluster-resiliency#auto-health-recovery">automated health checks</a> on your nodes and intervenes when a check fails. For example, upon identifying a fatal XID error, it may drain the node, requeue the affected Slurm job, and recreate the node. Each of these interventions is written to your project's logs as a <em>resilience event</em>.</p> <p>This page shows you how to build a custom <a href="https://docs.cloud.google.com/monitoring/charts/dashboards">Cloud Monitoring dashboard</a> that charts those resilience events next to the Slurm state of your compute nodes, so that you can see which recovery actions the service took and how they correlate with the state of your cluster. The dashboard has two charts:</p> <ul> <li>
+<strong>Slurm node states</strong>: the number of nodes in each Slurm state over time, taken from the <code translate="no" dir="ltr">hypercomputecluster.googleapis.com/slurm/node_state</code> metric.</li> <li>
+<strong>Resilience events</strong>: a count of resilience events, broken down by event type, taken from a log-based metric that you create in the next section.</li> </ul> <figure> <img alt="A dashboard with two charts: nodes in each Slurm state over time, and a stacked bar chart counting resilience events by event type." src="https://docs.cloud.google.com/static/gemini-enterprise-agent-platform/images/training-clusters-resilience-dashboard.png"> <figcaption><strong>Figure 1.</strong> Reading the two charts together shows the effect of a recovery: the count of idle nodes drops while the service replaces a node that failed a prolog health check, and the events that caused it appear underneath.</figcaption> </figure> <h2 id="before-you-begin">Before you begin</h2> <p>Install and initialize the Google Cloud CLI, then set the project that contains your training clusters:</p> 
+<pre>gcloud auth login
+gcloud config set project PROJECT_ID</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the ID of your project.</p> <h3 id="required-roles">Required roles</h3> <p> To get the permissions that you need to create the log-based metric and the dashboard, ask your administrator to grant you the following IAM roles on the project: </p> <ul> <li> Create the log-based metric: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/logging#logging.configWriter">Logs Configuration Writer </a> (<code translate="no" dir="ltr">roles/logging.configWriter</code>) </li> <li> Create the dashboard: <a href="https://docs.cloud.google.com/iam/docs/roles-permissions/monitoring#monitoring.dashboardEditor">Monitoring Dashboard Configuration Editor </a> (<code translate="no" dir="ltr">roles/monitoring.dashboardEditor</code>) </li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> These predefined roles contain the permissions required to create the log-based metric and the dashboard. To see the exact permissions that are required, expand the <strong>Required permissions</strong> section: </p>  <h4 class="showalways" id="required-permissions">Required permissions</h4> <p>The following permissions are required to create the log-based metric and the dashboard:</p> <ul> <li> Create the log-based metric: <code translate="no" dir="ltr">logging.logMetrics.create</code> </li> <li> Create the dashboard: <code translate="no" dir="ltr">monitoring.dashboards.create</code> </li> </ul>  <p> You might also be able to get these permissions with <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <h2 id="create-metric">Create the log-based metric</h2> <p>Resilience events are recorded in your project's logs, where each event carries an <code translate="no" dir="ltr">event_type</code> label prefixed with <code translate="no" dir="ltr">RESILIENCE_EVENT_TYPE_</code>. To see the raw events in the Logs Explorer, use the following query:</p> 
+<pre>labels.event_type=~"RESILIENCE_EVENT_TYPE_.*"
+</pre> <p>Cloud Monitoring can't chart log entries directly, so you first turn this query into a <a href="https://docs.cloud.google.com/logging/docs/logs-based-metrics">log-based metric</a>.</p> <ol> <li>
+<p>Save the following configuration to a file named <code translate="no" dir="ltr">resilience_metric.yaml</code>:</p> 
+<pre>name: training_cluster_resilience_events
+description: "Resilience events on training cluster nodes (VM instances)."
+filter: 'resource.type="gce_instance" AND labels.event_type=~"RESILIENCE_EVENT_TYPE_.*"'
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  labels:
+    - key: cluster_id
+      valueType: STRING
+      description: "The ID of the training cluster."
+    - key: event_type
+      valueType: STRING
+      description: "The type of resilience event."
+    - key: slurm_job_name
+      valueType: STRING
+      description: "The name of the Slurm job that triggered the resilience event, if applicable."
+    - key: slurm_job_id
+      valueType: STRING
+      description: "The ID of the Slurm job that triggered the resilience event, if applicable."
+    - key: slurm_job_partition
+      valueType: STRING
+      description: "The partition that the resilience event acts on."
+labelExtractors:
+  cluster_id: "EXTRACT(labels.cluster_id)"
+  event_type: "EXTRACT(labels.event_type)"
+  slurm_job_name: "EXTRACT(labels.slurm_job_name)"
+  slurm_job_id: "EXTRACT(labels.slurm_job_id)"
+  slurm_job_partition: "EXTRACT(labels.slurm_job_partition)"
+</pre> <p>The <code translate="no" dir="ltr">labelExtractors</code> field copies the labels of each log entry onto the metric, which lets you break the chart down by event type, by cluster, or by Slurm job.</p>
+</li> <li>
+<p>Create the metric:</p> 
+<pre>gcloud logging metrics create training_cluster_resilience_events \
+    --config-from-file=resilience_metric.yaml
+</pre>
+</li> <li>
+<p>Verify that the metric exists:</p> 
+<pre>gcloud logging metrics describe training_cluster_resilience_events
+</pre> <p>You can also confirm the metric in the Google Cloud console on the <a href="https://console.cloud.google.com/logs/metrics"><strong>Log-based metrics</strong></a> page.</p>
+</li> </ol> <h2 id="create-dashboard">Create the dashboard</h2> <ol> <li>
+<p>Save the following configuration to a file named <code translate="no" dir="ltr">resilience_dashboard.json</code>:</p> 
+<pre>{
+  "displayName": "Training Clusters Resilience Dashboard",
+  "mosaicLayout": {
+    "columns": 48,
+    "tiles": [
+      {
+        "height": 16,
+        "width": 24,
+        "widget": {
+          "title": "Slurm node states",
+          "xyChart": {
+            "chartOptions": {
+              "mode": "COLOR"
+            },
+            "dataSets": [
+              {
+                "minAlignmentPeriod": "60s",
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"state\""
+                      ],
+                      "perSeriesAligner": "ALIGN_MEAN"
+                    },
+                    "filter": "metric.type=\"hypercomputecluster.googleapis.com/slurm/node_state\" resource.type=\"gce_instance\""
+                  }
+                }
+              }
+            ],
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "yPos": 16,
+        "height": 16,
+        "width": 24,
+        "widget": {
+          "title": "Resilience events",
+          "xyChart": {
+            "chartOptions": {
+              "mode": "COLOR"
+            },
+            "dataSets": [
+              {
+                "minAlignmentPeriod": "60s",
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "crossSeriesReducer": "REDUCE_COUNT",
+                      "groupByFields": [
+                        "metric.label.\"event_type\""
+                      ],
+                      "perSeriesAligner": "ALIGN_COUNT"
+                    },
+                    "filter": "metric.type=\"logging.googleapis.com/user/training_cluster_resilience_events\" resource.type=\"gce_instance\""
+                  }
+                }
+              }
+            ],
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+</pre> <p>If you gave the log-based metric a different name in the previous section, change the <code translate="no" dir="ltr">logging.googleapis.com/user/</code> filter to match.</p>
+</li> <li>
+<p>Create the dashboard:</p> 
+<pre>gcloud monitoring dashboards create \
+    --config-from-file=resilience_dashboard.json
+</pre>
+</li> <li><p>In the Google Cloud console, go to the <a href="https://console.cloud.google.com/monitoring/dashboards"><strong>Dashboards</strong></a> page, and then, under <strong>My Dashboards</strong>, open <strong>Training Clusters Resilience Dashboard</strong>. The dashboard can take about a minute to appear.</p></li> </ol> <h2 id="troubleshooting">Troubleshooting</h2> <p>The following sections describe the problems you're most likely to hit after creating the metric and the dashboard.</p> <h3 id="no-event-data">The "Resilience events" chart is empty</h3> <p>A log-based metric isn't backfilled. It only counts log entries that arrive <em>after</em> you create the metric. As the <a href="https://docs.cloud.google.com/logging/docs/logs-based-metrics#metric-types">log-based metrics overview</a> explains, a metric isn't retroactively populated with data from log entries that are already in Cloud Logging.</p> <p>If resilience events have occurred since you created the metric and the chart is still empty, confirm that the events are present in the Logs Explorer by running the query in <a href="#create-metric">Create the log-based metric</a>.</p> <h3 id="no-node-state-data">The "Slurm node states" chart is missing some clusters</h3> <p>The <code translate="no" dir="ltr">hypercomputecluster.googleapis.com/slurm/node_state</code> metric is reported only by clusters running a recent enough version of the cluster software. If a cluster is missing from the chart, <a href="manage-cluster">update the cluster</a> and then check the chart again.</p> <h3 id="no-login-nodes">The "Slurm node states" chart doesn't show login nodes</h3> <p>This is expected. Login nodes don't have a Slurm state, such as <code translate="no" dir="ltr">idle</code> or <code translate="no" dir="ltr">mixed</code>, so they don't report the <code translate="no" dir="ltr">slurm/node_state</code> metric.</p> <h3 id="overcounting">The "Resilience events" chart overcounts events</h3> <p>Cloud Logging processes each log entry at least once, so a transient internal error can cause an entry to be counted more than once. For more information, see <a href="https://docs.cloud.google.com/logging/docs/logs-based-metrics/troubleshooting">Troubleshoot log-based metrics</a>.</p> <p>The log entries themselves are the source of truth. To get an exact count for a time range, query the events in the Logs Explorer instead of reading them off the chart.</p> <h2 id="what-next">What's next</h2> <ul> <li><a href="cluster-resiliency">Learn how cluster resiliency works</a></li> <li><a href="view-clusters#describe">View the prebuilt observability dashboards for a cluster</a></li> <li><a href="../../general/monitoring-metrics">Monitor training jobs on Gemini Enterprise Agent Platform</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/training/training-clusters/monitor-resilience-dashboard" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/training/training-clusters/monitor-resilience-dashboard</a>
+  </p>
+</div>

@@ -1,0 +1,288 @@
+<h1>Configure Workload Identity Federation with Kubernetes</h1> <p>This guide describes how to use Workload Identity Federation to let workloads that run on Azure Kubernetes Service (AKS), Amazon Elastic Kubernetes Service, or on a self-hosted Kubernetes cluster authenticate to Google Cloud.</p> <p>Kubernetes lets you configure a cluster so that workloads can obtain Kubernetes ServiceAccount tokens <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#serviceaccount-token-volume-projection">from a projected volume</a>. By setting up Workload Identity Federation, you can let workloads use these Kubernetes ServiceAccount tokens to authenticate to Google Cloud.</p> <p>If you're using GKE, use <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity">Workload Identity Federation for GKE</a> instead of configuring Workload Identity Federation.</p> <h2 id="before-you-begin">Before you begin</h2> <p>Before you configure Workload Identity Federation, make sure that your Kubernetes cluster meets the following criteria:</p> <div> <section><p class="_code-tab"><strong>GKE</strong></p>
+<p>For Google Kubernetes Engine (GKE) users, see <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity">Authenticate to Google Cloud APIs from GKE workloads</a>.</p></section> <section><p class="_code-tab"><strong>AKS</strong></p>
+<p>Make sure your cluster meets the following criteria:</p> <ul> <li>
+<p>You've enabled the <a href="https://learn.microsoft.com/en-us/azure/aks/use-oidc-issuer">OIDC issuer</a> feature.</p> <p>You must enable this feature so that Workload Identity Federation can access the OpenID Connect metadata and the JSON Web Key Set (JWKS) for the cluster.</p>
+</li> </ul></section> <section><p class="_code-tab"><strong>EKS</strong></p>
+<p>You don't need to make any changes in your EKS configuration.</p></section> <section><p class="_code-tab"><strong>Kubernetes</strong></p>
+<p>Make sure your cluster meets the following criteria:</p> <ul> <li>
+<p>You're running Kubernetes 1.20 or later.</p> <p>Previous versions of Kubernetes used a different ServiceAccount token format that is not compatible with the instructions in this document.</p>
+</li> <li><p>You configured <code translate="no" dir="ltr">kube-apiserver</code> so that it <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#serviceaccount-token-volume-projection">supports <code translate="no" dir="ltr">ServiceAccount</code> token volume projections</a>.</p></li> </ul> <p>The cluster doesn't need to be accessible over the internet.</p></section> </div> <h2 id="configure">Configure Workload Identity Federation</h2> <p>You only need to perform these steps once for each Kubernetes cluster. You can then use the same workload identity pool and provider for multiple Kubernetes pods and across multiple Google Cloud projects.</p> <p>To start configuring Workload Identity Federation, do the following:</p> <ol> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> We recommend that you <a href="best-practices-for-using-workload-identity-federation#dedicated-project"> use a dedicated project to manage workload identity pools and providers</a>. <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> <p> Enable the IAM, Resource Manager, Service Account Credentials, and Security Token Service APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p> </ol> <h3 id="mappings-and-conditions">Define an attribute mapping and condition</h3> <p>Kubernetes ServiceAccount tokens contain multiple claims, including the following:</p> <ul> <li>
+<code translate="no" dir="ltr">sub</code>: Contains the namespace and name of the ServiceAccount-for example, <code translate="no" dir="ltr">system:serviceaccount:<var translate="no">NAMESPACE</var>:<var translate="no">KSA_NAME</var></code>, where <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> is the namespace of the ServiceAccount and <code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code> is the name of the ServiceAccount.</li> <li>
+<code translate="no" dir="ltr">"kubernetes.io".namespace</code>: Contains the namespace of the ServiceAccount.</li> <li>
+<code translate="no" dir="ltr">"kubernetes.io".serviceaccount.name</code>: Contains the name of the ServiceAccount.</li> <li>
+<code translate="no" dir="ltr">"kubernetes.io".pod.name</code>: Contains the name of the pod.</li> </ul> <p>To use <code translate="no" dir="ltr">sub</code> as subject identifier (<code translate="no" dir="ltr">google.subject</code>) in Google Cloud, use the following mapping:</p> 
+<pre>
+google.subject=assertion.sub
+</pre> <p>Optionally, you can <a href="workload-identity-federation#mapping">map additional attributes</a>. You can then refer to these attributes when granting access to resources. For example:</p> 
+<pre>
+google.subject=assertion.sub,
+attribute.namespace=assertion['kubernetes.io']['namespace'],
+attribute.service_account_name=assertion['kubernetes.io']['serviceaccount']['name'],
+attribute.pod=assertion['kubernetes.io']['pod']['name']
+</pre> <p>Optionally, define an <a href="workload-identity-federation#conditions">attribute condition</a>. Attribute conditions are CEL expressions that can check assertion attributes and target attributes. If the attribute condition evaluates to <code translate="no" dir="ltr">true</code> for a given credential, the credential is accepted. Otherwise, the credential is rejected.</p> <p>You can use an attribute condition to restrict which Kubernetes ServiceAccounts can use Workload Identity Federation to obtain short-lived Google Cloud tokens. For example, the following condition restricts access to Kubernetes ServiceAccounts from the <code translate="no" dir="ltr">backend</code> and <code translate="no" dir="ltr">monitoring</code> namespaces:</p> 
+<pre>
+assertion['kubernetes.io']['namespace'] in ['backend', 'monitoring']
+</pre> <h3 id="create_the_workload_identity_pool_and_provider">Create the workload identity pool and provider</h3> <div>  <h4 class="showalways" id="required-roles">Required roles</h4> <div> <p> To get the permissions that you need to configure Workload Identity Federation, ask your administrator to grant you the following IAM roles on the project: </p> <ul> <li>
+<a href="roles-permissions/iam#iam.workloadIdentityPoolAdmin">Workload Identity Pool Admin </a> (<code translate="no" dir="ltr">roles/iam.workloadIdentityPoolAdmin</code>)</li> <li>
+<a href="roles-permissions/iam#iam.serviceAccountAdmin">Service Account Admin </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>)</li> </ul> <p> For more information about granting roles, see <a href="granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="creating-custom-roles">custom roles</a> or other <a href="roles-overview#predefined">predefined roles</a>. </p> Alternatively, the IAM Owner (<code translate="no" dir="ltr">roles/owner</code>) basic role also includes permissions to configure identity federation. You should not grant basic roles in a production environment, but you can grant them in a development or test environment. </div>  </div> <p>To create a workload identity pool and provider, do the following:</p> <div> <section><p class="_code-tab"><strong>AKS</strong></p>
+<ol> <li>
+<p>Determine the issuer URL of your AKS cluster:</p> 
+<pre data-language="">
+az aks show -n NAME -g RESOURCE_GROUP --query "oidcIssuerProfile.issuerUrl" -otsv
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAME</var></code>: The name of the cluster</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RESOURCE_GROUP</var></code>: The resource group of the cluster</li> </ul> <p>The command outputs the issuer URL. You need the issuer URL in one of the following steps.</p> <p>If the command doesn't return an issuer URL, verify that you've enabled the <a href="https://learn.microsoft.com/en-us/azure/aks/use-oidc-issuer">OIDC issuer</a> feature.</p>
+</li> <li>
+<p>Create a new workload identity pool:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools create POOL_ID \
+    --location="global" \
+    --description="DESCRIPTION" \
+    --display-name="DISPLAY_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISPLAY_NAME</var></code>: The name of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DESCRIPTION</var></code>: A description of the pool that you choose. This description appears when you grant access to pool identities.</li> </ul>
+</li> <li>
+<p>Add the AKS cluster as a workload identity pool provider:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools providers create-oidc WORKLOAD_PROVIDER_ID \
+    --location="global" \
+    --workload-identity-pool="POOL_ID" \
+    --issuer-uri="ISSUER" \
+    --attribute-mapping="MAPPINGS" \
+    --attribute-condition="CONDITIONS"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: A unique workload identity pool provider ID of your choice.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The workload identity pool ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ISSUER</var></code>: The issuer URI that you determined earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPINGS</var></code>: A comma-separated list of <a href="#mappings-and-conditions">attribute mappings</a> that you created earlier in this guide.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONDITIONS</var></code>: An optional <a href="#mappings-and-conditions">attribute condition</a> that you created earlier in this guide. Remove the parameter if you don't have an attribute condition.</li> </ul>
+</li> </ol></section> <section><p class="_code-tab"><strong>EKS</strong></p>
+<ol> <li>
+<p>Determine the issuer URL of your EKS cluster:</p> 
+<pre data-language="">
+aws eks describe-cluster --name NAME --query "cluster.identity.oidc.issuer" --output text
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAME</var></code> with the name of the cluster.</p> <p>The command outputs the issuer URL. You need the issuer URL in one of the following steps.</p>
+</li> <li>
+<p>Create a new workload identity pool:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools create POOL_ID \
+    --location="global" \
+    --description="DESCRIPTION" \
+    --display-name="DISPLAY_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISPLAY_NAME</var></code>: The name of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DESCRIPTION</var></code>: A description of the pool that you choose. This description appears when you grant access to pool identities.</li> </ul>
+</li> <li>
+<p>Add the EKS cluster as a workload identity pool provider:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools providers create-oidc WORKLOAD_PROVIDER_ID \
+    --location="global" \
+    --workload-identity-pool="POOL_ID" \
+    --issuer-uri="ISSUER" \
+    --attribute-mapping="MAPPINGS" \
+    --attribute-condition="CONDITIONS"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: A unique workload identity pool provider ID of your choice.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The workload identity pool ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ISSUER</var></code>: The issuer URI that you determined earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPINGS</var></code>: A comma-separated list of <a href="#mappings-and-conditions">attribute mappings</a> that you created earlier in this guide.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONDITIONS</var></code>: An optional <a href="#mappings-and-conditions">attribute condition</a> that you created earlier in this guide. Remove the parameter if you don't have an attribute condition.</li> </ul>
+</li> </ol></section> <section><p class="_code-tab"><strong>Kubernetes</strong></p>
+<ol> <li>
+<p>Connect to your Kubernetes cluster and use <code translate="no" dir="ltr">kubectl</code> to determine your cluster's issuer URL:</p> 
+<pre data-language="">
+kubectl get --raw /.well-known/openid-configuration | jq -r .issuer
+</pre> <p>You need the issuer URL in one of the following steps.</p>
+</li> <li>
+<p>Download the cluster's JSON Web Key Set (JWKS):</p> 
+<pre data-language="">
+kubectl get --raw /openid/v1/jwks &gt; cluster-jwks.json
+</pre> <p>In one of the following steps, you upload the JWKS so that Workload Identity Federation can verify the authenticity of the Kubernetes ServiceAccount tokens issued by your cluster.</p>
+</li> <li>
+<p>Create a new workload identity pool:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools create POOL_ID \
+    --location="global" \
+    --description="DESCRIPTION" \
+    --display-name="DISPLAY_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The unique ID for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DISPLAY_NAME</var></code>: The name of the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">DESCRIPTION</var></code>: A description of the pool that you choose. This description appears when you grant access to pool identities.</li> </ul>
+</li> <li>
+<p>Add the Kubernetes cluster as a workload identity pool provider and upload the cluster's JWKS:</p> 
+<pre data-language="">
+gcloud iam workload-identity-pools providers create-oidc WORKLOAD_PROVIDER_ID \
+    --location="global" \
+    --workload-identity-pool="POOL_ID" \
+    --issuer-uri="ISSUER" \
+    --attribute-mapping="MAPPINGS" \
+    --attribute-condition="CONDITIONS" \
+    --jwk-json-path="cluster-jwks.json"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: Enter a unique ID for the workload identity pool provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The workload identity pool ID that you created earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ISSUER</var></code>: The issuer URI that you determined earlier.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPINGS</var></code>: A comma-separated list of <a href="#mappings-and-conditions">attribute mappings</a> that you created earlier in this guide.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONDITIONS</var></code>: An optional <a href="#mappings-and-conditions">attribute condition</a> that you created earlier in this guide. Remove the parameter if you don't have an attribute condition.</li> </ul> <aside class="note"><strong>Note:</strong><span> The command doesn't validate the cluster's JWKS. If the JWKS is malformed or expired, subsequent authentication attempts might fail with an error message <code translate="no" dir="ltr">Error connecting to the given credential's issuer</code>.</span></aside>
+</li> </ol></section> </div> <h2 id="authenticate">Grant access to a Kubernetes workload</h2> <p>This section describes how to configure a Kubernetes workload to access Google Cloud APIs by using either Workload Identity Federation direct resource access or service account impersonation.</p> <p>You must perform these steps once for each Kubernetes workload that needs access to Google Cloud.</p> <p>We recommend that you use <a href="#use-wlif">Workload Identity Federation</a>. However, when using identity federation, certain API methods might have limitations. For a list of limitations, see <a href="federated-identity-supported-services">Identity federation: products and limitations</a>.</p> <p>If the methods that your workload uses have such limitations, you can instead use <a href="#use-service-account-impersonation">IAM impersonation</a>.</p> <h3 id="use-wlif">Use Workload Identity Federation to grant direct resource access</h3> <p>In this section, you use Workload Identity Federation to grant an IAM role to a Kubernetes ServiceAccount so that it can directly access Google Cloud resources.</p> <p>To create a Kubernetes ServiceAccount and grant it a role, do the following:</p> <ol> <li>
+<p>Create a Kubernetes ServiceAccount:</p> 
+<pre>
+kubectl create serviceaccount KSA_NAME --namespace NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: a name for the ServiceAccount.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace in which to create the ServiceAccount.</li> </ul>
+</li> <li>
+<p>Grant IAM access to the Kubernetes ServiceAccount for a Google Cloud resource.</p> <p>Following the <a href="using-iam-securely#least_privilege">principle of least privilege</a>, we recommend that you grant only roles that are specific to the resources that your application must access.</p> <p>In the following example, the command grants the <a href="roles-permissions/container#container.clusterViewer">Kubernetes Engine Cluster Viewer</a> (<code translate="no" dir="ltr">roles/container.clusterViewer</code>) role to the ServiceAccount that you created. The command uses the subject that you mapped earlier in this document.</p> 
+<pre>gcloud projects add-iam-policy-binding projects/PROJECT_ID \
+    --role=roles/container.clusterViewer \
+    --member=principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/MAPPED_SUBJECT \
+    --condition=None
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the ID of the Google Cloud project on which to grant access.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a> of the project that contains the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the ID of the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPED_SUBJECT</var></code>: the Kubernetes ServiceAccount from the claim in your ID token that you mapped to <code translate="no" dir="ltr">google.subject</code>. For example, if you mapped <code translate="no" dir="ltr">google.subject=assertion.sub</code> and your ID token contains <code translate="no" dir="ltr">"sub": "system:serviceaccount:default:my-kubernetes-serviceaccount"</code>, then <code translate="no" dir="ltr"><var translate="no">MAPPED_SUBJECT</var></code> is <code translate="no" dir="ltr">system:serviceaccount:default:my-kubernetes-serviceaccount</code>.</li> </ul> <p>You can grant roles on any Google Cloud resource that supports IAM allow policies. The syntax of the principal identifier depends on the Kubernetes resource. For a list of supported identifiers, see <a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity#principal-id-examples">Principal identifiers for Workload Identity Federation for GKE</a>.</p>
+</li> </ol> <p>You can now <a href="#deploy">deploy a workload</a> that uses the Kubernetes ServiceAccount to access the Google Cloud resources to which you granted access.</p> <h3 id="use-service-account-impersonation">Alternative: Use IAM service account impersonation to grant access</h3> <p>To configure your Kubernetes ServiceAccount to use IAM service account impersonation, do the following:</p> <ol> <li>
+<p>Create a Kubernetes ServiceAccount, if you haven't already:</p> 
+<pre>
+kubectl create serviceaccount KSA_NAME --namespace NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: a name for the ServiceAccount.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace in which to create the ServiceAccount.</li> </ul>
+</li> <li>
+<p>Create an IAM <a href="creating-managing-service-accounts#creating">service account</a> that represents the workload.</p> <p>The service account doesn't need to be in the same project as the workload identity pool, but you must specify the project that contains the service account when referring to it.</p> 
+<pre>
+gcloud iam service-accounts create IAM_SA_NAME \
+    --project=IAM_SA_PROJECT_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">IAM_SA_NAME</var></code>: the name of the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IAM_SA_PROJECT_ID</var></code>: the project ID of the service account.</li> </ul>
+</li> <li>
+<p><a href="granting-changing-revoking-access">Grant your IAM service account access</a> to the specific Google Cloud resources that you want the Kubernetes workload to access.</p> 
+<pre>gcloud projects add-iam-policy-binding IAM_SA_PROJECT_ID \
+    --member="serviceAccount:IAM_SA_NAME@IAM_SA_PROJECT_ID.iam.gserviceaccount.com" \
+    --role="ROLE"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">IAM_SA_PROJECT_ID</var></code>: the ID of the project where you created your service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IAM_SA_NAME</var></code>: the name of the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROLE</var></code>: the name of the role to grant—for example, <code translate="no" dir="ltr">roles/container.clusterViewer</code>.</li> </ul>
+</li> <li>
+<p>Grant the Kubernetes ServiceAccount access to impersonate the IAM service account:</p> 
+<pre>gcloud iam service-accounts add-iam-policy-binding \
+  IAM_SA_NAME@IAM_SA_PROJECT_ID.iam.gserviceaccount.com \
+    --member="principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/MAPPED_SUBJECT" \
+    --role=roles/iam.workloadIdentityUser
+
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">IAM_SA_NAME</var></code>: the name of the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">IAM_SA_PROJECT_ID</var></code>: the ID of the project where you created your service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: the <a href="https://docs.cloud.google.com/resource-manager/docs/creating-managing-projects">project number</a> of the project that contains the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the ID of the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">MAPPED_SUBJECT</var></code>: the Kubernetes ServiceAccount from the claim in your ID token that you mapped to <code translate="no" dir="ltr">google.subject</code>. For example, if you mapped <code translate="no" dir="ltr">google.subject=assertion.sub</code> and your ID token contains <code translate="no" dir="ltr">"sub": "system:serviceaccount:default:my-kubernetes-serviceaccount"</code>, then <code translate="no" dir="ltr"><var translate="no">MAPPED_SUBJECT</var></code> is <code translate="no" dir="ltr">system:serviceaccount:default:my-kubernetes-serviceaccount</code>.</li> </ul> <p>For information on authorizing IAM service accounts to access Google Cloud APIs, see <a href="understanding-service-accounts">Understanding service accounts</a>.</p>
+</li> </ol> <p>You can now <a href="#deploy">deploy a workload</a> that uses the Kubernetes ServiceAccount and the IAM service account to access the Google Cloud resources to which you granted access.</p> <h3 id="deploy">Deploy the Kubernetes workload</h3> <p>To deploy a Kubernetes workload that can access Google Cloud resources, do the following:</p> <ol> <li>
+<p>Create a credential configuration file:</p> 
+<pre>gcloud iam workload-identity-pools create-cred-config \
+    projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/WORKLOAD_PROVIDER_ID \
+    --service-account=SERVICE_ACCOUNT_EMAIL \
+    --credential-source-file=/var/run/service-account/token \
+    --credential-source-type=text \
+    --sts-location=REGION \
+    --output-file=credential-configuration.json</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: The project number of the project that contains the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: The ID of the workload identity pool</li> <li>
+<code translate="no" dir="ltr"><var translate="no">WORKLOAD_PROVIDER_ID</var></code>: The ID of the workload identity pool provider</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT_EMAIL</var></code>: Email address of the service account, if you configured your Kubernetes ServiceAccount to use IAM service account impersonation. Omit this flag if you configured your Kubernetes ServiceAccount to use direct resource access.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: Optional. Specify the region of the <a href="best-practices-for-using-workload-identity-federation#sts-regional-endpoints">regional Security Token Service endpoints</a>, if they are available.</li> </ul> <p>The credential configuration file lets the <a href="https://docs.cloud.google.com/apis/docs/cloud-client-libraries">Cloud Client Libraries</a>, the gcloud CLI, and Terraform determine the following:</p> <ul> <li>Where to obtain external credentials from</li> <li>Which workload identity pool and provider to use</li> <li>Which service account to impersonate</li> </ul> <aside class="note"><strong>Note:</strong><span> Unlike a <a href="creating-managing-service-account-keys#creating_service_account_keys">service account key</a>, a credential configuration file doesn't contain a private key and doesn't need to be kept confidential. Details about the credential configuration file are available at <a href="https://google.aip.dev/auth/4117">https://google.aip.dev/auth/4117</a>.</span></aside>
+</li> <li>
+<p>Import the credential configuration file as a <a href="https://kubernetes.io/docs/concepts/configuration/configmap/">ConfigMap</a></p> 
+<pre>
+kubectl create configmap CONFIGMAP_NAME \
+  --from-file credential-configuration.json \
+  --namespace NAMESPACE
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CONFIGMAP_NAME</var></code>: The name of the ConfigMap.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: The namespace in which to create the ConfigMap.</li> </ul>
+</li> <li>
+<p>Deploy a workload and let it use the Kubernetes ServiceAccount and ConfigMap.</p> <p>Create a manifest and configure as follows:</p> <ul> <li>Mount a <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#serviceaccount-token-volume-projection">projected token volume</a> so that the workload can obtain a Kubernetes ServiceAccount token from a local file. Configure the volume so that the Kubernetes ServiceAccount token uses the audience expected by your workload identity pool provider.</li> <li>Mount the ConfigMap that contains the credential configuration file so that the workload can access the necessary configuration for using Workload Identity Federation.</li> <li>Add an environment variable <code translate="no" dir="ltr">GOOGLE_APPLICATION_CREDENTIALS</code> that contains the path of the credential configuration file so that workloads can find the file.</li> </ul> <p>The following is an example manifest that uses the Kubernetes ServiceAccount and ConfigMap to let the Google Cloud CLI authenticate to Google Cloud:</p> 
+<pre>apiVersion: v1
+kind: Pod
+metadata:
+  name: example
+  namespace: NAMESPACE
+spec:
+  containers:
+  - name: example
+    image: google/cloud-sdk:alpine
+    command: ["/bin/sh", "-c", "gcloud auth login --cred-file $GOOGLE_APPLICATION_CREDENTIALS &amp;&amp; gcloud auth list &amp;&amp; sleep 600"]
+    volumeMounts:
+    - name: token
+      mountPath: "/var/run/service-account"
+      readOnly: true
+    - name: workload-identity-credential-configuration
+      mountPath: "/etc/workload-identity"
+      readOnly: true
+    env:
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      value: "/etc/workload-identity/credential-configuration.json"
+
+  serviceAccountName: KSA_NAME
+  volumes:
+  - name: token
+    projected:
+      sources:
+      - serviceAccountToken:
+          audience: https://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/WORKLOAD_PROVIDER_ID
+          expirationSeconds: 3600
+          path: token
+  - name: workload-identity-credential-configuration
+    configMap:
+      name: CONFIGMAP_NAME</pre> <p>You can follow the same approach to let tools and workloads that use one of the following client libraries <a href="https://docs.cloud.google.com/docs/authentication/client-libraries">find credentials automatically</a>:</p> <div> <section><p class="_code-tab"><strong>C++</strong></p>
+<p>The <a href="https://docs.cloud.google.com/cpp/docs">Google Cloud Client Libraries for C++</a> support Workload Identity Federation since version <a href="https://github.com/googleapis/google-cloud-cpp/releases/tag/v2.6.0">v2.6.0</a>. To use Workload Identity Federation, you must build the client libraries with version 1.36.0 or later of gRPC.</p></section> <section><p class="_code-tab"><strong>Go</strong></p>
+<p>Client libraries for Go support Workload Identity Federation if they use version v0.0.0-20210218202405-ba52d332ba99 or later of the <code translate="no" dir="ltr">golang.org/x/oauth2</code> module.</p> <p>To check which version of this module your client library uses, run the following commands:</p> 
+<pre data-language="go">cd $GOPATH/src/cloud.google.com/go
+go list -m golang.org/x/oauth2
+</pre></section> <section><p class="_code-tab"><strong>Java</strong></p>
+<p>Client libraries for Java support Workload Identity Federation if they use version 0.24.0 or later of the <a href="https://search.maven.org/artifact/com.google.auth/google-auth-library-oauth2-http"><code translate="no" dir="ltr">com.google.auth:google-auth-library-oauth2-http</code> artifact</a>.</p> <p>To check which version of this artifact your client library uses, run the following Maven command in your application directory:</p> 
+<pre data-language="java">mvn dependency:list -DincludeArtifactIds=google-auth-library-oauth2-http
+</pre></section> <section><p class="_code-tab"><strong>Node.js</strong></p>
+<p>Client libraries for Node.js support Workload Identity Federation if they use version 7.0.2 or later of the <a href="https://github.com/googleapis/google-auth-library-nodejs"><code translate="no" dir="ltr">google-auth-library</code> package</a>.</p> <p>To check which version of this package your client library uses, run the following command in your application directory:</p> 
+<pre data-language="javascript">npm list google-auth-library
+</pre> <p>When you create a <code translate="no" dir="ltr">GoogleAuth</code> object, you can specify a project ID, or you can allow <code translate="no" dir="ltr">GoogleAuth</code> to find the project ID automatically. To find the project ID automatically, the service account in the configuration file must have the Browser role (<code translate="no" dir="ltr">roles/browser</code>), or a role with equivalent permissions, on your project. For details, see the <a href="https://github.com/googleapis/google-auth-library-nodejs#using-external-identities"><code translate="no" dir="ltr">README</code> for the <code translate="no" dir="ltr">google-auth-library</code> package</a>.</p></section> <section><p class="_code-tab"><strong>Python</strong></p>
+<p>Client libraries for Python support Workload Identity Federation if they use version 1.27.0 or later of the <a href="https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth"><code translate="no" dir="ltr">google-auth</code> package</a>.</p> <p>To check which version of this package your client library uses, run the following command in the environment where the package is installed:</p> 
+<pre data-language="python">pip show google-auth
+</pre> <p>To specify a project ID for the authentication client, you can set the <code translate="no" dir="ltr">GOOGLE_CLOUD_PROJECT</code> environment variable, or you can allow the client to find the project ID automatically. To find the project ID automatically, the service account in the configuration file must have the Browser role (<code translate="no" dir="ltr">roles/browser</code>), or a role with equivalent permissions, on your project. For details, see the <a href="https://github.com/googleapis/google-cloud-python/blob/main/packages/google-auth/docs/user-guide.rst#using-external-identities">user guide for the <code translate="no" dir="ltr">google-auth</code> package</a>.</p></section> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p>To authenticate using Workload Identity Federation, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> command:</p> 
+<pre data-language="bash">
+gcloud auth login --cred-file=FILEPATH.json
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the path to the credential configuration file.</p> <p>Support for Workload Identity Federation in gcloud CLI is available in <a href="https://docs.cloud.google.com/sdk/docs/components#updating_components">version 363.0.0 and later versions of the gcloud CLI</a>.</p></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+<p>The <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs">Google Cloud provider</a> supports Workload Identity Federation if you use version 3.61.0 or later:</p> 
+<pre data-language="">
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~&gt; 3.61.0"
+    }
+  }
+}
+</pre></section> <section><p class="_code-tab"><strong>bq</strong></p>
+<p> To authenticate using Workload Identity Federation, use the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/auth/login"><code translate="no" dir="ltr">gcloud auth login</code></a> command, as follows:</p> 
+<pre data-language="">
+gcloud auth login --cred-file=FILEPATH.json
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">FILEPATH</var></code> with the path to the credential configuration file.</p> <p>Support for Workload Identity Federation in bq is available in <a href="https://docs.cloud.google.com/sdk/docs/components#updating_components">version 390.0.0 and later versions of the gcloud CLI</a>.</p></section> </div>
+</li> <li>
+<p>Optionally, verify that authentication works correctly by running the following command:</p> 
+<pre>kubectl exec example --namespace NAMESPACE -- gcloud auth print-access-token</pre>
+</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>Read more about <a href="workload-identity-federation">Workload Identity Federation</a>.</li> <li>Learn about <a href="best-practices-for-using-workload-identity-federation">best practices for using Workload Identity Federation</a>.</li> <li>See how you can <a href="manage-workload-identity-pools-providers">manage workload identity pools and providers</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes" class="_attribution-link">https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-kubernetes</a>
+  </p>
+</div>

@@ -1,0 +1,112 @@
+<h1>Migrate from Gemini 2.5 Flash Live API Native Audio to Gemini 3.8 Live</h1> <p>This document describes changes required when migrating from Gemini 2.5 Flash Live API Native Audio to Gemini 3.8 Live.</p> <h2 id="function-call-changes">Function call changes</h2> <p>The Gemini 2.5 Flash Live API Native Audio server allows asynchronous tool calls. By contrast, Gemini 3.8 Live supports asynchronous function calling with the following behavior changes:</p> <ul> <li><p>Gemini 3.8 Live supports blocking function calls when the function declaration declares <code translate="no" dir="ltr">behavior=BLOCKING</code> in the setup. If a new input is received during the blocking function call's execution, then the Gemini Live API server cancels the current function call.</p></li> <li>
+<p>The <code translate="no" dir="ltr">scheduling=interrupt</code> option to <code translate="no" dir="ltr">FunctionResponse</code> changed behavior:</p> <table> <thead> <tr> <th>
+<code translate="no" dir="ltr">FunctionResponse</code> scheduling</th> <th>Who is speaking</th> <th>Gemini 2.5 Flash Live API Native Audio</th> <th>Gemini 3.8 Live</th> </tr> </thead> <tbody> <tr> <td>interrupt</td> <td>model</td> <td> Stops the active model responding immediately; plays the tool's response. </td> <td> Stops the active model responding immediately; plays the tool's response. </td> </tr> <tr> <td>interrupt</td> <td>user</td> <td> Interrupts immediately; plays the tool's response over the user. </td> <td> Waits for the user to finish before playing the tool's response. </td> </tr> </tbody> </table>
+</li> </ul> <h2 id="redundant-sweeps-and-guiding-function-call-retries">Mitigating redundant sweeps and function-call retries</h2> <p>Gemini 3.8 Live sometimes makes redundant back-to-back function calls within a single turn when a tool returns no results. This can include repeating varied parameters, sweeping two to five times, before responding. The behavior increases time-to-first-audio (TTFA) and produces inaccurate fallback speech.</p> <p>The redundant back-to-back function calls are caused by Gemini 3.8 Live attempting to resolve queries. When a tool returns an uninformative or empty response, such as <code translate="no" dir="ltr">{"results": [], "total_available": 0}</code> or <code translate="no" dir="ltr">None</code>, the model can't distinguish between "permanently exhausted", "query window too narrow" or "invalid argument". The model tries widening or varying the query in an attempt to improve results, and begins sweeping.</p> <p>Apply the following complementary practices:</p> <ul> <li>
+<p><strong>Return informative function responses</strong>: Every tool response must contain information about the error or results, to guide the Gemini 3.8 Live model for how to proceed.</p> <p>The following table describes the cases, how the model should respond, and required payload example to assist the model:</p> <table> <thead> <tr> <th>Case</th> <th>What the Model Should Do</th> <th>Required Payload Content</th> </tr> </thead> <tbody> <tr> <td>Valid query that returns no results. Retrying won't help.</td> <td>Stop searching, inform the user, and offer alternatives.</td> <td> <code translate="no" dir="ltr">status: 'no_results'</code>,<br> <code translate="no" dir="ltr">retryable: false</code>,<br> and a clear explanatory natural-language message. </td> </tr> <tr> <td> Invalid or non-existent argument (for example, "wrong provider"). </td> <td>Stop searching, and ask user to clarify or confirm.</td> <td> <code translate="no" dir="ltr">status: 'invalid_argument'</code>,<br> <code translate="no" dir="ltr">reason_code</code>,<br> <code translate="no" dir="ltr">retryable: false</code>, and<br> <code translate="no" dir="ltr">valid_options</code> list </td> </tr> <tr> <td> Valid query that has an empty window. A wider query genuinely helps. </td> <td>Perform one reasonable retry.</td> <td> <code translate="no" dir="ltr">status: 'no_results_in_range'</code>,<br> <code translate="no" dir="ltr">retryable: true</code>, and <br> <code translate="no" dir="ltr">retry_hint</code>
+</td> </tr> </tbody> </table> <p>The following example demonstrates a payload example where <code translate="no" dir="ltr">search_appointment</code> is called but all of the potential dates are unavailable. The user expects to try on a vendor instead of sweeping the dates:</p> 
+<pre>def search_appointment(vendor: str, date: Datetime):
+
+# BEFORE (Invites Sweeping):
+{
+  "results": [],
+  "total_available": 0
+}
+
+# AFTER - Exhausted / Dead End (Stops Sweeping):
+{
+  "results": [],
+  "status": "no_availability",
+  "retryable": false,
+  "message": "No appointments are available for this provider for the foreseeable future. Searching other dates will not surface anything; openings only come from cancellations.",
+  "suggested_next_step": "offer_waitlist_or_a_different_provider"
+}
+
+# AFTER - Invalid Argument (Prompts User Clarification):
+{
+  "results": [],
+  "status": "invalid_argument",
+  "reason": "no_such_provider",
+  "retryable": false,
+  "message": "There is no provider named 'Mr. Johnson'. Ask the caller to confirm the name.",
+  "valid_options": ["Dr. Johnson", "Dr. Chen"]
+}
+</pre> <p>The following example demonstrates handling when <code translate="no" dir="ltr">check_user_account</code> returns no exact matches. The expected result is to modify the search query or transfer control back to the user instead of retrying:</p> 
+<pre>def check_user_account(user_name: str, phone_suffix: str):...
+
+# Checked user account but not existing
+# BEFORE: insufficient error information
+{
+ "found": false,
+ "matches": []
+}
+
+# AFTER: providing sufficient information to the LiveAPI to avoid further retries because the retries have been exhausted.
+{
+ "status": "EXHAUSTED",
+ "retryable": false,
+ "search_criteria": {
+   "name": "Alex Rivera",
+   "phone_suffix": "4921"
+ },
+ "search_scope": "Checked active orders, archived accounts, and guest checkouts across all regions.",
+ "guidance": "Exhaustive search completed with 0 matches. Do NOT retry with parameter substrings or variations. Inform the user that no account was found matching those details, and ask if they have an Order ID or billing email."
+}
+</pre>
+</li> <li>
+<p><strong>System instructions retry policy</strong>: Complement informative responses with an explicit constraint in the system instruction:</p> 
+<pre>"When a tool returns no results, tell the user the result before calling the
+tool again. If a call fails for a reason fundamental to the arguments (for
+example, the entity does not exist), do not silently retry with variations;
+ask the user to clarify or confirm. You may broaden a query once when a
+result set is simply empty. Do not run repeated searches with different
+parameters on your own initiative. Hard cap: Never issue more than two
+consecutive function calls without saying something back to the user."
+</pre>
+</li> </ul> <h2 id="session-history-exchange">Session history exchange</h2> <p>In Gemini 2.5 Flash Live API Native Audio, <code translate="no" dir="ltr">send_client_content</code> is used to set up history seeding prior to the first turn, and to add extra history during mid-session.</p> <p>In Gemini 3.8 Live, if you want to use the <code translate="no" dir="ltr">send_client_content</code> method to set up history seeding, in the <code translate="no" dir="ltr">HistoryConfig</code> section of the setup message, set <code translate="no" dir="ltr">initial_history_in_client_content=True</code>. After receiving <code translate="no" dir="ltr">setup_complete</code>. You can then call <code translate="no" dir="ltr">send_client_content</code> repeatedly to build history until the last message where <code translate="no" dir="ltr">turn_complete=True</code> is set.</p> <h2 id="in-session-updates">In-session system instruction and tools updates</h2> <p>In Gemini 2.5 Flash Live API Native Audio, you update the system instruction during a session by sending client content with the <code translate="no" dir="ltr">system</code> role.</p> <p>In Gemini 3.8 Live, call <code translate="no" dir="ltr">send_context_update</code> in the Google Gen AI SDK, or send a <code translate="no" dir="ltr">context_update</code> message over WebSockets, instead. It can replace the system instruction, the list of tools, or both. For details, see <a href="start-manage-session#update-context-3-8-live">Update system instructions and tools with Gemini 3.8 Live</a>.</p> <h2 id="model-behavior-differences">Model behavior differences</h2> <p>The following table describes model behavior differences for audio, multimodel, and output between Gemini 2.5 Flash Live API Native Audio and Gemini 3.8 Live:</p> <table> <thead> <tr> <th>Feature</th> <th>Gemini 2.5 Flash Live API Native Audio</th> <th>Gemini 3.8 Live</th> </tr> </thead> <tbody> <tr> <td>Affective dialog</td> <td>Supported through the <code translate="no" dir="ltr">enable_affective_dialog</code> flag.</td> <td>Always enabled by default.</td> </tr> <tr> <td>Proactive audio</td> <td>Supported through the <code translate="no" dir="ltr">proactivity</code> flag.</td> <td>Always enabled by default.</td> </tr> <tr> <td>Image or video frame tokens</td> <td>Lower default per-frame budget.</td> <td>
+<code translate="no" dir="ltr">media_resolution</code> is always supported when passing image frames. Lets you balance cost and accuracy.</td> </tr> <tr> <td>Transcription and content</td> <td>Stable baseline transcription.</td> <td> You can add <code translate="no" dir="ltr">custom_vocabulary</code> to provide biasing to your domain-specific words to improve accuracy. </td> </tr> </tbody> </table> <p>The following Python code demonstrates setting <code translate="no" dir="ltr">media_resolution</code> and <code translate="no" dir="ltr">custom_vocabulary</code>:</p> 
+<pre># Example: Setting media_resolution for image frames in Gemini 3.8 Live
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+config = types.LiveConnectConfig(
+    response_modalities=["AUDIO"],
+    media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,  # or MEDIA_RESOLUTION_LOW or MEDIA_RESOLUTION_MEDIUM
+)
+
+async with client.aio.live.connect(
+    model="gemini-3.8-live",
+    config=config,
+) as session:
+    # Send image frames with the configured resolution budget
+    ...
+
+
+# Example: Setting custom_vocabulary for domain-specific word biasing in Gemini 3.8 Live
+from google import genai
+from google.genai import types
+
+client = genai.Client()
+
+config = types.LiveConnectConfig(
+    response_modalities=["AUDIO"],
+    input_audio_transcription=types.AudioTranscriptionConfig(
+        custom_vocabulary=["Gemini", "MagicWord", "Lagrangian"],
+    ),
+)
+
+async with client.aio.live.connect(
+    model="gemini-3.8-live",
+    config=config,
+) as session:
+    ...
+
+</pre> <h2 id="third-party-framework-compatibility">Third-party framework compatibility</h2> <p>The following sections describe how third-party frameworks work with Gemini 3.8 Live:</p> <h3 id="livekit">LiveKit</h3> <p>LiveKit's Google plugin RealtimeModel supports Gemini 3.8 Live, but the following settings are not supported in LiveKit's Google plugin:</p> <ul> <li><code translate="no" dir="ltr">thinking_level</code></li> <li><code translate="no" dir="ltr">enable_affective_dialog</code></li> <li><code translate="no" dir="ltr">proactivity</code></li> </ul> <p>We recommend that you use extra caution when using LiveKit's Google plugin, because it requires careful adaptation to work with Gemini 3.8 Live.</p> <h3 id="pipecat">Pipecat</h3> <p>Pipecat supports Gemini 3.8 Live, with the following changes:</p> <ul> <li><p>Thinking Configuration: remove thinking level as it isn't supported by Gemini 3.8 Live.</p></li> <li><p>Pipecat connects Agent Platform endpoints using the <code translate="no" dir="ltr">GoogleVertexLLMService</code> over the <code translate="no" dir="ltr">GeminiLiveLLMService</code> connector.</p></li> </ul> <h2 id="wire-level-usage-telemetry">Wire-level token usage telemetry</h2> <p>Every server turn returns a <code translate="no" dir="ltr">usage_metadata</code> frame. This is consistent across Gemini 2.5 Flash Live API Native Audio and Gemini 3.8 Live. The usage metadata is more categorized, such as cached token, tool-use token, tokens in different modalities, and so forth.</p> <h2 id="known-model-limitations">Known model limitations and mitigations</h2> <p>For information about known limitations and mitigations when developing applications with Gemini 3.8 Live, see <a href="troubleshooting#known-limitations">Known limitations</a>.</p> <h2 id="migration-checklist">Migration checklist</h2> <p>The following is a client migration checklist that you can use when migrating from Gemini 2.5 Flash Live API Native Audio to Gemini 3.8 Live:</p> <ul> <li>
+<p>Function calling:</p> <ul> <li><p><strong>Informative tool responses</strong>: Refactor all tool handlers to return explicit status codes, retryable flags, and natural-language explanations. Never return bare <code translate="no" dir="ltr">None</code> or empty <code translate="no" dir="ltr">{}</code>.</p></li> <li><p><strong>System instruction policy</strong>: Add explicit constraints prohibiting silent tool retries, requiring user confirmation on argument failures, and capping consecutive tool calls.</p></li> <li><p><strong>Tool call ID matching</strong>: Ensure <code translate="no" dir="ltr">FunctionResponse</code> passes <code translate="no" dir="ltr">id=fc.id</code> on every tool reply.</p></li> <li><p><strong>Function scheduling behavior change</strong>: When the user is speaking, the <code translate="no" dir="ltr">scheduling=interrupt</code> downgrades to <code translate="no" dir="ltr">scheduling=when_idle</code> to provide a smoother user experience.</p></li> </ul>
+</li> <li><p><strong>Session: restrict <code translate="no" dir="ltr">send_client_content</code></strong>: Use <code translate="no" dir="ltr">send_client_content</code> to set the initial history by providing a sensible <code translate="no" dir="ltr">HistoryConfig</code>.</p></li> <li><p><strong>Session: update context with <code translate="no" dir="ltr">context_update</code></strong>: Replace in-session system instruction updates that use the <code translate="no" dir="ltr">system</code> role with <code translate="no" dir="ltr">send_context_update</code> calls in the Google Gen AI SDK, or <code translate="no" dir="ltr">context_update</code> messages over WebSockets.</p></li> <li><p><strong>Thinking: purge prompt-level thinking hacks</strong>: To prevent dropped audio, remove all prompt text that attempts to enforce step-by-step thinking schemas or token limits.</p></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/migrate-from-gemini-2-5-to-gemini-3-8-live" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/migrate-from-gemini-2-5-to-gemini-3-8-live</a>
+  </p>
+</div>

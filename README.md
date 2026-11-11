@@ -13,9 +13,9 @@ its own doc, so you can turn on only the ones you use.
 | BigQuery | …/bigquery/docs |
 | Pub/Sub | …/pubsub/docs |
 | Cloud SQL | …/sql/docs |
-| Firestore | …/firestore/docs |
+| Firestore | …/firestore/native/docs |
 | Identity and Access Management (IAM) | …/iam/docs |
-| Gemini Enterprise Agent Platform (formerly Vertex AI) | …/vertex-ai/docs |
+| Gemini Enterprise Agent Platform (formerly Vertex AI) | …/gemini-enterprise-agent-platform |
 | Google Cloud SDK (the `gcloud` CLI) | …/sdk/docs |
 
 The whole site has some 60,000 guide pages, far too many for one pack, so only these products

@@ -1,0 +1,482 @@
+<h1>Deploy a TLS passthrough Gateway</h1>  <p>This document shows you how to deploy a Kubernetes Gateway resource configured for TLS passthrough to enable Server Name Indication (SNI)-based routing in Google Kubernetes Engine (GKE). This approach preserves end-to-end encryption and mutual TLS (mTLS) between clients and backend Pods, supports non-HTTP TLS-based protocols, and conserves IP addresses.</p> <p>This document is for Cloud architects, Networking specialists, and Developers who design, deploy, and manage encrypted networking for containerized workloads. To learn more about common roles and example tasks, see <a href="https://docs.cloud.google.com/kubernetes-engine/enterprise/docs/concepts/roles-tasks">Common GKE user roles and tasks</a>.</p> <h2 id="overview">Overview</h2> <p>In addition to Layer 7 HTTP and HTTPS Application Load Balancers, the <a href="../concepts/gateway-api">GKE Gateway controller</a> supports Layer 4 proxy Network Load Balancers (TCP proxy load balancers) configured with TLS passthrough.</p> <p>With TLS passthrough, the load balancer does not terminate or decrypt the TLS session. Instead, when a client initiates a TLS handshake, the load balancer inspects the unencrypted <code translate="no" dir="ltr">ClientHello</code> message to read the Server Name Indication (SNI) hostname. Based on this SNI hostname, the load balancer routes the raw, encrypted TCP stream to the appropriate backend Kubernetes Service, where your application Pods terminate TLS directly.</p> <p>When you use TLS passthrough with the Gateway API, you can do the following:</p> <ul> <li>
+<strong>Maintain end-to-end encryption and support zero-trust compliance:</strong> keep traffic fully encrypted from the client to the backend Pod without giving the load balancer access to private keys or plaintext data.</li> <li>
+<strong>Use mutual TLS (mTLS) authentication:</strong> authenticate clients directly at the backend application layer.</li> <li>
+<strong>Conserve IPv4 addresses:</strong> multiplex multiple independent TLS services across distinct domains or subdomains by using a single Gateway IP address and port (such as <code translate="no" dir="ltr">443</code>).</li> <li>
+<strong>Support non-HTTP TLS-based protocols:</strong> route encrypted traffic for stateful workloads, databases, custom gRPC services, or proprietary protocols running over TLS.</li> </ul> <h3 id="supported-gatewayclasses">Supported GatewayClasses</h3> <p>The following GKE GatewayClasses support TLS passthrough listeners and TLSRoute resources:</p> <ul> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed</code></li> <li><code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code></li> <li>
+<code translate="no" dir="ltr">gke-l7-rilb</code> </li> <li><code translate="no" dir="ltr">gke-l7-rilb-mc</code></li> <li><code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code></li> </ul> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">gke-l7-global-external-managed</code> GatewayClass, <code translate="no" dir="ltr">gke-l7-global-external-managed-mc</code> GatewayClass, and classic GatewayClasses (<code translate="no" dir="ltr">gke-l7-gxlb</code> and <code translate="no" dir="ltr">gke-l7-gxlb-mc</code>) don't support TLS passthrough or TLSRoute resources.</span></aside> <p>For a full comparison of GatewayClass capabilities, see <a href="gatewayclass-capabilities">GatewayClass capabilities</a>.</p> <h2 id="before-you-begin">Before you begin</h2> <p> Before you start, make sure that you have performed the following tasks: </p> <ul> <li> Enable the Google Kubernetes Engine API. </li> <a class="button button-primary" href="https://console.cloud.google.com/apis/enableflow" target="_blank"> Enable Google Kubernetes Engine API </a> <li>To use the Google Cloud CLI for this task, <a href="https://docs.cloud.google.com/sdk/docs/install">install</a> and then <a href="https://docs.cloud.google.com/sdk/docs/initialize">initialize</a> the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running the <code translate="no" dir="ltr">gcloud components update</code> command. Earlier gcloud CLI versions might not support running the commands in this document. <aside class="note"><b>Note:</b> For existing gcloud CLI installations, make sure to set the <code translate="no" dir="ltr">compute/region</code> <a href="https://docs.cloud.google.com/sdk/docs/properties#setting_properties">property</a>. If you use primarily zonal clusters, set the <code translate="no" dir="ltr">compute/zone</code> instead. By setting a default location, you can avoid errors in the gcloud CLI like the following: <code translate="no" dir="ltr">One of [--zone, --region] must be supplied: Please specify location</code>. You might need to specify the location in certain commands if the location of your cluster differs from the default that you set.</aside> </li> </ul> <ul> <li>Verify that you have an existing Autopilot or Standard cluster running GKE version 1.35 or later with Gateway API enabled. To create a cluster, see <a href="creating-an-autopilot-cluster">Create an Autopilot cluster</a>. To enable Gateway API on an existing cluster, see <a href="deploying-gateways#enable-gateway">Enable Gateway API in your cluster</a>.</li> <li>Verify that you have the <a href="https://www.openssl.org/docs/">OpenSSL</a> command-line tool installed. You use this tool to generate self-signed TLS certificates for the sample applications.</li> </ul> <h3 id="requirements">GKE Gateway controller requirements</h3> <ul> <li>Gateway API is supported on <a href="../concepts/alias-ips">VPC-native</a> clusters only.</li> <li>If you are using the regional or cross-region GatewayClasses, you must enable a <a href="https://docs.cloud.google.com/load-balancing/docs/proxy-only-subnets">proxy-only subnet</a>.</li> <li>Your cluster must have the <code translate="no" dir="ltr">HttpLoadBalancing</code> add-on enabled.</li> <li>If you are using Istio, you must upgrade Istio to one of the following versions: <ul> <li>1.15.2 or later</li> <li>1.14.5 or later</li> <li>1.13.9 or later.</li> </ul>
+</li> <li>If you are using Shared VPC, then in the host project, you need to assign the <code translate="no" dir="ltr">Compute Network User</code> role to the GKE Service account for the service project. </li> </ul> <h3 id="restrictions-and-limitations">Restrictions and limitations</h3> <p>When deploying TLS passthrough Gateways and TLSRoute resources, observe the following limitations:</p> <ul> <li>When you configure the <code translate="no" dir="ltr">protocol: TLS</code> setting on a listener, you must explicitly set the <code translate="no" dir="ltr">tls.mode</code> field to the <code translate="no" dir="ltr">Passthrough</code> value. GKE doesn't support the default <code translate="no" dir="ltr">Terminate</code> mode for <code translate="no" dir="ltr">TLS</code> listeners.</li> <li>On a <code translate="no" dir="ltr">TLS</code> listener, don't set the <code translate="no" dir="ltr">certificateRefs</code> field. Gateway-level client certificate validation (the <code translate="no" dir="ltr">spec.tls.frontendValidation</code> field) doesn't apply to <code translate="no" dir="ltr">TLS</code> listeners. To use mTLS, validate client certificates in your backend.</li> <li>A <code translate="no" dir="ltr">TLS</code> listener can share a port only with other <code translate="no" dir="ltr">TLS</code> listeners. You can't configure <code translate="no" dir="ltr">HTTP</code> or <code translate="no" dir="ltr">HTTPS</code> listeners on the same port as a <code translate="no" dir="ltr">TLS</code> listener.</li> <li>In the <code translate="no" dir="ltr">TLSRoute.spec.hostnames</code> field, you must specify a list of 1 to 1,024 SNI hostnames (exact hostname or wildcard prefix, such as <code translate="no" dir="ltr">*.example.com</code>). Each entry can't exceed 253 characters and can't be an IP address.</li> <li>In the <code translate="no" dir="ltr">TLSRoute.spec.rules</code> field, you can configure at most one rule.</li> <li>Each rule supports exactly one <code translate="no" dir="ltr">backendRef</code> entry. Layer 4 proxy backends don't support weighted traffic splitting across multiple backends.</li> <li>Single-cluster GatewayClasses support only Service backends, and multi-cluster GatewayClasses support only ServiceImport backends.</li> <li>In the <code translate="no" dir="ltr">TLSRoute.spec.rules.backendRefs</code> field, set the <code translate="no" dir="ltr">port</code> field to a port declared by the target Service or ServiceImport resource, not to the container port.</li> <li>The backend Kubernetes Service (including Services exported as a ServiceImport) referenced by a TLSRoute resource must use the <code translate="no" dir="ltr">TCP</code> value for its port protocol.</li> <li>You can't attach a BackendTLSPolicy resource, Identity-Aware Proxy, or Google Cloud Armor security policy to a TLSRoute backend because the controller rejects configurations of this type.</li> <li>When you attach a GCPBackendPolicy resource to a Service or ServiceImport that is referenced by a TLSRoute resource, you must set the <code translate="no" dir="ltr">spec.protocol</code> field to the <code translate="no" dir="ltr">TCP</code> value (omitting the <code translate="no" dir="ltr">spec.protocol</code> field defaults to the <code translate="no" dir="ltr">HTTP</code> value, which applies only to HTTPRoute backends). A Service or ServiceImport can have one <code translate="no" dir="ltr">HTTP</code> policy and one <code translate="no" dir="ltr">TCP</code> policy attached at the same time; if multiple policies with the same <code translate="no" dir="ltr">spec.protocol</code> value target the same Service or ServiceImport, the oldest policy takes precedence and newer ones aren't attached.</li> <li>
+<p>A GCPBackendPolicy resource with the <code translate="no" dir="ltr">spec.protocol</code> field set to <code translate="no" dir="ltr">TCP</code> supports only the following fields in the <code translate="no" dir="ltr">spec.default</code> field (when targeting a ServiceImport resource, you can set the last three fields per cluster, zone, or region in the <code translate="no" dir="ltr">spec.default.scopes</code> field instead):</p> <ul> <li><code translate="no" dir="ltr">timeoutSec</code></li> <li><code translate="no" dir="ltr">connectionDraining</code></li> <li>
+<code translate="no" dir="ltr">logging.enabled</code> and <code translate="no" dir="ltr">logging.sampleRate</code>
+</li> <li>
+<code translate="no" dir="ltr">sessionAffinity.type</code> (valid values are <code translate="no" dir="ltr">CLIENT_IP</code> or <code translate="no" dir="ltr">NONE</code>)</li> <li><code translate="no" dir="ltr">capacityScalerPercent</code></li> <li><code translate="no" dir="ltr">balancingMode: CONNECTION</code></li> <li><code translate="no" dir="ltr">maxConnectionsPerEndpoint</code></li> </ul> <p>You can't create a <code translate="no" dir="ltr">TCP</code> policy that includes any other fields, or an <code translate="no" dir="ltr">HTTP</code> policy that includes <code translate="no" dir="ltr">TCP</code>-only fields (<code translate="no" dir="ltr">balancingMode: CONNECTION</code> and <code translate="no" dir="ltr">maxConnectionsPerEndpoint</code>); the Kubernetes API server rejects the policy on creation. For more information, see <a href="configure-gateway-resources">Configure Gateway resources using Policies</a>.</p>
+</li> <li><p>If both an HTTPRoute and a TLSRoute resource reference the same Service or ServiceImport, attaching a HealthCheckPolicy resource to that target replaces the separate default health checks and applies the same health check configuration to both routes' backends. To configure health checks independently (such as <code translate="no" dir="ltr">HTTP</code> health checks for HTTPRoute backends and <code translate="no" dir="ltr">SSL</code> or <code translate="no" dir="ltr">TCP</code> health checks for TLSRoute backends), create a separate Service for each route and attach a HealthCheckPolicy resource to each Service. Both Services can select the same Pods.</p></li> <li><p>Layer 7 features (such as URL rewrites, path-based routing, and HTTP header transformations) don't apply to Layer 4 TCP proxy load balancers.</p></li> </ul> <h2 id="configure-proxy-only-subnet">Configure a proxy-only subnet</h2> <p>A regional Gateway requires a proxy-only subnet (<code translate="no" dir="ltr">purpose=REGIONAL_MANAGED_PROXY</code>) in each region where you deploy it. One proxy-only subnet serves all regional Envoy-based load balancers in that region. If your region doesn't already have one, see <a href="deploying-gateways#configure_a_proxy-only_subnet">Configure a proxy-only subnet</a>.</p> <h2 id="reserve-ip-address">Reserve a static IP address</h2> <p>Before you deploy the Gateway, reserve a regional static IP address so that the Gateway address doesn't change and you can resolve your sample hostnames to it. For instructions on creating a static IP address, see <a href="deploying-gateways#create_a_regional_external_https_gateway">Create a regional external HTTP(S) Gateway</a>.</p> <h2 id="deploy-gateway">Deploy a Gateway with TLS passthrough listeners</h2> <p>The Gateway in this section configures two <code translate="no" dir="ltr">TLS</code> listeners that share port <code translate="no" dir="ltr">443</code>. Each listener matches a different SNI hostname and forwards connections in passthrough mode to attached TLSRoute resources.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">store-gateway.yaml</code>:</p> 
+<pre>kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-tls
+spec:
+  gatewayClassName: gke-l7-regional-external-managed
+  listeners:
+  # Accept TLS connections for store.example.com without decrypting them.
+  - name: store
+    protocol: TLS
+    port: 443
+    hostname: "store.example.com"
+    tls:
+      mode: Passthrough
+    allowedRoutes:
+      kinds:
+      - kind: TLSRoute
+  # A second listener on the same port, selected by a different SNI name.
+  - name: store-german
+    protocol: TLS
+    port: 443
+    hostname: "store-de.example.com"
+    tls:
+      mode: Passthrough
+    allowedRoutes:
+      kinds:
+      - kind: TLSRoute
+  addresses:
+  - type: NamedAddress
+    value: IP_ADDRESS_NAME
+</pre> <p>Replace <var translate="no">IP_ADDRESS_NAME</var> with the name of the static IP address that you reserved.</p> <p>Note that the <code translate="no" dir="ltr">tls</code> block has no <code translate="no" dir="ltr">certificateRefs</code> field. In <code translate="no" dir="ltr">Passthrough</code> mode, the TLS certificate resides in your backend Pods rather than on the load balancer.</p>
+</li> <li>
+<p>Apply the Gateway manifest:</p> 
+<pre>kubectl apply -f store-gateway.yaml
+</pre>
+</li> <li>
+<p>Verify that the Gateway is programmed:</p> 
+<pre>kubectl get gateway store-tls
+</pre> <p>Provisioning the load balancer takes a few minutes. The output is similar to the following:</p> 
+<pre>NAME        CLASS                              ADDRESS         PROGRAMMED   AGE
+store-tls   gke-l7-regional-external-managed   35.118.32.224   True         53s
+</pre>
+</li> </ol> <h3 id="internal-gateway">Use an internal Gateway</h3> <p>To keep traffic inside your VPC network, change the value of the <code translate="no" dir="ltr">gatewayClassName</code> field to <code translate="no" dir="ltr">gke-l7-rilb</code> and remove the <code translate="no" dir="ltr">addresses</code> field from the Gateway manifest. GKE then creates a regional internal proxy Network Load Balancer and assigns an internal IP address from your cluster subnet. The remaining steps on this page are unchanged. Send your test requests from a Compute Engine instance in the same VPC network, because the internal IP address isn't reachable from the internet.</p> <h2 id="deploy-sample-applications">Deploy sample TLS applications</h2> <p>In this section, you deploy two NGINX Deployments (<code translate="no" dir="ltr">store-v1</code> and <code translate="no" dir="ltr">store-german</code>) that terminate TLS on port <code translate="no" dir="ltr">8443</code>. Each Deployment serves a different TLS certificate and reports the SNI hostname that it received, which lets you verify that routing occurred based on SNI.</p> <ol> <li>
+<p>Generate a self-signed TLS certificate and private key for each hostname:</p> 
+<pre>openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365 \
+    -keyout store.key -out store.crt \
+    -subj '/CN=store.example.com' \
+    -addext 'subjectAltName=DNS:store.example.com'
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365 \
+    -keyout store-de.key -out store-de.crt \
+    -subj '/CN=store-de.example.com' \
+    -addext 'subjectAltName=DNS:store-de.example.com'
+</pre> <p>Use certificates from your certificate authority in production. Self-signed certificates keep this example self-contained.</p>
+</li> <li>
+<p>Store each certificate and key in a Kubernetes Secret by running the following commands:</p> 
+<pre>kubectl create secret tls store-cert \
+    --cert=store.crt --key=store.key
+kubectl create secret tls store-de-cert \
+    --cert=store-de.crt --key=store-de.key
+</pre>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">store-tls-app.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: store-nginx
+data:
+  default.conf: |
+    server {
+      listen 8443 ssl;
+      ssl_certificate     /etc/nginx/ssl/tls.crt;
+      ssl_certificate_key /etc/nginx/ssl/tls.key;
+      default_type text/plain;
+      # Report which Pod answered and which SNI name it received.
+      return 200 "backend: $hostname\nsni: $ssl_server_name\n";
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: store-v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: store-v1
+  template:
+    metadata:
+      labels:
+        app: store-v1
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/conf.d
+        - name: cert
+          mountPath: /etc/nginx/ssl
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: store-nginx
+      - name: cert
+        secret:
+          secretName: store-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-v1
+spec:
+  selector:
+    app: store-v1
+  ports:
+  - port: 443
+    targetPort: 8443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: store-german
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: store-german
+  template:
+    metadata:
+      labels:
+        app: store-german
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/conf.d
+        - name: cert
+          mountPath: /etc/nginx/ssl
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: store-nginx
+      - name: cert
+        secret:
+          secretName: store-de-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-german
+spec:
+  selector:
+    app: store-german
+  ports:
+  - port: 443
+    targetPort: 8443
+</pre> <p>The Services don't need an <code translate="no" dir="ltr">appProtocol</code> field. GKE forwards TLSRoute traffic to the backend as TCP, so the field has no effect.</p>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f store-tls-app.yaml
+</pre>
+</li> <li>
+<p>Verify that the Pods are running:</p> 
+<pre>kubectl get pods -l 'app in (store-v1,store-german)'
+</pre> <p>The output is similar to the following:</p> 
+<pre>NAME                            READY   STATUS    RESTARTS   AGE
+store-german-7d9f8c5b47-2xqkd   1/1     Running   0          41s
+store-german-7d9f8c5b47-h6tzn   1/1     Running   0          41s
+store-v1-6c4b9d8f65-kp8vr       1/1     Running   0          41s
+store-v1-6c4b9d8f65-wm2ls       1/1     Running   0          41s
+</pre>
+</li> </ol> <h2 id="deploy-tlsroutes">Deploy TLSRoute resources for SNI-based routing</h2> <p>A TLSRoute resource attaches to a Gateway listener and routes connections that match its hostnames to a single backend Service.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">store-tls-routes.yaml</code>:</p> 
+<pre>kind: TLSRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store
+spec:
+  parentRefs:
+  - kind: Gateway
+    name: store-tls
+    sectionName: store
+  hostnames:
+  - "store.example.com"
+  rules:
+  - backendRefs:
+    - name: store-v1
+      port: 443
+---
+kind: TLSRoute
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: store-german
+spec:
+  parentRefs:
+  - kind: Gateway
+    name: store-tls
+    sectionName: store-german
+  hostnames:
+  - "store-de.example.com"
+  rules:
+  - backendRefs:
+    - name: store-german
+      port: 443
+</pre> <p>The <code translate="no" dir="ltr">sectionName</code> field selects the target listener on the Gateway. The <code translate="no" dir="ltr">port</code> field specifies the Service port (<code translate="no" dir="ltr">443</code>), not the container port.</p>
+</li> <li>
+<p>Apply the TLSRoute manifest:</p> 
+<pre>kubectl apply -f store-tls-routes.yaml
+</pre>
+</li> <li>
+<p>Verify that the Gateway controller accepted the route:</p> 
+<pre>kubectl get tlsroute store -o yaml
+</pre> <p>The <code translate="no" dir="ltr">status</code> field is similar to the following:</p> 
+<pre>status:
+  parents:
+  - controllerName: networking.gke.io/gateway
+    parentRef:
+      name: store-tls
+      sectionName: store
+    conditions:
+    - type: ResolvedRefs
+      status: "True"
+      reason: ResolvedRefs
+    - type: Accepted
+      status: "True"
+      reason: Accepted
+    - type: Reconciled
+      status: "True"
+      reason: ReconciliationSucceeded
+</pre> <p>The <code translate="no" dir="ltr">Reconciled</code> condition is a GKE-specific status condition that reports whether the Gateway controller created the underlying Google Cloud resources.</p>
+</li> <li>
+<p>Verify that the Gateway listener accepted the route:</p> 
+<pre>kubectl get gateway store-tls -o yaml
+</pre> <p>Each entry in the <code translate="no" dir="ltr">status.listeners</code> field is similar to the following:</p> 
+<pre>- name: store
+  supportedKinds:
+  - group: gateway.networking.k8s.io
+    kind: TLSRoute
+  attachedRoutes: 1
+  conditions:
+  - type: ResolvedRefs
+    status: "True"
+    reason: ResolvedRefs
+  - type: Accepted
+    status: "True"
+    reason: Accepted
+  - type: Programmed
+    status: "True"
+    reason: Programmed
+</pre>
+</li> </ol> <h2 id="verify-traffic">Verify traffic routing</h2> <p>GKE health checks a TLS passthrough backend by completing a TLS handshake with it. Your Pods might take a few minutes to pass the initial health check.</p> <ol> <li>
+<p>Retrieve the Gateway IP address:</p> 
+<pre>kubectl get gateway store-tls -o jsonpath='{.status.addresses[0].value}'
+</pre>
+</li> <li>
+<p>Send a request to each hostname, replacing <var translate="no">GATEWAY_IP</var> with the IP address from the previous step:</p> 
+<pre>curl --resolve store.example.com:443:GATEWAY_IP \
+    --cacert store.crt https://store.example.com
+curl --resolve store-de.example.com:443:GATEWAY_IP \
+    --cacert store-de.crt https://store-de.example.com
+</pre> <p>Each response names the Pod that answered and echoes the SNI hostname that reached it:</p> 
+<pre>backend: store-v1-6c4b9d8f65-kp8vr
+sni: store.example.com
+backend: store-german-7d9f8c5b47-2xqkd
+sni: store-de.example.com
+</pre> <p>Because each request used a different certificate authority file and both succeeded, each backend served its own certificate. The load balancer forwarded the encrypted connection without terminating it.</p>
+</li> <li>
+<p>Confirm that routing happens during the TLS handshake, before the client sends any HTTP request:</p> 
+<pre>openssl s_client -connect GATEWAY_IP:443 \
+    -servername store-de.example.com &lt;/dev/null 2&gt;/dev/null \
+    | openssl x509 -noout -subject
+</pre> <p>The output shows the certificate of the <code translate="no" dir="ltr">store-german</code> backend:</p> 
+<pre>subject=CN=store-de.example.com
+</pre> <p>Changing only the value of the <code translate="no" dir="ltr">-servername</code> flag changes the certificate returned, confirming that the load balancer selected the backend based on SNI alone.</p>
+</li> <li>
+<p>Send a request with an SNI hostname that no listener matches:</p> 
+<pre>curl --resolve other.example.com:443:GATEWAY_IP \
+    https://other.example.com
+</pre> <p>The connection closes because no listener on port <code translate="no" dir="ltr">443</code> matches the SNI hostname <code translate="no" dir="ltr">other.example.com</code>.</p>
+</li> </ol> <h2 id="configure-backend-capacity">Configure backend connection capacity</h2> <p>For GKE Services referenced by TLSRoute resources, the GKE Gateway controller configures a TCP <a href="https://docs.cloud.google.com/load-balancing/docs/backend-service">backend service</a> by using the <code translate="no" dir="ltr">CONNECTION</code> balancing mode, and sets the default value of the <code translate="no" dir="ltr">maxConnectionsPerEndpoint</code> field to <code translate="no" dir="ltr">100,000,000</code> (<code translate="no" dir="ltr">1e8</code>).</p> <p>Because the Gateway controller can't automatically determine a container's concurrent connection limit, you can use a GCPBackendPolicy resource to override the default value of the <code translate="no" dir="ltr">maxConnectionsPerEndpoint</code> field (from <code translate="no" dir="ltr">1</code> to <code translate="no" dir="ltr">1,000,000,000</code>). To determine the optimal connection limit for your backend Pods, evaluate the following:</p> <ul> <li>
+<strong>Software limits:</strong> check your server or application configuration, such as the Apache <code translate="no" dir="ltr">MaxRequestWorkers</code> directive, the NGINX <code translate="no" dir="ltr">worker_processes * worker_connections</code> settings, the Tomcat <code translate="no" dir="ltr">maxConnections</code> attribute, or database connection pool limits.</li> <li>
+<strong>Load testing:</strong> gradually increase concurrent connections against an isolated Pod while monitoring CPU, memory, latency, and socket or file descriptor limits.</li> </ul> <h3 id="apply-gcpbackendpolicy">Apply a custom GCPBackendPolicy</h3> <p>To override the default value of the <code translate="no" dir="ltr">maxConnectionsPerEndpoint</code> field on a TLSRoute backend Service, attach a GCPBackendPolicy resource with the <code translate="no" dir="ltr">spec.protocol</code> field set to <code translate="no" dir="ltr">TCP</code> and the <code translate="no" dir="ltr">balancingMode</code> field set to <code translate="no" dir="ltr">CONNECTION</code>:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">backend-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: store-v1-backend-policy
+spec:
+  protocol: TCP
+  default:
+    balancingMode: CONNECTION
+    maxConnectionsPerEndpoint: 1000
+  targetRef:
+    group: ""
+    kind: Service
+    name: store-v1
+</pre>
+</li> <li>
+<p>Apply the policy:</p> 
+<pre>kubectl apply -f backend-policy.yaml
+</pre>
+</li> </ol> <p>For more information about configuring backend policies, see <a href="configure-gateway-resources">Configure Gateway resources using Policies</a>.</p> <h2 id="configure-health-checks">Configure health checks for TLS passthrough</h2> <p>By default, for backend Services associated with TLS passthrough TLSRoute resources, the GKE Gateway controller automatically provisions a health check of type <code translate="no" dir="ltr">SSL</code>.</p> <h3 id="handle-prober-sni">Handle the absence of SNI extensions from probers</h3> <p>When configuring health checks for TLS passthrough backends, you must account for how Google Cloud health check probers interact with TLS endpoints.</p> <aside class="caution"><strong>Caution:</strong><span> Google Cloud SSL health check probers don't send an SNI extension in their <code translate="no" dir="ltr">ClientHello</code> handshake when checking backend health. This behavior applies specifically to SSL health checks. In contrast, TCP health checks verify basic socket connectivity and avoid the TLS handshake entirely.</span></aside> <p>If your backend applications require a valid SNI hostname to complete a TLS handshake, default SSL health checks will fail. To resolve this, use one of the following approaches:</p> <ul> <li>
+<strong>Configure fallback certificates:</strong> configure your backend server or Pod to serve a default fallback TLS certificate when a TLS connection arrives without an SNI extension.</li> <li>
+<strong>Use TCP health checks with HealthCheckPolicy:</strong> attach a HealthCheckPolicy resource (with the <code translate="no" dir="ltr">config.type</code> field set to <code translate="no" dir="ltr">TCP</code>) to your Service to check raw TCP port connectivity and avoid the TLS handshake.</li> </ul> <h3 id="apply-healthcheckpolicy">Apply a custom HealthCheckPolicy</h3> <p>To configure custom health check parameters or switch to TCP health checking, use a HealthCheckPolicy resource:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">health-check-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: store-health-check
+spec:
+  default:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    config:
+      type: TCP
+      tcpHealthCheck:
+        port: 8443
+  targetRef:
+    group: ""
+    kind: Service
+    name: store-service
+</pre>
+</li> <li>
+<p>Apply the policy:</p> 
+<pre>kubectl apply -f health-check-policy.yaml
+</pre>
+</li> </ol> <p>For more information about configuring health checks, see <a href="configure-gateway-resources#configure_health_check">Configure Gateway resources using Policies</a>.</p> <h2 id="advanced-configurations">Advanced configurations</h2> <p>This section describes advanced routing patterns, multi-tenant configurations, and multi-cluster deployments supported with TLS passthrough Gateways and TLSRoute resources.</p> <h3 id="wildcard-hostname-matching">Wildcard hostname matching</h3> <p>TLSRoute resources support wildcard prefix matching for hostnames and follow deterministic precedence rules when multiple routes match the same incoming traffic.</p> <p>Save the following manifest to define a wildcard TLSRoute:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: wildcard-tls-route
+spec:
+  parentRefs:
+  - name: store-tls
+    sectionName: store
+  hostnames:
+  - "*.example.com"
+  rules:
+  - backendRefs:
+    - name: store-v1
+      port: 443
+</pre> <h4 id="precedence-rules">Precedence and conflict resolution rules</h4> <p>When multiple TLSRoute resources attach to the same Gateway listener and claim overlapping or identical hostnames, the GKE Gateway controller resolves conflicts by using the same hostname specificity and creation timestamp rules as other Gateway routes:</p> <ul> <li>Exact hostname matches (such as <code translate="no" dir="ltr">store.example.com</code>) take precedence over wildcard matches (such as <code translate="no" dir="ltr">*.example.com</code>), and longer wildcard matches take precedence over broader wildcard matches (such as <code translate="no" dir="ltr">*.com</code>).</li> <li>If two or more TLSRoute resources declare the exact same hostname, the route with the oldest creation timestamp (<code translate="no" dir="ltr">metadata.creationTimestamp</code>) takes precedence. If creation timestamps match, the lexicographically smaller <code translate="no" dir="ltr">&lt;namespace&gt;/&lt;name&gt;</code> identifier breaks the tie. The Gateway controller doesn't accept conflicting routes, which report an <code translate="no" dir="ltr">Accepted: False</code> condition with the <code translate="no" dir="ltr">Conflicted</code> reason.</li> </ul> <p>For more information about route precedence, see <a href="deploying-gateways#route-merging">Route merging, precedence, and validation</a>.</p> <h3 id="cross-namespace-routing">Cross-namespace routing with ReferenceGrant</h3> <p>In multi-tenant environments, a centralized platform team can manage the Gateway in an infrastructure namespace (such as <code translate="no" dir="ltr">gateway-infra</code>), while application teams manage TLSRoute and Service resources in developer namespaces (such as <code translate="no" dir="ltr">store-ns</code>).</p> <ol> <li>
+<p>In the Gateway listener, allow routes from all namespaces (or selected namespaces):</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared-tls-gateway
+  namespace: gateway-infra
+spec:
+  gatewayClassName: gke-l7-regional-external-managed
+  listeners:
+  - name: tls-passthrough
+    protocol: TLS
+    port: 443
+    tls:
+      mode: Passthrough
+    allowedRoutes:
+      namespaces:
+        from: All
+      kinds:
+      - kind: TLSRoute
+</pre>
+</li> <li>
+<p>In the application namespace (<code translate="no" dir="ltr">store-ns</code>), create a ReferenceGrant resource that permits the Gateway in the <code translate="no" dir="ltr">gateway-infra</code> namespace to reference the TLSRoute or Service resource:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gateway-infra
+  namespace: store-ns
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    namespace: gateway-infra
+  to:
+  - group: ""
+    kind: Service
+</pre>
+</li> <li>
+<p>In the application namespace (<code translate="no" dir="ltr">store-ns</code>), create the TLSRoute resource referencing the shared Gateway:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: store-tls-route
+  namespace: store-ns
+spec:
+  parentRefs:
+  - name: shared-tls-gateway
+    namespace: gateway-infra
+    sectionName: tls-passthrough
+  hostnames:
+  - "store.example.com"
+  rules:
+  - backendRefs:
+    - name: store-service
+      port: 443
+</pre>
+</li> </ol> <h3 id="multi-cluster-tls-passthrough">Multi-cluster TLS passthrough Gateway</h3> <p>You can deploy multi-cluster Gateways with TLS passthrough across multiple GKE clusters in a fleet:</p> <ol> <li>Use a supported multi-cluster GatewayClass (<code translate="no" dir="ltr">gke-l7-regional-external-managed-mc</code>, <code translate="no" dir="ltr">gke-l7-rilb-mc</code>, or <code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code>).</li> <li>Export your backend Service across the fleet by using a ServiceExport resource.</li> <li>
+<p>In your TLSRoute resource, reference the multi-cluster backend by using a ServiceImport resource:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: mc-store-tls-route
+spec:
+  parentRefs:
+  - name: mc-tls-gateway
+    sectionName: tls-passthrough
+  hostnames:
+  - "store.example.com"
+  rules:
+  - backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store-service
+      port: 443
+</pre>
+</li> </ol> <h4 id="multiple-ip-addresses-mc">Multiple IP addresses in multi-cluster Gateways</h4> <p>When deploying cross-regional multi-cluster Gateways (such as when using the <code translate="no" dir="ltr">gke-l7-cross-regional-internal-managed-mc</code> GatewayClass), you can define multiple IP addresses in the <code translate="no" dir="ltr">spec.addresses</code> field to expose an internal VIP across different regions.</p> <p>When you configure multiple IP addresses in a single Gateway, the GKE Gateway controller translates each IP address into a separate forwarding rule. At the same time, the controller references a shared target proxy and reuses the same underlying routing configuration. The controller does not multiply the underlying TLSRoute resources by the number of IP addresses, which helps prevent route duplication and quota exhaustion.</p> <p>The following example shows a multi-cluster Gateway configured with ephemeral IP addresses across two regions:</p> 
+<pre>kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1
+metadata:
+  name: internal-cross-region-tls-gateway
+spec:
+  gatewayClassName: gke-l7-cross-regional-internal-managed-mc
+  addresses:
+  - type: networking.gke.io/ephemeral-ipv4-address/us-west1
+    value: "us-west1"
+  - type: networking.gke.io/ephemeral-ipv4-address/us-east1
+    value: "us-east1"
+  listeners:
+  - name: tls-passthrough
+    protocol: TLS
+    port: 443
+    tls:
+      mode: Passthrough
+    allowedRoutes:
+      kinds:
+      - kind: TLSRoute
+</pre> <p>For more information about deploying internal multi-cluster Gateways, see <a href="deploy-internal-multi-cluster-gateway">Deploy an internal multi-cluster Gateway</a>.</p> <h2 id="http-connection-coalescing">HTTP connection coalescing</h2> <aside class="warning"><strong>Warning:</strong><span> When deploying HTTPS applications behind a TCP proxy load balancer that uses SNI-based routing, HTTP/2 connection coalescing can lead to misdirected requests if backend certificates share overlapping domain names.</span></aside> <p>According to <a href="https://datatracker.ietf.org/doc/html/rfc7540#section-9.1.1">RFC 7540 (Section 9.1.1)</a>, web browsers and HTTP/2 clients can reuse an established TLS connection for multiple requests if both of the following conditions are met:</p> <ul> <li>The target hostnames resolve to the same IP address.</li> <li>The server's presented TLS certificate is authoritative for both hostnames. For example, a certificate can cover multiple hostnames when you use wildcard certificates such as <code translate="no" dir="ltr">*.example.com</code> or multi-domain Subject Alternative Names (SANs).</li> </ul> <p>Because a Layer 4 TCP proxy load balancer does not inspect HTTP request headers after the initial TLS handshake, the load balancer forwards coalesced requests over the existing connection to the initially matched backend Pod.</p> <p>To prevent connection coalescing issues:</p> <ul> <li>
+<strong>Use distinct, non-overlapping TLS certificates:</strong> don't share wildcard certificates or common SAN identities across different backend services multiplexed behind the same Gateway IP address.</li> <li>
+<strong>Return HTTP 421 Misdirected Request:</strong> configure your backend HTTPS servers to check the HTTP <code translate="no" dir="ltr">:authority</code> (or <code translate="no" dir="ltr">Host</code>) header. If the requested host does not match the server's expected domain, return an <code translate="no" dir="ltr">HTTP 421 Misdirected Request</code> status code, prompting the client to open a new connection.</li> <li>
+<strong>Enable HTTP/2 ORIGIN Frame:</strong> adopt <a href="https://datatracker.ietf.org/doc/html/rfc8336">RFC 8336 ORIGIN Frame support</a> on your origin servers and explicitly declare which hostnames are valid for connection reuse.</li> </ul> <h2 id="clean-up">Clean up</h2> <p>To avoid incurring charges to your Google Cloud account for the resources used on this page, delete the resources:</p> <ol> <li>
+<p>Delete the TLSRoute resources:</p> 
+<pre>kubectl delete tlsroute store store-german
+</pre>
+</li> <li>
+<p>Delete the Gateway resource:</p> 
+<pre>kubectl delete gateway store-tls
+</pre>
+</li> <li>
+<p>Delete the sample Deployment, Service, and Secret resources:</p> 
+<pre>kubectl delete -f store-tls-app.yaml
+kubectl delete secret store-cert store-de-cert
+</pre>
+</li> </ol> <h2 id="whats-next">What's next</h2> <ul> <li>Learn about <a href="gatewayclass-capabilities">GatewayClass capabilities</a>.</li> <li>Learn about <a href="../concepts/gateway-security">Gateway security</a>.</li> <li>Learn how to <a href="configure-gateway-resources">Configure Gateway resources using Policies</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-tls-passthrough-gateway" class="_attribution-link">https://docs.cloud.google.com/kubernetes-engine/docs/how-to/deploy-tls-passthrough-gateway</a>
+  </p>
+</div>

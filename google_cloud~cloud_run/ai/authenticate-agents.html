@@ -1,0 +1,83 @@
+<h1>Authenticate your AI agents</h1> <aside class="beta"> <p> <strong> Preview — Configure Agent Platform features for Cloud Run </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>When you deploy an agent to Cloud Run, you can give it an identity that allows it to securely authenticate when communicating with APIs and other agents.</p> <h2 id="authenticate-apis-agents-tools">Authenticate to Google Cloud APIs, other agents, and tools</h2> <p>When your Cloud Run workload is configured with the <code translate="no" dir="ltr">agent-identity</code> identity type, it receives a system-managed identity in the following format:</p> <p><code translate="no" dir="ltr">principal://agents.global.org-ORGANIZATION_ID.system.id.goog/resources/run/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME</code></p> <p>For projects without an organization, the format uses the project number:</p> <p><code translate="no" dir="ltr">principal://agents.global.project-PROJECT_NUMBER.system.id.goog/resources/run/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME</code></p> <p>You can use this identity to securely authenticate your agent when communicating with Google Cloud APIs, other agents, or tools.</p> <h3 id="authenticate-gcp-apis">Authenticate to Google Cloud APIs</h3> <p>Agents can use their assigned agent identity to authenticate to Google Cloud APIs like Vertex AI, Cloud Storage, and other Google Cloud products by using access tokens fetched from the Cloud Run metadata server.</p> <ol> <li>
+<p>Grant the appropriate IAM role to your agent's principal, for example:</p> <ul> <li>
+<p><strong>Grant access to Vertex AI</strong>:</p> 
+<pre>gcloud projects add-iam-policy-binding PROJECT_ID \
+    --member="AGENT_PRINCIPAL" \
+    --role="roles/aiplatform.user"</pre>
+</li> <li>
+<p><strong>Grant access to other Google Cloud APIs</strong>:</p> <p>Grant the required role on your target resource to <code translate="no" dir="ltr"><var translate="no">AGENT_PRINCIPAL</var></code>, for example, <code translate="no" dir="ltr">roles/storage.objectViewer</code> on a Cloud Storage bucket. For details, see <a href="https://docs.cloud.google.com/docs/authentication/application-default-credentials">Authenticate with Application Default Credentials</a>.</p>
+</li> </ul> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_PRINCIPAL</var></code>: the identity of your agent, for example, <code translate="no" dir="ltr">principal://agents.global.org-ORGANIZATION_ID.system.id.goog/resources/run/projects/PROJECT_NUMBER/locations/REGION/services/AGENT_NAME</code>.</li> </ul>
+</li> <li>
+<p>In your agent application code, use standard Google Cloud client libraries. The client libraries automatically use <a href="https://docs.cloud.google.com/docs/authentication/application-default-credentials">Application Default Credentials (ADC)</a> to fetch short-lived access tokens from the metadata server.</p> <p>Alternatively, you can manually fetch an access token from the metadata server inside your container:</p> 
+<pre>curl -s -H "Metadata-Flavor: Google" \
+"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"</pre>
+</li> </ol> <h3 id="authenticate-agents">Authenticate to other agents on Cloud Run</h3> <p>When an agent needs to call another agent hosted on Cloud Run such as <a href="../deploy-a2a-agents">A2A agents</a>, authenticate using a JSON Web Token (JWT) identity token validated by Cloud Run's built-in <code translate="no" dir="ltr">roles/run.invoker</code> IAM check:</p> <ol> <li>
+<p>Grant the caller agent's identity the <code translate="no" dir="ltr">roles/run.invoker</code> role on the target Cloud Run service:</p> 
+<pre>gcloud run services add-iam-policy-binding TARGET_SERVICE_NAME \
+    --member="CALLER_AGENT_PRINCIPAL" \
+    --role="roles/run.invoker" \
+    --region=REGION</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TARGET_SERVICE_NAME</var></code>: the name of the destination Cloud Run agent service.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CALLER_AGENT_PRINCIPAL</var></code>: the identity of the calling agent.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region of the target service.</li> </ul>
+</li> </ol> <h4 id="token-validation-options">Token validation options</h4> <p>Cloud Run supports two identity token validation methods:</p> <ul> <li>
+<a href="#fetch-unbound-token">Unbound tokens</a>: standard audience-bound identity tokens generated by the metadata server. This is the default mechanism for service-to-service and agent-to-agent authentication.</li> <li>
+<p><a href="#fetch-bound-token">Bound tokens</a>: provides cryptographic binding between the token and the workload's certificate using mTLS. To use bound tokens, the calling client provides its leaf certificate chain in the request.</p> <p>You can use mTLS-bound tokens to invoke Cloud Run resources configured with <code translate="no" dir="ltr">ingress=internal</code>. This lets you restrict public internet access to your agents or MCP servers without requiring a VPC network.</p>
+</li> </ul> <h5 id="fetch-unbound-token">Fetch an unbound ID token</h5> <ol> <li>From within the calling agent container, fetch an identity token with the target service's URL as the audience: 
+<pre>TOKEN=$(curl -s -H "Metadata-Flavor: Google" \
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=TARGET_SERVICE_URL")</pre> Replace <code translate="no" dir="ltr"><var translate="no">TARGET_SERVICE_URL</var></code> with the URL of the destination Cloud Run service, for example, <code translate="no" dir="ltr">https://target-agent-1234567890.us-central1.run.app</code>. </li> <li>Send requests to the target service with the token in the <code translate="no" dir="ltr">Authorization</code> header: 
+<pre>curl -H "Authorization: Bearer $TOKEN" \
+  TARGET_SERVICE_URL/endpoint</pre> </li> </ol> <h5 id="fetch-bound-token">Fetch a bound ID token (mTLS)</h5> <ol> <li>From within the calling agent container, read your leaf certificate chain and request a bound token from the metadata server using a POST request: 
+<pre>CERT_PATH="/var/run/secrets/workload-spiffe-credentials/certificates.pem"
+JSON_PAYLOAD=$(jq -n --arg certs "$(cat $CERT_PATH)" '{"certificate_chain": $certs}')
+
+TOKEN=$(curl -s -X POST \
+    -H "Metadata-Flavor: Google" \
+    -H "Content-Type: application/json" \
+    -d "$JSON_PAYLOAD" \
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=TARGET_SERVICE_MTLS_URL")</pre> </li> <li>Call the target service's mTLS endpoint, presenting the workload certificates during the TLS handshake: 
+<pre>KEY_PATH="/var/run/secrets/workload-spiffe-credentials/private_key.pem"
+
+curl --cert $CERT_PATH \
+    --key $KEY_PATH \
+    -H "Authorization: Bearer $TOKEN" \
+  TARGET_SERVICE_MTLS_URL/endpoint</pre> </li> </ol> <h6 id="python-example">Python example</h6> <p>If you write Python-based agent code, standard Google Cloud client libraries automatically request bound tokens by default when certificates are present. If you need to make manual HTTP requests:</p> 
+<pre>import os
+import requests
+import google.auth
+from google.auth.transport.requests import Request
+from google.oauth2 import id_token
+
+# Target agent's mTLS URL
+target_mtls_url = "TARGET_SERVICE_MTLS_URL"
+
+# 1. Fetch the ID token.
+# google-auth automatically requests a bound ID token via POST because
+# the platform configures the workload certificate environment variables.
+auth_req = Request()
+token = id_token.fetch_id_token(auth_req, target_mtls_url)
+
+# 2. Make the HTTP call over mTLS, presenting the workload certificates.
+cert_path = "/var/run/secrets/workload-spiffe-credentials/certificates.pem"
+key_path = "/var/run/secrets/workload-spiffe-credentials/private_key.pem"
+
+response = requests.get(
+    target_mtls_url,
+    headers={"Authorization": f"Bearer {token}"},
+    cert=(cert_path, key_path)
+)
+print(response.text)</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">TARGET_SERVICE_MTLS_URL</var></code> with the mTLS URL of the destination Cloud Run service, for example, <code translate="no" dir="ltr">https://target-agent-12345.us-central1.mtls.run.app</code>.</p> <h3 id="authenticate-mcp-servers">Authenticate to MCP servers on Cloud Run</h3> <p>To connect to an MCP server or tool hosted on Cloud Run, use the <code translate="no" dir="ltr">--functional-type=mcp-server</code> identifier to enable auto-registration of the MCP server in the Agent Registry.</p> <p>If your MCP server is only accessed by other agents running on Cloud Run, use the built-in IAM invoker check. Let your agents communicate natively using standard run invoker policies:</p> 
+<pre>gcloud run services add-iam-policy-binding MCP_SERVICE_NAME \
+    --member="CALLING_AGENT_PRINCIPAL" \
+    --role="roles/run.invoker" \
+    --region=REGION</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MCP_SERVICE_NAME</var></code>: the name of the destination Cloud Run service hosting the MCP server.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CALLING_AGENT_PRINCIPAL</var></code>: the principal identity of the agent invoking the MCP server. For example, <code translate="no" dir="ltr">serviceAccount:my-agent@my-project.iam.iam.gserviceaccount.com</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the Google Cloud region where the MCP server is deployed.</li> </ul> <p>After granting the <code translate="no" dir="ltr">run.invoker</code> role, the calling agent can fetch an identity token as described in the <a href="#token-validation-options">Token validation options</a> section.</p> <p>To learn how to protect MCP servers with IAP for CLI and programmatic SDK access, see <a href="authenticate-mcp-servers">Authenticate MCP servers</a>.</p> <h3 id="authenticate-on-behalf-of-users">Authenticate on behalf of users</h3> <p>When your agent accesses external tools and services on behalf of a user, it can use its provisioned agent identity to manage authentication with MCP servers and external endpoints.</p> <p>To securely handle complex authorization workflows, such as 3-legged OAuth (3LO) consent, 2-legged OAuth (2LO), and API keys, configure the <a href="https://docs.cloud.google.com/iam/docs/auth-manager-overview">Agent Identity Auth Manager</a>.</p> <p>For instructions on binding these auth managers to your toolsets, see <a href="https://docs.cloud.google.com/agent-registry/authenticate-toolsets">Authenticate to tools and resources</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/ai/authenticate-agents" class="_attribution-link">https://docs.cloud.google.com/run/docs/ai/authenticate-agents</a>
+  </p>
+</div>

@@ -1,0 +1,281 @@
+<h1>Set up agent ingress governance on GKE</h1> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This product or feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA products and features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>This document shows you how to configure Agent Gateway for Google Kubernetes Engine (GKE) to govern and secure inbound (ingress) traffic to the self-managed AI agents and Model Context Protocol (MCP) servers running on your GKE cluster.</p> <p>To secure your incoming connections, you provision a regional Application Load Balancer by using the GKE Gateway API. After you configure a standard Gateway and convert it into an Agent Gateway, you can enforce identity-based access controls, restrict specific MCP tool calls, and sanitize incoming prompts by using Google Cloud Model Armor.</p> <p>To secure your inbound connections, complete the following steps:</p> <ol> <li>
+<a href="#create-gke-gateway">Create a GKE Gateway</a>.</li> <li>
+<a href="#turn-gateway-agent">Turn the Gateway into an Agent Gateway</a>.</li> <li>
+<a href="#configure-content-security">Configure content security with Model Armor</a>.</li> <li>
+<a href="#delegate-auth-idp">Delegate authorization to a custom IDP</a>.</li> <li>
+<a href="#verify-ingress">Verify ingress governance</a>.</li> <li>
+<a href="#verify-status">Verify resource status</a>.</li> </ol> <p>To learn more about this architecture, see <a href="gke-overview">Agent Gateway on GKE overview</a>.</p> <h2 id="before-you-begin">Before you begin</h2> <p>Before you configure ingress governance, complete the following prerequisites:</p> <ol> <li><p>Complete the common prerequisites in <a href="gke-overview#prereqs">Agent Gateway on GKE overview</a>.</p></li> <li>
+<p>Create a proxy-only subnet. Regional load balancers require one active proxy-only subnet per region and VPC network. If your network already has an active proxy-only subnet in your region, you can skip this step.</p> 
+<pre>gcloud compute networks subnets create PROXY_SUBNET_NAME \
+    --purpose=REGIONAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=REGION \
+    --network=NETWORK \
+    --range=10.10.0.0/24
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROXY_SUBNET_NAME</var></code>: a name for the subnet—for example, <code translate="no" dir="ltr">gateway-subnet</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK</var></code>: the name of your VPC network.</li> </ul>
+</li> <li><p>Create the certificates for your Gateway by using Kubernetes Secrets, Compute SSL Certificates, or Certificate Manager.</p></li> <li>
+<p>Create a namespace for your agent workloads:</p> 
+<pre>kubectl create namespace NAMESPACE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> with a name for your namespace—for example, <code translate="no" dir="ltr">agent-ns</code>.</p>
+</li> <li>
+<p>Workload configuration: Register your workloads with Agent Registry and deploy them with a SPIFFE identity.</p> <ol> <li>
+<p>Save the following as <code translate="no" dir="ltr">agent.yaml</code> and apply it to your cluster:</p> 
+<pre>apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: KSA_NAME
+  namespace: NAMESPACE
+---
+# nginx config: listen on 8080, answer every method with 200 JSON
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-conf
+  namespace: NAMESPACE
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      location / {
+        default_type application/json;
+        return 200 '{"backend":"nginx","method":"$request_method","uri":"$request_uri"}\n';
+      }
+    }
+---
+# The agent: curl for egress tests + nginx for ingress tests
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: AGENT_NAME
+  namespace: NAMESPACE
+  labels:
+    # Identifies the workload as an AI agent
+    registry.gke.io/functional-type: "AGENT"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: AGENT_NAME
+  template:
+    metadata:
+      labels:
+        app: AGENT_NAME
+      annotations:
+        # Indicates that the agent uses Agent Identity
+        iam.gke.io/spiffe-identity-type: "agent-identity"
+        # To assign an agent identity and per-Pod credentials to a workload
+        iam.gke.io/identity: "spiffe://TRUST_DOMAIN/*"
+    spec:
+      serviceAccountName: KSA_NAME
+      containers:
+      - name: curl                      # egress: kubectl exec -c curl
+        image: curlimages/curl:8.10.1
+        command: ["sleep", "infinity"]
+      - name: nginx                     # ingress backend on :8080
+        image: nginx:1.27
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: conf
+        configMap:
+          name: nginx-conf
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: the name of the Kubernetes service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_NAME</var></code>: the name of the agent deployment.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN</var></code>: the trust domain for your resource hierarchy. For projects in an organization, use <code translate="no" dir="ltr">agents.global.org-<var translate="no">ORGANIZATION_ID</var>.system.id.goog</code>. For projects without an organization, use <code translate="no" dir="ltr">agents.global.proj-<var translate="no">PROJECT_NUMBER</var>.system.id.goog</code>.</li> </ul> <p><strong>Notes:</strong></p> <ul> <li>This manifest deploys <code translate="no" dir="ltr">curl</code> and <code translate="no" dir="ltr">nginx</code> containers for testing. For production deployments, replace this deployment with your actual AI agent.</li> <li>If you are deploying an Agent-to-Agent (A2A) workload, you must set the URL of your Agent Gateway (the GKE Gateway) in the <code translate="no" dir="ltr">supportedInterfaces</code> section of your Agent Card. This ensures that clients discovering your agents by using Agent Registry connect through the governed ingress path.</li> <li>If your agent application code needs to call Google Cloud APIs directly by using bound tokens from the metadata server, or perform direct Agent-to-Agent (A2A) mTLS authentication, you must also add the <code translate="no" dir="ltr">iam.gke.io/inject-podcertificates: "true"</code> annotation to your Pod template.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f agent.yaml
+</pre>
+</li> </ol>
+</li> </ol> <h2 id="create-gke-gateway">Create a GKE Gateway</h2> <p>To establish a network entry point for your inbound traffic, deploy a <code translate="no" dir="ltr">Gateway</code> resource. During this preview, you can use only regional load balancers. You also need a <code translate="no" dir="ltr">Service</code> and an <code translate="no" dir="ltr">HTTPRoute</code> to direct incoming traffic from the Gateway to your agent workloads.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">gke-gw-https.yaml</code>:</p> 
+<pre>apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-agent-ingress-gateway
+  namespace: NAMESPACE
+spec:
+  # gke-l7-regional-external-managed (for regional external HTTP(S) LB)
+  # gke-l7-rilb (for regional internal HTTP(S) LB)
+  gatewayClassName: gke-l7-regional-external-managed
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      options:
+        networking.gke.io/cert-manager-certs: CERTIFICATE_NAME
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: AGENT_NAME
+  namespace: NAMESPACE
+spec:
+  selector:
+    app: AGENT_NAME
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-agent-route
+  namespace: NAMESPACE
+spec:
+  parentRefs:
+  - name: my-agent-ingress-gateway
+  hostnames:
+  - HOSTNAME
+  rules:
+  - backendRefs:
+    - name: AGENT_NAME
+      port: 8080
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: your agent namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_NAME</var></code>: the name of the Certificate Manager certificate you created.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_NAME</var></code>: the name of your agent deployment.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">HOSTNAME</var></code>: the external hostname for your Gateway.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f gke-gw-https.yaml
+</pre>
+</li> </ol> <h2 id="turn-gateway-agent">Turn the Gateway into an Agent Gateway</h2> <p>To apply agent governance policies to your incoming traffic, create a <code translate="no" dir="ltr">GCPAgentGateway</code> custom resource that targets your standard Gateway.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">agent-gateway.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAgentGateway
+metadata:
+  name: my-ingress-agentgateway
+  namespace: NAMESPACE
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: my-agent-ingress-gateway
+</pre>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f agent-gateway.yaml
+</pre>
+</li> </ol> <p>To enforce identity-based access controls for your incoming traffic, define a GCPAuthzPolicy custom resource. By using this resource, you can allow or deny traffic based on exact conditions, such as the identity of the calling client or the specific MCP operations being requested. For more examples and configuration details, see <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/secure-gateway#auth-policy">Secure your Gateway</a>.</p> <h3 id="authorize-mcp-calls">Authorize specific MCP tool calls</h3> <p>To restrict inbound access to your MCP servers running on GKE, apply authorization rules based on MCP-specific conditions. For example, you can allow clients to use only the <code translate="no" dir="ltr">tools/list</code> method and specific read-only <code translate="no" dir="ltr">tools/call</code> parameters. To enforce this and block requests for all other MCP tools by default, apply a policy similar to the following:</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">authz-policy-mcp.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPAuthzPolicy
+metadata:
+  name: my-mcp-authz
+  namespace: NAMESPACE
+spec:
+  enforcementLevel: L7
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: my-agent-ingress-gateway
+  rules:
+  - to:
+      operations:
+      - mcp:
+          methods:
+          - name: "tools/list"
+          - name: "tools/call"
+            params:
+            - type: Exact
+              value: "get_weather"
+            - type: Exact
+              value: "get_location"
+  action: ALLOW
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> with your agent namespace.</p>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f authz-policy-mcp.yaml
+</pre>
+</li> </ol> <h2 id="configure-content-security">Configure content security with Model Armor</h2> <p>To protect against prompt injection and sensitive data leakage on inbound traffic, you can bind Google Cloud Model Armor to your ingress Gateway using a GCPExtensionBinding custom resource.</p> <ol> <li><p>Create your request and response sanitization templates. You can reuse the template you created during the <a href="set-up-gke-egress#delegate-content-security-model-armor">egress setup</a>, or create a new one by following the instructions in <a href="https://docs.cloud.google.com/security-command-center/docs/model-armor-overview">Configure Model Armor</a>.</p></li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">bind-agent-gateway-to-model-armor.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPExtensionBinding
+metadata:
+  name: bind-agent-gateway-to-model-armor
+  namespace: NAMESPACE
+spec:
+  targetRefs:
+    - group: networking.gke.io
+      kind: GCPAgentGateway
+      name: my-ingress-agentgateway
+  producerExtension: "modelarmor.REGION.rep.googleapis.com"
+  failOpen: true
+  producerMetadata:
+    model_armor_settings: '[{"request_template_id":"projects/PROJECT_ID/locations/REGION/templates/REQUEST_TEMPLATE","response_template_id":"projects/PROJECT_ID/locations/REGION/templates/RESPONSE_TEMPLATE"}]'
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: your agent namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for your Model Armor templates.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REQUEST_TEMPLATE</var></code>: the name of your request sanitization template.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">RESPONSE_TEMPLATE</var></code>: the name of your response sanitization template.</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f bind-agent-gateway-to-model-armor.yaml
+</pre>
+</li> </ol> <aside class="note"><strong>Note:</strong><span> Ensure you have granted the necessary IAM roles, such as <code translate="no" dir="ltr">roles/modelarmor.calloutUser</code>, to your Gateway's service account. For instructions, see <a href="set-up-gke-egress#delegate-content-security-model-armor">Delegate content security to Model Armor</a>.</span></aside> <h2 id="delegate-auth-idp">Delegate authorization to a custom IDP</h2> <p>To enforce centralized Identity and Access Management (IAM) controls through a Custom Identity Provider (IDP), bind your IDP to the Agent Gateway by using a GCPExtensionBinding custom resource.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">bind-agent-gateway-to-custom-idp.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPExtensionBinding
+metadata:
+  name: custom-idp-extension
+  namespace: NAMESPACE
+spec:
+  targetRefs:
+    - group: networking.gke.io
+      kind: GCPAgentGateway
+      name: my-ingress-agentgateway
+  producerExtension: "example.provider.net"
+</pre>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f bind-agent-gateway-to-custom-idp.yaml
+</pre>
+</li> </ol> <h2 id="verify-ingress">Verify ingress governance</h2> <p>To verify that your ingress Gateway is correctly routing traffic and enforcing both your authorization and Model Armor policies, run the following test commands from your local machine.</p> <p>These commands test the Nginx backend deployed earlier, using specific Model Context Protocol (MCP) payloads:</p> <ol> <li>
+<p>Run the test script:</p> 
+<pre>GW_IP=$(kubectl -n NAMESPACE get gateway my-agent-ingress-gateway -o jsonpath='{.status.addresses[0].value}')
+URL="https://HOSTNAME/"
+echo "Gateway IP: $GW_IP"
+
+PAYLOAD_A='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"Paris"}}}'
+PAYLOAD_B='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"my card is 4111111111111111"}}}'
+PAYLOAD_C='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"delete_everything","arguments":{}}}'
+PAYLOAD_D='{"jsonrpc":"2.0","id":4,"method":"tools/list"}'
+
+# A. allowed tool (get_weather), harmless -&gt; Expect HTTP=200 (from nginx)
+curl -s -w " HTTP=%{http_code}\n" --cacert CA_CERT_FILE --resolve "HOSTNAME:443:$GW_IP" -H "Content-Type: application/json" -d "$PAYLOAD_A" "$URL"
+
+# B. allowed tool (get_weather), credit card number -&gt; Expect HTTP=403 (blocked by Model Armor)
+curl -s -w " HTTP=%{http_code}\n" --cacert CA_CERT_FILE --resolve "HOSTNAME:443:$GW_IP" -H "Content-Type: application/json" -d "$PAYLOAD_B" "$URL"
+
+# C. tool not allowed (delete_everything) -&gt; Expect HTTP=403 (blocked by GCPAuthzPolicy)
+curl -s -w " HTTP=%{http_code}\n" --cacert CA_CERT_FILE --resolve "HOSTNAME:443:$GW_IP" -H "Content-Type: application/json" -d "$PAYLOAD_C" "$URL"
+
+# D. tools/list -&gt; Expect HTTP=200 (allowed by GCPAuthzPolicy)
+curl -s -w " HTTP=%{http_code}\n" --cacert CA_CERT_FILE --resolve "HOSTNAME:443:$GW_IP" -H "Content-Type: application/json" -d "$PAYLOAD_D" "$URL"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: your agent namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">HOSTNAME</var></code>: the external hostname for your Gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_CERT_FILE</var></code>: the path to the root certificate that signed your Gateway's certificate (if using a private CA or self-signed cert). If using a public CA, you can omit the <code translate="no" dir="ltr">--cacert</code> flag.</li> </ul>
+</li> </ol> <h2 id="verify-status">Verify resource status</h2> <p>To verify that your Gateway and its attached governance policies are successfully programmed and ready, check the status of your custom resources:</p> 
+<pre>kubectl describe gateway my-agent-ingress-gateway -n NAMESPACE
+kubectl describe gcpagentgateway my-ingress-agentgateway -n NAMESPACE
+kubectl describe gcpextensionbinding bind-agent-gateway-to-model-armor -n NAMESPACE
+</pre> <p>In the output for each command, review the Status section. Ensure that the conditions indicate the resources are accepted and successfully programmed before you send traffic to the Gateway.</p> <h2 id="troubleshoot">Troubleshoot</h2> <p>To find methods for diagnosing and resolving Agent Gateway issues, see <a href="../../troubleshooting/troubleshoot-agent-gateway">Troubleshoot Agent Gateway connectivity</a>.</p> <h2 id="whats-next">What's next</h2> <ul> <li>To monitor your agents' traffic and behavior, see <a href="monitor-agent-gateway">Monitor Agent Gateway traffic</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-gke-ingress" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-gke-ingress</a>
+  </p>
+</div>

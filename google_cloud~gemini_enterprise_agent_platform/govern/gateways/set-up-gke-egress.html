@@ -1,0 +1,505 @@
+<h1>Set up agent egress governance on GKE</h1> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This product or feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA products and features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <p>This document shows you how to configure Agent Gateway for Google Kubernetes Engine (GKE) to govern and secure outbound (egress) traffic from the self-managed AI agents running on your GKE cluster.</p> <p>To establish a complete egress data path, you combine several Google Cloud and GKE networking services. This setup routes your agent traffic through a secure forward proxy that enforces your policies and sanitizes content.</p> <p>To secure your outbound agent traffic, complete the following steps:</p> <ol> <li>
+<a href="#enable-gke-ambient">Enable the GKE ambient proxy</a>.</li> <li>
+<a href="#create-swp-name">Create a Secure Web Proxy</a>.</li> <li>
+<a href="#configure-mtls">Configure mTLS authentication</a>.</li> <li>
+<a href="#create-egress-gateway">Create an egress Agent Gateway</a>.</li> <li>
+<a href="#configure-egress-redirection">Configure egress redirection in GKE</a>.</li> <li>
+<a href="#configure-auth-csp">Configure authorization and content security policies</a>.</li> </ol> <p>To learn more about this architecture, see <a href="gke-overview">Agent Gateway on GKE overview</a>.</p> <h2 id="before-you-begin">Before you begin</h2> <p>Before you configure egress governance, complete the following prerequisites:</p> <ol> <li>Complete the common prerequisites in <a href="gke-overview#prereqs">Agent Gateway on GKE overview</a>.</li> <li>
+<p>Workload configuration: register your workloads with Agent Registry and deploy them with a SPIFFE identity. Save the following as <code translate="no" dir="ltr">agent.yaml</code> and apply it to your cluster:</p> 
+<pre>apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: KSA_NAME
+  namespace: NAMESPACE
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: AGENT_NAME
+  namespace: NAMESPACE
+  labels:
+    # Identifies the workload as an AI agent
+    registry.gke.io/functional-type: "AGENT"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: AGENT_NAME
+  template:
+    metadata:
+      labels:
+        app: AGENT_NAME
+      annotations:
+        # Indicates that the agent uses Agent Identity
+        iam.gke.io/spiffe-identity-type: "agent-identity"
+        # To assign an agent identity and per-Pod credentials to a workload
+        iam.gke.io/identity: "spiffe://TRUST_DOMAIN/*"
+    spec:
+      serviceAccountName: KSA_NAME
+      containers:
+      - name: curl
+        image: curlimages/curl:8.10.1
+        command: ["sleep", "infinity"]
+</pre>
+<aside class="note"><strong>Note:</strong><span> This manifest uses a curl container to help you verify your configuration. Before deploying to production, replace the curl image with your AI agent's container image.</span></aside> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">KSA_NAME</var></code>: the name of the Kubernetes service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for the service account.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_NAME</var></code>: the name of the agent deployment.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_IMAGE</var></code>: the container image for the agent.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CONTAINER_NAME</var></code>: the name of the agent container.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ORG_ID</var></code>: the ID of your Google Cloud organization.</li> </ul> <aside class="note"><strong>Note:</strong><span> If your agent application code needs to call Google Cloud APIs directly by using bound tokens from the metadata server, or perform direct Agent-to-Agent (A2A) mTLS authentication, you must also add the <code translate="no" dir="ltr">iam.gke.io/inject-podcertificates: "true"</code> annotation to your Pod template.</span></aside>
+</li> </ol> <h2 id="enable-gke-ambient">Enable the GKE ambient proxy</h2> <p>To redirect traffic from your agents, Agent Gateway uses the sidecar-less GKE ambient proxy.</p> <ol> <li><p>Prepare your cluster by following the instructions in <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/prepare-ambient-networking">Prepare a cluster for Ambient networking</a>.</p></li> <li>
+<p>Create a namespace for your agent workloads:</p> 
+<pre>kubectl create namespace NAMESPACE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> with a name for your namespace—for example, <code translate="no" dir="ltr">agent-ns</code>.</p>
+</li> <li>
+<p>Add the Ambient label to the namespace that contains your agent workloads:</p> 
+<pre>kubectl label namespace NAMESPACE networking.gke.io/dataplane-mode=ambient
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code> with the name of your agent namespace—for example, <code translate="no" dir="ltr">agent-ns</code>.</p>
+</li> </ol> <h2 id="create-swp-name">Create a Secure Web Proxy</h2> <p>To enforce your security policies and perform the TLS inspection required for Agent Gateway guardrails, you must provision a Secure Web Proxy (SWP) alongside the necessary certificates, Certificate Authority (CA) pools, and gateway security policies.</p> <ol> <li>
+<p>Create a proxy-only subnet. Secure Web Proxy requires one active proxy-only subnet per region and VPC network. If your network already has an active proxy-only subnet in your region, you can skip this step.</p> 
+<pre>gcloud compute networks subnets create PROXY_SUBNET_NAME \
+    --purpose=REGIONAL_MANAGED_PROXY \
+    --role=ACTIVE \
+    --region=REGION \
+    --network=NETWORK \
+    --range=10.10.0.0/24
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROXY_SUBNET_NAME</var></code>: a name for the subnet—for example, <code translate="no" dir="ltr">gateway-subnet</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the subnet.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK</var></code>: the name of your VPC network.</li> </ul> <aside class="note"><strong>Note:</strong><span> When you provision the Secure Web Proxy later in this guide, Google Cloud automatically creates a Cloud Router and Cloud NAT gateway to provide it with outbound internet access.</span></aside>
+</li> <li>
+<p>Generate a self-signed certificate and private key:</p> 
+<pre>openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout CERT_KEY_FILE.key \
+    -out CERT_FILE.crt \
+    -days CERT_VALIDITY_DAYS \
+    -subj "/CN=SWP_HOSTNAME" \
+    -addext "subjectAltName=DNS:SWP_HOSTNAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CERT_KEY_FILE</var></code> and <code translate="no" dir="ltr"><var translate="no">CERT_FILE</var></code>: local file names for the private key and certificate—for example, <code translate="no" dir="ltr">swp</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERT_VALIDITY_DAYS</var></code>: how long the certificate is valid—for example, <code translate="no" dir="ltr">365</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SWP_HOSTNAME</var></code>: a hostname for the proxy certificate—for example, <code translate="no" dir="ltr">swp.example.internal</code>. (Agents don't connect to the proxy by this name, so any internal name works for testing).</li> </ul>
+</li> <li>
+<p>Upload the certificate to Certificate Manager in the same region as your SWP:</p> 
+<pre>gcloud certificate-manager certificates create CERTIFICATE_NAME \
+    --location=REGION \
+    --certificate-file=CERT_FILE.crt \
+    --private-key-file=CERT_KEY_FILE.key
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_NAME</var></code>: a name for the certificate—for example, <code translate="no" dir="ltr">swp-cert</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the certificate.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERT_FILE</var></code> and <code translate="no" dir="ltr"><var translate="no">CERT_KEY_FILE</var></code>: the local file names for the certificate and private key that you created earlier.</li> </ul>
+</li> <li>
+<p>Create a CA Pool and a root CA:</p> 
+<pre>gcloud privateca pools create CA_POOL_NAME \
+    --location=REGION \
+    --tier=devops
+
+gcloud privateca roots create ROOT_CA_NAME \
+    --pool=CA_POOL_NAME \
+    --location=REGION \
+    --subject="CN=CA_COMMON_NAME, O=ORGANIZATION" \
+    --key-algorithm=rsa-pkcs1-4096-sha256 \
+    --max-chain-length=1 \
+    --auto-enable
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_POOL_NAME</var></code>: a name for the CA pool—for example, <code translate="no" dir="ltr">swp-ca-pool</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ROOT_CA_NAME</var></code>: a name for the root CA—for example, <code translate="no" dir="ltr">swp-root-ca</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_COMMON_NAME</var></code>: a common name for the CA—for example, <code translate="no" dir="ltr">swp-ca</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ORGANIZATION</var></code>: the name of your organization—for example, <code translate="no" dir="ltr">My Company</code>.</li> </ul>
+</li> <li>
+<p>Allow the Network Security Service agent to issue certificates from the pool:</p> 
+<pre>gcloud beta services identity create --service=networksecurity.googleapis.com
+
+gcloud privateca pools add-iam-policy-binding CA_POOL_NAME \
+    --location=REGION \
+    --member="serviceAccount:service-PROJECT_NUMBER@gcp-sa-networksecurity.iam.gserviceaccount.com" \
+    --role=roles/privateca.certificateManager
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number. <code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code> with your project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_POOL_NAME</var></code>: the name of the CA pool.</li> </ul>
+</li> <li>
+<p>Export the CA certificate. The TrustConfig uses this in a later step:</p> 
+<pre>gcloud privateca pools get-ca-certs CA_POOL_NAME \
+    --location=REGION \
+    --output-file=CA_CERT_FILE.pem
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_POOL_NAME</var></code>: the name of the CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_CERT_FILE</var></code> with a local filename for the certificate—for example, <code translate="no" dir="ltr">swp-ca-cert</code>.</li> </ul>
+</li> <li>
+<p>Create a TLS Inspection Policy.</p> <ol> <li>
+<p>Save the following as <code translate="no" dir="ltr">tls-inspection.yaml</code>:</p> 
+<pre>name: projects/PROJECT_ID/locations/REGION/tlsInspectionPolicies/TLS_INSPECTION_POLICY_NAME
+caPool: projects/PROJECT_NUMBER/locations/REGION/caPools/CA_POOL_NAME
+</pre>
+</li> <li>
+<p>Import the policy:</p> 
+<pre>gcloud network-security tls-inspection-policies import TLS_INSPECTION_POLICY_NAME \
+    --location=REGION \
+    --source=tls-inspection.yaml
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TLS_INSPECTION_POLICY_NAME</var></code> with a name for the TLS inspection policy—for example, <code translate="no" dir="ltr">swp-tls-inspection</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the policy.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_POOL_NAME</var></code>: the name of the CA pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your project number.</li> </ul> <aside class="note"><strong>Note:</strong><span> If you're using the Google Cloud console, you can create the TLS inspection policy without using a manifest.</span></aside>
+</li> </ol>
+</li> <li>
+<p>Generate a TrustConfig from the exported CA certificate and import it:</p> 
+<pre>{ echo "trustStores:"; echo "- trustAnchors:"; echo "  - pemCertificate: |"; \
+  sed 's/^/      /' CA_CERT_FILE.pem; } &gt; trust-config.yaml
+
+gcloud certificate-manager trust-configs import TRUST_CONFIG_NAME \
+    --location=REGION \
+    --source=trust-config.yaml
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_CONFIG_NAME</var></code>: a name for the trust config—for example, <code translate="no" dir="ltr">swp-trust-config</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the trust config.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CA_CERT_FILE</var></code>: the local filename for the CA certificate that you exported earlier.</li> </ul>
+</li> <li>
+<p>Create a gateway security policy and an allow-all rule:</p> <ol> <li>
+<p>Save the policy as <code translate="no" dir="ltr">swp-policy.yaml</code>:</p> 
+<pre>name: projects/PROJECT_ID/locations/REGION/gatewaySecurityPolicies/POLICY_NAME
+description: POLICY_DESCRIPTION
+tlsInspectionPolicy: projects/PROJECT_NUMBER/locations/REGION/tlsInspectionPolicies/TLS_INSPECTION_POLICY_NAME
+</pre>
+</li> <li>
+<p>Import the policy:</p> 
+<pre>gcloud network-security gateway-security-policies import POLICY_NAME \
+    --location=REGION \
+    --source=swp-policy.yaml
+</pre>
+</li> <li>
+<p>Save the rule as <code translate="no" dir="ltr">rule.yaml</code>:</p> 
+<pre>name: projects/PROJECT_ID/locations/REGION/gatewaySecurityPolicies/POLICY_NAME/rules/RULE_NAME
+priority: RULE_PRIORITY
+enabled: true
+sessionMatcher: "SESSION_MATCHER"
+applicationMatcher: "APPLICATION_MATCHER"
+basicProfile: ALLOW
+tlsInspectionEnabled: true
+</pre>
+</li> <li>
+<p>Import the rule:</p> 
+<pre>gcloud network-security gateway-security-policies rules import RULE_NAME \
+    --gateway-security-policy=POLICY_NAME \
+    --location=REGION \
+    --source=rule.yaml
+</pre>
+<aside class="note"><strong>Note:</strong><span> For testing, <code translate="no" dir="ltr">SESSION_MATCHER</code> can be <code translate="no" dir="ltr">true</code> and <code translate="no" dir="ltr">APPLICATION_MATCHER</code> can be <code translate="no" dir="ltr">request.method != ''</code> to match all requests.</span></aside>
+</li> </ol>
+</li> <li>
+<p>Create a Server TLS Policy for mTLS. Save the following as <code translate="no" dir="ltr">server-tls.yaml</code>:</p> 
+<pre>name: projects/PROJECT_ID/locations/REGION/serverTlsPolicies/SERVER_TLS_POLICY_NAME
+allowOpen: false
+mtlsPolicy:
+  clientValidationMode: ALLOW_INVALID_OR_MISSING_CLIENT_CERT
+  clientValidationTrustConfig: projects/PROJECT_NUMBER/locations/REGION/trustConfigs/TRUST_CONFIG_NAME
+</pre> <p>Import the policy:</p> 
+<pre>gcloud network-security server-tls-policies import SERVER_TLS_POLICY_NAME \
+    --location=REGION \
+    --source=server-tls.yaml
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVER_TLS_POLICY_NAME</var></code>: a name for the policy—for example, <code translate="no" dir="ltr">swp-server-tls</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_CONFIG_NAME</var></code>: the name of the TrustConfig you created earlier (for example, <code translate="no" dir="ltr">swp-trust-config</code>).</li> </ul>
+</li> <li>
+<p>Create the Secure Web Proxy.</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">swp.yaml</code>:</p> 
+<pre>name: projects/PROJECT_ID/locations/REGION/gateways/SWP_NAME
+type: SECURE_WEB_GATEWAY
+addresses: ["IP_ADDRESS"]
+ports: [443, 80]
+certificateUrls: ["projects/PROJECT_ID/locations/REGION/certificates/CERTIFICATE_NAME"]
+serverTlsPolicy: projects/PROJECT_ID/locations/REGION/serverTlsPolicies/SERVER_TLS_POLICY_NAME
+gatewaySecurityPolicy: projects/PROJECT_ID/locations/REGION/gatewaySecurityPolicies/POLICY_NAME
+network: projects/PROJECT_ID/global/networks/NETWORK
+subnetwork: projects/PROJECT_ID/regions/REGION/subnetworks/SUBNETWORK
+routingMode: EXPLICIT_ROUTING_MODE
+</pre>
+</li> <li>
+<p>Import the proxy:</p> 
+<pre>gcloud network-services gateways import SWP_NAME \
+    --source=swp.yaml \
+    --location=REGION
+</pre>
+</li> </ol> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">IP_ADDRESS</var></code>: an IP address for the proxy.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CERTIFICATE_NAME</var></code>: the name of the Certificate Manager certificate you created earlier (for example, <code translate="no" dir="ltr">swp-cert</code>).</li> <li>
+<code translate="no" dir="ltr"><var translate="no">NETWORK</var></code>: the name of the VPC network.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SUBNETWORK</var></code>: the name of the subnetwork.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">EXPLICIT_ROUTING_MODE</var></code>: the routing mode. For Agent Gateway, this must be <code translate="no" dir="ltr">EXPLICIT_ROUTING_MODE</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVER_TLS_POLICY_NAME</var></code>: the name of your Server TLS policy.</li> </ul>
+</li> </ol> <h2 id="configure-mtls">Configure mTLS authentication</h2> <p>To authenticate traffic between the GKE ambient proxy and your Secure Web Proxy, configure mutual TLS (mTLS). When you use Workload Identity Federation for GKE, your Workload Identity Federation for GKE pool is already configured with the default shared certificate authority (CA).</p> <p>To verify this configuration, run the following command:</p> 
+<pre>gcloud iam workload-identity-pools describe PROJECT_ID.svc.id.goog \
+    --location=global \
+    --format="yaml(inlineCertificateIssuanceConfig)"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with your project ID.</p> <p>In the output, verify that <code translate="no" dir="ltr">useDefaultSharedCa</code> is set to <code translate="no" dir="ltr">true</code>. The expected output looks similar to the following:</p> 
+<pre>inlineCertificateIssuanceConfig:
+  keyAlgorithm: ECDSA_P256
+  lifetime: 86400s
+  rotationWindowPercentage: 50
+  useDefaultSharedCa: true
+</pre> <p>If <code translate="no" dir="ltr">useDefaultSharedCa: true</code> is missing or set to <code translate="no" dir="ltr">false</code>, run the following command to configure it:</p> 
+<pre>gcloud iam workload-identity-pools update PROJECT_ID.svc.id.goog \
+    --location=global \
+    --use-default-shared-ca
+</pre> <h2 id="create-egress-gateway">Create an egress Agent Gateway</h2> <p>Create an egress Agent Gateway resource in Agent Platform and connect it to your Secure Web Proxy.</p> <ol> <li>
+<p>Save the following manifest as a file named <code translate="no" dir="ltr">agent-gateway.yaml</code>:</p> 
+<pre>name: GATEWAY_NAME
+protocols:
+- MCP
+registries: ["//agentregistry.googleapis.com/projects/PROJECT_ID/locations/REGION"]
+selfManaged:
+  resourceUris:
+  - "projects/PROJECT_ID/locations/REGION/gateways/SWP_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> with a name for the Gateway—for example, <code translate="no" dir="ltr">my-agent-egress-gateway</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the Gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SWP_NAME</var></code>: the name of your Secure Web Proxy.</li> </ul>
+</li> <li>
+<p>Create the Gateway:</p> 
+<pre>gcloud beta network-services agent-gateways import GATEWAY_NAME \
+    --source=agent-gateway.yaml \
+    --location=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: a name for the Gateway—for example, <code translate="no" dir="ltr">my-agent-egress-gateway</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the Gateway.</li> </ul>
+</li> <li>
+<p>To verify that the AgentGateway resource was created, describe the Gateway:</p> 
+<pre>gcloud beta network-services agent-gateways describe GATEWAY_NAME \
+    --location=REGION
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: a name for the Gateway—for example, <code translate="no" dir="ltr">my-agent-egress-gateway</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the Gateway.</li> </ul>
+</li> </ol> <h2 id="configure-egress-redirection">Configure egress redirection in GKE</h2> <p>To route your outbound agent traffic to your Secure Web Proxy, define the proxy's location for the GKE ambient proxy.</p> <ol> <li>
+<p>Save the following manifest as a file named <code translate="no" dir="ltr">swp-backend.yaml</code>. You must create the <code translate="no" dir="ltr">GCPBackend</code> resource in the same namespace as your agent workloads.</p> <p>If your Secure Web Proxy is in the same VPC as your cluster, use the gateway URI:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPBackend
+metadata:
+  name: swp-backend
+  namespace: NAMESPACE
+spec:
+  serviceUris:
+  - "//networkservices.googleapis.com/projects/PROJECT_ID/locations/REGION/gateways/SWP_NAME"
+</pre> <p>Alternatively, if your proxy is in a different VPC and uses Private Service Connect, use the service attachment URI:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPBackend
+metadata:
+  name: swp-backend
+  namespace: NAMESPACE
+spec:
+  serviceUris:
+  - "//compute.googleapis.com/projects/PROJECT_ID/regions/REGION/serviceAttachments/ATTACHMENT_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: the namespace for your agent workloads.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for the proxy or service attachment.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SWP_NAME</var></code>: the name of your proxy (for same-VPC setups).</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ATTACHMENT_NAME</var></code>: the name of the Private Service Connect service attachment (for cross-VPC setups).</li> </ul>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f swp-backend.yaml
+</pre>
+</li> <li>
+<p>Get your cluster's Service IPv4 CIDR range:</p> 
+<pre>gcloud container clusters describe CLUSTER_NAME \
+    --location=LOCATION \
+    --format="value(ipAllocationPolicy.servicesIpv4Cidr)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of your GKE cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the cluster's location.</li> </ul>
+</li> <li>
+<p>Save the following manifest as a file named <code translate="no" dir="ltr">egress-policy.yaml</code>:</p> 
+<pre>apiVersion: networking.gke.io/v1
+kind: GCPEgressPolicy
+metadata:
+  name: prod-egress-policy
+  namespace: NAMESPACE
+spec:
+  to:
+    excludeCIDRRanges:
+      - SERVICE_CIDR
+      - VPC_CIDR
+  proxyRef:
+    group: networking.gke.io
+    kind: GCPBackend
+    name: swp-backend
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_CIDR</var></code>: the cluster Service CIDR from the previous step—for example, <code translate="no" dir="ltr">34.118.224.0/20</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">VPC_CIDR</var></code>: other internal ranges that shouldn't go through the proxy—for example, <code translate="no" dir="ltr">10.0.0.0/8</code>.</li> </ul> <p>To prevent internal traffic, such as communication with the Kubernetes control plane, from routing through the proxy, use the <code translate="no" dir="ltr">excludeCIDRRanges</code> field.</p>
+</li> <li>
+<p>Apply the manifest to your cluster:</p> 
+<pre>kubectl apply -f egress-policy.yaml
+</pre> <p>The GKE Ambient data plane now routes egress traffic from your agent namespace to your Secure Web Proxy for policy enforcement.</p>
+</li> </ol> <h2 id="deploy-test-clients">(Optional) Deploy test clients</h2> <p>To verify that your egress policies are working correctly, you can deploy a test agent with a registered SPIFFE identity (the positive control) and a plain client without an identity (the negative control).</p> <ol> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">agents.yaml</code>:</p> 
+<pre>apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-sa
+  namespace: NAMESPACE
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-agent
+  namespace: NAMESPACE
+  labels:
+    registry.gke.io/functional-type: "AGENT"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-agent
+  template:
+    metadata:
+      labels:
+        app: test-agent
+      annotations:
+        iam.gke.io/spiffe-identity-type: "agent-identity"
+        iam.gke.io/identity: "spiffe://agents.global.org-ORG_ID.system.id.goog/*"
+    spec:
+      serviceAccountName: agent-sa
+      containers:
+      - name: curl
+        image: curlimages/curl:8.10.1
+        command: ["sleep", "infinity"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plain-client
+  namespace: NAMESPACE
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plain-client
+  template:
+    metadata:
+      labels:
+        app: plain-client
+    spec:
+      containers:
+      - name: curl
+        image: curlimages/curl:8.10.1
+        command: ["sleep", "infinity"]
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">NAMESPACE</var></code>: your agent namespace.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ORG_ID</var></code>: the ID of your Google Cloud organization.</li> </ul>
+</li> <li>
+<p>Apply the deployments and wait for them to become ready:</p> 
+<pre>kubectl apply -f agents.yaml
+kubectl rollout status deploy/test-agent deploy/plain-client -n NAMESPACE
+</pre>
+</li> <li>
+<p>Copy the Secure Web Proxy CA certificate into both Pods so they can securely connect through the proxy during testing:</p> 
+<pre>B64=$(base64 -w0 CA_CERT_FILE.pem)
+
+for p in test-agent plain-client; do
+  kubectl exec -i -n NAMESPACE deploy/"$p" -- sh -c "cat &gt; /tmp/swp-ca.pem" &lt; CA_CERT_FILE.pem
+done
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">CA_CERT_FILE</var></code> with the local name of the CA certificate you exported during the Secure Web Proxy setup.</p>
+</li> </ol> <h2 id="configure-auth-csp">Configure authorization and content security policies</h2> <p>To enforce access controls and sanitize content, forward your outbound traffic to extension services, such as Identity-Aware Proxy (IAP) (IAP) or Model Armor, before it reaches its destination.</p> <p>You can then delegate authorization to IAP or a custom authorization engine, and delegate content sanitization to Model Armor.</p> <h3 id="delegate-authorization-iap">Delegate authorization to IAP</h3> <p>To authorize your outbound requests by using IAP, bind the extension to your Gateway.</p> <ol> <li>
+<p>Save the following match conditions as a file named <code translate="no" dir="ltr">match.yaml</code> to define which traffic routes to IAP. For example, to evaluate traffic to example.com during testing:</p> 
+<pre>name: ext-binding
+producerExtension: iap.googleapis.com
+target:
+  resources:
+  - "//networkservices.googleapis.com/projects/PROJECT_ID/locations/REGION/agentGateways/GATEWAY_NAME"
+matchConditions:
+# invoke IAP for traffic to example.com for testing
+- to:
+    destination:
+      hosts:
+      - exact: "example.com"
+</pre>
+</li> <li>
+<p>Import the extension binding:</p> 
+<pre>gcloud beta service-extensions extension-bindings import my-iap-binding \
+    --source=match.yaml \
+    --location=REGION
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> with the region for the extension binding.</p>
+</li> <li>
+<p>To verify your IAP response, run the following test commands:</p> 
+<pre>echo -n "no identity -&gt; example.com: "; kubectl exec -n NAMESPACE deploy/plain-client -- curl -s -o /tmp/b -w "%{http_code} " --cacert /tmp/swp-ca.pem https://example.com/; kubectl exec -n NAMESPACE deploy/plain-client -- head -c 120 /tmp/b; echo
+echo -n "agent       -&gt; example.com: "; kubectl exec -n NAMESPACE deploy/test-agent -- curl -s -o /tmp/b -w "%{http_code} " --cacert /tmp/swp-ca.pem https://example.com/; kubectl exec -n NAMESPACE deploy/test-agent -- head -c 120 /tmp/b; echo
+echo -n "agent       -&gt; www.google.com (no IAP match): "; kubectl exec -n NAMESPACE deploy/test-agent -- curl -s -o /dev/null -w "%{http_code}\n" --cacert /tmp/swp-ca.pem https://www.google.com/
+</pre> <p>Expected output:</p> <ul> <li>
+<strong>no identity → example.com:</strong> 401, body... Error code 1200 (no token)</li> <li>
+<strong>agent → example.com:</strong> 200 (Example Domain HTML). Right after binding IAP, you might first see 403 "Egress request is not authorized" for about 1–2 minutes while IAP propagates.</li> <li>
+<strong>agent → www.google.com:</strong> 200 (the binding doesn't match, so IAP is skipped)</li> </ul>
+</li> </ol> <h3 id="delegate-content-security-model-armor">Delegate content security to Model Armor</h3> <p>To protect against prompt injection and sensitive data leakage on outbound traffic, you can bind Google Cloud Model Armor to your egress Gateway.</p> <ol> <li>
+<p>Grant the required roles to the Agent Gateway service account or the Service Extensions service account.</p> <aside class="note"><strong>Note:</strong><span> For self-managed Gateways, this account uses the format <code translate="no" dir="ltr">service-<var translate="no">AGENT_GATEWAY_PROJECT_NUMBER</var>@gcp-sa-dep.iam.gserviceaccount.com</code>.</span></aside>
+<pre>gcloud projects add-iam-policy-binding MODEL_ARMOR_PROJECT_ID \
+    --member="serviceAccount:SERVICE_ACCOUNT" \
+    --role="roles/modelarmor.calloutUser"
+
+gcloud projects add-iam-policy-binding MODEL_ARMOR_PROJECT_ID \
+    --member="serviceAccount:SERVICE_ACCOUNT" \
+    --role="roles/serviceusage.serviceUsageConsumer"
+
+gcloud projects add-iam-policy-binding MODEL_ARMOR_PROJECT_ID \
+    --member="serviceAccount:SERVICE_ACCOUNT" \
+    --role="roles/modelarmor.user"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">MODEL_ARMOR_PROJECT_ID</var></code>: the project ID where Model Armor is located.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">SERVICE_ACCOUNT</var></code>: the service account for the Gateway.</li> </ul>
+</li> <li>
+<p>Create a Model Armor template to filter sensitive data and prompt injection attacks. Our subsequent verification steps rely on this configuration:</p> 
+<pre>gcloud model-armor templates create TEMPLATE_NAME \
+    --location=REGION \
+    --basic-config-filter-enforcement=enabled \
+    --pi-and-jailbreak-filter-settings-enforcement=enabled \
+    --pi-and-jailbreak-filter-settings-confidence-level=MEDIUM_AND_ABOVE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">TEMPLATE_NAME</var></code> with a name for your template—for example, <code translate="no" dir="ltr">safety-template</code>.</p>
+</li> <li>
+<p>To get the full resource path of your new template (which you need for the extension binding step), run the following command:</p> 
+<pre>gcloud model-armor templates describe TEMPLATE_NAME \
+    --location=REGION \
+    --format="value(name)"
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">REGION</var></code> with the region for your template.</p>
+</li> <li>
+<p>Save the following match conditions as a file named <code translate="no" dir="ltr">model-armor-match.yaml</code> to evaluate traffic to www.google.com during testing:</p> 
+<pre>- to:
+    destination:
+      hosts:
+      - exact: "www.google.com"
+</pre>
+</li> <li>
+<p>Bind Model Armor to your Gateway:</p> 
+<pre>gcloud beta service-extensions extension-bindings create my-model-armor-binding \
+    --location=REGION \
+    --producer-extension="modelarmor.REGION.rep.googleapis.com" \
+    --target-resources="//networkservices.googleapis.com/projects/PROJECT_ID/locations/REGION/agentGateways/GATEWAY_NAME" \
+    --fail-open \
+    --match-conditions=model-armor-match.yaml \
+    --producer-metadata=model_armor_settings='[{"request_template_id":"projects/TEMPLATE_PROJECT_ID/locations/REGION/templates/REQUEST_TEMPLATE","response_template_id":"projects/TEMPLATE_PROJECT_ID/locations/REGION/templates/RESPONSE_TEMPLATE"}]'
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: the region for your Agent Gateway. The binding and the Model Armor producer extension must use this same region, and Model Armor must be available in it. Other regions and the global <code translate="no" dir="ltr">modelarmor.googleapis.com</code> endpoint aren't accepted.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: the name of your Agent Gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">TEMPLATE_PROJECT_ID</var></code>, <code translate="no" dir="ltr"><var translate="no">REQUEST_TEMPLATE</var></code>, and <code translate="no" dir="ltr"><var translate="no">RESPONSE_TEMPLATE</var></code>: the details for your Model Armor templates. The templates must be created in <code translate="no" dir="ltr"><var translate="no">REGION</var></code>. If a template doesn't exist in that region, matched requests fail with HTTP 404 "Not Found".</li> </ul> <p><strong>Note:</strong> By default the binding fails closed (if Model Armor is unavailable, requests are blocked). The <code translate="no" dir="ltr">--fail-open</code> flag allows traffic when the extension can't be reached.</p>
+</li> <li>
+<p>To verify Model Armor is filtering requests, run the following test commands:</p> 
+<pre>SENS='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"deploy-html","arguments":{"value":"&lt;html&gt; card 4111111111111111&lt;/html&gt;"}}}'
+BEN='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"deploy-html","arguments":{"value":"Hello, how are you?"}}}'
+
+kubectl exec -n NAMESPACE deploy/test-agent -- curl -s -w " HTTP=%{http_code}\n" --cacert /tmp/swp-ca.pem -X POST -H 'Content-Type: application/json' -d "$SENS" "https://www.google.com/"
+kubectl exec -n NAMESPACE deploy/test-agent -- curl -s -o /dev/null -w "HTTP=%{http_code}\n" --cacert /tmp/swp-ca.pem -X POST -H 'Content-Type: application/json' -d "$BEN" "https://www.google.com/"
+</pre> <p>Expected output:</p> <ul> <li>
+<strong>sensitive:</strong> <code translate="no" dir="ltr">403</code> <code translate="no" dir="ltr">{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Traffic blocked by MA security policy."}],"isError":true}}</code>
+</li> <li>
+<strong>benign:</strong> <code translate="no" dir="ltr">405</code> (origin; it reached www.google.com)</li> </ul>
+</li> </ol> <h3 id="delegate-auth-custom-extensions">Delegate authorization to custom extensions</h3> <p>As an alternative to IAP, you can use custom extensions to delegate authorization decisions. For more information, see <a href="extension-bindings-overview#producer-setup">Producers: Build and publish extensions</a> to create the appropriate <code translate="no" dir="ltr">ProducerExtension</code> and <code translate="no" dir="ltr">ExtensionBinding</code>.</p> <h2 id="troubleshoot">Troubleshoot</h2> <p>If you experience connectivity issues, verify the following configurations:</p> <ul> <li>
+<strong>APIs:</strong> verify that all required APIs are enabled in your project.</li> <li>
+<strong>Namespace labels:</strong> verify that your agent namespace has the <code translate="no" dir="ltr">networking.gke.io/dataplane-mode=ambient</code> label.</li> <li>
+<strong>Custom resources:</strong> verify that the <code translate="no" dir="ltr">GCPBackend</code> and <code translate="no" dir="ltr">GCPEgressPolicy</code> custom resources applied without errors and are located in the same namespace as your agents.</li> </ul> <h2 id="whats-next">What's next</h2> <ul> <li>To monitor your agents' traffic and behavior, see <a href="monitor-agent-gateway">Monitor Agent Gateway traffic</a>.</li> <li>To resolve connectivity or policy issues, see <a href="../../troubleshooting/troubleshoot-agent-gateway">Troubleshoot Agent Gateway</a>.</li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-gke-egress" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/set-up-gke-egress</a>
+  </p>
+</div>

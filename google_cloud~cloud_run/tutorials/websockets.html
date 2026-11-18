@@ -1,0 +1,253 @@
+<h1>Building a WebSocket Chat service for Cloud Run tutorial</h1> <div class="tutorial tutorial-lesson"> <section id="overview"> <p>This tutorial shows how to create a multi-room, realtime chat service using WebSockets with a persistent connection for bidirectional communication. With WebSockets, both client and server can push messages to each other without polling the server for updates.</p> <p>Although you can configure Cloud Run to use <a href="../configuring/session-affinity">session affinity</a>, this provides a <em>best effort</em> affinity, which means that any new request can still be potentially routed to a different instance. As a result, user messages in the chat service need to be synchronized across all instances, not just between the clients connected to one instance.</p> <h2 id="design_for_a_realtime_chat_service">Design for a realtime chat service</h2> <p>This sample chat service uses a Memorystore for Redis instance to store and synchronize user messages across all instances. Redis uses a <a href="https://redis.io/topics/pubsub">Pub/Sub</a> mechanism, not to be confused with the product <a href="https://docs.cloud.google.com/pubsub/docs">Cloud Pub/Sub</a>, to push data to subscribed clients connected to any instance, to eliminate HTTP polling for updates.</p> <p>However, even with push updates, any instance that is spun up will only receive new messages pushed to the container. To load prior messages, message history would need to be stored and retrieved from a persistent storage solution. This sample uses Redis's conventional functionality of an object store to cache and retrieve message history.</p> <p>The Redis instance is protected from the internet using private IPs with access controlled and limited to services running on the same Virtual Private Network as the Redis instance. We recommend that you use <a href="../configuring/vpc-direct-vpc">Direct VPC egress</a>.</p> <h2 id="limitations">Limitations</h2> <ul> <li><p>This tutorial does not show end user authentication or session caching. To learn more about end user authentication, refer to the Cloud Run tutorial for <a href="identity-platform">end user authentication</a>.</p></li> <li><p>This tutorial does not implement a database such as Firestore for indefinite storage and retrieval of chat message history.</p></li> <li><p>Additional elements are needed for this sample service to be production ready. A <a href="https://docs.cloud.google.com/memorystore/docs/redis/redis-tiers">Standard Tier Redis instance</a> is recommended to provide <a href="https://docs.cloud.google.com/memorystore/docs/redis/high-availability">High Availability</a> using replication and automatic failover.</p></li> </ul> </section> <section id="objectives"> <h2 id="objectives">Objectives</h2> <ul> <li><p>Write, build, and deploy a Cloud Run service that uses WebSockets.</p></li> <li><p>Connect to a Memorystore for Redis instance to publish and subscribe to new messages across instances.</p></li> <li><p>Connect the Cloud Run service with Memorystore using <a href="../configuring/vpc-direct-vpc">Direct VPC egress</a>.</p></li> </ul> </section> <section id="costs"> <h2 id="costs">Costs</h2> <p> In this document, you use the following billable components of Google Cloud: </p> <ul> <li><a href="https://cloud.google.com/build">Cloud Build</a></li> <li><a href="https://docs.cloud.google.com/artifact-registry">Artifact Registry</a></li> <li><a href="https://cloud.google.com/memorystore">Memorystore</a></li> <li><a href="https://cloud.google.com/run">Cloud Run</a></li> </ul> <p> To generate a cost estimate based on your projected usage, use the <a href="https://docs.cloud.google.com/products/calculator" track-type="commonIncludes" track-name="pricingCalculator">pricing calculator</a>. <cloud-free-trial> <div class="eligible"> New Google Cloud users might be eligible for a <a href="https://docs.cloud.google.com/free" track-type="freeTrial" track-name="consoleLink" track-metadata-position="prerequisites" track-metadata-end-goal="signUp" target="_blank">free trial</a>. </div>  </cloud-free-trial> </p> </section> <section id="prerequisites"> <h2 id="before-you-begin">Before you begin</h2> <ol> <cloud-free-trial> <div class="eligible"> <li> Sign in to your Google Cloud account. If you're new to Google Cloud, <a href="https://console.cloud.google.com/freetrial" target="console" track-type="commonIncludes" track-name="createAnAccount" track-metadata-position="prereqs" track-metadata-eventdetail="https://console.cloud.google.com/freetrial" track-metadata-link-destination="https://console.cloud.google.com/freetrial"> create an account</a> to evaluate how our products perform in real-world scenarios. New customers also get $300 in free credits to run, test, and deploy workloads. </li> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> <div class="ineligible"> <li> <p>In the Google Cloud console, on the project selector page, select or create a Google Cloud project.</p>  <p class="showalways"><b>Roles required to select or create a project</b></p> <ul> <li> <b>Select a project</b>: Selecting a project doesn't require a specific IAM role—you can select any project that you've been granted a role on. </li> <li> <b>Create a project</b>: To create a project, you need the Project Creator role (<code translate="no" dir="ltr">roles/resourcemanager.projectCreator</code>), which contains the <code translate="no" dir="ltr">resourcemanager.projects.create</code> permission. <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </li> </ul>  <aside class="note"><b>Note</b>: If you don't plan to keep the resources that you create in this procedure, create a project instead of selecting an existing project. After you finish these steps, you can delete the project, removing all resources associated with the project.</aside> <p><a href="https://console.cloud.google.com/projectselector2/home/dashboard" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="createProject" class="button button-primary">Go to project selector</a></p> </li> <li> <p> <a href="https://docs.cloud.google.com/billing/docs/how-to/verify-billing-enabled#confirm_billing_is_enabled_on_a_project" target="_blank" track-type="commonIncludes" track-name="supportLink" track-metadata-end-goal="enableBilling">Verify that billing is enabled for your Google Cloud project</a>. </p> </li> </div> </cloud-free-trial> <li>
+<p> Enable the Cloud Run, Memorystore for Redis, Artifact Registry, and Cloud Build APIs, if any are not already enabled. </p>
+<p class="showalways"><b>Roles required to enable APIs</b></p>
+<p> To enable APIs, you need the <code translate="no" dir="ltr">serviceusage.services.enable</code> permission. If you created the project, then you likely already have this permission through the Owner role (<code translate="no" dir="ltr">roles/owner</code>). Otherwise, you can get this permission through the Service Usage Admin role (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageAdmin</code>). <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Learn how to grant roles</a>. </p>
+<p><a href="https://console.cloud.google.com/apis/enableflow" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="enableAPI" class="button button-primary">Enable the APIs</a></p>
+</li> <li>
+<a href="https://docs.cloud.google.com/sdk/docs/install">Install and initialize the gcloud CLI</a>.</li> </ol> <h3 id="required_roles">Required roles</h3> <p> To get the permissions that you need to complete the tutorial, ask your administrator to grant you the following IAM roles on your project: </p> <ul> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/artifactregistry#artifactregistry.reader">Artifact Registry Reader </a> (<code translate="no" dir="ltr">roles/artifactregistry.reader</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/cloudbuild#cloudbuild.builds.editor">Cloud Build Editor </a> (<code translate="no" dir="ltr">roles/cloudbuild.builds.editor</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/redis#redis.admin">Cloud Memorystore Redis Admin </a> (<code translate="no" dir="ltr">roles/redis.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/run#run.admin">Cloud Run Admin </a> (<code translate="no" dir="ltr">roles/run.admin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountCreator">Create Service Accounts </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountCreator</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/resourcemanager#resourcemanager.projectIamAdmin">Project IAM Admin </a> (<code translate="no" dir="ltr">roles/resourcemanager.projectIamAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/iam#iam.serviceAccountAdmin">Service Account Admin </a> (<code translate="no" dir="ltr">roles/iam.serviceAccountAdmin</code>)</li> <li>
+<a href="https://docs.cloud.google.com/iam/docs/roles-permissions/serviceusage#serviceusage.serviceUsageConsumer">Service Usage Consumer </a> (<code translate="no" dir="ltr">roles/serviceusage.serviceUsageConsumer</code>)</li> </ul> <p> For more information about granting roles, see <a href="https://docs.cloud.google.com/iam/docs/granting-changing-revoking-access">Manage access to projects, folders, and organizations</a>. </p> <p> You might also be able to get the required permissions through <a href="https://docs.cloud.google.com/iam/docs/creating-custom-roles">custom roles</a> or other <a href="https://docs.cloud.google.com/iam/docs/roles-overview#predefined">predefined roles</a>. </p> <aside class="note"> <strong>Note:</strong> <a href="https://docs.cloud.google.com/iam/docs/roles-overview#basic">IAM basic roles</a> might also contain permissions to complete the tutorial. You shouldn't grant basic roles in a production environment, but you can grant them in a development or test environment. </aside> </section> <div id="tutorial-content"> <h2 id="setting-up-gcloud">Set up gcloud defaults</h2> <p>To configure gcloud with defaults for your Cloud Run service:</p> <ol> <li>
+<p>Set your default project:</p> 
+<pre>gcloud config set project PROJECT_ID</pre> <p>Replace <var translate="no">PROJECT_ID</var> with the name of the project you created for this tutorial.</p>
+</li> <li>
+<p>Configure gcloud for your chosen region:</p> 
+<pre>gcloud config set run/region REGION</pre> <p>Replace <var translate="no">REGION</var> with the supported Cloud Run <a href="#follow-cloud-run" style="border-bottom: 1px dotted #999" data-modal-dialog-id="regions" class="devsite-dialog-button">region</a> of your choice.</p>
+</li> </ol> <div id="regions" class="devsite-dialog"> <div class="devsite-dialog-contents"> <h3 class="hide-from-toc" id="cloud-run-locations">Cloud Run locations</h3> <p>Cloud Run is regional, which means the infrastructure that runs your Cloud Run services is located in a specific region and is managed by Google to be redundantly available across <a href="https://docs.cloud.google.com/docs/geography-and-regions">all the zones within that region</a>. <br><br></p> <p>Meeting your latency, availability, or durability requirements are primary factors for selecting the region where your Cloud Run services are run. You can generally select the region nearest to your users but you should consider the location of the <a href="https://cloud.google.com/about/locations/#locations">other Google Cloud products</a> that are used by your Cloud Run service. Using Google Cloud products together across multiple locations can affect your service's latency as well as cost.<br><br></p> <p>Cloud Run is available in the following regions:</p> <h4 id="tier-1">Subject to <a href="https://cloud.google.com/run/pricing#tables" track-type="inline link">Tier 1 pricing</a>
+</h4> <ul> <li>
+<code translate="no" dir="ltr">asia-east1</code> (Taiwan) </li> <li>
+<code translate="no" dir="ltr">asia-northeast1</code> (Tokyo) </li> <li>
+<code translate="no" dir="ltr">asia-northeast2</code> (Osaka) </li> <li>
+<code translate="no" dir="ltr">asia-south1</code> (Mumbai, India) </li> <li>
+<code translate="no" dir="ltr">asia-southeast3 </code> (Bangkok) </li> <li>
+<code translate="no" dir="ltr">europe-north1</code> (Finland) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-north2</code> (Stockholm) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-southwest1</code> (Madrid) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west1</code> (Belgium) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west4</code> (Netherlands) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west8</code> (Milan) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west9</code> (Paris) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">me-west1</code> (Tel Aviv) </li> <li>
+<code translate="no" dir="ltr">northamerica-south1</code> (Mexico) </li> <li>
+<code translate="no" dir="ltr">us-central1</code> (Iowa) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">us-east1</code> (South Carolina) </li> <li>
+<code translate="no" dir="ltr">us-east4</code> (Northern Virginia) </li> <li>
+<code translate="no" dir="ltr">us-east5</code> (Columbus) </li> <li>
+<code translate="no" dir="ltr">us-south1</code> (Dallas) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">us-west1</code> (Oregon) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> </ul> <h4 id="tier-2">Subject to <a href="https://cloud.google.com/run/pricing#tables" track-type="inline link">Tier 2 pricing</a>
+</h4> <ul> <li>
+<code translate="no" dir="ltr">africa-south1</code> (Johannesburg) </li> <li>
+<code translate="no" dir="ltr">asia-east2</code> (Hong Kong) </li> <li>
+<code translate="no" dir="ltr">asia-northeast3</code> (Seoul, South Korea) </li> <li>
+<code translate="no" dir="ltr">asia-southeast1</code> (Singapore) </li> <li>
+<code translate="no" dir="ltr">asia-southeast2 </code> (Jakarta) </li> <li>
+<code translate="no" dir="ltr">asia-south2</code> (Delhi, India) </li> <li>
+<code translate="no" dir="ltr">australia-southeast1</code> (Sydney) </li> <li>
+<code translate="no" dir="ltr">australia-southeast2</code> (Melbourne) </li> <li>
+<code translate="no" dir="ltr">europe-central2</code> (Warsaw, Poland) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west10</code> (Berlin) </li> <li>
+<code translate="no" dir="ltr">europe-west12</code> (Turin) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west2</code> (London, UK) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">europe-west3</code> (Frankfurt, Germany) </li> <li>
+<code translate="no" dir="ltr">europe-west6</code> (Zurich, Switzerland) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">me-central1</code> (Doha) </li> <li>
+<code translate="no" dir="ltr">me-central2</code> (Dammam) </li> <li>
+<code translate="no" dir="ltr">northamerica-northeast1</code> (Montreal) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">northamerica-northeast2</code> (Toronto) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">southamerica-east1</code> (Sao Paulo, Brazil) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">southamerica-west1</code> (Santiago, Chile) <img src="https://cloud.google.com/sustainability/region-carbon/gleaf.svg" width="18" alt="leaf icon"> <a href="https://cloud.google.com/sustainability/region-carbon#region-picker" track-type="inline link">Low CO<sub>2</sub></a> </li> <li>
+<code translate="no" dir="ltr">us-west2</code> (Los Angeles) </li> <li>
+<code translate="no" dir="ltr">us-west3</code> (Salt Lake City) </li> <li>
+<code translate="no" dir="ltr">us-west4</code> (Las Vegas) </li> </ul> <p>If you already created a Cloud Run service, you can view the region in the Cloud Run dashboard in the <a href="https://console.cloud.google.com/run">Google Cloud console</a>.</p> </div>  </div> <h2 id="retrieve-code">Retrieve the code sample</h2> <p>To retrieve the code sample for use:</p> <ol> <li>
+<p>Clone the sample repository to your local machine:</p> <div id="run-clone-sample-repository-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Node.js</strong></p> 
+<pre data-language="javascript">git clone https://github.com/GoogleCloudPlatform/nodejs-docs-samples.git</pre> <p> Alternatively, you can <a href="https://github.com/GoogleCloudPlatform/nodejs-docs-samples/archive/master.zip"> download the sample </a> as a zip file and extract it. </p> </section> </div> </li> <li>
+<p>Change to the directory that contains the Cloud Run sample code:</p> 
+<div id="run-change-directory-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Node.js</strong></p> 
+<pre data-language="javascript">cd nodejs-docs-samples/run/websockets/</pre> </section> </div> </li> </ol> <h2 id="understand_the_websockets_code">Understand the WebSockets code</h2> <p>Socket.io is a library that enables real time, bidirectional communication between the browser and server. Although Socket.io is not a WebSocket implementation, it does wrap the functionality to provide a simpler API for multiple communication protocols with additional <a href="https://socket.io/docs/v3/#Features">features</a> such as improved reliability, <a href="../triggering/websockets#client-reconnects">automatic reconnection</a>, and broadcasting to all or a subset of clients.</p> <h3 id="client">Client-side integration</h3> <div class="github-docwidget-gitinclude-code"> 
+<pre>&lt;script src="/socket.io/socket.io.js"&gt;&lt;/script&gt;</pre> </div> <p>The client instantiates a new <a href="https://socket.io/docs/v3/client-socket-instance/">Socket instance</a> for every connection. Because this sample is server side rendered the server URL does not need to be defined. The socket instance can emit and listen to events.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>// Initialize Socket.io
+const socket = io('', {
+  transports: ['websocket'],
+});</pre> </div> <div class="github-docwidget-gitinclude-code"> 
+<pre>// Emit "sendMessage" event with message
+socket.emit('sendMessage', msg, error =&gt; {
+  if (error) {
+    console.error(error);
+  } else {
+    // Clear message
+    $('#msg').val('');
+  }
+});</pre> </div> <div class="github-docwidget-gitinclude-code"> 
+<pre>// Listen for new messages
+socket.on('message', msg =&gt; {
+  log(msg.user, msg.text);
+});
+
+// Listen for notifications
+socket.on('notification', msg =&gt; {
+  log(msg.title, msg.description);
+});
+
+// Listen connect event
+socket.on('connect', () =&gt; {
+  console.log('connected');
+});</pre> </div> <aside class="note"><strong>Note:</strong><span> For a <a href="https://socket.io/docs/v4/using-multiple-nodes/">multiple instances</a> architecture without session affinity, Socket.io must only use the Websocket transport. If Socket.io falls back to long polling, it will send multiple HTTP requests during the lifetime of the session. The first request establishes a "<a href="https://socket.io/docs/v4/how-it-works/#Handshake">handshake</a>" with important information such as the session ID. After the first request, requests might be routed to another instance that will generate an error due to the session ID being unknown to the server.</span></aside> <h3 id="server">Server-side integration</h3> <p>On the server side, the Socket.io server is initialized and attached to the HTTP server. Similar to the client side, once the Socket.io server makes a connection to the client, a socket instance is created for every connection which can be used to emit and listen to messages. Socket.io also provides an interface for creating "rooms" or an arbitrary channel that sockets can join and leave.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>// Initialize Socket.io
+const server = require('http').Server(app);
+const io = require('socket.io')(server);
+
+const {createAdapter} = require('@socket.io/redis-adapter');
+// Replace in-memory adapter with Redis
+const subClient = redisClient.duplicate();
+io.adapter(createAdapter(redisClient, subClient));
+// Add error handlers
+redisClient.on('error', err =&gt; {
+  console.error(err.message);
+});
+
+subClient.on('error', err =&gt; {
+  console.error(err.message);
+});
+
+// Listen for new connection
+io.on('connection', socket =&gt; {
+  // Add listener for "signin" event
+  socket.on('signin', async ({user, room}, callback) =&gt; {
+    try {
+      // Record socket ID to user's name and chat room
+      addUser(socket.id, user, room);
+      // Call join to subscribe the socket to a given channel
+      socket.join(room);
+      // Emit notification event
+      socket.in(room).emit('notification', {
+        title: "Someone's here",
+        description: `${user} just entered the room`,
+      });
+      // Retrieve room's message history or return null
+      const messages = await getRoomFromCache(room);
+      // Use the callback to respond with the room's message history
+      // Callbacks are more commonly used for event listeners than promises
+      callback(null, messages);
+    } catch (err) {
+      callback(err, null);
+    }
+  });
+
+  // Add listener for "updateSocketId" event
+  socket.on('updateSocketId', async ({user, room}) =&gt; {
+    try {
+      addUser(socket.id, user, room);
+      socket.join(room);
+    } catch (err) {
+      console.error(err);
+    }
+  });
+
+  // Add listener for "sendMessage" event
+  socket.on('sendMessage', (message, callback) =&gt; {
+    // Retrieve user's name and chat room  from socket ID
+    const {user, room} = getUser(socket.id);
+    if (room) {
+      const msg = {user, text: message};
+      // Push message to clients in chat room
+      io.in(room).emit('message', msg);
+      addMessageToCache(room, msg);
+      callback();
+    } else {
+      callback('User session not found.');
+    }
+  });
+
+  // Add listener for disconnection
+  socket.on('disconnect', () =&gt; {
+    // Remove socket ID from list
+    const {user, room} = deleteUser(socket.id);
+    if (user) {
+      io.in(room).emit('notification', {
+        title: 'Someone just left',
+        description: `${user} just left the room`,
+      });
+    }
+  });
+});</pre> </div> <p>Socket.io also provides a Redis adapter to broadcast events to all clients regardless of which server is serving the socket. Socket.io only uses Redis's Pub/Sub mechanism and does not store any data.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>const {createAdapter} = require('@socket.io/redis-adapter');
+// Replace in-memory adapter with Redis
+const subClient = redisClient.duplicate();
+io.adapter(createAdapter(redisClient, subClient));</pre> </div> <p>Socket.io's Redis adapter can reuse the Redis client used to store the room's message history. Each container will create a connection to the Redis instance and Cloud Run can create a large number of instances. This is well under the 65,000 connections that Redis can support.</p> <aside class="note"><strong>Note:</strong><span> The <a href="https://cloud.google.com/blog/topics/developers-practitioners/lifecycle-container-cloud-run">Cloud Run container lifecycle</a> does not take into consideration outbound requests such as Redis connections; therefore an active connection to Redis won't prevent the container from scaling in.</span></aside> <h3 id="reconnection">Reconnection</h3> <p>Cloud Run has a maximum timeout of 60 minutes. So you need to add reconnection logic for possible timeouts. In some cases, Socket.io automatically attempts to reconnect after <a href="https://socket.io/docs/v3/client-socket-instance/">disconnection or connection error</a> events. There is no guarantee that the client will reconnect to the same instance.</p> <div class="github-docwidget-gitinclude-code"> 
+<pre>// Listen for reconnect event
+socket.io.on('reconnect', () =&gt; {
+  console.log('reconnected');
+  // Emit "updateSocketId" event to update the recorded socket ID with user and room
+  socket.emit('updateSocketId', {user, room}, error =&gt; {
+    if (error) {
+      console.error(error);
+    }
+  });
+});</pre> </div> <div class="github-docwidget-gitinclude-code"> 
+<pre>// Add listener for "updateSocketId" event
+socket.on('updateSocketId', async ({user, room}) =&gt; {
+  try {
+    addUser(socket.id, user, room);
+    socket.join(room);
+  } catch (err) {
+    console.error(err);
+  }
+});</pre> </div> <p>Instances will persist if there is an active connection until all requests close or time out. Even if you use Cloud Run <a href="../configuring/session-affinity">session affinity</a>, it is possible for new requests to be load balanced to active containers, which allows containers to scale in. If you are concerned about large numbers of containers persisting after a spike in traffic, you can lower the maximum timeout value, so that unused sockets are cleaned up more frequently.</p> <h2 id="ship-code">Ship the service</h2> <ol> <li>
+<p>Create a Memorystore for Redis instance:</p> 
+<pre>gcloud redis instances create INSTANCE_ID --size=1 --region=REGION</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">INSTANCE_ID</var>: the name for the instance—for example, <code translate="no" dir="ltr">my-redis-instance</code>.</li> <li>
+<var translate="no">REGION_ID</var>: the <a href="../locations">region</a> for all your resources and services—for example, <code translate="no" dir="ltr">europe-west1</code>.</li> </ul> <p>Instance will be automatically allocated an IP range from the default service network range. This tutorial uses 1GB of memory for the local cache of messages in the Redis instance. Learn more about <a href="https://docs.cloud.google.com/memorystore/docs/redis/memory-management-best-practices#determine_the_initial_size_of_a_cloud_memorystore_instance">Determining the initial size of a Memorystore instance</a> for your use case.</p>
+</li> <li>
+<p>Define an environment variable with the IP address of your Redis instance's authorized network:</p> 
+<pre> export REDISHOST=$(gcloud redis instances describe INSTANCE_ID --region REGION --format "value(host)")</pre> <aside class="note"><strong>Note:</strong><span> This tutorial uses the default value for the Redis port, <code translate="no" dir="ltr">6379</code>.</span></aside>
+</li> <li>
+<p>Create a service account to serve as the service identity. By default this has no privileges other than project membership.</p> 
+<pre>gcloud iam service-accounts create chat-identity
+gcloud projects add-iam-policy-binding PROJECT_ID \
+--member=serviceAccount:chat-identity@PROJECT_ID.iam.gserviceaccount.com \
+--role=roles/serviceusage.serviceUsageConsumer</pre>
+</li> <li>
+<p>Find the name of your Redis instance-authorized VPC network by running the following command:</p> 
+<pre data-language="sh">
+  gcloud redis instances describe INSTANCE_ID --region REGION --format "value(authorizedNetwork)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">INSTANCE_ID</var>: the name for the instance—for example, <code translate="no" dir="ltr">my-redis-instance</code>.</li> <li>
+<var translate="no">REGION_ID</var>: the <a href="../locations">region</a> for all your resources and services—for example, <code translate="no" dir="ltr">europe-west1</code>.</li> </ul> <p>Make note of the VPC network name.</p>
+</li> <li>
+<p>Build and deploy the container image to Cloud Run:</p> 
+<pre>gcloud run deploy chat-app --source . \
+    --allow-unauthenticated \
+    --timeout 3600 \
+    --service-account chat-identity \
+    --network NETWORK \
+    --subnet SUBNET \
+    --update-env-vars REDISHOST=$REDISHOST</pre> <p>Replace the following:</p> <ul> <li>
+<var translate="no">NETWORK</var> is the name of the authorized VPC network that your Redis instance is attached to.</li> <li>
+<var translate="no">SUBNET</var> is the name of your subnet. The subnet must be <code translate="no" dir="ltr">/26</code> or larger. Direct VPC egress supports IPv4 ranges <a href="https://tools.ietf.org/html/rfc1918#section-3">RFC 1918</a>, <a href="https://tools.ietf.org/html/rfc6598#section-7">RFC 6598</a>, and Class E.</li> </ul> <p> Respond to any prompts to install required APIs by responding <code translate="no" dir="ltr">y</code> when prompted. You only need to do this once for a project. Respond to other prompts by supplying the platform and region, if you haven't set defaults for these as described in the <a href="../setup">setup</a> page. Learn more about <a href="../deploying-source-code">Deploying from source code</a>.</p>
+</li> </ol> <h2 id="trying-it-out">Try the service</h2> <p>To try out the complete service:</p> <ol> <li><p>Navigate your browser to the URL provided by the deployment step.</p></li> <li><p>Add your name and a chat room to sign in.</p></li> <li><p>Send a message to the room!</p></li> </ol> <aside class="success"><strong>Success:</strong><span> You built a multi-room, real-time chat service using WebSockets to maintain a persistent connection for bi-directional communication.</span></aside> <p>If you choose to continue developing these services, remember that they have restricted Identity and Access Management (IAM) access to the rest of Google Cloud and will need to be given additional IAM roles to access many other services.</p> </div> <section id="cleanup"> <h2 id="clean-up">Clean up</h2> <p>To avoid additional charges to your Google Cloud account, delete all the resources you deployed with this tutorial.</p> <h3 id="delete-project">Delete the project</h3> <p>If you created a new project for this tutorial, delete the project. If you used an existing project and need to keep it without the changes you added in this tutorial, <a href="#delete-resources">delete resources that you created for the tutorial</a>.</p> 
+<p> The easiest way to eliminate billing is to delete the project that you created for the tutorial. </p> <p>To delete the project: </p>
+<ol> <aside class="caution"> <strong>Caution</strong>: Deleting a project has the following effects: <ul> <li> <strong>Everything in the project is deleted.</strong> If you used an existing project for the tasks in this document, when you delete it, you also delete any other work you've done in the project. </li> <li> <strong>Custom project IDs are lost.</strong> When you created this project, you might have created a custom project ID that you want to use in the future. To preserve the URLs that use the project ID, such as an <code translate="no" dir="ltr">appspot.com</code> URL, delete selected resources inside the project instead of deleting the whole project. </li> </ul> <p> If you plan to explore multiple architectures, tutorials, or quickstarts, reusing projects can help you avoid exceeding project quota limits. </p> </aside> <li> In the Google Cloud console, go to the <b>Manage resources</b> page. <p><a href="https://console.cloud.google.com/iam-admin/projects" target="console" track-type="commonIncludes" track-name="consoleLink" track-metadata-end-goal="deleteProject" class="button button-primary">Go to Manage resources</a></p> </li> <li> In the project list, select the project that you want to delete, and then click <b>Delete</b>. </li> <li> In the dialog, type the project ID, and then click <b>Shut down</b> to delete the project. </li> </ol> <h3 id="delete-resources">Delete tutorial resources</h3> <ol> <li>
+<p>Delete the Cloud Run service you deployed in this tutorial. Cloud Run services don't incur costs until they receive requests.</p> <p>To delete your Cloud Run service, run the following command:</p> 
+<pre>gcloud run services delete SERVICE-NAME</pre> <p>Replace <var translate="no">SERVICE-NAME</var> with the name of your service.</p> <p>You can also delete Cloud Run services from the <a href="https://console.cloud.google.com/run">Google Cloud console</a>.</p>
+</li> <li>
+<p>Remove the <code translate="no" dir="ltr">gcloud</code> default region configuration you added during tutorial setup:</p> 
+<pre> gcloud config unset run/region
+</pre>
+</li> <li>
+<p>Remove the project configuration:</p> 
+<pre> gcloud config unset project
+</pre>
+</li> <li>
+<p>Delete other Google Cloud resources created in this tutorial:</p> <ul> <li>
+<a href="https://docs.cloud.google.com/artifact-registry/docs/docker/manage-images#deleting_images">Delete the service container image</a> named <code translate="no" dir="ltr">gcr.io/PROJECT_ID/chat-app</code> from Artifact Registry</li> <li><a href="https://docs.cloud.google.com/iam/docs/creating-managing-service-accounts#iam-service-accounts-delete-gcloud">Delete the service account <code translate="no" dir="ltr">chat-identity@PROJECT_ID.iam.gserviceaccount.com</code></a></li> <li><a href="https://docs.cloud.google.com/memorystore/docs/redis/creating-managing-instances#deleting_instances">Delete the Memorystore for Redis instance</a></li> </ul>
+</li> </ol> </section> <section id="whatsnext"> <h2 id="whats-next">What's next</h2> <ul> <li><p>Learn more about <a href="https://socket.io/docs/v4/how-it-works/">how Socket.io works</a> and more advanced usage.</p></li> <li><p>Dive deeper into <a href="../configuring/vpc-direct-vpc">Direct VPC egress with a VPC network</a>.</p></li> <li><p>Review best practices for <a href="https://docs.cloud.google.com/memorystore/docs/redis/general-best-practices">Memorystore</a> and for <a href="../triggering/websockets#client-reconnects">Using WebSockets on Cloud Run</a>.</p></li> </ul> </section>  </div><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/tutorials/websockets" class="_attribution-link">https://docs.cloud.google.com/run/docs/tutorials/websockets</a>
+  </p>
+</div>

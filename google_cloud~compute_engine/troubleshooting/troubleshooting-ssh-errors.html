@@ -122,6 +122,13 @@ ssh -i PATH_TO_PRIVATE_KEY USERNAME@EXTERNAL_IP
 <code translate="no" dir="ltr">0700</code> or <code translate="no" dir="ltr">0750</code> or <code translate="no" dir="ltr">0755</code> <sup>*</sup>
 </td> </tr> <tr> <td><code translate="no" dir="ltr">$HOME/.ssh</code></td> <td><code translate="no" dir="ltr">0700</code></td> </tr> <tr> <td><code translate="no" dir="ltr">$HOME/.ssh/authorized_keys</code></td> <td><code translate="no" dir="ltr">0600</code></td> </tr> </tbody> </table> 
 <p><sup>*</sup> To find out which of the options is the correct default permission for your <code translate="no" dir="ltr">$HOME</code> directory, refer to the official documentation for your specific Linux distribution.</p> <hr> <p>Alternatively, you can create a new VM based on the same image and check its default permissions for <code translate="no" dir="ltr">$HOME</code>.</p> <p>To learn how to change permissions and ownership, read about <a href="https://linux.die.net/man/1/chmod" class="external"><code translate="no" dir="ltr">chmod</code></a> and <a href="https://linux.die.net/man/1/chown" class="external"><code translate="no" dir="ltr">chown</code></a>.</p></section> </div> </li> <li>
+<p><strong>A user's home directory is missing.</strong> When the guest agent, <code translate="no" dir="ltr">google-guest-agent</code>, syncs metadata-based SSH keys, it writes keys to each user's <code translate="no" dir="ltr">$HOME/.ssh/authorized_keys</code> file. If a user account exists on the VM, such as in <code translate="no" dir="ltr">/etc/passwd</code>, but its home directory doesn't exist, <code translate="no" dir="ltr">google-guest-agent</code> logs a missing directory error in the serial port output for that user and moves on to the next user. As a result, SSH key provisioning fails for the user whose home directory is missing.</p> <p>To resolve this issue, do the following:</p> <ol> <li>Check the <a href="viewing-serial-port-output">serial port output</a> for <code translate="no" dir="ltr">google-guest-agent</code> errors indicating <code translate="no" dir="ltr">no such file or directory</code> for <code translate="no" dir="ltr">/home/<var translate="no">USERNAME</var></code>.</li> <li>
+<p>Connect to the VM using another administrator account, the <a href="#debug_with_serial_console">interactive serial console</a>, or an <a href="#use_startup_script">in-place startup script</a>, and then recreate the missing home directory with the correct ownership:</p> 
+<pre>
+sudo mkhomedir_helper USERNAME
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">USERNAME</var></code> with the username of the affected account.</p>
+</li> <li><p>Reconnect to the VM using <code translate="no" dir="ltr">gcloud compute ssh</code>, or <a href="../images/manage-guest-agent#restart-guest-agent">restart the guest agent</a> so that the guest agent writes existing metadata SSH keys to <code translate="no" dir="ltr">/home/<var translate="no">USERNAME</var>/.ssh/authorized_keys</code>.</p></li> </ol>
+</li> <li>
 <p><strong>The VM uses OS Login, and the <code translate="no" dir="ltr">sshd</code> daemon can't run the OS Login authorized keys command because of unsafe ownership or permissions.</strong> On VMs that use <a href="../oslogin">OS Login</a>, the <code translate="no" dir="ltr">sshd</code> daemon runs the <code translate="no" dir="ltr">/usr/bin/google_authorized_keys</code> command to retrieve your SSH keys. The <code translate="no" dir="ltr">sshd</code> daemon refuses to run this command if the file or any parent directory isn't owned by <code translate="no" dir="ltr">root</code> or is writable by the group or by other users. This issue causes connections from both the gcloud CLI and SSH-in-browser to fail, and the SSH logs on the VM, such as <code translate="no" dir="ltr">/var/log/auth.log</code> or <code translate="no" dir="ltr">/var/log/secure</code>, contain errors similar to the following:</p> 
 <pre>
 sshd[1297]: error: Unsafe AuthorizedKeysCommand "/usr/bin/google_authorized_keys": bad ownership or modes for directory /usr
@@ -497,7 +504,44 @@ cd /mnt/VM_NAME/var/log
 # Identify the issue preventing ssh from working
 ls
 </pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">VM_NAME</var></code> with the name of the VM you can't connect to.</p>
-</li> </ol> <h4 id="use_startup_script">Use a startup script</h4> <p>If none of the preceding helped, you can create a startup script to collect information right after the instance starts. Follow the instructions for <a href="../startupscript">running a startup script</a>.</p> <p>Afterward, you also need to reset your instance before the metadata takes effect by using <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instances/reset"><code translate="no" dir="ltr">gcloud compute instances reset</code></a>.</p> <p>Alternatively, you can also recreate your instance by running a diagnostic startup script:</p> <ol> <li>
+</li> </ol> <h4 id="use_startup_script">Use a startup script</h4> <p>If none of the preceding methods helped—or if an organization policy, such as <code translate="no" dir="ltr">constraints/compute.disableSerialPortAccess</code>, blocks access to the interactive serial console—you can run an in-place <a href="../startupscript">startup script</a> to collect diagnostic information or recover <code translate="no" dir="ltr">google-guest-agent</code> and <code translate="no" dir="ltr">sshd</code> during boot without recreating the VM:</p> <ol> <li>
+<p>Check whether the VM already has a <code translate="no" dir="ltr">startup-script</code> metadata entry and save its value so that you can restore it after recovery:</p> 
+<pre>
+gcloud compute instances describe VM_NAME \
+   --zone=ZONE \
+   --flatten="metadata.items[]" \
+   --filter="metadata.items.key=startup-script" \
+   --format="value(metadata.items.value)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">VM_NAME</var></code>: the name of the VM that you can't connect to</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ZONE</var></code>: the zone where the VM is located</li> </ul>
+</li> <li>
+<p>Add a <code translate="no" dir="ltr">startup-script</code> metadata entry to the existing VM to restart the <a href="../images/manage-guest-agent#restart-guest-agent">guest agent</a> and <code translate="no" dir="ltr">sshd</code>:</p> 
+<pre>
+gcloud compute instances add-metadata VM_NAME \
+   --zone=ZONE \
+   --metadata=startup-script='#! /bin/bash
+if systemctl list-unit-files google-guest-agent-manager.service &gt;/dev/null 2&gt;&amp;1 &amp;&amp; ! systemctl is-enabled --quiet google-guest-agent 2&gt;/dev/null; then
+ systemctl start google-guest-agent-manager &amp;&amp; ggactl_plugin coreplugin restart
+else
+ systemctl enable --now google-guest-agent &amp;&amp; systemctl restart google-guest-agent
+fi
+systemctl restart sshd ssh || true'
+</pre>
+</li> <li>
+<p>Reset the VM using the <a href="https://docs.cloud.google.com/sdk/gcloud/reference/compute/instances/reset"><code translate="no" dir="ltr">gcloud compute instances reset</code></a> command so that the startup script runs during boot:</p> 
+<pre>
+gcloud compute instances reset VM_NAME \
+   --zone=ZONE
+</pre>
+</li> <li>
+<p>After you reconnect to the VM, remove the temporary <code translate="no" dir="ltr">startup-script</code> metadata key, or restore the original <code translate="no" dir="ltr">startup-script</code> value that you saved in the first step:</p> 
+<pre>
+gcloud compute instances remove-metadata VM_NAME \
+   --zone=ZONE \
+   --keys=startup-script
+</pre>
+</li> </ol> <p>Alternatively, you can also recreate your instance by running a diagnostic startup script:</p> <ol> <li>
 <p>Run <code translate="no" dir="ltr">gcloud compute instances delete</code> with the <code translate="no" dir="ltr">--keep-disks</code> flag.</p> 
 <pre>
 gcloud compute instances delete VM_NAME \
@@ -513,7 +557,7 @@ gcloud compute instances create NEW_VM_NAME \
 <code translate="no" dir="ltr"><var translate="no">NEW_VM_NAME</var></code> is the name of the new VM you're creating</li> <li>
 <code translate="no" dir="ltr"><var translate="no">BOOT_DISK_NAME</var></code> is the name of the boot disk from the VM you can't connect to</li> <li>
 <code translate="no" dir="ltr"><var translate="no">URL</var></code> is the Cloud Storage URL to the script, in either <code translate="no" dir="ltr">gs://<var translate="no">BUCKET</var>/<var translate="no">FILE</var></code> or <code translate="no" dir="ltr">https://storage.googleapis.com/<var translate="no">BUCKET</var>/<var translate="no">FILE</var></code> format.</li> </ul>
-</li> </ol> <h4 id="move_boot_disk">Use your disk on a new instance</h4> <p>If you still need to recover data from your persistent boot disk, you can detach the boot disk and then attach that disk as a secondary disk on a new instance.</p> <ol> <li>
+</li> </ol> <h4 id="move_boot_disk">Use your disk on a new instance</h4> <p>If you still need to recover data from your boot disk, you can detach the boot disk and then attach that disk as a secondary disk on a new instance.</p> <ol> <li>
 <p>Delete the VM you can't connect to and keep its boot disk:</p> 
 <pre>
 gcloud compute instances delete VM_NAME \

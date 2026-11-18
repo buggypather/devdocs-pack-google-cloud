@@ -231,9 +231,79 @@ gcloud agent-registry services create RUNTIME_AGENT_SERVICE_NAME \
 }
 </pre></section> </div> <p>For more information, see <a href="https://docs.cloud.google.com/agent-registry/register-agents">Register agents</a>. To learn about manual registration of agents in multi-project setups, see <a href="https://docs.cloud.google.com/agent-registry/manual-registration#cross-project">Register an agent from another project</a>.</p>
 </li> <li>
-<p><strong>Create an agent-to-registry IAM policy binding</strong></p> <p>Perform this step in the same project and region as the Agent Gateway.</p> <div> <section><p class="_code-tab"><strong>gcloud</strong></p>
+<p><strong>Authorize outbound egress to registered destinations</strong></p> <p>When your Agent Gateway authorization extension is configured with <code translate="no" dir="ltr">iapPolicyVersion: "V2"</code> (the recommended setting in <a href="../../govern/gateways/set-up-agent-gateway">Set up Agent Gateway</a>), IAP evaluates <a href="../../govern/policies/configure-iam-policies-uap">IAM Unified Access Policies (UAPs)</a> bound to your project or organization.</p> <aside class="caution"> <p><strong>Caution:</strong> Under <code translate="no" dir="ltr">iapPolicyVersion: "V2"</code>, neither project-wide IAM allow bindings nor endpoint-level <code translate="no" dir="ltr">roles/iap.egressor</code> bindings (<code translate="no" dir="ltr">gcloud iap web add-iam-policy-binding --resource-type=agent-registry</code>) open outbound traffic. You must create and bind a UAP that grants <code translate="no" dir="ltr">iap.googleapis.com/resources.egressViaIAP</code>. Use <code translate="no" dir="ltr">roles/iap.egressor</code> only if your gateway's authorization extension is explicitly configured with legacy <code translate="no" dir="ltr">iapPolicyVersion: "V1"</code>.</p> </aside> <div> <section><p class="_code-tab"><strong>gcloud (UAP—V2, recommended)</strong></p>
+<ol> <li>Create a UAP that grants <code translate="no" dir="ltr">iap.googleapis.com/resources.egressViaIAP</code> on the registered endpoint:</li> </ol> 
+<pre data-language="sh">
+gcloud iam access-policies create POLICY_ID \
+    --project=AGENT_GATEWAY_PROJECT_ID \
+    --location=global \
+    --display-name="Allow agent egress to registered endpoint" \
+    --details-rules='[
+      {
+        "description": "Allow agent egress to registered endpoint",
+        "effect": "ALLOW",
+        "principals": [
+          "MEMBER"
+        ],
+        "operation": {
+          "permissions": [
+            "iap.googleapis.com/resources.egressViaIAP"
+          ]
+        },
+        "conditions": {
+          "iap.googleapis.com": {
+            "expression": "(destination.is_registered == true) &amp;&amp; (destination.agent_registry.endpoint.name == '\''projects/AGENT_GATEWAY_PROJECT_ID/locations/REGION/endpoints/AGENT_ENDPOINT_ID'\'')"
+          }
+        }
+      }
+    ]'
+</pre> <ol> <li>Bind the UAP to the project that hosts your Agent Gateway:</li> </ol> 
+<pre data-language="sh">
+gcloud iam policy-bindings create POLICY_BINDING_ID \
+    --project=AGENT_GATEWAY_PROJECT_ID \
+    --location=global \
+    --policy-kind=ACCESS \
+    --target-resource="//cloudresourcemanager.googleapis.com/projects/AGENT_GATEWAY_PROJECT_ID" \
+    --policy="projects/AGENT_GATEWAY_PROJECT_ID/locations/global/accessPolicies/POLICY_ID"
+</pre></section> <section><p class="_code-tab"><strong>Terraform (UAP—V2, recommended)</strong></p>
 
-<pre data-language="bash">
+<pre data-language="">resource "google_iam_project_access_policy" "egress_policy" {
+project          = "AGENT_GATEWAY_PROJECT_ID"
+location         = "global"
+access_policy_id = "POLICY_ID"
+display_name     = "Allow agent egress to registered endpoint"
+
+details {
+ rules {
+   description = "Allow agent egress to registered endpoint"
+   effect      = "ALLOW"
+   principals  = ["MEMBER"]
+
+   operation {
+     permissions = ["iap.googleapis.com/resources.egressViaIAP"]
+   }
+
+   conditions {
+     service    = "iap.googleapis.com"
+     expression = "(destination.is_registered == true) &amp;&amp; (destination.agent_registry.endpoint.name == 'projects/AGENT_GATEWAY_PROJECT_ID/locations/REGION/endpoints/AGENT_ENDPOINT_ID')"
+   }
+ }
+}
+}
+
+resource "google_iam_projects_policy_binding" "egress_binding" {
+project           = "AGENT_GATEWAY_PROJECT_ID"
+location          = "global"
+policy_binding_id = "POLICY_BINDING_ID"
+policy_kind       = "ACCESS"
+policy            = "projects/AGENT_GATEWAY_PROJECT_ID/locations/global/accessPolicies/${google_iam_project_access_policy.egress_policy.access_policy_id}"
+
+target {
+ resource = "//cloudresourcemanager.googleapis.com/projects/AGENT_GATEWAY_PROJECT_ID"
+}
+}</pre></section> <section><p class="_code-tab"><strong>gcloud (Legacy V1 allow policy)</strong></p>
+<p>If your gateway's authorization extension is configured with <code translate="no" dir="ltr">iapPolicyVersion: "V1"</code>, bind <code translate="no" dir="ltr">roles/iap.egressor</code> in the same project and region as the Agent Gateway:</p> 
+<pre data-language="sh">
 gcloud iap web add-iam-policy-binding \
  --resource-type=agent-registry \
  --endpoint=AGENT_ENDPOINT_ID \
@@ -241,7 +311,7 @@ gcloud iap web add-iam-policy-binding \
  --project=AGENT_GATEWAY_PROJECT_ID \
  --member=MEMBER \
  --role=roles/iap.egressor
-</pre></section> <section><p class="_code-tab"><strong>Terraform</strong></p>
+</pre></section> <section><p class="_code-tab"><strong>Terraform (Legacy V1 allow policy)</strong></p>
 
 <pre data-language="">resource "google_iap_agent_registry_endpoint_iam_member" "egress_binding" {
   project     = "AGENT_GATEWAY_PROJECT_ID"
@@ -250,18 +320,22 @@ gcloud iap web add-iam-policy-binding \
   role        = "roles/iap.egressor"
   member      = "MEMBER"
 }
-</pre></section> </div> <p>Replace the following:</p> <ul> <li>
-<code translate="no" dir="ltr"><var translate="no">AGENT_ENDPOINT_ID</var></code>: The service endpoint ID of the registered agent. You get this from the output of the previous step.</li> <li>
-<p><code translate="no" dir="ltr"><var translate="no">MEMBER</var></code>: The agent identity principal to grant the role to. The format for an individual reasoning engine is: <code translate="no" dir="ltr">principal://<var translate="no">TRUST_DOMAIN</var>/resources/aiplatform/projects/<var translate="no">AGENT_RUNTIME_PROJECT_NUMBER</var>/locations/<var translate="no">REGION</var>/reasoningEngines/<var translate="no">ENGINE_ID</var></code>.</p> <p>If you want to grant egress access to all agents in a project or across the organization rather than binding individual instances, you can bind the IAM policy to a principal set:</p> <ul> <li>To grant access to all agents in a project: <code translate="no" dir="ltr">principalSet://<var translate="no">TRUST_DOMAIN</var>/attribute.platformContainer/aiplatform/projects/<var translate="no">AGENT_RUNTIME_PROJECT_NUMBER</var></code>
-</li> <li>To grant access to all agents across the organization: <code translate="no" dir="ltr">principalSet://<var translate="no">TRUST_DOMAIN</var>/*</code>
-</li> </ul> <p>In these principal strings, <code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN</var></code> is typically <code translate="no" dir="ltr">agents.global.org-<var translate="no">ORGANIZATION_ID</var>.system.id.goog</code>.</p>
+</pre></section> </div> <p>Replace the following:</p> <ul> <li><p><code translate="no" dir="ltr"><var translate="no">POLICY_ID</var></code>: A unique ID for the UAP, such as <code translate="no" dir="ltr">agent-endpoint-egress-policy</code>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">POLICY_BINDING_ID</var></code>: A unique ID for the policy binding, such as <code translate="no" dir="ltr">agent-endpoint-egress-binding</code>.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">AGENT_GATEWAY_PROJECT_ID</var></code>: The project ID where the Agent Gateway and Agent Registry endpoint are configured.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region where the Agent Gateway and endpoint are located.</p></li> <li><p><code translate="no" dir="ltr"><var translate="no">AGENT_ENDPOINT_ID</var></code>: The service endpoint ID of the registered endpoint in Agent Registry, returned in the <code translate="no" dir="ltr">registryResource</code> output in step 4. This ID differs from <code translate="no" dir="ltr">RUNTIME_AGENT_SERVICE_NAME</code>. Don't include a leading slash before <code translate="no" dir="ltr">projects/</code> in <code translate="no" dir="ltr">destination.agent_registry.endpoint.name</code>.</p></li> <li>
+<p><code translate="no" dir="ltr"><var translate="no">MEMBER</var></code>: The agent identity principal to grant access to. The format for an individual reasoning engine is: <code translate="no" dir="ltr">principal://<var translate="no">TRUST_DOMAIN</var>/resources/aiplatform/projects/<var translate="no">AGENT_RUNTIME_PROJECT_NUMBER</var>/locations/<var translate="no">REGION</var>/reasoningEngines/<var translate="no">ENGINE_ID</var></code>.</p> <p>Replace the following in the principal string:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">TRUST_DOMAIN</var></code>: <code translate="no" dir="ltr">agents.global.org-<var translate="no">ORGANIZATION_ID</var>.system.id.goog</code>, where <code translate="no" dir="ltr"><var translate="no">ORGANIZATION_ID</var></code> is your Google Cloud organization ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">AGENT_RUNTIME_PROJECT_NUMBER</var></code>: The project number where the Runtime agent is deployed.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ENGINE_ID</var></code>: The resource ID of the agent runtime deployment.</li> </ul> <p>If you want to grant egress access to all agents in a project or across the organization rather than binding individual instances, you can bind the policy to a principal set:</p> <ul> <li><p>To grant access to all agents in a project: <code translate="no" dir="ltr">principalSet://<var translate="no">TRUST_DOMAIN</var>/attribute.platformContainer/aiplatform/projects/<var translate="no">AGENT_RUNTIME_PROJECT_NUMBER</var></code></p></li> <li><p>To grant access to all agents across the organization: <code translate="no" dir="ltr">principalSet://<var translate="no">TRUST_DOMAIN</var>/*</code></p></li> </ul>
 </li> </ul>
 </li> <li>
 <p><strong>Allowlist essential APIs for Runtime operations</strong></p> <p>At this point your agent traffic is now directed through the Agent Gateway. However, Agent Gateway adopts a <em>default deny</em> policy. To enable certain Agent Platform functions, you must ensure that the agent can communicate with the following endpoints:</p> <p>Hostname matching in Agent Gateway is exact. Wildcards, such as <code translate="no" dir="ltr">*.googleapis.com</code>, or prefix forms aren't supported. You must register each standard, regional, and secure (mTLS) hostname variant that your agent SDK or client application resolves to.</p> <p>To enable certain Agent Platform functions and ensure successful initialization and telemetry, you must allow traffic to the following endpoints in the Agent Registry:</p> <h3 id="essential_platform_endpoints">Essential platform endpoints</h3> <p>The following table lists the essential platform endpoints that your agents require for standard operations, tracing, logging, and metadata resolution:</p> <table> <thead> <tr> <th>Service name</th> <th>Standard hostname</th> <th>mTLS hostname</th> <th>Regional and other variants</th> </tr> </thead> <tbody> <tr> <td><strong>Agent Registry</strong></td> <td><code translate="no" dir="ltr">agentregistry.googleapis.com</code></td> <td>—</td> <td>—</td> </tr> <tr> <td><strong>Cloud Logging</strong></td> <td><code translate="no" dir="ltr">logging.googleapis.com</code></td> <td><code translate="no" dir="ltr">logging.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>Cloud Trace / Telemetry</strong></td> <td><code translate="no" dir="ltr">telemetry.googleapis.com</code></td> <td><code translate="no" dir="ltr">telemetry.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>Trace API</strong></td> <td><code translate="no" dir="ltr">cloudtrace.googleapis.com</code></td> <td><code translate="no" dir="ltr">cloudtrace.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>Cloud Monitoring</strong></td> <td><code translate="no" dir="ltr">monitoring.googleapis.com</code></td> <td><code translate="no" dir="ltr">monitoring.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>Secret Manager</strong></td> <td><code translate="no" dir="ltr">secretmanager.googleapis.com</code></td> <td><code translate="no" dir="ltr">secretmanager.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>Resource Manager</strong></td> <td><code translate="no" dir="ltr">cloudresourcemanager.googleapis.com</code></td> <td><code translate="no" dir="ltr">cloudresourcemanager.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>IAM credentials</strong></td> <td><code translate="no" dir="ltr">iamcredentials.googleapis.com</code></td> <td><code translate="no" dir="ltr">iamcredentials.mtls.googleapis.com</code></td> <td>—</td> </tr> <tr> <td><strong>Agent Platform (aiplatform)</strong></td> <td><code translate="no" dir="ltr">aiplatform.googleapis.com</code></td> <td><code translate="no" dir="ltr">aiplatform.mtls.googleapis.com</code></td> <td> <code translate="no" dir="ltr"><var translate="no">REGION</var>-aiplatform.googleapis.com</code><br> <code translate="no" dir="ltr"><var translate="no">REGION</var>-aiplatform.mtls.googleapis.com</code><br> <code translate="no" dir="ltr">aiplatform.<var translate="no">REGION</var>.rep.googleapis.com</code> </td> </tr> </tbody> </table> <h3 id="feature-specific_endpoints">Feature-specific endpoints</h3> <p>Additionally, if your agents use features such as <a href="../sessions">Sessions</a> or <a href="../memory-bank">Agent Platform Memory Bank</a>, you must ensure that the agents can communicate with the specific endpoints used by these services:</p> <ul> <li>
 <strong>For Sessions</strong>: <code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.googleapis.com/<var translate="no">API_VERSION</var>/projects/<var translate="no">PROJECT_ID</var>/locations/<var translate="no">REGION</var>/reasoningEngines/<var translate="no">RESOURCE_ID</var>/sessions</code>
 </li> <li>
 <strong>For Memory Bank</strong>: <code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.googleapis.com/<var translate="no">API_VERSION</var>/projects/<var translate="no">PROJECT_ID</var>/locations/<var translate="no">REGION</var>/reasoningEngines/<var translate="no">RESOURCE_ID</var>/memories</code>
-</li> </ul> <p>For security reasons, we recommend that you register and allowlist only the specific URIs that the agent accesses. Because the gateway matches hostnames directly, you must ensure that you register all the variants that the agent SDK uses. For example, depending on the SDK version, regional client configuration, or mTLS usage, a Google API can resolve through the following endpoint hostnames:</p> <ul> <li><code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.googleapis.com</code></li> <li><code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.mtls.googleapis.com</code></li> <li><code translate="no" dir="ltr">https://aiplatform.<var translate="no">REGION</var>.rep.googleapis.com</code></li> </ul> <aside class="caution"><strong>Caution:</strong><span> While you can register a base URI (such as <code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.googleapis.com/</code>) for convenience, doing so provides a broad access policy that lets the agent access any service under that domain. Note that even if you register a base URI, you are still required to register all its regional and mTLS variants.</span></aside> <p>To learn how to register endpoints, see <a href="https://docs.cloud.google.com/agent-registry/register-endpoints">Register endpoints</a>. If you have a multi-project setup, you can register multiple core Google API endpoints in a single Agent Registry service. For more information, see <a href="https://docs.cloud.google.com/agent-registry/register-endpoints#google-apis-endpoint">Register a composite Google APIs endpoint</a>. You must also ensure that the agent has the <code translate="no" dir="ltr">iap.resources.egressViaIAP</code> permission for these endpoints. For instructions, see <a href="../../govern/policies/configure-iam-policies-uap#agent-to-endpoint">Create an agent-to-endpoint egress policy</a>.</p>
+</li> </ul> <p>For security reasons, we recommend that you register and allowlist only the specific URIs that the agent accesses. Because the gateway matches hostnames directly, you must ensure that you register all the variants that the agent SDK uses. For example, depending on the SDK version, regional client configuration, or mTLS usage, a Google API can resolve through the following endpoint hostnames:</p> <ul> <li><code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.googleapis.com</code></li> <li><code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.mtls.googleapis.com</code></li> <li><code translate="no" dir="ltr">https://aiplatform.<var translate="no">REGION</var>.rep.googleapis.com</code></li> </ul> <aside class="caution"><strong>Caution:</strong><span> While you can register a base URI (such as <code translate="no" dir="ltr">https://<var translate="no">REGION</var>-aiplatform.googleapis.com/</code>) for convenience, doing so provides a broad access policy that lets the agent access any service under that domain. Note that even if you register a base URI, you are still required to register all its regional and mTLS variants.</span></aside> <p>To learn how to register endpoints, see <a href="https://docs.cloud.google.com/agent-registry/register-endpoints">Register endpoints</a>. If you have a multi-project setup, you can register multiple core Google API endpoints in a single Agent Registry service. For more information, see <a href="https://docs.cloud.google.com/agent-registry/register-endpoints#google-apis-endpoint">Register a composite Google APIs endpoint</a>. You must also ensure that the agent has the <code translate="no" dir="ltr">iap.googleapis.com/resources.egressViaIAP</code> permission for these endpoints. For instructions, see <a href="../../govern/policies/configure-iam-policies-uap#agent-to-endpoint">Create an agent-to-endpoint egress policy</a>.</p> <p>Alternatively, if you don't register these platform endpoints in Agent Registry, add a scoped domain allowlist rule to your UAP that explicitly lists the required hostnames:</p> 
+<pre data-language="text">
+(destination.is_registered == false) &amp;&amp; (destination.unregistered.host in ['agentregistry.googleapis.com', 'logging.googleapis.com', 'logging.mtls.googleapis.com', 'telemetry.googleapis.com', 'telemetry.mtls.googleapis.com', 'cloudtrace.googleapis.com', 'cloudtrace.mtls.googleapis.com', 'monitoring.googleapis.com', 'monitoring.mtls.googleapis.com', 'secretmanager.googleapis.com', 'secretmanager.mtls.googleapis.com', 'cloudresourcemanager.googleapis.com', 'cloudresourcemanager.mtls.googleapis.com', 'iamcredentials.googleapis.com', 'iamcredentials.mtls.googleapis.com', 'aiplatform.googleapis.com', 'aiplatform.mtls.googleapis.com', 'REGION-aiplatform.googleapis.com', 'REGION-aiplatform.mtls.googleapis.com', 'aiplatform.REGION.rep.googleapis.com'])
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">REGION</var></code>: The region where the Agent Gateway and endpoint are located, such as <code translate="no" dir="ltr">us-central1</code>.</li> </ul> <aside class="caution"> <p><strong>Caution:</strong> Never use a wildcard unregistered egress rule (such as allowing <code translate="no" dir="ltr">destination.is_registered == false</code> without a <code translate="no" dir="ltr">destination.unregistered.host</code> allowlist) in production. A wildcard unregistered rule bypasses Agent Gateway egress governance and allows the agent to reach arbitrary external hosts. For more information, see <a href="../../govern/policies/configure-iam-policies-uap#example-unregistered-endpoints">Create an agent-to-unregistered endpoint UAP</a>.</p> </aside>
 </li> <li>
 <p><strong>Verify agent configuration</strong></p> <div> <section><p class="_code-tab"><strong>Console</strong></p>
 <ol> <li>In the Google Cloud console, go to the Agent Platform <b>Deployments</b> page.<br> <p><a class="button button-primary" href="https://console.cloud.google.com/agent-platform/runtimes" target="console">Go to Deployments</a></p>

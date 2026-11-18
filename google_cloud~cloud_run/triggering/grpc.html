@@ -1,0 +1,124 @@
+<h1>Using gRPC</h1> <p>This page shows Cloud Run-specific details for developers who want to use <a href="https://grpc.io/">gRPC</a> to connect a Cloud Run service with other services, for example, to provide simple, high performance communication between internal microservices. You can use <a href="https://grpc.io/docs/what-is-grpc/core-concepts#rpc-life-cycle">all gRPC types</a>, streaming or unary, with Cloud Run.</p> <p>Possible use cases include:</p> <ul> <li>Communication between internal microservices.</li> <li>High loads of data (gRPC uses <a href="https://developers.google.com/protocol-buffers" class="external">protocol buffers</a>, which are up to seven times faster than REST calls).</li> <li>Only a simple service definition is needed, you don't want to write a full client library.</li> <li>Use streaming gRPCs in your gRPC server to build more responsive applications and APIs.</li> </ul> <p>To integrate your service with gRPC:</p> <ul> <li>Configure your service to use HTTP/2 if you are using streaming gRPC. HTTP/2 is the transport method for gRPC streaming.</li> <li>Define the request messages and responses in a proto file and compile them.</li> <li>Create a gRPC server to handle requests and return responses: it should listen to the <code translate="no" dir="ltr">PORT</code> environment variable.</li> <li>Create a client that sends requests and handles responses from the gRPC server.</li> <li>Optionally, add authentication.</li> <li>Build and deploy your service.</li> </ul> <h2 id="configuring_your_service_to_use_http2">Configuring your service to use HTTP/2</h2> <p>Google recommends <a href="../configuring/http2">configuring your service to use HTTP/2</a> if you use gRPC with Cloud Run. Although some simple gRPC features work without using HTTP/2, many gRPC features, such as streaming and metadata, require HTTP/2.</p> <h2 id="messages">Defining and compiling messages in a proto file</h2> <p>There are no extra or Cloud Run-specific things to add to your proto definitions. Just as with any other use of gRPC, you use <a href="https://grpc.io/docs/guides/#working-with-protocol-buffers">gRPC protocol buffers</a> for service definitions and data serialization.</p> <h2 id="creating_a_grpc_client">Creating a gRPC client</h2> <p>There are no extra or Cloud Run specific things to add to a client that uses gRPC: follow the gRPC docs on using service definitions in <a href="https://grpc.io/docs/guides/concepts/#using-the-api">client code</a>, and the sample clients provided in the language-specific <a href="https://grpc.io/docs/languages">gRPC tutorials</a>.</p> <h2 id="autoscaling_and_load_balancing">Autoscaling and load balancing</h2> <p>Cloud Run uses Google-managed load balancers that keep separate connections between clients and your Cloud Run instances. With gRPC, autoscaling behaves as follows:</p> <ul> <li>gRPC connections from clients end at the edge load balancer. Adjusting <code translate="no" dir="ltr">KeepAlive</code> settings only affects the connection to the load balancer, not the Cloud Run instances. The client doesn't recognize when an instance drops.</li> <li>During scale-in, the load balancer closes connections by sending GOAWAY messages to the backend instances as they shut down.</li> <li>During scale-out, the load balancer creates new connections to the backend instances. All these operations are transparent to clients.</li> <li>During autoscaling, many instances can start up and multiplex into a single connection between the client and the proxy load balancer.</li> <li>Concurrency is determined by the <a href="../about-concurrency">maximum concurrent requests per instance</a> for messages. In streaming, each stream is counted once against the maximum concurrent requests.</li> </ul> <h2 id="unauthenticated-grpc">Listening for gRPC requests in a Cloud Run service</h2> <p>The only special requirement for a gRPC server running in Cloud Run is to listen at the port specified by the <code translate="no" dir="ltr">PORT</code> environment variable as shown in the following code:</p> 
+<div id="run_grpc_handler-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">func main() {
+	log.Printf("grpc-ping: starting server...")
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+		log.Printf("Defaulting to port %s", port)
+	}
+
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("net.Listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	pb.RegisterPingServiceServer(grpcServer, &amp;pingService{})
+	if err = grpcServer.Serve(listener); err != nil {
+		log.Fatal(err)
+	}
+}
+</pre> </div> </section> </div> <h2 id="connect">Opening a gRPC connection to a service</h2> <p>To open a gRPC connection to a service so you can send gRPC messages, you need to specify the host domain, which is the URL of the Cloud Run service or the custom domain <a href="../mapping-custom-domains">mapped</a> to that service, along with the port 443, which is the port expected to be used by gRPC.</p> 
+<div id="run_grpc_connection-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+import (
+	"crypto/tls"
+	"crypto/x509"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+)
+
+// NewConn creates a new gRPC connection.
+// host should be of the form domain:port, e.g., example.com:443
+func NewConn(host string, insecure bool) (*grpc.ClientConn, error) {
+	var opts []grpc.DialOption
+	if host != "" {
+		opts = append(opts, grpc.WithAuthority(host))
+	}
+
+	if insecure {
+		opts = append(opts, grpc.WithInsecure())
+	} else {
+		// Note: On the Windows platform, use of x509.SystemCertPool() requires
+		// Go version 1.18 or higher.
+		systemRoots, err := x509.SystemCertPool()
+		if err != nil {
+			return nil, err
+		}
+		cred := credentials.NewTLS(&amp;tls.Config{
+			RootCAs: systemRoots,
+		})
+		opts = append(opts, grpc.WithTransportCredentials(cred))
+	}
+
+	return grpc.Dial(host, opts...)
+}
+</pre> </div> </section> </div> <h2 id="request-no-auth">Sending gRPC requests without authentication</h2> <p>The following sample shows how to send a request without authentication, using a <a href="#connect">gRPC connection</a> configured as mentioned previously.</p> 
+<div id="run_grpc_handler-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+import (
+	"context"
+	"time"
+
+	pb "github.com/GoogleCloudPlatform/golang-samples/run/grpc-ping/pkg/api/v1"
+	"google.golang.org/grpc"
+)
+
+// pingRequest sends a new gRPC ping request to the server configured in the connection.
+func pingRequest(conn *grpc.ClientConn, p *pb.Request) (*pb.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := pb.NewPingServiceClient(conn)
+	return client.Send(ctx, p)
+}
+</pre> </div> </section> </div> <h2 id="request-auth">Sending gRPC requests with authentication</h2> <p>The following sample shows how to use authentication between services, if the calling service has invoker permission to the receiving service. Notice that this code creates an authorization header that has the proper identity token: this is required. The required permissions and the authorization header are described in detail in <a href="../authenticating/service-to-service">service to service authentication</a>.</p> 
+<div id="run_grpc_handler-tabs" class="ds-selector-tabs" data-ds-scope="code-sample"> <section> <p class="_code-tab"><strong>Go</strong></p> <div class="github-docwidget-gitinclude-code"> 
+<pre data-language="go">
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"google.golang.org/api/idtoken"
+	"google.golang.org/grpc"
+	grpcMetadata "google.golang.org/grpc/metadata"
+
+	pb "github.com/GoogleCloudPlatform/golang-samples/run/grpc-ping/pkg/api/v1"
+)
+
+// pingRequestWithAuth mints a new Identity Token for each request.
+// This token has a 1 hour expiry and should be reused.
+// audience must be the auto-assigned URL of a Cloud Run service or HTTP Cloud Function without port number.
+func pingRequestWithAuth(conn *grpc.ClientConn, p *pb.Request, audience string) (*pb.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create an identity token.
+	// With a global TokenSource tokens would be reused and auto-refreshed at need.
+	// A given TokenSource is specific to the audience.
+	tokenSource, err := idtoken.NewTokenSource(ctx, audience)
+	if err != nil {
+		return nil, fmt.Errorf("idtoken.NewTokenSource: %w", err)
+	}
+	token, err := tokenSource.Token()
+	if err != nil {
+		return nil, fmt.Errorf("TokenSource.Token: %w", err)
+	}
+
+	// Add token to gRPC Request.
+	ctx = grpcMetadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token.AccessToken)
+
+	// Send the request.
+	client := pb.NewPingServiceClient(conn)
+	return client.Send(ctx, p)
+}
+</pre> </div> </section> </div> <h2 id="sample_code_for_grpc_streaming">Sample code for gRPC streaming</h2> <p>For sample code, refer to the <code translate="no" dir="ltr">RouteGuide</code> implementation in the <a href="https://grpc.io/">gRPC</a> Basics tutorial for the language of your choice. When using Go, for example, refer to <a href="https://grpc.io/docs/languages/go/basics/#implementing-routeguide">Implementing RouteGuide</a>.</p><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/run/docs/triggering/grpc" class="_attribution-link">https://docs.cloud.google.com/run/docs/triggering/grpc</a>
+  </p>
+</div>

@@ -1,0 +1,223 @@
+<h1>Set up Agent Gateway for cross-cloud</h1> <aside class="beta"> <p> <strong> Preview </strong> </p> <p> This feature is subject to the "Pre-GA Offerings Terms" in the General Service Terms section of the <a href="https://docs.cloud.google.com/terms/service-terms#1" track-type="commonIncludes">Service Specific Terms</a>. Pre-GA features are available "as is" and might have limited support. For more information, see the <a href="https://cloud.google.com/products/#product-launch-stages" track-type="commonIncludes">launch stage descriptions</a>. </p> </aside> <aside class="note"><b>Request access:</b> Agent Gateway for cross-cloud is available in Limited Preview. To use this feature, complete the <a href="https://docs.google.com/forms/d/e/1FAIpQLSeUpnNRtYQjLRblii-KoUbJJ7DjEV6fvQAfO21IAXgVSqFjpw/viewform">access request form</a>.</aside> <p>This guide explains how to deploy Agent Gateway for cross-cloud on standard Kubernetes clusters to extend Gemini Enterprise Agent Platform governance to your environment. For an overview of the three-plane architecture, see the <a href="overview">Agent Gateway for cross-cloud overview</a>.</p> <h2 id="before-you-begin">Before you begin</h2> <p>Before you begin, ensure that you have the following:</p> <ul> <li>A Cloud Native Computing Foundation (CNCF)-conformant Kubernetes cluster.</li> <li>An existing service mesh or network stack configured in your cluster.</li> <li>Outbound network connectivity from your cluster to Google Cloud APIs over HTTPS (TCP port <code translate="no" dir="ltr">443</code>).</li> <li>The Google Cloud CLI version 591.0.0 or later installed. To update to the latest version, run <code translate="no" dir="ltr">gcloud components update</code>.</li> <li>The Identity and Access Management (IAM) roles on your Google Cloud project that you need to enable APIs, create a workload identity pool and provider, and grant IAM roles.</li> </ul> <h2 id="enable-apis-and-register-cluster">Enable APIs and register the cluster</h2> <p>Enable the required Google Cloud APIs, and then register your external cluster.</p> <h3 id="enable-apis">Enable the required APIs</h3> <p>To enable the APIs that Agent Gateway for cross-cloud requires, run the following command:</p> 
+<pre>
+gcloud services enable \
+    agentregistry.googleapis.com \
+    apphubendpoint.googleapis.com \
+    cloudresourcemanager.googleapis.com \
+    cloudtrace.googleapis.com \
+    iam.googleapis.com \
+    iamcredentials.googleapis.com \
+    iap.googleapis.com \
+    logging.googleapis.com \
+    modelarmor.googleapis.com \
+    monitoring.googleapis.com \
+    networkservices.googleapis.com \
+    serviceextensions.googleapis.com \
+    sts.googleapis.com \
+    telemetry.googleapis.com \
+    trafficdirector.googleapis.com \
+    --project=PROJECT_ID
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code> with the ID of your Google Cloud project.</p> <h3 id="extract-api-server-public-key">Extract the Kubernetes API server public key</h3> <p>To register your cluster, you need the public key that your cluster uses to sign service account tokens. To extract the public key, do the following:</p> <ol> <li><p>Set your current <code translate="no" dir="ltr">kubectl</code> context to the cluster that you want to register.</p></li> <li>
+<p>Retrieve the JSON Web Key Set (JWKS) of your cluster, and then convert the first RSA key to a public key file named <code translate="no" dir="ltr">pubkey.pem</code>:</p> 
+<pre>
+kubectl get --raw /openid/v1/jwks &gt; cluster-jwks.json
+
+N_HEX=$(jq -r '[.keys[] | select((.kty // "" | ascii_upcase) == "RSA" and (.n // "") != "" and (.e // "") != "")][0].n | gsub("-";"+") | gsub("_";"/") | . + ("==="[:(4 - length % 4) % 4])' cluster-jwks.json | base64 -d | od -An -tx1 | tr -d ' \n')
+E_HEX=$(jq -r '[.keys[] | select((.kty // "" | ascii_upcase) == "RSA" and (.n // "") != "" and (.e // "") != "")][0].e | gsub("-";"+") | gsub("_";"/") | . + ("==="[:(4 - length % 4) % 4])' cluster-jwks.json | base64 -d | od -An -tx1 | tr -d ' \n')
+
+openssl asn1parse -genconf &lt;(printf "asn1=SEQUENCE:rsa_key\n[rsa_key]\nmodulus=INTEGER:0x%s\nexponent=INTEGER:0x%s\n" "$N_HEX" "$E_HEX") -noout -out /dev/stdout \
+  | openssl rsa -RSAPublicKey_in -inform DER -pubout -out pubkey.pem
+</pre> <p>These commands require a Bash shell and the <code translate="no" dir="ltr">jq</code> and <code translate="no" dir="ltr">openssl</code> utilities.</p>
+</li> </ol> <h3 id="register-cluster">Register the cluster</h3> <p>To register your cluster, do the following:</p> <ol> <li>
+<p>Retrieve the OpenID Connect (OIDC) issuer URL of your cluster:</p> 
+<pre>
+kubectl get --raw /.well-known/openid-configuration | jq -r '.issuer'
+</pre> <p>The output is the value of the <code translate="no" dir="ltr">--service-account-issuer</code> flag of your cluster's Kubernetes API server. This value might differ from the external URL of your Kubernetes API server. Copy the output exactly. Don't add or remove a trailing slash.</p>
+</li> <li>
+<p>Register the cluster:</p> 
+<pre>
+gcloud alpha network-services registered-clusters create CLUSTER_NAME \
+    --project=PROJECT_ID \
+    --location=LOCATION \
+    --oidc-issuer-url=OIDC_ISSUER_URL \
+    --api-server-public-key="$(cat pubkey.pem)"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: a name for the registered cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: the ID of your Google Cloud project.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the Google Cloud region for the registered cluster—for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">OIDC_ISSUER_URL</var></code>: the exact issuer URL that you retrieved in the previous step. The URL must start with <code translate="no" dir="ltr">https://</code>.</li> </ul>
+</li> </ol> <h3 id="prevent-accidental-deletion">Prevent accidental resource deletion</h3> <p>Deleting your Google Cloud project or unregistering a registered cluster while cross-cloud workloads are active disconnects in-cluster controllers and disrupts policy enforcement. To protect your Google Cloud resources from accidental deletion, apply the following safeguards:</p> <ul> <li>
+<strong>Protect the Google Cloud project with liens</strong>: Apply a <a href="https://docs.cloud.google.com/resource-manager/docs/project-liens">project lien</a> to the Google Cloud project that hosts your registered cluster, <a href="../../../govern/agent-registry">Agent Registry</a>, and federated identity pools to block accidental project deletion until all cross-cloud clusters are decommissioned.</li> <li>
+<strong>Restrict destructive IAM permissions</strong>: Limit permissions that can delete registered clusters or gateway resources (such as <code translate="no" dir="ltr">networkservices.registeredClusters.delete</code> and <code translate="no" dir="ltr">networkservices.agentGateways.delete</code>) to dedicated platform administrator roles.</li> <li>
+<strong>Retain Kubernetes resource finalizers</strong>: Don't remove finalizers on in-cluster custom resources managed by the <code translate="no" dir="ltr">agent-governance-cross-cloud-controller</code> controller. Finalizers ensure that corresponding Google Cloud control plane registrations are cleanly deprovisioned before local cluster resources are removed.</li> <li>
+<strong>Delete custom resources before you remove the controller</strong>: Before you uninstall the <code translate="no" dir="ltr">agent-governance-cross-cloud</code> Helm chart or delete your Kubernetes cluster, delete all <code translate="no" dir="ltr">GCPExtensionBinding</code> and <code translate="no" dir="ltr">GCPAgentGateway</code> custom resources, and wait for the deletion to complete. If you remove the controller first, the corresponding Agent Gateway resource remains orphaned in Network Services. The orphaned gateway blocks deletion of the agent connectivity template and the registered cluster.</li> </ul> <h2 id="configure-identity-federation">Configure Workload Identity Federation</h2> <p>The in-cluster components of Agent Gateway for cross-cloud—the <code translate="no" dir="ltr">agent-governance-cross-cloud-controller</code> controller, the telemetry collector, and the proxy—use Workload Identity Federation to authenticate to Google Cloud APIs. Each component exchanges its Kubernetes service account (KSA) token for a federated access token. You grant IAM roles directly to these federated identities, so you don't need to create Google Cloud service accounts or store service account keys in your cluster.</p> <p>The Agent Identity Runtime (AIR) sidecar that runs with each proxy uses the workload identity pool to provide SPIFFE identities to your agent workloads. These identities are the <a href="../../../govern/agent-identity-overview">Agent Identities</a> of your agents. Model Armor and IAP policies identify agents by their Agent Identity, not by the federated identities of the in-cluster components. For the principal format, see <a href="enforce-policies#identify-agent-principal">Identify the agent principal</a>.</p> <aside class="important"><b>Important:</b> Don't grant Google Cloud project IAM roles to agent workload namespaces or agent Kubernetes service accounts on the workload identity pool. Only the dedicated control plane namespace (<code translate="no" dir="ltr">geap-system</code>) and dedicated gateway namespace receive Google Cloud IAM role bindings. Don't run any other workloads in these namespaces. Agent workloads exchange their Kubernetes service account tokens only for scoped Agent Identities governed by IAP and Model Armor policies.</aside> <h3 id="create-pool-provider">Create a workload identity pool and provider</h3> <p>To create a workload identity pool and an OIDC provider for your cluster, do the following:</p> <ol> <li>
+<p>If your cluster's OIDC issuer URL isn't publicly reachable, save the JSON Web Key Set (JWKS) of your cluster to a file:</p> 
+<pre>
+kubectl get --raw /openid/v1/jwks &gt; cluster-jwks.json
+</pre> <p>When you provide the JWKS to the provider, Google Cloud can verify KSA tokens without connecting to your cluster's OIDC issuer.</p>
+</li> <li>
+<p>Create a workload identity pool:</p> 
+<pre>
+gcloud iam workload-identity-pools create POOL_ID \
+    --project=PROJECT_ID \
+    --location=global \
+    --display-name="POOL_DISPLAY_NAME"
+</pre>
+</li> <li>
+<p>Create an OIDC provider in the pool:</p> 
+<pre>
+gcloud iam workload-identity-pools providers create-oidc PROVIDER_ID \
+    --project=PROJECT_ID \
+    --location=global \
+    --workload-identity-pool=POOL_ID \
+    --issuer-uri=OIDC_ISSUER_URL \
+    --jwk-json-path=cluster-jwks.json \
+    --attribute-mapping="google.subject=assertion.sub,attribute.namespace=assertion['kubernetes.io']['namespace'],attribute.service_account=assertion['kubernetes.io']['serviceaccount']['name']"
+</pre> <aside class="note"><strong>Note:</strong><span> If your cluster's OIDC issuer URL isn't publicly reachable, you must specify the <code translate="no" dir="ltr">--jwk-json-path</code> flag. If the issuer is publicly reachable, you can omit the flag, and Google Cloud retrieves the JWKS from the issuer.</span></aside> <p>Don't specify the <code translate="no" dir="ltr">--allowed-audiences</code> flag. The cross-cloud components request tokens for the default audience, which is the full resource name of the provider: <code translate="no" dir="ltr">//iam.googleapis.com/projects/<var translate="no">PROJECT_NUMBER</var>/locations/global/workloadIdentityPools/<var translate="no">POOL_ID</var>/providers/<var translate="no">PROVIDER_ID</var></code>.</p>
+</li> </ol> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: an ID for the workload identity pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_DISPLAY_NAME</var></code>: a display name for the pool.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROVIDER_ID</var></code>: an ID for the OIDC provider.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">OIDC_ISSUER_URL</var></code>: the exact OIDC issuer URL that you retrieved when you <a href="#register-cluster">registered the cluster</a>. This value must match the value that you passed to <code translate="no" dir="ltr">--oidc-issuer-url</code>, including whether it ends with a trailing slash.</li> </ul> <h2 id="deploy-control-plane">Deploy the control plane</h2> <p>Use the provided Helm chart to deploy the in-cluster controller, <code translate="no" dir="ltr">agent-governance-cross-cloud-controller</code> and telemetry collector in the <code translate="no" dir="ltr">geap-system</code> namespace.</p> <h3 id="ensure-controller-connectivity">Ensure connectivity for the controller</h3> <p>Ensure that your cluster firewall, proxy, egress rules, and network policies allow the following connectivity:</p> <ul> <li>
+<strong>Google Cloud APIs</strong>: The <code translate="no" dir="ltr">agent-governance-cross-cloud-controller</code> controller pods and the telemetry collector must have outbound HTTPS and gRPC connectivity on TCP port <code translate="no" dir="ltr">443</code> to <code translate="no" dir="ltr">*.googleapis.com</code>.</li> <li>
+<strong>Kubernetes API server</strong>: The controller pods must be able to reach the Kubernetes API server to watch Kubernetes services, workloads, and custom resources.</li> <li>
+<strong>Agent workloads in all namespaces</strong>: The controller pods must be able to call agent and MCP server pods in any namespace in the cluster. The controller fetches the Agent Card from each agent workload to register the agent in Agent Registry.</li> </ul> <h3 id="grant-controller-roles">Grant IAM roles to the controller and telemetry collector</h3> <p>Grant IAM roles to the federated identities of the <code translate="no" dir="ltr">agent-governance-cross-cloud-controller</code> controller and the telemetry collector, which run in the <code translate="no" dir="ltr">geap-system</code> namespace:</p> <ul> <li>Satellite Operator (<code translate="no" dir="ltr">roles/networkservices.satelliteOperator</code>)</li> <li>Cloud Telemetry Writer (<code translate="no" dir="ltr">roles/telemetry.writer</code>)</li> </ul> <aside class="caution"><b>Caution:</b> Every Kubernetes service account in the <code translate="no" dir="ltr">geap-system</code> namespace receives these IAM roles. You must reserve <code translate="no" dir="ltr">geap-system</code> exclusively for the control plane and telemetry components of Agent Gateway for cross-cloud: <ul> <li>Don't deploy agent workloads, MCP servers, or other application pods in <code translate="no" dir="ltr">geap-system</code>.</li> <li>Restrict Kubernetes RBAC permissions to create or modify pods, deployments, service accounts, and secrets in <code translate="no" dir="ltr">geap-system</code> to trusted cluster administrators.</li> <li>Set <code translate="no" dir="ltr">automountServiceAccountToken: false</code> on the <code translate="no" dir="ltr">default</code> service account in <code translate="no" dir="ltr">geap-system</code>.</li> </ul></aside> <p>To grant the roles, run the following command:</p> 
+<pre>
+for ROLE in \
+    roles/networkservices.satelliteOperator \
+    roles/telemetry.writer; do
+  gcloud projects add-iam-policy-binding PROJECT_ID \
+      --role="${ROLE}" \
+      --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.namespace/geap-system"
+done
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your Google Cloud project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the ID of the <a href="#create-pool-provider">workload identity pool</a>.</li> </ul> <h3 id="install-control-plane">Install the control plane Helm chart</h3> <p>To install the control plane, do the following:</p> <ol> <li>
+<p>Install the <code translate="no" dir="ltr">agent-governance-cross-cloud</code> Helm chart in the <code translate="no" dir="ltr">geap-system</code> namespace:</p> <aside class="important"><b>Important:</b> You must install the control plane in the <code translate="no" dir="ltr">geap-system</code> namespace. The control plane doesn't support other namespaces, and the IAM role bindings that you granted in the previous section apply only to <code translate="no" dir="ltr">geap-system</code>. Don't change the value of the <code translate="no" dir="ltr">--namespace</code> flag.</aside> 
+<pre>
+helm upgrade --install agent-governance-cross-cloud \
+    oci://gcr.io/gke-release/agent-governance-cross-cloud \
+    --version 0.1.0-preview \
+    --namespace geap-system \
+    --create-namespace \
+    --set gcp.projectId=PROJECT_ID \
+    --set-string gcp.projectNumber=PROJECT_NUMBER \
+    --set-string gcp.orgId=ORGANIZATION_ID \
+    --set gcp.location=LOCATION \
+    --set gcp.registeredCluster=CLUSTER_NAME \
+    --set gcp.workloadIdentityPool=POOL_ID \
+    --set gcp.identityProvider=PROVIDER_ID
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your Google Cloud project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ORGANIZATION_ID</var></code>: the ID of your Google Cloud organization. If your project isn't associated with an organization, omit the <code translate="no" dir="ltr">--set-string gcp.orgId</code> flag.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region where you <a href="#register-cluster">registered the cluster</a>—for example, <code translate="no" dir="ltr">us-central1</code>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the registered cluster.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the ID of the <a href="#create-pool-provider">workload identity pool</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROVIDER_ID</var></code>: the ID of the <a href="#create-pool-provider">workload identity pool provider</a>.</li> </ul> <p>If your cluster's nodes have taints—for example, arm64 nodes on most cloud providers, including Google Cloud, AWS, and Azure—set pod tolerations in the <code translate="no" dir="ltr">k8s.tolerations</code> Helm value. The tolerations apply to the controller, the OpenTelemetry (OTel) collector, and the gateway deployments that the controller creates. For example, save the following as <code translate="no" dir="ltr">tolerations-values.yaml</code>, and then add <code translate="no" dir="ltr">--values tolerations-values.yaml</code> to the preceding command:</p> 
+<pre>
+k8s:
+  tolerations:
+  - key: "kubernetes.io/arch"
+    operator: "Equal"
+    value: "arm64"
+    effect: "NoSchedule"
+</pre> <aside class="caution"><b>Caution:</b> Set tolerations before you create a <code translate="no" dir="ltr">GCPAgentGateway</code> resource. Running <code translate="no" dir="ltr">helm upgrade</code> updates the controller and OTel collector deployments, but the controller doesn't update existing gateway deployments. If you add tolerations after you create a gateway, see <a href="#add-tolerations">Add tolerations to existing gateways</a>.</aside>
+</li> <li>
+<p>Wait for the controller deployment to become ready:</p> 
+<pre>
+kubectl rollout status deployment/agent-governance-cross-cloud-controller \
+    --namespace geap-system --timeout=180s
+</pre>
+</li> </ol> <h2 id="deploy-data-plane">Deploy the data plane</h2> <p>Deploy the Agent Gateway for cross-cloud proxy (Envoy proxy) by creating a <code translate="no" dir="ltr">GCPAgentGateway</code> custom resource. The proxy inspects traffic and enforces policies for the agent workloads that it governs. Each proxy runs with an Agent Identity Runtime (AIR) sidecar that brokers workload identities, Secret Discovery Service (SDS) certificates, and local token exchange for the proxy.</p> <p>You must deploy Agent Gateway for cross-cloud in a dedicated namespace (for example, <code translate="no" dir="ltr">agent-gateway-system</code>) that contains no agent workloads, MCP servers, or other application pods. A single gateway in this dedicated namespace can govern outbound traffic from agent workloads across your cluster.</p> <h3 id="grant-gateway-roles">Grant IAM roles to the gateway</h3> <p>Grant IAM roles to the federated identities of the Agent Gateway for cross-cloud proxy. The binding applies to all KSAs in the gateway namespace, so grant these roles for each gateway namespace:</p> <ul> <li>Traffic Director Client (<code translate="no" dir="ltr">roles/trafficdirector.client</code>)</li> <li>App Hub Endpoint Viewer (<code translate="no" dir="ltr">roles/apphubendpoint.viewer</code>)</li> <li>Agent Registry Viewer (<code translate="no" dir="ltr">roles/agentregistry.viewer</code>)</li> <li>Service Extensions Editor (<code translate="no" dir="ltr">roles/serviceextensions.editor</code>), which lets the proxy call Service Extensions policy callouts</li> </ul> <aside class="caution"><b>Caution:</b> Every Kubernetes service account in <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code> receives these IAM roles, and pods in that namespace can mount the gateway's TLS inspection CA <code translate="no" dir="ltr">Secret</code>. Enforce the following controls on <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code>: <ul> <li>Don't deploy agent workloads, MCP servers, or any other non-gateway pods in <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code>.</li> <li>Restrict Kubernetes RBAC permissions to create or modify pods, workload controllers, service accounts, and secrets in <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code> to trusted cluster administrators and the <code translate="no" dir="ltr">agent-governance-cross-cloud-controller</code> service account.</li> <li>Set <code translate="no" dir="ltr">automountServiceAccountToken: false</code> on the <code translate="no" dir="ltr">default</code> service account in <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code>.</li> </ul></aside> <p>To grant the roles, run the following command:</p> 
+<pre>
+for ROLE in \
+    roles/trafficdirector.client \
+    roles/apphubendpoint.viewer \
+    roles/agentregistry.viewer \
+    roles/serviceextensions.editor; do
+  gcloud projects add-iam-policy-binding PROJECT_ID \
+      --role="${ROLE}" \
+      --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.namespace/GATEWAY_NAMESPACE"
+done
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_NUMBER</var></code>: your Google Cloud project number.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">POOL_ID</var></code>: the ID of the <a href="#create-pool-provider">workload identity pool</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code>: a dedicated namespace for the gateway. This namespace must not contain agent workloads.</li> </ul> <aside class="note"><b>Note:</b> If you want to scope the binding to a single gateway service account instead of the dedicated gateway namespace, set <code translate="no" dir="ltr">--member</code> to <code translate="no" dir="ltr">principal://iam.googleapis.com/projects/<var translate="no">PROJECT_NUMBER</var>/locations/global/workloadIdentityPools/<var translate="no">POOL_ID</var>/subject/system:serviceaccount:<var translate="no">GATEWAY_NAMESPACE</var>:<var translate="no">GATEWAY_NAME</var></code>, where <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code> is the name that you plan to give the gateway when you <a href="#create-gateway">create the gateway</a>.</aside> <h3 id="create-act">Create an agent connectivity template</h3> <p>Each gateway references an agent connectivity template, which is a Google Cloud resource that references your <a href="#register-cluster">registered cluster</a>. You don't need to create a separate template for each gateway: you can map multiple gateways to a single template. You can also create multiple templates for the same cluster.</p> <p>If you already have an agent connectivity template for your cluster that you want to use, skip to <a href="#create-gateway">Create the gateway</a>.</p> <p>To create an agent connectivity template, do the following:</p> <ol> <li>
+<p>Save the following template definition as <code translate="no" dir="ltr">act.yaml</code>:</p> 
+<pre>
+description: "Agent connectivity template for CLUSTER_NAME"
+agentCompute: K8S
+registeredCluster: "projects/PROJECT_ID/locations/LOCATION/registeredClusters/CLUSTER_NAME"
+</pre>
+</li> <li>
+<p>Import the template:</p> 
+<pre>
+gcloud alpha network-services agent-connectivity-templates import ACT_NAME \
+    --project=PROJECT_ID \
+    --location=LOCATION \
+    --source=act.yaml
+</pre>
+</li> </ol> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">CLUSTER_NAME</var></code>: the name of the <a href="#register-cluster">registered cluster</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region where you <a href="#register-cluster">registered the cluster</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ACT_NAME</var></code>: a name for the agent connectivity template.</li> </ul> <h3 id="create-gateway">Create the gateway</h3> <p>To create the gateway, do the following:</p> <ol> <li>
+<p>If the gateway namespace doesn't already exist, create it:</p> 
+<pre>
+kubectl create namespace GATEWAY_NAMESPACE
+</pre> <p>Replace <code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code> with the dedicated namespace for the gateway that you used when you <a href="#grant-gateway-roles">granted roles to the gateway</a>.</p>
+</li> <li>
+<p>Save the following manifest as <code translate="no" dir="ltr">agent-gateway.yaml</code>:</p> 
+<pre>
+apiVersion: networkservices.googleapis.com/v1alpha1
+kind: GCPAgentGateway
+metadata:
+  name: GATEWAY_NAME
+  namespace: GATEWAY_NAMESPACE
+spec:
+  agentConnectivityTemplateUri: "projects/PROJECT_ID/locations/LOCATION/agentConnectivityTemplates/ACT_NAME"
+</pre> <p>Replace the following:</p> <ul> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAME</var></code>: a name for the gateway.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">GATEWAY_NAMESPACE</var></code>: the dedicated namespace for the gateway that you used when you <a href="#grant-gateway-roles">granted roles to the gateway</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">PROJECT_ID</var></code>: your Google Cloud project ID.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">LOCATION</var></code>: the region of the agent connectivity template. This region must match the region where you <a href="#register-cluster">registered the cluster</a>.</li> <li>
+<code translate="no" dir="ltr"><var translate="no">ACT_NAME</var></code>: the name of the <a href="#create-act">agent connectivity template</a>.</li> </ul>
+</li> <li>
+<p>Apply the manifest:</p> 
+<pre>
+kubectl apply -f agent-gateway.yaml
+</pre>
+</li> <li>
+<p>Wait for the gateway to be deployed and ready:</p> 
+<pre>
+kubectl wait --for=condition=Reconciled=True \
+    gcpagentgateway/GATEWAY_NAME \
+    -n GATEWAY_NAMESPACE \
+    --timeout=300s
+</pre> <p>When the gateway is ready, the command returns <code translate="no" dir="ltr">gcpagentgateway.networkservices.googleapis.com/<var translate="no">GATEWAY_NAME</var> condition met</code>.</p> <aside class="note"><strong>Note:</strong><span> The <code translate="no" dir="ltr">Reconciled</code> condition can become <code translate="no" dir="ltr">True</code> up to two minutes before the gateway starts accepting connections on port <code translate="no" dir="ltr">8443</code>. During this time, requests to the gateway fail with a connection error. Wait before you send traffic, or retry failed requests.</span></aside>
+</li> <li><p>Configure your service mesh to forward outbound agent traffic, such as large language model (LLM), Model Context Protocol (MCP), and Agent-to-Agent (A2A) requests, through the gateway.</p></li> </ol> <h3 id="add-tolerations">Add tolerations to existing gateways</h3> <p>If you add the <code translate="no" dir="ltr">k8s.tolerations</code> Helm value after you create a <code translate="no" dir="ltr">GCPAgentGateway</code> resource, do the following so that the controller re-creates the gateway deployment with the new tolerations:</p> <ol> <li><p>Run the <code translate="no" dir="ltr">helm upgrade --install</code> command from <a href="#install-control-plane">Install the control plane Helm chart</a> with <code translate="no" dir="ltr">--values tolerations-values.yaml</code>.</p></li> <li>
+<p>Delete the existing gateway deployment:</p> 
+<pre>
+kubectl delete deployment GATEWAY_NAME \
+    --namespace GATEWAY_NAMESPACE
+</pre> <p>Repeat this step for each gateway in your cluster.</p>
+</li> <li>
+<p>Restart the controller so that it re-creates the gateway deployment:</p> 
+<pre>
+kubectl rollout restart deployment/agent-governance-cross-cloud-controller \
+    --namespace geap-system
+</pre>
+</li> </ol> <p>This procedure doesn't affect the Google Cloud <code translate="no" dir="ltr">AgentGateway</code> resource or any attached <code translate="no" dir="ltr">GCPExtensionBinding</code> resources. Outbound traffic through the gateway is interrupted until the controller re-creates the gateway deployment.</p> <h3 id="allow-egress">Allow outbound connectivity to Google APIs</h3> <p>Ensure that the Agent Gateway for cross-cloud proxy pods have outbound HTTPS and gRPC connectivity to <code translate="no" dir="ltr">*.googleapis.com</code> on TCP port <code translate="no" dir="ltr">443</code>.</p> <h2 id="configure-tls-inspection">Configure TLS inspection</h2> <p>Configure Transport Layer Security (TLS) inspection to ensure that Agent Gateway for cross-cloud can inspect and govern outbound traffic.</p> <h3 id="secure-ca-secret">Secure the TLS inspection CA secret</h3> <p>Agent Gateway for cross-cloud uses a root certificate authority (CA) to issue the certificates that it presents when it inspects outbound TLS traffic. The controller creates this CA when it starts. The CA, including its private key, is stored in Kubernetes <code translate="no" dir="ltr">Secret</code> resources in two namespaces: the controller namespace (<code translate="no" dir="ltr">geap-system</code>) and the gateway namespace, where the Agent Gateway for cross-cloud proxy and AIR sidecar are deployed. Anyone who can read these <code translate="no" dir="ltr">Secret</code> resources can impersonate external endpoints to your agent workloads. To protect the CA, apply the following safeguards:</p> <ul> <li>
+<strong>Restrict RBAC access to the <code translate="no" dir="ltr">Secret</code></strong>: Limit the <code translate="no" dir="ltr">get</code>, <code translate="no" dir="ltr">list</code>, and <code translate="no" dir="ltr">watch</code> permissions on <code translate="no" dir="ltr">Secret</code> resources in the <code translate="no" dir="ltr">geap-system</code> and gateway namespaces to the Agent Gateway for cross-cloud service accounts and dedicated platform administrators. The <code translate="no" dir="ltr">list</code> and <code translate="no" dir="ltr">watch</code> permissions also expose <code translate="no" dir="ltr">Secret</code> contents.</li> <li>
+<strong>Isolate the controller and gateway namespaces</strong>: Users who can create pods in a namespace can mount any <code translate="no" dir="ltr">Secret</code> in that namespace. Run only Agent Gateway for cross-cloud components in the <code translate="no" dir="ltr">geap-system</code> namespace and the gateway namespace. Don't deploy agent workloads or other pods in these namespaces. Limit permissions to create or modify pods, deployments, and other workload resources in these namespaces to trusted administrators.</li> <li>
+<strong>Encrypt <code translate="no" dir="ltr">Secret</code> data at rest</strong>: Enable <a href="https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/">encryption at rest</a> for <code translate="no" dir="ltr">Secret</code> resources in your cluster's etcd datastore. Where possible, use a <a href="https://kubernetes.io/docs/tasks/administer-cluster/kms-provider/">KMS provider</a> to manage the encryption keys.</li> <li>
+<strong>Audit access to the <code translate="no" dir="ltr">Secret</code></strong>: Enable <a href="https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/">Kubernetes audit logging</a> and monitor read access to the CA <code translate="no" dir="ltr">Secret</code>.</li> </ul> <h2 id="whats-next">What's next</h2> <ul> <li><a href="deploy-agents">Deploy and register cross-cloud agents</a></li> <li><a href="enforce-policies">Enforce cross-cloud governance policies</a></li> <li><a href="observability">Configure cross-cloud agent observability</a></li> </ul><div class="_attribution">
+  <p class="_attribution-p">
+    &copy; Google LLC<br>Text licensed under the Creative Commons Attribution 4.0 License; code samples under the Apache License 2.0.<br>
+    <a href="https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/governance/agent-gateway-cross-cloud/setup" class="_attribution-link">https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/governance/agent-gateway-cross-cloud/setup</a>
+  </p>
+</div>
